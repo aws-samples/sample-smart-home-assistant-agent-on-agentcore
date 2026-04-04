@@ -212,7 +212,7 @@ const LedMatrix: React.FC = () => {
   return (
     <div className="device-card">
       <div className="device-card-header">
-        <h2>Govee LED Matrix</h2>
+        <h2>LED Matrix</h2>
         <div className="device-status">
           <span className={`dot ${power ? 'on' : 'off'}`} />
           {power ? mode.charAt(0).toUpperCase() + mode.slice(1) : 'Off'}

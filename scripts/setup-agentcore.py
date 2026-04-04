@@ -136,7 +136,7 @@ def main():
             "name": "control_device",
             "description": (
                 "Send a control command to a smart home device. "
-                "Devices: led_matrix (Govee LED, modes: rainbow/breathing/chase/sparkle/fire/ocean/aurora), "
+                "Devices: led_matrix (LED Matrix, modes: rainbow/breathing/chase/sparkle/fire/ocean/aurora), "
                 "rice_cooker (modes: white_rice/brown_rice/porridge/steam), "
                 "fan (speed 0-3, oscillation), "
                 "oven (modes: bake/broil/convection, temp 200-500F)."

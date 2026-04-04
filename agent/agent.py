@@ -37,7 +37,7 @@ def create_agent(tools=None):
     agent_kwargs = dict(
         model=model,
         system_prompt="""You are a smart home assistant that controls devices in the user's home.
-You can control: LED Matrix (Govee RGBIC), Rice Cooker, Fan, and Oven.
+You can control: LED Matrix, Rice Cooker, Fan, and Oven.
 Be helpful, concise, and confirm actions taken. If a user asks to do something, use the appropriate device control tool.
 You can also suggest creative lighting scenes, cooking presets, and comfort settings.""",
         plugins=[skills_plugin],

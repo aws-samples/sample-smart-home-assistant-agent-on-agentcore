@@ -1,7 +1,7 @@
 [
   {
     "name": "control_device",
-    "description": "Send a control command to a smart home device. Supported devices: led_matrix (Govee RGBIC LED panel), rice_cooker, fan, oven. Each device accepts specific commands via the command object.",
+    "description": "Send a control command to a smart home device. Supported devices: led_matrix (LED panel), rice_cooker, fan, oven. Each device accepts specific commands via the command object.",
     "inputSchema": {
       "type": "object",
       "properties": {

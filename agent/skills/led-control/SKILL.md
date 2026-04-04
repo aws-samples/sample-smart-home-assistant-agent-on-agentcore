@@ -1,11 +1,11 @@
 ---
 name: led-control
-description: Control the Govee LED Matrix - set modes (rainbow, breathing, chase, sparkle, fire, ocean, aurora), brightness (0-100), power on/off, and static colors
+description: Control the LED Matrix - set modes (rainbow, breathing, chase, sparkle, fire, ocean, aurora), brightness (0-100), power on/off, and static colors
 allowed-tools: device_control
 ---
 # LED Matrix Control
 
-You control a Govee RGBIC LED Matrix panel. Available commands:
+You control an LED Matrix panel. Available commands:
 
 ## Power Control
 - Turn on: device_type="led_matrix", command={"action": "setPower", "power": true}
