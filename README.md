@@ -78,7 +78,7 @@ The deployment creates two separate CloudFormation stacks:
 - AgentCore Runtime running the Strands agent (CodeZip, Python 3.13)
 - AgentCore Memory with semantic, summary, and user preference extraction strategies
 
-The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates the memory resource, creates an `agentcore` project, injects our agent code, adds the gateway + target, deploys, and patches the runtime with the memory ID.
+The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates an `agentcore` project, injects our agent code, adds memory + gateway + target, and deploys everything in one `agentcore deploy`.
 
 ---
 
@@ -253,4 +253,14 @@ Remove `bucketName` from the CDK stack to let CDK auto-generate unique names.
 
 ### CDK custom resource fails: "@aws-sdk/client-bedrockagentcorecontrol does not exist"
 
-This is expected — the CDK JS SDK does not yet include the AgentCore client. AgentCore resources are created by the `agentcore` CLI in a separate step (Step 6 of deploy), not by CDK.
+This is expected — the CDK JS SDK does not yet include the AgentCore client. AgentCore resources are created by the `agentcore` CLI in a separate step (Step 7 of deploy), not by CDK.
+
+---
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
+## License
+
+This library is licensed under the MIT-0 License. See the LICENSE file.

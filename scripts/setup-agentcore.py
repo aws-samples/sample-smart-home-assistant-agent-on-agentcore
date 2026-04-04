@@ -64,52 +64,9 @@ def main():
     print(f"  Account: {account_id}")
 
     # --------------------------------------------------------
-    # Create AgentCore Memory (if not exists)
-    # --------------------------------------------------------
-    print("\n  Creating AgentCore Memory...")
-    from bedrock_agentcore.memory import MemoryClient
-    mem_client = MemoryClient(region_name=REGION)
-
-    # Check if smarthome memory already exists
-    memory_id = ""
-    for mem in mem_client.list_memories():
-        if "smarthome" in mem.get("id", "").lower():
-            memory_id = mem["id"]
-            print(f"  Using existing memory: {memory_id}")
-            break
-
-    if not memory_id:
-        mem_result = mem_client.create_memory_and_wait(
-            name="smarthome_assistant_memory",
-            description="Smart Home Assistant conversation and preference memory",
-            strategies=[
-                {
-                    "semanticMemoryStrategy": {
-                        "name": "FactExtractor",
-                        "namespaceTemplates": ["/facts/{actorId}/"],
-                    }
-                },
-                {
-                    "summaryMemoryStrategy": {
-                        "name": "SessionSummarizer",
-                        "namespaceTemplates": ["/summaries/{actorId}/{sessionId}/"],
-                    }
-                },
-                {
-                    "userPreferenceMemoryStrategy": {
-                        "name": "PreferenceLearner",
-                        "namespaceTemplates": ["/preferences/{actorId}/"],
-                    }
-                },
-            ],
-        )
-        memory_id = mem_result.get("id", "")
-        print(f"  Created memory: {memory_id}")
-
-    # --------------------------------------------------------
     # Step 1: Create agentcore project (with default agent)
     # --------------------------------------------------------
-    print("\n[1/5] Creating agentcore project...")
+    print("\n[1/6] Creating agentcore project...")
     if os.path.exists(AGENTCORE_DIR):
         shutil.rmtree(AGENTCORE_DIR)
     os.makedirs(AGENTCORE_DIR)
@@ -122,7 +79,7 @@ def main():
     # --------------------------------------------------------
     # Step 2: Replace default agent code with our SmartHome agent
     # --------------------------------------------------------
-    print("\n[2/5] Injecting SmartHome agent code...")
+    print("\n[2/6] Injecting SmartHome agent code...")
     default_app = os.path.join(project_dir, "app", "smarthome")
     if os.path.exists(default_app):
         shutil.rmtree(default_app)
@@ -146,7 +103,6 @@ def main():
         rt["environmentVariables"] = {
             "MODEL_ID": "moonshotai.kimi-k2.5",
             "AWS_REGION": REGION,
-            "AGENTCORE_MEMORY_ID": memory_id,
         }
 
     with open(config_file, "w") as f:
@@ -158,9 +114,21 @@ def main():
         json.dump([{"name": "default", "region": REGION, "account": account_id}], f, indent=2)
 
     # --------------------------------------------------------
-    # Step 3: Add AgentCore Gateway
+    # Step 3: Add AgentCore Memory (managed by agentcore CLI)
     # --------------------------------------------------------
-    print("\n[3/5] Adding AgentCore Gateway...")
+    print("\n[3/6] Adding AgentCore Memory...")
+    r = run(
+        "agentcore add memory --name SmartHomeMemory "
+        "--strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE",
+        cwd=project_dir,
+    )
+    if r.returncode != 0:
+        raise Exception("Failed to add memory")
+
+    # --------------------------------------------------------
+    # Step 4: Add AgentCore Gateway
+    # --------------------------------------------------------
+    print("\n[4/6] Adding AgentCore Gateway...")
     r = run(
         f'agentcore add gateway --name SmartHomeGateway '
         f'--authorizer-type NONE',
@@ -170,9 +138,9 @@ def main():
         raise Exception("Failed to add gateway")
 
     # --------------------------------------------------------
-    # Step 4: Add Lambda target to gateway
+    # Step 5: Add Lambda target to gateway
     # --------------------------------------------------------
-    print("\n[4/5] Adding Lambda target to gateway...")
+    print("\n[5/6] Adding Lambda target to gateway...")
 
     # Write tool schema file
     with open(os.path.join(project_dir, "tools.json"), "w") as f:
@@ -212,9 +180,9 @@ def main():
         raise Exception("Failed to add gateway target")
 
     # --------------------------------------------------------
-    # Step 5: Deploy all AgentCore resources
+    # Step 6: Deploy all AgentCore resources
     # --------------------------------------------------------
-    print("\n[5/5] Deploying AgentCore resources...")
+    print("\n[6/6] Deploying AgentCore resources...")
     r = run("agentcore deploy -y --verbose", cwd=project_dir)
     if r.returncode != 0:
         raise Exception("agentcore deploy failed — check log above")
@@ -240,12 +208,11 @@ def main():
             runtime_arn = val
 
     # Patch runtime env vars (agentcore CLI drops custom env vars during deploy)
-    if runtime_id and memory_id:
+    if runtime_id:
         print("Patching runtime environment variables...")
         ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
         rt_info = ac.get_agent_runtime(agentRuntimeId=runtime_id)
         existing_env = rt_info.get("environmentVariables", {})
-        existing_env["AGENTCORE_MEMORY_ID"] = memory_id
         existing_env["MODEL_ID"] = "moonshotai.kimi-k2.5"
         existing_env["AWS_REGION"] = REGION
         update_kwargs = dict(
@@ -258,7 +225,7 @@ def main():
         if rt_info.get("authorizerConfiguration"):
             update_kwargs["authorizerConfiguration"] = rt_info["authorizerConfiguration"]
         ac.update_agent_runtime(**update_kwargs)
-        print(f"  Set AGENTCORE_MEMORY_ID={memory_id}")
+        print(f"  Patched MODEL_ID and AWS_REGION")
 
     # Update chatbot config.js with runtime ARN
     if runtime_arn:
@@ -286,8 +253,7 @@ def main():
     with open(state_file, "w") as f:
         json.dump({
             "gatewayId": gateway_id, "runtimeId": runtime_id,
-            "runtimeArn": runtime_arn, "memoryId": memory_id,
-            "projectDir": project_dir,
+            "runtimeArn": runtime_arn, "projectDir": project_dir,
         }, f, indent=2)
 
     print("\n" + "=" * 60)

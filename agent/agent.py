@@ -6,6 +6,7 @@ from strands.models.bedrock import BedrockModel
 from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client
 from bedrock_agentcore import BedrockAgentCoreApp
+from memory.session import get_memory_session_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,34 +20,11 @@ if not GATEWAY_URL:
             break
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai.kimi-k2.5")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-MEMORY_ID = os.environ.get("AGENTCORE_MEMORY_ID", "")
 
 app = BedrockAgentCoreApp()
 
 # Load skills
 skills_plugin = AgentSkills(skills="./skills/")
-
-
-def create_session_manager(session_id, actor_id):
-    """Create AgentCore Memory session manager for conversation persistence."""
-    if not MEMORY_ID:
-        return None
-    try:
-        from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
-        from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
-
-        config = AgentCoreMemoryConfig(
-            memory_id=MEMORY_ID,
-            session_id=session_id,
-            actor_id=actor_id,
-        )
-        return AgentCoreMemorySessionManager(
-            agentcore_memory_config=config,
-            region_name=AWS_REGION,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to create memory session manager: {e}")
-        return None
 
 
 def create_agent(tools=None, session_manager=None):
@@ -90,7 +68,7 @@ def get_mcp_tools(mcp_client):
 
 def invoke_agent(prompt, session_id="default", actor_id="default"):
     """Run agent with MCP tools from Gateway if available, with memory persistence."""
-    session_manager = create_session_manager(session_id, actor_id)
+    session_manager = get_memory_session_manager(session_id, actor_id)
 
     if GATEWAY_URL:
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL))

@@ -9,7 +9,7 @@
 - [5. Security Architecture](#5-security-architecture)
 - [6. Device Simulator Design](#6-device-simulator-design)
 - [7. Chatbot Design](#7-chatbot-design)
-- [8. AI Agent Design](#8-ai-agent-design)
+- [8. AI Agent Design](#8-ai-agent-design) (includes [8.6 Agent Internal Data Flow](#86-agent-internal-data-flow))
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
@@ -496,27 +496,49 @@ The agent is a Strands Agent deployed to Amazon Bedrock AgentCore Runtime via Co
 
 ### 8.2 AgentCore Memory
 
-The agent uses AgentCore Memory for short-term conversation persistence and long-term knowledge extraction via three configured strategies:
+The agent uses AgentCore Memory for short-term conversation persistence and long-term knowledge extraction. Memory is created and deployed via the `agentcore` CLI as a first-class project resource (`agentcore add memory`), which manages its lifecycle through the same CloudFormation stack as the runtime and gateway.
 
-| Strategy | Purpose | Namespace |
-|----------|---------|-----------|
-| **Semantic** (FactExtractor) | Extracts and stores factual knowledge from conversations | `/facts/{actorId}/` |
-| **Summary** (SessionSummarizer) | Generates session summaries for context continuity | `/summaries/{actorId}/{sessionId}/` |
-| **User Preference** (PreferenceLearner) | Learns user preferences (e.g., "warm lighting in evening") | `/preferences/{actorId}/` |
+**Three configured strategies:**
 
-**Integration pattern:**
-```python
-from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
-from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+| Strategy | Type | Namespace |
+|----------|------|-----------|
+| **Semantic** | `SEMANTIC` | `/facts/{actorId}/` |
+| **Summarization** | `SUMMARIZATION` | `/summaries/{actorId}/{sessionId}/` |
+| **User Preference** | `USER_PREFERENCE` | `/preferences/{actorId}/` |
 
-config = AgentCoreMemoryConfig(memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id)
-session_manager = AgentCoreMemorySessionManager(agentcore_memory_config=config, region_name=REGION)
-agent = Agent(model=model, system_prompt=..., session_manager=session_manager)
+**CLI-managed lifecycle:**
+```bash
+# Memory is added to the agentcore project alongside gateway and runtime
+agentcore add memory --name SmartHomeMemory --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
+agentcore deploy -y --verbose
+# CLI auto-sets MEMORY_SMARTHOMEMEMORY_ID env var on the runtime
 ```
 
-- **Short-term**: Conversation messages are stored automatically per session via `AgentCoreMemorySessionManager`
+**Agent integration** (`agent/memory/session.py`):
+```python
+from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig, RetrievalConfig
+from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+
+MEMORY_ID = os.getenv("MEMORY_SMARTHOMEMEMORY_ID", "")  # auto-set by agentcore CLI
+
+def get_memory_session_manager(session_id, actor_id):
+    retrieval_config = {
+        f"/facts/{actor_id}/": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/summaries/{actor_id}/{session_id}/": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/preferences/{actor_id}/": RetrievalConfig(top_k=3, relevance_score=0.5),
+    }
+    return AgentCoreMemorySessionManager(
+        AgentCoreMemoryConfig(memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id,
+                              retrieval_config=retrieval_config),
+        REGION,
+    )
+```
+
+- **Short-term**: Conversation messages stored automatically per session via `AgentCoreMemorySessionManager`
 - **Long-term**: Strategies extract facts, preferences, and summaries asynchronously and make them available as context in future sessions
+- **Retrieval**: Each namespace has configurable `top_k` and `relevance_score` thresholds for context injection
 - **Session/Actor IDs**: Derived from AgentCore Runtime request context (`session_id`, `x-amzn-bedrock-agentcore-runtime-user-id` header)
+- **Env var**: `MEMORY_SMARTHOMEMEMORY_ID` is auto-set by the `agentcore` CLI on deploy (follows `MEMORY_<NAME>_ID` convention)
 
 ### 8.3 Tool Access via AgentCore Gateway (MCP)
 
@@ -547,6 +569,9 @@ The MCP protocol allows the agent to dynamically discover available tools (devic
 ```
 agent/
 ├── agent.py              # BedrockAgentCoreApp with @app.entrypoint handler
+├── memory/
+│   ├── __init__.py
+│   └── session.py        # AgentCoreMemorySessionManager factory (follows agentcore CLI pattern)
 ├── tools/
 │   └── device_control.py # Fallback tool for local dev (Lambda invocation via boto3)
 ├── skills/
@@ -585,6 +610,145 @@ DEVICE_COMMANDS = {
 
 Invalid commands return 400 with descriptive error messages. The agent receives these errors and can self-correct.
 
+### 8.6 Agent Internal Data Flow
+
+The following diagram shows the complete lifecycle of a single user request as it flows through the agent's internal components:
+
+```
+                          HTTP POST /invocations
+                          Authorization: Bearer {jwt}
+                          {"prompt": "Set LED to rainbow and fan to medium"}
+                                    |
+                                    v
+                    +-------------------------------+
+                    |   BedrockAgentCoreApp          |
+                    |   (bedrock_agentcore)          |
+                    |                               |
+                    |   1. JWT validation (Cognito)  |
+                    |   2. Extract request context:  |
+                    |      - session_id              |
+                    |      - actor_id (from header)  |
+                    +---------------+---------------+
+                                    |
+                                    v
+                    +-------------------------------+
+                    |   handle_invocation()          |
+                    |   @app.entrypoint              |
+                    |                               |
+                    |   3. Parse prompt from payload  |
+                    |   4. Extract session_id,        |
+                    |      actor_id from context      |
+                    +---------------+---------------+
+                                    |
+                                    v
+                    +-------------------------------+
+                    |   memory/session.py            |
+                    |   get_memory_session_manager() |
+                    |                               |
+                    |   5. Read MEMORY_SMARTHOME-    |
+                    |      MEMORY_ID env var          |
+                    |   6. Build retrieval config     |
+                    |      per namespace (top_k=3)   |
+                    |   7. Return SessionManager      |
+                    +---------------+---------------+
+                                    |
+                                    v
+                    +-------------------------------+
+                    |   invoke_agent()               |
+                    |                               |
+                    |   8. Connect MCP client to      |
+                    |      AgentCore Gateway          |
+                    |   9. Discover tools via MCP     |
+                    |      (list_tools_sync with      |
+                    |       pagination)               |
+                    |  10. Create Strands Agent with:  |
+                    |      - BedrockModel (Kimi K2.5) |
+                    |      - MCP tools                |
+                    |      - Skills plugin            |
+                    |      - Session manager          |
+                    +---------------+---------------+
+                                    |
+                                    v
+                    +-------------------------------+
+                    |   Strands Agent                |
+                    |   agent(prompt)                |
+                    |                               |
+                    |  11. Session manager retrieves  |
+                    |      memory context:            |
+                    |      - /facts/{actor}/          |
+                    |      - /summaries/{actor}/{sid}/|
+                    |      - /preferences/{actor}/   |
+                    |                               |
+                    |  12. LLM receives:             |
+                    |      - System prompt            |
+                    |      - Retrieved memory context |
+                    |      - Activated skill prompts  |
+                    |      - User prompt              |
+                    |      - Available tool schemas   |
+                    |                               |
+                    |  13. LLM reasons and emits      |
+                    |      tool_use blocks:           |
+                    |      control_device(            |
+                    |        device_type="led_matrix",|
+                    |        command={action:"setMode"|
+                    |                 mode:"rainbow"})|
+                    |      control_device(            |
+                    |        device_type="fan",       |
+                    |        command={action:"setSpeed|
+                    |                 speed:2})       |
+                    +------+----------------+-------+
+                           |                |
+                    +------v------+  +------v------+
+                    | MCP call #1 |  | MCP call #2 |
+                    | (Gateway)   |  | (Gateway)   |
+                    +------+------+  +------+------+
+                           |                |
+                    +------v------+  +------v------+
+                    | Lambda      |  | Lambda      |
+                    | iot-control |  | iot-control |
+                    +------+------+  +------+------+
+                           |                |
+                    +------v------+  +------v------+
+                    | IoT Core    |  | IoT Core    |
+                    | led_matrix/ |  | fan/command |
+                    | command     |  |             |
+                    +------+------+  +------+------+
+                           |                |
+                           v                v
+                    +-------------------------------+
+                    |   Device Simulator (Browser)   |
+                    |   MQTT subscribers update UI   |
+                    +-------------------------------+
+                                    |
+                                    | (back in the agent)
+                                    v
+                    +-------------------------------+
+                    |  14. LLM receives tool results |
+                    |      and generates final text  |
+                    |                               |
+                    |  15. Session manager stores     |
+                    |      conversation to memory     |
+                    |      (async extraction runs     |
+                    |       for facts, summaries,     |
+                    |       preferences)              |
+                    +---------------+---------------+
+                                    |
+                                    v
+                          HTTP Response 200
+                          {"response": "Done! I've set the
+                           LED matrix to rainbow mode and
+                           the fan to medium speed.",
+                           "status": "success"}
+```
+
+**Key observations:**
+- Steps 8-9 (MCP tool discovery) happen on every invocation — tools are not cached between requests
+- Step 11 (memory retrieval) injects relevant context from prior conversations before the LLM sees the prompt
+- Step 13 (tool calls) may involve multiple sequential or parallel tool invocations depending on the LLM's reasoning
+- Step 15 (memory storage) is asynchronous — the response is returned before extraction strategies complete
+- The MCP client connection is scoped to a single invocation (`with mcp_client:` context manager)
+- Skills are loaded once at module init via `AgentSkills(skills="./skills/")` and shared across invocations
+
 ---
 
 ## 9. Infrastructure Design
@@ -618,12 +782,13 @@ AgentCore Runtime
   +-> CodeZip (Python 3.13, agent code from S3)
   +-> BedrockAgentCoreApp (Strands Agent)
   +-> JWT Auth (Cognito User Pool)
-  +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MODEL_ID, AGENTCORE_MEMORY_ID
+  +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MEMORY_SMARTHOMEMEMORY_ID, MODEL_ID
 
-AgentCore Memory (created by setup script via MemoryClient API)
-  +-> Semantic strategy (fact extraction)
-  +-> Summary strategy (session summaries)
-  +-> User preference strategy (preference learning)
+AgentCore Memory (managed by agentcore CLI: `agentcore add memory`)
+  +-> SEMANTIC strategy (fact extraction)
+  +-> SUMMARIZATION strategy (session summaries)
+  +-> USER_PREFERENCE strategy (preference learning)
+  +-> Env var auto-set: MEMORY_SMARTHOMEMEMORY_ID
 ```
 
 **Why two stacks?** AgentCore resources cannot be created via CDK for two reasons:
@@ -641,7 +806,8 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - Gateway `authorizerType` cannot be changed after creation — must delete and recreate the CloudFormation stack
 - Gateway auth should be `NONE` for runtime-to-gateway calls; the runtime strips the user's JWT before passing to the handler, so the agent cannot forward it to the gateway
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
-- `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside)
+- `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
+- `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
 
 ### 9.2 Deployment Architecture
 
@@ -664,19 +830,21 @@ deploy.sh (one-click)
     |
     +---> [7] scripts/setup-agentcore.py
               |
-              +---> Create AgentCore Memory (semantic + summary + user preference)
-              +---> agentcore create --name smarthome --defaults
-              +---> Replace default agent code with agent/
-              +---> Patch agentcore.json (entrypoint, JWT auth, env vars)
-              +---> Seed aws-targets.json (required for CLI deploy)
-              +---> agentcore add gateway (NONE auth)
-              +---> agentcore add gateway-target (Lambda, tool schema)
-              +---> agentcore deploy -y --verbose
+              +---> [1/6] agentcore create --name smarthome --defaults
+              +---> [2/6] Replace default agent code with agent/
+              |           Patch agentcore.json (entrypoint, JWT auth, env vars)
+              |           Seed aws-targets.json (required for CLI deploy)
+              +---> [3/6] agentcore add memory --name SmartHomeMemory
+              |           --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
+              +---> [4/6] agentcore add gateway (NONE auth)
+              +---> [5/6] agentcore add gateway-target (Lambda, tool schema)
+              +---> [6/6] agentcore deploy -y --verbose
               |         CloudFormation: AgentCore-smarthome-default
-              |         -> IAM Role, AgentCore Runtime
-              +---> Fetch Gateway URL + Runtime ARN (from CFN stack outputs)
-              +---> Patch runtime env vars (AGENTCORE_MEMORY_ID, MODEL_ID)
-              |     (agentcore CLI drops custom env vars during deploy)
+              |         -> Runtime, Gateway, Memory, IAM Role
+              +---> Fetch resource IDs (from CFN stack outputs)
+              +---> Patch runtime env vars (MODEL_ID, AWS_REGION)
+              |     (agentcore CLI drops custom env vars during deploy;
+              |      MEMORY_SMARTHOMEMEMORY_ID is set by CLI automatically)
               +---> Update chatbot config.js in S3
               +---> Invalidate CloudFront cache
 ```
