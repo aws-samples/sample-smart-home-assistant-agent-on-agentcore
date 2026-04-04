@@ -1,0 +1,44 @@
+[
+  {
+    "name": "control_device",
+    "description": "Send a control command to a smart home device. Supported devices: led_matrix (Govee RGBIC LED panel), rice_cooker, fan, oven. Each device accepts specific commands via the command object.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "device_type": {
+          "type": "string",
+          "description": "The type of device to control. One of: led_matrix, rice_cooker, fan, oven."
+        },
+        "command": {
+          "type": "object",
+          "description": "Command object. Must include 'action' field. LED matrix actions: setPower(power:bool), setMode(mode:rainbow|breathing|chase|sparkle|fire|ocean|aurora), setBrightness(brightness:0-100), setColor(color:#RRGGBB). Rice cooker actions: start(mode:white_rice|brown_rice|porridge|steam), stop(), keepWarm(enabled:bool). Fan actions: setPower(power:bool), setSpeed(speed:0-3), setOscillation(enabled:bool). Oven actions: setPower(power:bool), setMode(mode:bake|broil|convection), setTemperature(temperature:200-500).",
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "The action to perform on the device"
+            }
+          },
+          "required": ["action"]
+        }
+      },
+      "required": ["device_type", "command"]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "Confirmation message"
+        },
+        "device": {
+          "type": "string",
+          "description": "Device that received the command"
+        },
+        "topic": {
+          "type": "string",
+          "description": "MQTT topic the command was published to"
+        }
+      }
+    }
+  }
+]

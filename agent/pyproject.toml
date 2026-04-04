@@ -1,0 +1,14 @@
+[project]
+name = "smarthome-agent"
+version = "1.0.0"
+description = "Smart Home Assistant Agent for AgentCore Runtime"
+requires-python = ">=3.12"
+dependencies = [
+    "strands-agents",
+    "strands-agents-tools",
+    "strands-agents-builder",
+    "bedrock-agentcore",
+    "boto3",
+    "requests",
+    "mcp",
+]

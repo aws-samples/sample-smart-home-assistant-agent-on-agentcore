@@ -1,0 +1,624 @@
+/* ========== Global & Theme ========== */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #08080e;
+  color: #e0e0e0;
+  font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+}
+
+.app {
+  min-height: 100vh;
+  padding: 24px 32px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* ========== Header ========== */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 28px;
+  margin-bottom: 28px;
+  background: linear-gradient(135deg, #0e0e18 0%, #14142a 50%, #0e0e18 100%);
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.06);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 4px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.app-header h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 40%, #f472b6 70%, #fb923c 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 24px;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e88;
+  animation: pulse-green 2s infinite;
+}
+
+.status-dot.disconnected {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef444488;
+}
+
+.status-text {
+  font-size: 0.8rem;
+  color: #707080;
+  font-weight: 500;
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 4px #22c55e88; }
+  50% { box-shadow: 0 0 14px #22c55ecc; }
+}
+
+/* ========== Dashboard Grid — LED left, 3 devices stacked right ========== */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto auto;
+  gap: 20px;
+}
+
+.dashboard-grid > :nth-child(1) {
+  grid-row: 1 / 4;
+}
+
+@media (max-width: 960px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+  .dashboard-grid > :nth-child(1) {
+    grid-row: auto;
+  }
+}
+
+/* ========== Device Card ========== */
+.device-card {
+  background: linear-gradient(160deg, #101018 0%, #13132a 50%, #101018 100%);
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.06);
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.4s, box-shadow 0.4s, transform 0.3s;
+  box-shadow: 0 2px 20px rgba(0,0,0,0.3);
+}
+
+.device-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+}
+
+.device-card:hover {
+  border-color: rgba(120, 120, 255, 0.15);
+  box-shadow: 0 8px 40px rgba(80, 80, 200, 0.1), 0 2px 20px rgba(0,0,0,0.3);
+  transform: translateY(-1px);
+}
+
+.device-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.device-card-header h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #e8e8f0;
+  letter-spacing: -0.01em;
+}
+
+.device-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: #666;
+  padding: 4px 10px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.04);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.device-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.device-status .dot.on {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55eaa;
+}
+
+.device-status .dot.off {
+  background: #555;
+}
+
+/* ========== Shared Button Styles ========== */
+.led-controls button,
+.cooker-buttons button,
+.fan-controls button,
+.oven-controls button {
+  padding: 5px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: #999;
+  font-size: 0.7rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  letter-spacing: 0.2px;
+}
+
+.led-controls button:hover,
+.cooker-buttons button:hover,
+.fan-controls button:hover,
+.oven-controls button:hover {
+  background: rgba(255,255,255,0.07);
+  border-color: rgba(255,255,255,0.15);
+  color: #ccc;
+}
+
+/* ========== LED Matrix ========== */
+.led-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.led-grid {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 2px;
+  padding: 10px;
+  background: #030306;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.06);
+  width: 100%;
+  max-width: 380px;
+  aspect-ratio: 1;
+  box-shadow: inset 0 2px 20px rgba(0,0,0,0.5);
+}
+
+.led-pixel {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  transition: background-color 0.12s ease;
+}
+
+.led-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+  justify-content: center;
+}
+
+.led-controls button.active {
+  background: rgba(124, 124, 255, 0.15);
+  border-color: rgba(124, 124, 255, 0.4);
+  color: #b4b4ff;
+  box-shadow: 0 0 12px rgba(124, 124, 255, 0.1);
+}
+
+.led-info {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.led-info span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ========== Rice Cooker ========== */
+.rice-cooker-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.cooker-visual {
+  width: 150px;
+  height: 110px;
+  background: linear-gradient(180deg, #3a3a48 0%, #2a2a38 40%, #222230 100%);
+  border-radius: 75px 75px 25px 25px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255,255,255,0.08);
+  margin-bottom: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+.cooker-lid {
+  width: 132px;
+  height: 14px;
+  background: linear-gradient(180deg, #555 0%, #444 100%);
+  border-radius: 70px 70px 0 0;
+  position: absolute;
+  top: -2px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.cooker-display {
+  background: #080812;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 6px 14px;
+  text-align: center;
+  font-family: 'Courier New', monospace;
+  min-width: 100px;
+}
+
+.cooker-display .mode-label {
+  font-size: 0.6rem;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.cooker-display .timer-display {
+  font-size: 1.2rem;
+  font-weight: bold;
+  color: #4ade80;
+  margin: 2px 0;
+}
+
+.cooker-display .temp-display {
+  font-size: 0.65rem;
+  color: #fb923c;
+}
+
+.cooker-display.cooking .timer-display {
+  color: #f97316;
+  animation: timer-glow 1s infinite alternate;
+}
+
+@keyframes timer-glow {
+  from { text-shadow: 0 0 4px #f9731644; }
+  to { text-shadow: 0 0 14px #f97316bb; }
+}
+
+.cooker-steam {
+  position: absolute;
+  top: -28px;
+  display: flex;
+  gap: 8px;
+}
+
+.steam-line {
+  width: 2px;
+  height: 18px;
+  background: linear-gradient(to top, rgba(200,200,200,0.25), transparent);
+  border-radius: 2px;
+  animation: steam-rise 1.5s ease-in-out infinite;
+}
+
+.steam-line:nth-child(2) { animation-delay: 0.3s; height: 22px; }
+.steam-line:nth-child(3) { animation-delay: 0.6s; height: 16px; }
+
+@keyframes steam-rise {
+  0% { opacity: 0; transform: translateY(0) scaleY(0.5); }
+  50% { opacity: 0.7; }
+  100% { opacity: 0; transform: translateY(-15px) scaleY(1.2); }
+}
+
+.cooker-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.cooker-buttons button.active {
+  background: rgba(74, 222, 128, 0.12);
+  border-color: rgba(74, 222, 128, 0.35);
+  color: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.08);
+}
+
+/* ========== Fan ========== */
+.fan-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.fan-visual {
+  width: 120px;
+  height: 120px;
+  position: relative;
+  margin-bottom: 12px;
+}
+
+.fan-guard {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.08);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle, #0e0e18 30%, #080810 100%);
+  box-shadow: inset 0 2px 12px rgba(0,0,0,0.4);
+}
+
+.fan-hub {
+  width: 16px;
+  height: 16px;
+  background: radial-gradient(circle at 35% 35%, #666, #333);
+  border-radius: 50%;
+  position: absolute;
+  z-index: 2;
+}
+
+.fan-blades {
+  position: absolute;
+  width: 90px;
+  height: 90px;
+}
+
+.fan-blades.spinning {
+  animation: spin var(--spin-duration, 2s) linear infinite;
+}
+
+.fan-blades.oscillating {
+  animation: spin var(--spin-duration, 2s) linear infinite, oscillate 4s ease-in-out infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes oscillate {
+  0%, 100% { transform-origin: center; }
+}
+
+.fan-blade {
+  position: absolute;
+  width: 22px;
+  height: 38px;
+  background: linear-gradient(180deg, #4a5568 0%, #2d3748 100%);
+  border-radius: 50% 50% 30% 30%;
+  left: 50%;
+  top: 7px;
+  transform-origin: center 38px;
+  margin-left: -11px;
+}
+
+.fan-blade:nth-child(1) { transform: rotate(0deg); }
+.fan-blade:nth-child(2) { transform: rotate(90deg); }
+.fan-blade:nth-child(3) { transform: rotate(180deg); }
+.fan-blade:nth-child(4) { transform: rotate(270deg); }
+
+.fan-stand {
+  width: 6px;
+  height: 28px;
+  background: linear-gradient(180deg, #444 0%, #333 100%);
+  margin: 0 auto;
+}
+
+.fan-base {
+  width: 48px;
+  height: 8px;
+  background: #333;
+  border-radius: 0 0 6px 6px;
+  margin: 0 auto;
+}
+
+.fan-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.fan-controls button.active {
+  background: rgba(96, 165, 250, 0.12);
+  border-color: rgba(96, 165, 250, 0.35);
+  color: #60a5fa;
+  box-shadow: 0 0 10px rgba(96, 165, 250, 0.08);
+}
+
+.fan-info {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: #666;
+}
+
+/* ========== Oven ========== */
+.oven-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.oven-visual {
+  width: 180px;
+  height: 140px;
+  background: linear-gradient(180deg, #282838 0%, #202030 100%);
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 10px;
+  margin-bottom: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+.oven-control-panel {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.oven-screen {
+  background: #080812;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 4px;
+  padding: 3px 10px;
+  text-align: center;
+  font-family: 'Courier New', monospace;
+}
+
+.oven-screen .oven-mode {
+  font-size: 0.55rem;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.oven-screen .oven-temp {
+  font-size: 1.1rem;
+  font-weight: bold;
+  color: #ef4444;
+}
+
+.oven-screen .oven-timer {
+  font-size: 0.6rem;
+  color: #fb923c;
+}
+
+.oven-knob {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #666, #333);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.oven-window {
+  width: 150px;
+  height: 70px;
+  background: #080810;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+  position: relative;
+  overflow: hidden;
+}
+
+.oven-window.heating {
+  background: linear-gradient(180deg, #120808 0%, #1a0800 100%);
+}
+
+.oven-glow {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 0%;
+  background: linear-gradient(to top, rgba(255, 80, 20, 0.3), transparent);
+  transition: height 1s ease;
+}
+
+.oven-element {
+  position: absolute;
+  bottom: 6px;
+  left: 10%;
+  right: 10%;
+  height: 3px;
+  background: #333;
+  border-radius: 2px;
+  transition: all 0.5s;
+}
+
+.oven-element.hot {
+  background: #ef4444;
+  box-shadow: 0 0 10px #ef4444aa, 0 0 20px #ef444444;
+}
+
+.oven-element-top {
+  position: absolute;
+  top: 6px;
+  left: 10%;
+  right: 10%;
+  height: 3px;
+  background: #333;
+  border-radius: 2px;
+  transition: all 0.5s;
+}
+
+.oven-element-top.hot {
+  background: #ef4444;
+  box-shadow: 0 0 10px #ef4444aa, 0 0 20px #ef444444;
+}
+
+.oven-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.oven-controls button.active {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.08);
+}
+
+.oven-info {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: #666;
+}
