@@ -19,6 +19,7 @@ if not GATEWAY_URL:
             break
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai.kimi-k2.5")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+MEMORY_ID = os.environ.get("AGENTCORE_MEMORY_ID", "")
 
 app = BedrockAgentCoreApp()
 
@@ -26,8 +27,30 @@ app = BedrockAgentCoreApp()
 skills_plugin = AgentSkills(skills="./skills/")
 
 
-def create_agent(tools=None):
-    """Create a Strands agent with Bedrock model and optional MCP tools."""
+def create_session_manager(session_id, actor_id):
+    """Create AgentCore Memory session manager for conversation persistence."""
+    if not MEMORY_ID:
+        return None
+    try:
+        from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
+        from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+
+        config = AgentCoreMemoryConfig(
+            memory_id=MEMORY_ID,
+            session_id=session_id,
+            actor_id=actor_id,
+        )
+        return AgentCoreMemorySessionManager(
+            agentcore_memory_config=config,
+            region_name=AWS_REGION,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create memory session manager: {e}")
+        return None
+
+
+def create_agent(tools=None, session_manager=None):
+    """Create a Strands agent with Bedrock model, optional MCP tools, and memory."""
     model = BedrockModel(
         model_id=MODEL_ID,
         region_name=AWS_REGION,
@@ -39,12 +62,15 @@ def create_agent(tools=None):
         system_prompt="""You are a smart home assistant that controls devices in the user's home.
 You can control: LED Matrix, Rice Cooker, Fan, and Oven.
 Be helpful, concise, and confirm actions taken. If a user asks to do something, use the appropriate device control tool.
-You can also suggest creative lighting scenes, cooking presets, and comfort settings.""",
+You can also suggest creative lighting scenes, cooking presets, and comfort settings.
+Use what you remember about the user's preferences to personalize your responses.""",
         plugins=[skills_plugin],
     )
 
     if tools:
         agent_kwargs["tools"] = tools
+    if session_manager:
+        agent_kwargs["session_manager"] = session_manager
 
     return Agent(**agent_kwargs)
 
@@ -62,27 +88,40 @@ def get_mcp_tools(mcp_client):
     return tools
 
 
-def invoke_agent(prompt):
-    """Run agent with MCP tools from Gateway if available, otherwise without tools."""
+def invoke_agent(prompt, session_id="default", actor_id="default"):
+    """Run agent with MCP tools from Gateway if available, with memory persistence."""
+    session_manager = create_session_manager(session_id, actor_id)
+
     if GATEWAY_URL:
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL))
         with mcp_client:
             tools = get_mcp_tools(mcp_client)
-            agent = create_agent(tools=tools)
+            agent = create_agent(tools=tools, session_manager=session_manager)
             return str(agent(prompt))
     else:
-        agent = create_agent()
+        agent = create_agent(session_manager=session_manager)
         return str(agent(prompt))
 
 
 @app.entrypoint
-def handle_invocation(payload):
+def handle_invocation(payload, context):
     """Handle HTTP POST /invocations requests."""
     prompt = payload.get("prompt", payload.get("inputText", ""))
     if not prompt:
         return {"error": "No prompt provided"}
 
-    response = invoke_agent(prompt)
+    # Extract session and actor IDs from request context
+    session_id = "default"
+    actor_id = "default"
+    if hasattr(context, 'session_id') and context.session_id:
+        session_id = context.session_id
+    if hasattr(context, 'request_headers') and context.request_headers:
+        # Use runtime user ID header if available
+        actor_id = context.request_headers.get(
+            "x-amzn-bedrock-agentcore-runtime-user-id", actor_id
+        )
+
+    response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id)
     return {"response": response, "status": "success"}
 
 

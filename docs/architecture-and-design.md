@@ -489,11 +489,36 @@ The agent is a Strands Agent deployed to Amazon Bedrock AgentCore Runtime via Co
 | Packaging | CodeZip (Python 3.13, managed runtime — no Docker) |
 | Endpoints | `/invocations` (POST), `/ping` (health) on port 8080 |
 | App Framework | `BedrockAgentCoreApp` from `bedrock-agentcore` |
+| Memory | AgentCore Memory with semantic, summary, and user preference strategies |
 
 **System instruction:**
-> You are a smart home assistant that controls devices in the user's home. You can control: LED Matrix, Rice Cooker, Fan, and Oven. Be helpful, concise, and confirm actions taken. Suggest creative lighting scenes, cooking presets, and comfort settings.
+> You are a smart home assistant that controls devices in the user's home. You can control: LED Matrix, Rice Cooker, Fan, and Oven. Be helpful, concise, and confirm actions taken. Suggest creative lighting scenes, cooking presets, and comfort settings. Use what you remember about the user's preferences to personalize your responses.
 
-### 8.2 Tool Access via AgentCore Gateway (MCP)
+### 8.2 AgentCore Memory
+
+The agent uses AgentCore Memory for short-term conversation persistence and long-term knowledge extraction via three configured strategies:
+
+| Strategy | Purpose | Namespace |
+|----------|---------|-----------|
+| **Semantic** (FactExtractor) | Extracts and stores factual knowledge from conversations | `/facts/{actorId}/` |
+| **Summary** (SessionSummarizer) | Generates session summaries for context continuity | `/summaries/{actorId}/{sessionId}/` |
+| **User Preference** (PreferenceLearner) | Learns user preferences (e.g., "warm lighting in evening") | `/preferences/{actorId}/` |
+
+**Integration pattern:**
+```python
+from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
+from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+
+config = AgentCoreMemoryConfig(memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id)
+session_manager = AgentCoreMemorySessionManager(agentcore_memory_config=config, region_name=REGION)
+agent = Agent(model=model, system_prompt=..., session_manager=session_manager)
+```
+
+- **Short-term**: Conversation messages are stored automatically per session via `AgentCoreMemorySessionManager`
+- **Long-term**: Strategies extract facts, preferences, and summaries asynchronously and make them available as context in future sessions
+- **Session/Actor IDs**: Derived from AgentCore Runtime request context (`session_id`, `x-amzn-bedrock-agentcore-runtime-user-id` header)
+
+### 8.3 Tool Access via AgentCore Gateway (MCP)
 
 The Strands Agent discovers and invokes tools through an AgentCore Gateway, which acts as an MCP (Model Context Protocol) server:
 
@@ -517,7 +542,7 @@ AWS IoT Core MQTT
 
 The MCP protocol allows the agent to dynamically discover available tools (device control actions) and their schemas from the gateway, then invoke them as needed.
 
-### 8.3 Agent Directory Structure
+### 8.4 Agent Directory Structure
 
 ```
 agent/
@@ -542,7 +567,7 @@ agent/
 # -> Has allowed-tools: device_control
 ```
 
-### 8.4 Command Validation
+### 8.5 Command Validation
 
 The `iot-control` Lambda validates all commands before publishing:
 
@@ -593,7 +618,12 @@ AgentCore Runtime
   +-> CodeZip (Python 3.13, agent code from S3)
   +-> BedrockAgentCoreApp (Strands Agent)
   +-> JWT Auth (Cognito User Pool)
-  +-> Env: AGENTCORE_GATEWAY_{NAME}_URL (auto-detected), MODEL_ID
+  +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MODEL_ID, AGENTCORE_MEMORY_ID
+
+AgentCore Memory (created by setup script via MemoryClient API)
+  +-> Semantic strategy (fact extraction)
+  +-> Summary strategy (session summaries)
+  +-> User preference strategy (preference learning)
 ```
 
 **Why two stacks?** AgentCore resources cannot be created via CDK for two reasons:
@@ -611,6 +641,7 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - Gateway `authorizerType` cannot be changed after creation — must delete and recreate the CloudFormation stack
 - Gateway auth should be `NONE` for runtime-to-gateway calls; the runtime strips the user's JWT before passing to the handler, so the agent cannot forward it to the gateway
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
+- `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside)
 
 ### 9.2 Deployment Architecture
 
@@ -633,6 +664,7 @@ deploy.sh (one-click)
     |
     +---> [7] scripts/setup-agentcore.py
               |
+              +---> Create AgentCore Memory (semantic + summary + user preference)
               +---> agentcore create --name smarthome --defaults
               +---> Replace default agent code with agent/
               +---> Patch agentcore.json (entrypoint, JWT auth, env vars)
@@ -643,6 +675,8 @@ deploy.sh (one-click)
               |         CloudFormation: AgentCore-smarthome-default
               |         -> IAM Role, AgentCore Runtime
               +---> Fetch Gateway URL + Runtime ARN (from CFN stack outputs)
+              +---> Patch runtime env vars (AGENTCORE_MEMORY_ID, MODEL_ID)
+              |     (agentcore CLI drops custom env vars during deploy)
               +---> Update chatbot config.js in S3
               +---> Invalidate CloudFront cache
 ```

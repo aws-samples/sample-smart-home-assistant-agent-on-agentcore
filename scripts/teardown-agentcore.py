@@ -37,6 +37,7 @@ def main():
     project_dir = state.get("projectDir", "")
     gateway_id = state.get("gatewayId", "")
     runtime_id = state.get("runtimeId", "")
+    memory_id = state.get("memoryId", "")
 
     # Step 1: Delete the AgentCore CloudFormation stack (owns gateway targets + runtime)
     # The stack name follows the agentcore CLI convention: AgentCore-{project}-default
@@ -49,7 +50,7 @@ def main():
         stack_name = f"AgentCore-{project_name}-default"
 
     if stack_name:
-        print(f"\n[1/3] Deleting CloudFormation stack: {stack_name}")
+        print(f"\n[1/4] Deleting CloudFormation stack: {stack_name}")
         try:
             cf.describe_stacks(StackName=stack_name)
             run(f"aws cloudformation delete-stack --stack-name {stack_name}")
@@ -60,7 +61,7 @@ def main():
             print("  Stack not found, skipping.")
 
     # Step 2: Clean up specific resources by ID (safety net if stack delete missed them)
-    print(f"\n[2/3] Cleaning up tracked resources...")
+    print(f"\n[2/4] Cleaning up tracked resources...")
     client = boto3.client("bedrock-agentcore-control", region_name=REGION)
 
     if runtime_id:
@@ -85,8 +86,21 @@ def main():
         except Exception as e:
             print(f"  Skipped (already deleted or not found): {e}")
 
-    # Step 3: Clean up local state
-    print(f"\n[3/3] Cleaning up local files...")
+    # Step 3: Delete AgentCore Memory
+    if memory_id:
+        print(f"\n[3/4] Deleting memory: {memory_id}")
+        try:
+            from bedrock_agentcore.memory import MemoryClient
+            mem_client = MemoryClient(region_name=REGION)
+            mem_client.delete_memory(memory_id=memory_id)
+            print("  Memory deleted.")
+        except Exception as e:
+            print(f"  Skipped (already deleted or not found): {e}")
+    else:
+        print(f"\n[3/4] No memory to delete.")
+
+    # Step 4: Clean up local state
+    print(f"\n[4/4] Cleaning up local files...")
     os.remove(STATE_FILE)
     print(f"  Removed {STATE_FILE}")
 

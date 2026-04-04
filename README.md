@@ -1,6 +1,6 @@
 # Smart Home Assistant Agent
 
-AI-powered smart home control system built on AWS. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with real-time MQTT communication.
+AI-powered smart home control system built on AWS. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core.
 
 ```
 smarthome-assistant-agent/
@@ -76,8 +76,9 @@ The deployment creates two separate CloudFormation stacks:
 - AgentCore Gateway (MCP server) with NONE auth (internal to runtime)
 - Gateway Lambda Target pointing to iot-control Lambda
 - AgentCore Runtime running the Strands agent (CodeZip, Python 3.13)
+- AgentCore Memory with semantic, summary, and user preference extraction strategies
 
-The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates an `agentcore` project, injects our agent code, adds the gateway + target, and deploys.
+The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates the memory resource, creates an `agentcore` project, injects our agent code, adds the gateway + target, deploys, and patches the runtime with the memory ID.
 
 ---
 
