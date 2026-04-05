@@ -11,4 +11,6 @@ dependencies = [
     "boto3",
     "requests",
     "mcp",
+    "aws-opentelemetry-distro>=0.10.0",
+    "opentelemetry-exporter-otlp-proto-http",
 ]

@@ -48,7 +48,7 @@ def run(cmd, cwd=None):
 
 def main():
     print("=" * 60)
-    print("  AgentCore Setup (Gateway + Lambda Target + Runtime)")
+    print("  AgentCore Setup (Gateway + Lambda Target + Runtime + Observability + Eval)")
     print("=" * 60)
 
     # Read CDK stack outputs
@@ -66,7 +66,7 @@ def main():
     # --------------------------------------------------------
     # Step 1: Create agentcore project (with default agent)
     # --------------------------------------------------------
-    print("\n[1/6] Creating agentcore project...")
+    print("\n[1/8] Creating agentcore project...")
     if os.path.exists(AGENTCORE_DIR):
         shutil.rmtree(AGENTCORE_DIR)
     os.makedirs(AGENTCORE_DIR)
@@ -79,7 +79,7 @@ def main():
     # --------------------------------------------------------
     # Step 2: Replace default agent code with our SmartHome agent
     # --------------------------------------------------------
-    print("\n[2/6] Injecting SmartHome agent code...")
+    print("\n[2/8] Injecting SmartHome agent code...")
     default_app = os.path.join(project_dir, "app", "smarthome")
     if os.path.exists(default_app):
         shutil.rmtree(default_app)
@@ -116,7 +116,7 @@ def main():
     # --------------------------------------------------------
     # Step 3: Add AgentCore Memory (managed by agentcore CLI)
     # --------------------------------------------------------
-    print("\n[3/6] Adding AgentCore Memory...")
+    print("\n[3/8] Adding AgentCore Memory...")
     r = run(
         "agentcore add memory --name SmartHomeMemory "
         "--strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE",
@@ -128,7 +128,7 @@ def main():
     # --------------------------------------------------------
     # Step 4: Add AgentCore Gateway
     # --------------------------------------------------------
-    print("\n[4/6] Adding AgentCore Gateway...")
+    print("\n[4/8] Adding AgentCore Gateway...")
     r = run(
         f'agentcore add gateway --name SmartHomeGateway '
         f'--authorizer-type NONE',
@@ -140,7 +140,7 @@ def main():
     # --------------------------------------------------------
     # Step 5: Add Lambda target to gateway
     # --------------------------------------------------------
-    print("\n[5/6] Adding Lambda target to gateway...")
+    print("\n[5/8] Adding Lambda target to gateway...")
 
     # Write tool schema file
     with open(os.path.join(project_dir, "tools.json"), "w") as f:
@@ -180,9 +180,44 @@ def main():
         raise Exception("Failed to add gateway target")
 
     # --------------------------------------------------------
-    # Step 6: Deploy all AgentCore resources
+    # Step 6: Add evaluator (LLM-as-a-Judge for response quality)
     # --------------------------------------------------------
-    print("\n[6/6] Deploying AgentCore resources...")
+    print("\n[6/8] Adding evaluator...")
+    r = run(
+        'agentcore add evaluator --name SmartHomeQuality '
+        '--level SESSION '
+        '--type llm-as-a-judge '
+        '--model us.anthropic.claude-sonnet-4-20250514-v1:0 '
+        '--rating-scale 1-5-quality '
+        '--instructions "Evaluate the smart home assistant response. '
+        'Consider: (1) Did the agent correctly understand the user intent? '
+        '(2) Did the agent use the right device control tools? '
+        '(3) Was the response helpful and concise? '
+        'Context: {context}"',
+        cwd=project_dir,
+    )
+    if r.returncode != 0:
+        print("  Warning: Failed to add evaluator (non-fatal)")
+
+    # --------------------------------------------------------
+    # Step 7: Add online evaluation config
+    # --------------------------------------------------------
+    print("\n[7/8] Adding online evaluation config...")
+    r = run(
+        'agentcore add online-eval --name SmartHomeOnlineEval '
+        '--runtime smarthome '
+        '--evaluator SmartHomeQuality '
+        '--sampling-rate 100 '
+        '--enable-on-create',
+        cwd=project_dir,
+    )
+    if r.returncode != 0:
+        print("  Warning: Failed to add online eval config (non-fatal)")
+
+    # --------------------------------------------------------
+    # Step 8: Deploy all AgentCore resources
+    # --------------------------------------------------------
+    print("\n[8/8] Deploying AgentCore resources...")
     r = run("agentcore deploy -y --verbose", cwd=project_dir)
     if r.returncode != 0:
         raise Exception("agentcore deploy failed — check log above")

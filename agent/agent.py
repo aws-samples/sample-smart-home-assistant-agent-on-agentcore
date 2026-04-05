@@ -1,15 +1,29 @@
 import os
 import json
 import logging
-from strands import Agent, AgentSkills
-from strands.models.bedrock import BedrockModel
-from strands.tools.mcp.mcp_client import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
-from bedrock_agentcore import BedrockAgentCoreApp
-from memory.session import get_memory_session_manager
+
+# ADOT auto-instrumentation: programmatic equivalent of `opentelemetry-instrument python agent.py`.
+# Must run before any other imports so ADOT can patch libraries (botocore, requests, etc.).
+# On AgentCore managed runtime, ADOT exports spans to CloudWatch automatically.
+os.environ.setdefault("OTEL_PYTHON_DISTRO", "aws_distro")
+os.environ.setdefault("OTEL_PYTHON_CONFIGURATOR", "aws_configurator")
+from opentelemetry.instrumentation.auto_instrumentation import sitecustomize  # noqa: E402
+sitecustomize.initialize()
+
+from strands import Agent, AgentSkills  # noqa: E402
+from strands.models.bedrock import BedrockModel  # noqa: E402
+from strands.tools.mcp.mcp_client import MCPClient  # noqa: E402
+from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
+from strands.telemetry import StrandsTelemetry  # noqa: E402
+from bedrock_agentcore import BedrockAgentCoreApp  # noqa: E402
+from memory.session import get_memory_session_manager  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Configure Strands to emit OTEL traces (GenAI semantic conventions).
+# ADOT auto-instrumentation (above) handles exporting these spans to CloudWatch.
+StrandsTelemetry()
 
 # agentcore CLI sets env vars as AGENTCORE_GATEWAY_{GATEWAYNAME}_URL
 GATEWAY_URL = os.environ.get("AGENTCORE_GATEWAY_URL", "")

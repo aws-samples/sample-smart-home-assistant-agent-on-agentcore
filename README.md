@@ -1,6 +1,9 @@
 # Smart Home Assistant Agent
 
-AI-powered smart home control system built on AWS. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core.
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core.
+
+![chatbot](docs/screenshots/smarthomeassistant-chat.png)
+![device simulator](docs/screenshots/smarthomeassistant-devices.png)
 
 ```
 smarthome-assistant-agent/
