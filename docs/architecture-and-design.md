@@ -285,6 +285,7 @@ Internet
 | Cognito Unauth Role | iot:Connect, Subscribe, Receive, Publish | `*` (IoT Core) |
 | Cognito Auth Role | iot:Connect, Subscribe, Receive, Publish | `*` (IoT Core) |
 | iot-control Lambda | iot:Publish | `arn:...:topic/smarthome/*` |
+| iot-discovery Lambda | (none) | Returns mock device list |
 | admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
 | AgentCore Runtime Role | bedrock:InvokeModel | Kimi-2.5 model |
 | AgentCore Runtime Role | dynamodb:Query, GetItem, Scan | `arn:...:table/smarthome-skills` |
@@ -532,9 +533,9 @@ The agent uses AgentCore Memory for short-term conversation persistence and long
 
 | Strategy | Type | Namespace |
 |----------|------|-----------|
-| **Semantic** | `SEMANTIC` | `/facts/{actorId}/` |
-| **Summarization** | `SUMMARIZATION` | `/summaries/{actorId}/{sessionId}/` |
-| **User Preference** | `USER_PREFERENCE` | `/preferences/{actorId}/` |
+| **Semantic** | `SEMANTIC` | `/users/{actorId}/facts` |
+| **Summarization** | `SUMMARIZATION` | `/summaries/{actorId}/{sessionId}` |
+| **User Preference** | `USER_PREFERENCE` | `/users/{actorId}/preferences` |
 
 **CLI-managed lifecycle:**
 ```bash
@@ -552,10 +553,11 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import AgentC
 MEMORY_ID = os.getenv("MEMORY_SMARTHOMEMEMORY_ID", "")  # auto-set by agentcore CLI
 
 def get_memory_session_manager(session_id, actor_id):
+    actor_id = _sanitize_actor_id(actor_id)  # replace @/. with _ for Memory API
     retrieval_config = {
-        f"/facts/{actor_id}/": RetrievalConfig(top_k=3, relevance_score=0.5),
-        f"/summaries/{actor_id}/{session_id}/": RetrievalConfig(top_k=3, relevance_score=0.5),
-        f"/preferences/{actor_id}/": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/users/{actor_id}/facts": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/summaries/{actor_id}/{session_id}": RetrievalConfig(top_k=3, relevance_score=0.5),
+        f"/users/{actor_id}/preferences": RetrievalConfig(top_k=3, relevance_score=0.5),
     }
     return AgentCoreMemorySessionManager(
         AgentCoreMemoryConfig(memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id,
@@ -568,6 +570,7 @@ def get_memory_session_manager(session_id, actor_id):
 - **Long-term**: Strategies extract facts, preferences, and summaries asynchronously and make them available as context in future sessions
 - **Retrieval**: Each namespace has configurable `top_k` and `relevance_score` thresholds for context injection
 - **Session/Actor IDs**: Derived from AgentCore Runtime request context (`session_id`, `x-amzn-bedrock-agentcore-runtime-user-id` header)
+- **Actor ID sanitization**: AgentCore Memory requires actor IDs matching `[a-zA-Z0-9][a-zA-Z0-9-_/]*`. Since Cognito emails contain `@` and `.`, `_sanitize_actor_id()` replaces invalid characters with `_` (e.g., `user@example.com` → `user_example_com`).
 - **Env var**: `MEMORY_SMARTHOMEMEMORY_ID` is auto-set by the `agentcore` CLI on deploy (follows `MEMORY_<NAME>_ID` convention)
 
 ### 8.3 Tool Access via AgentCore Gateway (MCP)
@@ -608,7 +611,8 @@ agent/
 │   ├── led-control/      # SKILL.md with LED-specific instructions
 │   ├── rice-cooker-control/
 │   ├── fan-control/
-│   └── oven-control/
+│   ├── oven-control/
+│   └── all-devices-on/   # Discovers devices then turns them on sequentially
 ├── pyproject.toml        # Dependencies for AgentCore CodeZip packaging
 └── Dockerfile            # Optional, for local container testing
 ```
@@ -863,6 +867,10 @@ modelId: "us.anthropic.claude-sonnet-4-6"
 - Claude 4.5: Sonnet, Opus, Haiku
 - Claude 4: Sonnet, Opus, Opus 4.1
 - Claude 3.x: 3.7 Sonnet, 3.5 Haiku
+- DeepSeek: V3.2, V3.1, R1
+- Qwen: Qwen3 235B, Next 80B, 32B Dense, VL 235B, Coder 480B, Coder 30B
+- GLM (Z.AI): GLM 5, GLM 4.7, GLM 4.7 Flash
+- MiniMax: M2.5, M2.1, M2
 - Meta Llama: Llama 4 Maverick/Scout, Llama 3.3 70B
 - OpenAI: GPT OSS 120B/20B
 
@@ -915,7 +923,8 @@ S3 Buckets + CloudFront (x3)
 ```
 AgentCore Gateway (MCP Server)
   +-> Auth: NONE (only called by the runtime internally)
-  +-> Lambda Target (iot-control Lambda + tool schema)
+  +-> Lambda Target: SmartHomeDeviceControl (iot-control Lambda + tool schema)
+  +-> Lambda Target: SmartHomeDeviceDiscovery (iot-discovery Lambda + tool schema)
 
 AgentCore Runtime
   +-> CodeZip (Python 3.13, agent code from S3)
@@ -1090,8 +1099,9 @@ Health check endpoint. Returns 200 when the runtime is healthy.
 
 The gateway exposes device control tools via MCP protocol. The Strands Agent connects as an MCP client to discover available tools and their schemas, then invokes them to control devices.
 
-**Lambda Target:** `iot-control` Lambda with tool schema defining:
-- `control_device(device_type, command)` - Send a control command to a smart home device
+**Lambda Targets:**
+- `control_device(device_type, command)` — Send a control command to a smart home device (via `iot-control` Lambda)
+- `discover_devices()` — List available smart home devices with their types, actions, and power-on/off commands (via `iot-discovery` Lambda)
 
 ### 10.3 iot-control Lambda Response Format
 
@@ -1123,7 +1133,8 @@ The gateway exposes device control tools via MCP protocol. The Strands Agent con
 | `UserPoolClientId` | Cognito App Client ID | `1a2b3c4d5e6f7g8h9i0j` |
 | `IdentityPoolId` | Cognito Identity Pool ID | `us-west-2:xxxxxxxx-xxxx-...` |
 | `CognitoDomain` | Cognito hosted UI domain | `smarthome-123456789.auth.us-west-2.amazoncognito.com` |
-| `IoTControlLambdaArn` | Lambda ARN for gateway target | `arn:aws:lambda:us-west-2:...:function:smarthome-iot-control` |
+| `IoTControlLambdaArn` | Lambda ARN for device control gateway target | `arn:aws:lambda:us-west-2:...:function:smarthome-iot-control` |
+| `IoTDiscoveryLambdaArn` | Lambda ARN for device discovery gateway target | `arn:aws:lambda:us-west-2:...:function:smarthome-iot-discovery` |
 | `ChatbotBucketName` | S3 bucket for chatbot config.js update | `smarthome-chatbot-123456789` |
 | `ChatbotDistributionId` | CloudFront ID for cache invalidation | `E1234567890` |
 | `DeviceSimulatorUrl` | Device Simulator URL | `https://d1234567890.cloudfront.net` |

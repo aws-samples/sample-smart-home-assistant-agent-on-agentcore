@@ -57,6 +57,7 @@ def main():
     user_pool_id = outputs["UserPoolId"]
     client_id = outputs["UserPoolClientId"]
     lambda_arn = outputs["IoTControlLambdaArn"]
+    discovery_lambda_arn = outputs["IoTDiscoveryLambdaArn"]
     discovery_url = f"https://cognito-idp.{REGION}.amazonaws.com/{user_pool_id}/.well-known/openid-configuration"
     agent_code_src = os.path.join(PROJECT_ROOT, "agent")
 
@@ -178,6 +179,31 @@ def main():
     )
     if r.returncode != 0:
         raise Exception("Failed to add gateway target")
+
+    # Write discovery tool schema
+    with open(os.path.join(project_dir, "discovery-tools.json"), "w") as f:
+        json.dump([{
+            "name": "discover_devices",
+            "description": (
+                "Discover all smart home devices available to the current user. "
+                "Returns a list of devices with their type, display name, and supported actions."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        }], f, indent=2)
+
+    r = run(
+        f'agentcore add gateway-target --name SmartHomeDeviceDiscovery '
+        f'--gateway SmartHomeGateway '
+        f'--type lambda-function-arn '
+        f'--lambda-arn {discovery_lambda_arn} '
+        f'--tool-schema-file discovery-tools.json',
+        cwd=project_dir,
+    )
+    if r.returncode != 0:
+        raise Exception("Failed to add discovery gateway target")
 
     # --------------------------------------------------------
     # Step 6: Add evaluator (LLM-as-a-Judge for response quality)
