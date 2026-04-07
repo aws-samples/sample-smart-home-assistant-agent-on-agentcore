@@ -1,23 +1,28 @@
 # Smart Home Assistant Agent
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core.
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core. Includes an admin console for managing agent skills, model selection, and user sessions.
 
 ![chatbot](docs/screenshots/smarthomeassistant-chat.png)
 ![device simulator](docs/screenshots/smarthomeassistant-devices.png)
+![admin console](docs/screenshots/smarthomeassistant-admin.png)
 
 ```
 smarthome-assistant-agent/
-├── cdk/                     # AWS CDK — Cognito, IoT Core, Lambda, S3, CloudFront
+├── cdk/                     # AWS CDK — Cognito, IoT Core, Lambda, DynamoDB, API Gateway, S3, CloudFront
 │   ├── lib/smarthome-stack.ts
-│   └── lambda/iot-control/  # Validates & publishes MQTT commands
+│   └── lambda/
+│       ├── iot-control/     # Validates & publishes MQTT commands
+│       └── admin-api/       # Skill CRUD, user settings, session management API
 ├── device-simulator/        # React app — 4 simulated IoT devices
 ├── chatbot/                 # React app — chat UI with Cognito auth
+├── admin-console/           # React app — admin user management UI
 ├── agent/                   # Strands Agent (deployed to AgentCore Runtime)
 │   ├── agent.py             # BedrockAgentCoreApp entrypoint
-│   ├── skills/              # Device control SKILL.md files
+│   ├── skills/              # Fallback device control SKILL.md files
 │   └── pyproject.toml       # Dependencies for AgentCore code packaging
 ├── scripts/
 │   ├── setup-agentcore.py   # Creates Gateway, Lambda Target, Runtime
+│   ├── seed-skills.py       # Seeds SKILL.md files to DynamoDB
 │   └── teardown-agentcore.py
 ├── docs/                    # Architecture & design documentation
 └── deploy.sh                # One-click deploy
@@ -48,20 +53,23 @@ aws configure
 # 2. Set up Python environment (for setup script + agent deps)
 python3 -m venv venv
 source venv/bin/activate
-pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp
+pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp pyyaml
 
 # 3. Deploy everything
 ./deploy.sh
 ```
 
-The deploy script runs 7 steps:
+The deploy script runs 8 steps:
 1. Install CDK dependencies
 2. Build Device Simulator (React)
 3. Build Chatbot (React)
-4. CDK bootstrap
-5. **CDK deploy** — Cognito, IoT Core, Lambda, S3 + CloudFront
-6. **Fix Cognito** — Enable self-service sign-up + email auto-verification
-7. **AgentCore setup** — Gateway + Lambda Target + Agent Runtime (via `agentcore` CLI)
+4. Build Admin Console (React)
+5. CDK bootstrap
+6. **CDK deploy** — Cognito, IoT Core, Lambda, DynamoDB, API Gateway, S3 + CloudFront
+7. **Fix Cognito** — Enable self-service sign-up + email auto-verification
+8. **AgentCore setup** — Gateway + Lambda Target + Agent Runtime + Seed skills to DynamoDB
+
+After deployment, the script outputs URLs for all three frontends and admin credentials.
 
 ---
 
@@ -70,10 +78,12 @@ The deploy script runs 7 steps:
 The deployment creates two separate CloudFormation stacks:
 
 **CDK Stack** (`SmartHomeAssistantStack`) — standard AWS resources:
-- Cognito User Pool + Identity Pool
+- Cognito User Pool + Identity Pool + Admin group and default admin user
 - IoT Core things + endpoint lookup
-- Lambda function (iot-control) for MQTT publishing
-- S3 + CloudFront for Device Simulator and Chatbot
+- Lambda functions: iot-control (MQTT), admin-api (skill CRUD + settings + sessions)
+- DynamoDB table (smarthome-skills) for agent skill storage, user settings, and session tracking
+- API Gateway with Cognito authorizer for admin API
+- S3 + CloudFront for Device Simulator, Chatbot, and Admin Console
 
 **AgentCore Stack** (managed by `agentcore` CLI) — AgentCore resources:
 - AgentCore Gateway (MCP server) with NONE auth (internal to runtime)
@@ -81,7 +91,30 @@ The deployment creates two separate CloudFormation stacks:
 - AgentCore Runtime running the Strands agent (CodeZip, Python 3.13)
 - AgentCore Memory with semantic, summary, and user preference extraction strategies
 
-The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates an `agentcore` project, injects our agent code, adds memory + gateway + target, and deploys everything in one `agentcore deploy`.
+The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates an `agentcore` project, injects our agent code, adds memory + gateway + target, deploys everything, then patches the runtime with `SKILLS_TABLE_NAME` and grants DynamoDB access. Finally, `scripts/seed-skills.py` populates the DynamoDB table with the 4 built-in skills.
+
+---
+
+## Admin Console Features
+
+The Admin Console is a separate React app for administrators. Log in with a user in the `admin` Cognito group (default admin credentials are shown in deploy output).
+
+### Skills Management (Skills Tab)
+- **Global skills** (`__global__`) are shared across all users
+- **Per-user skills** override global skills with the same name for a specific user
+- Create, edit, and delete skills with a markdown instruction editor
+- Skills are stored in DynamoDB and loaded dynamically per invocation — no agent redeployment needed
+
+### Per-User Model Selection
+- Set the LLM model per user or a global default via a dropdown
+- Available models include Kimi K2.5, Claude 4.5/4.6, Llama 4, and OpenAI GPT
+- The agent reads the model setting from DynamoDB on each invocation
+
+### Session Management (Sessions Tab)
+- View all user runtime sessions (User ID, Session ID, Last Active)
+- Each user gets a **fixed session ID** derived from their Cognito identity (same user = same session across invocations)
+- **Stop** button to terminate a user's runtime session via the AgentCore StopRuntimeSession API
+- User ID is passed from the chatbot in the request payload and recorded by the agent
 
 ---
 
@@ -92,6 +125,7 @@ The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs,
 ```bash
 cd device-simulator && npm install && npm run build && cd ..
 cd chatbot && npm install && npm run build && cd ..
+cd admin-console && npm install && npm run build && cd ..
 ```
 
 ### 2. Deploy CDK stack
@@ -111,6 +145,25 @@ python3 scripts/setup-agentcore.py
 ```
 
 This creates an `agentcore` CLI project in `.agentcore-project/`, adds our agent code, gateway, and Lambda target, then runs `agentcore deploy -y --verbose`.
+
+### 4. Seed skills
+
+```bash
+python3 scripts/seed-skills.py
+```
+
+Reads the 4 SKILL.md files from `agent/skills/` and writes them to DynamoDB as `__global__` skills.
+
+### 5. Add admin users (optional)
+
+The CDK stack creates a default admin user. To add more:
+
+```bash
+aws cognito-idp admin-add-user-to-group \
+  --user-pool-id <USER_POOL_ID> \
+  --username <EMAIL> \
+  --group-name admin
+```
 
 ---
 
@@ -148,6 +201,23 @@ window.__CONFIG__ = {
 };
 ```
 
+### Admin Console
+
+```bash
+cd admin-console && npm install && npm start  # http://localhost:3002
+```
+
+Create `admin-console/public/config.js`:
+```javascript
+window.__CONFIG__ = {
+  cognitoUserPoolId: "YOUR_USER_POOL_ID",
+  cognitoClientId: "YOUR_CLIENT_ID",
+  adminApiUrl: "YOUR_ADMIN_API_URL",
+  agentRuntimeArn: "YOUR_RUNTIME_ARN",
+  region: "us-west-2"
+};
+```
+
 ### Strands Agent
 
 ```bash
@@ -171,7 +241,7 @@ curl -X POST http://localhost:8080/invocations \
 
 ### Changing the AI Model
 
-Edit `agent/agent.py` or set the `MODEL_ID` environment variable. Default: `moonshotai.kimi-k2.5`. The setup script sets it in `agentcore.json` for the deployed runtime.
+Edit `agent/agent.py` or set the `MODEL_ID` environment variable. Default: `moonshotai.kimi-k2.5`. Administrators can override the model per user via the Admin Console without redeploying.
 
 ### Custom Domain Names
 
@@ -193,7 +263,7 @@ source venv/bin/activate
 # 1. Tear down AgentCore resources first (Gateway, Target, Runtime)
 python3 scripts/teardown-agentcore.py
 
-# 2. Then destroy CDK stack (Cognito, IoT, Lambda, S3, CloudFront)
+# 2. Then destroy CDK stack (Cognito, IoT, Lambda, DynamoDB, S3, CloudFront)
 cd cdk && npx cdk destroy --all --force
 ```
 
@@ -238,6 +308,28 @@ Check: Cognito Identity Pool ID, IoT endpoint, and IAM role permissions in brows
 
 The chatbot uses HTTP POST (not WebSocket) to `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{arn}/invocations`. Check: `agentRuntimeArn` in config.js, Cognito tokens, AgentCore Runtime logs in CloudWatch.
 
+### Admin Console: "Access Denied"
+
+The logged-in user must belong to the `admin` Cognito group. Add them with:
+```bash
+aws cognito-idp admin-add-user-to-group \
+  --user-pool-id <USER_POOL_ID> \
+  --username <EMAIL> \
+  --group-name admin
+```
+
+### Admin API returns 403 "Forbidden: admin group required"
+
+Same as above — the JWT `cognito:groups` claim must include `admin`.
+
+### Skills not loading from DynamoDB
+
+Check that the AgentCore Runtime has the `SKILLS_TABLE_NAME` environment variable set and the runtime IAM role has `dynamodb:Query`, `dynamodb:PutItem` permission on the skills table. The setup script handles both, but re-running it may be needed after a fresh `agentcore deploy`.
+
+### User ID shows as "default" in Admin Console Sessions
+
+The chatbot passes `userId` in the POST body to the agent. If it shows "default", the chatbot may be serving a cached old bundle. Hard-refresh (`Ctrl+Shift+R`) or clear the CloudFront cache.
+
 ### agentcore deploy fails: CDK synth "pyproject.toml not found"
 
 The `agentcore` CLI requires `pyproject.toml` in the agent code directory to package it as CodeZip. This file is included in the repo under `agent/pyproject.toml`.
@@ -256,7 +348,7 @@ Remove `bucketName` from the CDK stack to let CDK auto-generate unique names.
 
 ### CDK custom resource fails: "@aws-sdk/client-bedrockagentcorecontrol does not exist"
 
-This is expected — the CDK JS SDK does not yet include the AgentCore client. AgentCore resources are created by the `agentcore` CLI in a separate step (Step 7 of deploy), not by CDK.
+This is expected — the CDK JS SDK does not yet include the AgentCore client. AgentCore resources are created by the `agentcore` CLI in a separate step (Step 8 of deploy), not by CDK.
 
 ---
 

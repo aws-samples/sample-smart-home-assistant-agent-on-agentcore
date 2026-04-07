@@ -11,12 +11,16 @@ from opentelemetry.instrumentation.auto_instrumentation import sitecustomize  # 
 sitecustomize.initialize()
 
 from strands import Agent, AgentSkills  # noqa: E402
+from strands.vended_plugins.skills import Skill  # noqa: E402
 from strands.models.bedrock import BedrockModel  # noqa: E402
 from strands.tools.mcp.mcp_client import MCPClient  # noqa: E402
 from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
 from strands.telemetry import StrandsTelemetry  # noqa: E402
 from bedrock_agentcore import BedrockAgentCoreApp  # noqa: E402
 from memory.session import get_memory_session_manager  # noqa: E402
+
+import boto3  # noqa: E402
+from boto3.dynamodb.conditions import Key  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,20 +38,88 @@ if not GATEWAY_URL:
             break
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai.kimi-k2.5")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+SKILLS_TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "")
 
 app = BedrockAgentCoreApp()
 
-# Load skills
-skills_plugin = AgentSkills(skills="./skills/")
+# DynamoDB resource for skill loading (initialised lazily)
+_dynamodb_resource = None
 
 
-def create_agent(tools=None, session_manager=None):
+def _get_dynamodb():
+    global _dynamodb_resource
+    if _dynamodb_resource is None:
+        _dynamodb_resource = boto3.resource("dynamodb", region_name=AWS_REGION)
+    return _dynamodb_resource
+
+
+def load_skills_from_dynamodb(actor_id: str) -> list:
+    """Load global + user-specific skills from DynamoDB, return list of Skill instances."""
+    table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
+    skills_by_name = {}
+
+    # Global skills first
+    resp = table.query(KeyConditionExpression=Key("userId").eq("__global__"))
+    for item in resp.get("Items", []):
+        allowed_tools = item.get("allowedTools")
+        if isinstance(allowed_tools, set):
+            allowed_tools = list(allowed_tools)
+        skills_by_name[item["skillName"]] = Skill(
+            name=item["skillName"],
+            description=item.get("description", ""),
+            instructions=item.get("instructions", ""),
+            allowed_tools=allowed_tools,
+        )
+
+    # User-specific skills override global by name
+    if actor_id and actor_id not in ("default", "__global__"):
+        resp = table.query(KeyConditionExpression=Key("userId").eq(actor_id))
+        for item in resp.get("Items", []):
+            allowed_tools = item.get("allowedTools")
+            if isinstance(allowed_tools, set):
+                allowed_tools = list(allowed_tools)
+            skills_by_name[item["skillName"]] = Skill(
+                name=item["skillName"],
+                description=item.get("description", ""),
+                instructions=item.get("instructions", ""),
+                allowed_tools=allowed_tools,
+            )
+
+    return list(skills_by_name.values())
+
+
+def load_user_settings(actor_id: str) -> dict:
+    """Load user settings (e.g., modelId) from DynamoDB.
+
+    Checks user-specific settings first, then falls back to __global__.
+    """
+    table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
+    for uid in [actor_id, "__global__"]:
+        if uid in ("default", ""):
+            continue
+        resp = table.get_item(Key={"userId": uid, "skillName": "__settings__"})
+        item = resp.get("Item")
+        if item and item.get("modelId"):
+            return {"modelId": item["modelId"]}
+    return {}
+
+
+# Fallback: static skills from filesystem
+_static_skills_plugin = AgentSkills(skills="./skills/")
+
+
+def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
     """Create a Strands agent with Bedrock model, optional MCP tools, and memory."""
     model = BedrockModel(
-        model_id=MODEL_ID,
+        model_id=model_id or MODEL_ID,
         region_name=AWS_REGION,
         streaming=True,
     )
+
+    if skills:
+        skills_plugin = AgentSkills(skills=skills)
+    else:
+        skills_plugin = _static_skills_plugin
 
     agent_kwargs = dict(
         model=model,
@@ -55,7 +127,8 @@ def create_agent(tools=None, session_manager=None):
 You can control: LED Matrix, Rice Cooker, Fan, and Oven.
 Be helpful, concise, and confirm actions taken. If a user asks to do something, use the appropriate device control tool.
 You can also suggest creative lighting scenes, cooking presets, and comfort settings.
-Use what you remember about the user's preferences to personalize your responses.""",
+Use what you remember about the user's preferences to personalize your responses.
+IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.""",
         plugins=[skills_plugin],
     )
 
@@ -84,14 +157,30 @@ def invoke_agent(prompt, session_id="default", actor_id="default"):
     """Run agent with MCP tools from Gateway if available, with memory persistence."""
     session_manager = get_memory_session_manager(session_id, actor_id)
 
+    # Load skills and user settings from DynamoDB
+    skills = None
+    user_model_id = None
+    if SKILLS_TABLE_NAME:
+        try:
+            skills = load_skills_from_dynamodb(actor_id)
+        except Exception as e:
+            logger.warning(f"DynamoDB skill load failed, using filesystem fallback: {e}")
+        try:
+            settings = load_user_settings(actor_id)
+            user_model_id = settings.get("modelId") or None
+            if user_model_id:
+                logger.info(f"Using per-user model: {user_model_id} for actor {actor_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load user settings: {e}")
+
     if GATEWAY_URL:
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL))
         with mcp_client:
             tools = get_mcp_tools(mcp_client)
-            agent = create_agent(tools=tools, session_manager=session_manager)
+            agent = create_agent(tools=tools, session_manager=session_manager, skills=skills, model_id=user_model_id)
             return str(agent(prompt))
     else:
-        agent = create_agent(session_manager=session_manager)
+        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id)
         return str(agent(prompt))
 
 
@@ -107,11 +196,25 @@ def handle_invocation(payload, context):
     actor_id = "default"
     if hasattr(context, 'session_id') and context.session_id:
         session_id = context.session_id
-    if hasattr(context, 'request_headers') and context.request_headers:
-        # Use runtime user ID header if available
-        actor_id = context.request_headers.get(
-            "x-amzn-bedrock-agentcore-runtime-user-id", actor_id
-        )
+
+    # The runtime strips the X-Amzn-Bedrock-AgentCore-Runtime-User-Id header
+    # before forwarding to the agent. Read user ID from the payload instead.
+    actor_id = payload.get("userId", actor_id)
+
+    logger.info(f"Invocation: actor_id={actor_id}, session_id={session_id}")
+
+    # Record session to DynamoDB for admin visibility
+    if SKILLS_TABLE_NAME:
+        try:
+            from datetime import datetime, timezone
+            _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
+                "userId": actor_id,
+                "skillName": "__session__",
+                "sessionId": session_id,
+                "lastActiveAt": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.warning(f"Failed to record session: {e}")
 
     response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id)
     return {"response": response, "status": "success"}

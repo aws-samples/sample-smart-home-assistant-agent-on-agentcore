@@ -10,7 +10,11 @@
 - [6. Device Simulator Design](#6-device-simulator-design)
 - [7. Chatbot Design](#7-chatbot-design)
 - [8. AI Agent Design](#8-ai-agent-design) (includes [8.6 Agent Internal Data Flow](#86-agent-internal-data-flow))
+- [8.7. Skill Management](#87-skill-management)
+- [8.8. Per-User Model Selection](#88-per-user-model-selection)
+- [8.9. Fixed Session ID and Session Tracking](#89-fixed-session-id-and-session-tracking)
 - [9. Infrastructure Design](#9-infrastructure-design)
+- [9.4. Admin Console Design](#94-admin-console-design)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -30,6 +34,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Command routing and device control via MCP |
+| Admin Console | React + TypeScript + REST API | Manage agent skills (CRUD) per user |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
 ---
@@ -37,53 +42,53 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 ## 2. High-Level Architecture
 
 ```
-+-----------------------------------------------------------------------------------+
-|                                  AWS Cloud                                        |
-|                                                                                   |
-|  +------------------+     +------------------+     +-------------------------+    |
-|  |   CloudFront     |     |   CloudFront     |     |     Cognito             |    |
-|  |  (Device Sim)    |     |   (Chatbot)      |     |  +--------+ +--------+ |    |
-|  +--------+---------+     +--------+---------+     |  |  User  | |Identity| |    |
-|           |                        |               |  |  Pool  | |  Pool  | |    |
-|  +--------v---------+     +--------v---------+     |  +---+----+ +---+----+ |    |
-|  |    S3 Bucket      |     |    S3 Bucket     |     +-----+----------+------+    |
-|  +-------------------+     +------------------+           |          |           |
-|                                    |                      |          |           |
-|  +-----------+  MQTT/WSS          | HTTPS (Bearer JWT)   |          |           |
-|  | Browser   +----------+        |                       |          |           |
-|  | (Device   |          |  +-----v-----------------------v---+      |           |
-|  |  Sim App) |          |  |  AgentCore Runtime               |      |           |
-|  +-----------+          |  |  (Strands Agent + Kimi-2.5)      |      |           |
-|             |           |  |  /invocations  /ws  /ping        |      |           |
-|             |           |  +-----+----------------------------+      |           |
-|  Cognito    |           |        |                                   |           |
-|  Identity   |           |        | MCP Client                       |           |
-|  Pool       |           |  +-----v----------------------------+      |           |
-|  (SigV4)    |           |  |  AgentCore Gateway (MCP Server)  |      |           |
-|             |           |  |  Auth: NONE (internal to runtime) |      |           |
-|             v           |  +-----+----------------------------+      |           |
-|  +------------------+   |        |                                   |           |
-|  |  AWS IoT Core    |   |        | Lambda Target                    |           |
-|  |  MQTT Broker     |<--+--------+                                   |           |
-|  +------------------+   |  +-----v----------------------------+      |           |
-|                         |  |  iot-control Lambda               |      |           |
-|                         |  |  Validates & publishes MQTT       |      |           |
-|                         +->+----------------------------------+      |           |
-|                                                                      |           |
-+----------------------------------------------------------------------+-----------+
++--------------------------------------------------------------------------------------------+
+|                                  AWS Cloud                                                 |
+|                                                                                            |
+|  +--------------+ +--------------+ +--------------+  +---------------------------+         |
+|  | CloudFront   | | CloudFront   | | CloudFront   |  |     Cognito               |         |
+|  | (Device Sim) | | (Chatbot)    | | (Admin)      |  |  +--------+ +--------+   |         |
+|  +------+-------+ +------+-------+ +------+-------+  |  |  User  | |Identity|   |         |
+|         |                |                |           |  |  Pool  | |  Pool  |   |         |
+|  +------v-------+ +------v-------+ +------v-------+  |  +---+----+ +---+----+   |         |
+|  |  S3 Bucket   | |  S3 Bucket   | |  S3 Bucket   |  +------+----------+--------+         |
+|  +--------------+ +--------------+ +------+-------+         |          |                   |
+|                          |                |                  |          |                   |
+|  +-----------+ MQTT/WSS  | Bearer JWT     | Bearer JWT      |          |                   |
+|  | Browser   +--------+  |                |                  |          |                   |
+|  | (Device   |        |  +-----v----------v---+              |          |                   |
+|  |  Sim App) |        |  | AgentCore Runtime   |  +----------v-------+  |                   |
+|  +-----------+        |  | (Strands Agent)     |  | API Gateway      |  |                   |
+|             |         |  +-----+---------------+  | (Admin API)      |  |                   |
+|  Cognito    |         |        |                  +----+-------------+  |                   |
+|  Identity   |         |        | MCP Client            |                |                   |
+|  Pool       |         |  +-----v-----------------+     |                |                   |
+|  (SigV4)    |         |  | AgentCore Gateway     |     |                |                   |
+|             v         |  +-----+-----------------+  +--v-------------+  |                   |
+|  +------------------+ |        |                    | admin-api      |  |                   |
+|  | AWS IoT Core     | |        | Lambda Target      | Lambda         |  |                   |
+|  | MQTT Broker      |<+--------+                    +--+-------------+  |                   |
+|  +------------------+ |  +-----v-----------------+     |                |                   |
+|                       |  | iot-control Lambda     |  +--v-------------+  |                   |
+|                       |  | Validates & publishes  |  | DynamoDB       |  |                   |
+|                       +->| MQTT                   |  | (skills table) |<-+ Agent reads      |
+|                          +------------------------+  +----------------+                     |
++--------------------------------------------------------------------------------------------+
 ```
 
 ### Component Interaction Matrix
 
 ```
-                    Cognito   Cognito    IoT     AgentCore  AgentCore   IoT Control
-                    UserPool  Identity   Core    Runtime    Gateway     Lambda
+                    Cognito   Cognito    IoT     AgentCore  AgentCore   IoT Control  Admin   DynamoDB
+                    UserPool  Identity   Core    Runtime    Gateway     Lambda       Lambda  Skills
                               Pool
 Device Simulator                 R        R/W
 Chatbot App          R                            R/W
-AgentCore Runtime    V                                       I (MCP)
+Admin Console        R                                                               R/W
+AgentCore Runtime    V                                       I (MCP)                          R
 AgentCore Gateway    V                                       (self)      I
 IoT Control Lambda                        W
+Admin Lambda                                                                         (self)  R/W
 
 R = Read/Subscribe   W = Write/Publish   V = Validate JWT   I = Invoke
 ```
@@ -198,6 +203,17 @@ Internet
     |         +---> Auth: JWT Bearer token (Cognito User Pool)
     |         +---> CORS: access-control-allow-origin: *
     |
+    +---> CloudFront (Admin Console) ---> S3 Bucket (static assets)
+    |         |
+    |         +---> /config.js (adminApiUrl, Cognito IDs)
+    |
+    +---> HTTPS: Admin API (API Gateway)
+    |         https://{api-id}.execute-api.{region}.amazonaws.com/prod/skills
+    |         |
+    |         +---> Lambda Target: admin-api Lambda
+    |         +---> Auth: Cognito User Pool Authorizer (admin group required)
+    |         +---> DynamoDB: smarthome-skills table (CRUD)
+    |
     +---> HTTPS: AgentCore Gateway (MCP Server, internal to agent)
     |         https://{gateway-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp
     |         |
@@ -251,6 +267,14 @@ Internet
 |  |   setting to NONE avoids runtime-to-gateway auth issues     |  |
 |  +------------------------------------------------------------+  |
 |                                                                   |
+|  Layer 5: Admin API (Cognito + Group Check)                      |
+|  +------------------------------------------------------------+  |
+|  | - API Gateway Cognito User Pools Authorizer (validates JWT) |  |
+|  | - Lambda checks cognito:groups claim for "admin" membership |  |
+|  | - Protects: /skills CRUD endpoints                          |  |
+|  | - Non-admin users receive 403 Forbidden                     |  |
+|  +------------------------------------------------------------+  |
+|                                                                   |
 +------------------------------------------------------------------+
 ```
 
@@ -261,7 +285,9 @@ Internet
 | Cognito Unauth Role | iot:Connect, Subscribe, Receive, Publish | `*` (IoT Core) |
 | Cognito Auth Role | iot:Connect, Subscribe, Receive, Publish | `*` (IoT Core) |
 | iot-control Lambda | iot:Publish | `arn:...:topic/smarthome/*` |
+| admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
 | AgentCore Runtime Role | bedrock:InvokeModel | Kimi-2.5 model |
+| AgentCore Runtime Role | dynamodb:Query, GetItem, Scan | `arn:...:table/smarthome-skills` |
 
 ---
 
@@ -448,6 +474,8 @@ Browser --HTTP POST--> AgentCore Runtime ---> Strands Agent (Kimi K2.5)
 **HTTP POST Invocation:**
 - Endpoint: `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations`
 - Authentication: `Authorization: Bearer {jwt_token}` header
+- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}` (fixed per user)
+- User ID: Passed in the POST body as `userId` (the runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent)
 - CORS: Fully supported (`access-control-allow-origin: *`)
 
 **Note:** The AgentCore Runtime does not expose a public WebSocket endpoint for browser connections. The chatbot uses synchronous HTTP POST to `/invocations` instead.
@@ -456,7 +484,7 @@ Browser --HTTP POST--> AgentCore Runtime ---> Strands Agent (Kimi K2.5)
 
 **Client -> Server (POST):**
 ```json
-{"prompt": "Turn on the LED to rainbow mode"}
+{"prompt": "Turn on the LED to rainbow mode", "userId": "user@example.com"}
 ```
 
 **Server -> Client (Response):**
@@ -472,7 +500,9 @@ The `ChatInterface` sends a prompt via `fetch()`, shows a typing indicator while
 
 - **Auth tokens**: Managed by Cognito SDK in `localStorage`. Auto-refreshed.
 - **Chat history**: Held in React state (not persisted). Refreshing the page clears chat history.
-- **Stateless requests**: Each HTTP POST to `/invocations` is independent. The agent does not maintain conversation state between requests.
+- **Session ID**: Fixed per user, derived from `cognito:sub` UUID. Sent via `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. Same user always gets the same runtime session.
+- **User ID**: User's email extracted from JWT and sent in the POST body as `userId`. Used for per-user skill loading, model selection, and session tracking.
+- **AgentCore Memory**: Provides conversation persistence across sessions via semantic, summary, and preference extraction strategies.
 
 ---
 
@@ -583,7 +613,7 @@ agent/
 └── Dockerfile            # Optional, for local container testing
 ```
 
-**Skills** provide on-demand specialized instructions. When the agent activates a skill, it loads the full SKILL.md instructions into context:
+**Skills** provide on-demand specialized instructions. Skills are loaded dynamically from DynamoDB per invocation (`load_skills_from_dynamodb`), with the `./skills/` directory serving as a fallback when `SKILLS_TABLE_NAME` is not configured. When the agent activates a skill, it loads the full instructions into context:
 
 ```python
 # Example: agent activates led-control skill
@@ -747,7 +777,106 @@ The following diagram shows the complete lifecycle of a single user request as i
 - Step 13 (tool calls) may involve multiple sequential or parallel tool invocations depending on the LLM's reasoning
 - Step 15 (memory storage) is asynchronous — the response is returned before extraction strategies complete
 - The MCP client connection is scoped to a single invocation (`with mcp_client:` context manager)
-- Skills are loaded once at module init via `AgentSkills(skills="./skills/")` and shared across invocations
+- Skills are loaded dynamically from DynamoDB per invocation (global + user-specific), with filesystem fallback
+
+### 8.7 Skill Management
+
+The agent's skills (specialized instruction sets) are stored in DynamoDB and managed via an admin console. This enables administrators to add, modify, or delete skills without redeploying the agent.
+
+**Architecture:**
+
+```
+Admin Console (React)
+    |
+    | HTTPS (Bearer JWT)
+    v
+API Gateway (Cognito Authorizer)
+    |
+    | Lambda Proxy Integration
+    v
+admin-api Lambda
+    |
+    | CRUD operations
+    v
+DynamoDB: smarthome-skills
+    PK: userId (__global__ or specific user)
+    SK: skillName
+    |
+    v (per invocation)
+agent.py: load_skills_from_dynamodb(actor_id)
+    |
+    +-> Query userId = "__global__" (shared skills)
+    +-> Query userId = actor_id (user-specific overrides)
+    +-> Construct Skill objects -> AgentSkills plugin
+    v
+Strands Agent (with dynamic skills)
+```
+
+**DynamoDB Table Schema (`smarthome-skills`):**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `userId` (PK) | String | `__global__` for shared skills, or Cognito username for per-user |
+| `skillName` (SK) | String | Skill identifier (e.g., `led-control`) |
+| `description` | String | Skill description (shown in skill metadata) |
+| `instructions` | String | Full markdown instructions (loaded on skill activation) |
+| `allowedTools` | List\<String\> | Tools the skill can use (e.g., `["device_control"]`) |
+| `createdAt` | String | ISO 8601 timestamp |
+| `updatedAt` | String | ISO 8601 timestamp |
+
+**Skill Override Rule:** When a user-specific skill has the same name as a global skill, the user-specific version takes precedence. Global skills are loaded first, then user-specific skills overwrite by name.
+
+**Fallback:** If the `SKILLS_TABLE_NAME` environment variable is not set or the DynamoDB query fails, the agent falls back to loading skills from the local `./skills/` directory (the 4 built-in skills).
+
+**Admin API Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/skills?userId=` | List skills for a user scope |
+| `POST` | `/skills` | Create a new skill |
+| `GET` | `/skills/{userId}/{skillName}` | Get a single skill |
+| `PUT` | `/skills/{userId}/{skillName}` | Update a skill |
+| `DELETE` | `/skills/{userId}/{skillName}` | Delete a skill |
+| `GET` | `/skills/users` | List distinct user scopes |
+| `GET` | `/settings/{userId}` | Get user settings (modelId) |
+| `PUT` | `/settings/{userId}` | Update user settings |
+| `GET` | `/sessions` | List all user runtime sessions |
+
+**Authorization:** All admin API endpoints require a valid Cognito JWT. The Lambda additionally checks that the caller belongs to the `admin` Cognito group (returns 403 if not).
+
+### 8.8 Per-User Model Selection
+
+Administrators can assign a different LLM model to each user (or set a global default) via the Admin Console. The setting is stored in DynamoDB using a reserved key `skillName = "__settings__"`.
+
+**Storage format:**
+```
+PK: userId (e.g., "zihangh@amazon.com" or "__global__")
+SK: "__settings__"
+modelId: "us.anthropic.claude-sonnet-4-6"
+```
+
+**Resolution order:** User-specific setting > `__global__` setting > `MODEL_ID` env var (default: `moonshotai.kimi-k2.5`).
+
+**Available models** (shown as dropdown in Admin Console):
+- Moonshot: Kimi K2.5, Kimi K2 Thinking
+- Claude 4.6: Sonnet, Opus
+- Claude 4.5: Sonnet, Opus, Haiku
+- Claude 4: Sonnet, Opus, Opus 4.1
+- Claude 3.x: 3.7 Sonnet, 3.5 Haiku
+- Meta Llama: Llama 4 Maverick/Scout, Llama 3.3 70B
+- OpenAI: GPT OSS 120B/20B
+
+### 8.9 Fixed Session ID and Session Tracking
+
+Each user gets a **fixed runtime session ID** derived from their Cognito `sub` (UUID). This means the same user always uses the same session across invocations, enabling session persistence.
+
+**Session ID format:** `user-session-{cognito-sub}` (set by the chatbot via the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header).
+
+**User identification:** The AgentCore Runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent process. To work around this, the chatbot passes the user's email in the POST body as `userId`, and the agent reads it from `payload.get("userId")`.
+
+**Session tracking:** On each invocation, the agent records `{userId, sessionId, lastActiveAt}` to DynamoDB (key: `userId`, `skillName = "__session__"`). The Admin Console reads these records in the Sessions tab.
+
+**Stop session:** The Admin Console calls the AgentCore `StopRuntimeSession` API directly from the browser using the admin's JWT token (the Lambda cannot do this because the runtime uses JWT auth, not SigV4).
 
 ---
 
@@ -762,12 +891,22 @@ The system deploys as two CloudFormation stacks:
 Cognito User Pool
   +-> User Pool Client + Domain
   +-> Identity Pool + Auth/Unauth IAM Roles
+  +-> Admin Group (for skill management access)
 
 IoT Endpoint (Custom Resource)
   +-> iot-control Lambda (env: IOT_ENDPOINT)
   +-> Device Simulator config.js
 
-S3 Buckets + CloudFront
+DynamoDB Table (smarthome-skills)
+  +-> Skill storage (global + per-user)
+  +-> Admin Lambda read/write access
+
+Admin API (API Gateway + Lambda)
+  +-> Cognito Authorizer (admin group check)
+  +-> CRUD endpoints for skill management
+
+S3 Buckets + CloudFront (x3)
+  +-> Device Simulator, Chatbot, Admin Console
   +-> BucketDeployment (static assets)
   +-> Custom Resource (config.js injection)
 ```
@@ -782,7 +921,7 @@ AgentCore Runtime
   +-> CodeZip (Python 3.13, agent code from S3)
   +-> BedrockAgentCoreApp (Strands Agent)
   +-> JWT Auth (Cognito User Pool)
-  +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MEMORY_SMARTHOMEMEMORY_ID, MODEL_ID
+  +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MEMORY_SMARTHOMEMEMORY_ID, MODEL_ID, SKILLS_TABLE_NAME
 
 AgentCore Memory (managed by agentcore CLI: `agentcore add memory`)
   +-> SEMANTIC strategy (fact extraction)
@@ -814,21 +953,22 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 ```
 deploy.sh (one-click)
     |
-    +---> [1-3] Build frontends (npm install + npm run build)
+    +---> [1-4] Build frontends (Device Sim, Chatbot, Admin Console)
     |
-    +---> [4] CDK Bootstrap
+    +---> [5] CDK Bootstrap
     |
-    +---> [5] CDK Deploy --all
+    +---> [6] CDK Deploy --all
     |         CloudFormation: SmartHomeAssistantStack
     |         -> Cognito, IoT Things, Lambda, S3, CloudFront
-    |         -> Outputs: UserPoolId, LambdaArn, BucketNames, URLs
+    |         -> DynamoDB (skills table), API Gateway (admin API)
+    |         -> Outputs: UserPoolId, LambdaArn, BucketNames, URLs, AdminApiUrl
     |
-    +---> [6] Fix Cognito User Pool settings
+    +---> [7] Fix Cognito User Pool settings
     |         -> Enable self-service sign-up (AllowAdminCreateUserOnly=false)
     |         -> Enable email auto-verification (auto-verified-attributes=email)
     |         (CDK selfSignUpEnabled doesn't always propagate correctly)
     |
-    +---> [7] scripts/setup-agentcore.py
+    +---> [8] scripts/setup-agentcore.py
               |
               +---> [1/6] agentcore create --name smarthome --defaults
               +---> [2/6] Replace default agent code with agent/
@@ -842,11 +982,16 @@ deploy.sh (one-click)
               |         CloudFormation: AgentCore-smarthome-default
               |         -> Runtime, Gateway, Memory, IAM Role
               +---> Fetch resource IDs (from CFN stack outputs)
-              +---> Patch runtime env vars (MODEL_ID, AWS_REGION)
+              +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
+              +---> Grant runtime role DynamoDB read access (inline IAM policy)
               |     (agentcore CLI drops custom env vars during deploy;
               |      MEMORY_SMARTHOMEMEMORY_ID is set by CLI automatically)
               +---> Update chatbot config.js in S3
               +---> Invalidate CloudFront cache
+    |
+    +---> scripts/seed-skills.py
+              +---> Read 4 SKILL.md files from agent/skills/
+              +---> Write to DynamoDB as __global__ skills
 ```
 
 ### 9.3 Runtime Configuration Injection
@@ -857,6 +1002,52 @@ A key design challenge: React apps need environment-specific values (API endpoin
 2. **Deploy time**: CDK custom resource writes `config.js` to S3 with actual values
 3. **Runtime**: `index.html` loads `<script src="/config.js">` before the app bundle
 4. **Result**: Same build artifact works for any environment
+
+### 9.4 Admin Console Design
+
+The admin console is an independent React + TypeScript frontend app for managing agent skills. It follows the same deployment pattern as the device simulator and chatbot (S3 + CloudFront + config.js injection).
+
+**Directory Structure:**
+
+```
+admin-console/
+├── src/
+│   ├── index.tsx            # React DOM entry point
+│   ├── App.tsx              # Auth routing + admin role gate
+│   ├── App.css              # Dark theme styles (matches chatbot)
+│   ├── config.ts            # Runtime config (adminApiUrl, Cognito IDs)
+│   ├── auth/
+│   │   ├── CognitoAuth.ts   # Sign in, session management, admin role check
+│   │   └── LoginPage.tsx    # Login form
+│   ├── api/
+│   │   └── adminApi.ts      # REST client for admin API (CRUD operations)
+│   └── components/
+│       └── AdminConsole.tsx  # Skill list table, create/edit form, delete confirmation
+├── public/
+│   ├── index.html           # HTML template with config.js loader
+│   └── config.js            # Runtime config placeholder (overwritten by CDK)
+├── webpack.config.js        # Webpack 5 (dev server on port 3002)
+├── tsconfig.json
+└── package.json
+```
+
+**Key Features:**
+
+- **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see an "Access Denied" page.
+- **Two tabs**: Skills (skill CRUD + model selection) and Sessions (runtime session management).
+- **User scope selector**: Dropdown to switch between `__global__` (shared) and per-user skill views. "Add User" button to manage skills for a specific user.
+- **Skill CRUD**: Table view with Edit/Delete actions; create/edit form with fields for name, description, instructions (monospace textarea), and allowed tools.
+- **Per-user model selection**: Dropdown with curated Bedrock model IDs (Kimi, Claude, Llama, GPT). Settings saved per user scope.
+- **Session management**: Table showing user sessions with User ID, Session ID, Last Active timestamp, and Stop button.
+- **Stop session**: Calls AgentCore StopRuntimeSession API directly from the browser with the admin's JWT token.
+
+**CDK Resources:**
+
+| Resource | Description |
+|----------|-------------|
+| `smarthome-admin-console-{accountId}` S3 Bucket | Static assets |
+| CloudFront Distribution | HTTPS CDN |
+| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region` |
 
 ---
 
@@ -937,6 +1128,11 @@ The gateway exposes device control tools via MCP protocol. The Strands Agent con
 | `ChatbotDistributionId` | CloudFront ID for cache invalidation | `E1234567890` |
 | `DeviceSimulatorUrl` | Device Simulator URL | `https://d1234567890.cloudfront.net` |
 | `ChatbotUrl` | Chatbot URL | `https://d0987654321.cloudfront.net` |
+| `AdminApiUrl` | Admin API Gateway URL | `https://abc123.execute-api.us-west-2.amazonaws.com/prod/` |
+| `SkillsTableName` | DynamoDB skills table name | `smarthome-skills` |
+| `AdminConsoleBucketName` | S3 bucket for admin console | `smarthome-admin-console-123456789` |
+| `AdminConsoleDistributionId` | CloudFront ID for admin console | `E2345678901` |
+| `AdminConsoleUrl` | Admin Console URL | `https://d1122334455.cloudfront.net` |
 
 **AgentCore Stack outputs** (from `agentcore deploy`):
 

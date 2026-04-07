@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { jwtDecode } from 'jwt-decode';
 import { getConfig } from '../config';
 import { getIdToken } from '../auth/CognitoAuth';
 
@@ -53,13 +54,19 @@ const ChatInterface: React.FC = () => {
 
       const url = `https://bedrock-agentcore.${config.region}.amazonaws.com/runtimes/${encodeURIComponent(config.agentRuntimeArn)}/invocations`;
 
+      // Derive a stable session ID and user ID from the JWT
+      const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
+      const userId = decoded.email || decoded['cognito:username'] || decoded.sub;
+      const sessionId = `user-session-${decoded.sub}`;
+
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
+          'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
         },
-        body: JSON.stringify({ prompt: text }),
+        body: JSON.stringify({ prompt: text, userId }),
       });
 
       if (!response.ok) {

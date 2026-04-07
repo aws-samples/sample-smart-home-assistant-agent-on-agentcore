@@ -250,6 +250,9 @@ def main():
         existing_env = rt_info.get("environmentVariables", {})
         existing_env["MODEL_ID"] = "moonshotai.kimi-k2.5"
         existing_env["AWS_REGION"] = REGION
+        # Add skills table name for dynamic skill loading from DynamoDB
+        skills_table = outputs.get("SkillsTableName", "smarthome-skills")
+        existing_env["SKILLS_TABLE_NAME"] = skills_table
         update_kwargs = dict(
             agentRuntimeId=runtime_id,
             agentRuntimeArtifact=rt_info["agentRuntimeArtifact"],
@@ -260,13 +263,78 @@ def main():
         if rt_info.get("authorizerConfiguration"):
             update_kwargs["authorizerConfiguration"] = rt_info["authorizerConfiguration"]
         ac.update_agent_runtime(**update_kwargs)
-        print(f"  Patched MODEL_ID and AWS_REGION")
+        print(f"  Patched MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME={skills_table}")
 
-    # Update chatbot config.js with runtime ARN
+        # Grant runtime role DynamoDB read access for skills table
+        role_arn = rt_info.get("roleArn", "")
+        if role_arn:
+            role_name = role_arn.split("/")[-1]
+            iam_client = boto3.client("iam", region_name=REGION)
+            policy_doc = json.dumps({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
+                    "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                }],
+            })
+            try:
+                iam_client.put_role_policy(
+                    RoleName=role_name,
+                    PolicyName="DynamoDBSkillsReadAccess",
+                    PolicyDocument=policy_doc,
+                )
+                print(f"  Granted DynamoDB read access to role {role_name}")
+            except Exception as e:
+                print(f"  Warning: Failed to attach DynamoDB policy: {e}")
+
+    # Patch admin Lambda with runtime ARN (needed for stop-runtime-session)
     if runtime_arn:
-        s3 = boto3.client("s3", region_name=REGION)
-        bucket = outputs["ChatbotBucketName"]
-        config_js = f"""window.__CONFIG__ = {{
+        try:
+            lambda_client = boto3.client("lambda", region_name=REGION)
+            lambda_client.update_function_configuration(
+                FunctionName="smarthome-admin-api",
+                Environment={
+                    "Variables": {
+                        "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
+                        "AGENT_RUNTIME_ARN": runtime_arn,
+                        "AWS_REGION_OVERRIDE": REGION,
+                    }
+                },
+            )
+            print(f"  Patched admin Lambda with AGENT_RUNTIME_ARN")
+        except Exception as e:
+            print(f"  Warning: Failed to patch admin Lambda: {e}")
+
+    # Re-write config.js for ALL frontends.
+    # CDK BucketDeployment syncs dist/ to S3 and removes files not in the source,
+    # which wipes config.js that was written by CDK custom resources.
+    # We re-write them here after everything is deployed.
+    s3 = boto3.client("s3", region_name=REGION)
+    cf_client = boto3.client("cloudfront", region_name=REGION)
+
+    def _invalidate(dist_id):
+        if dist_id:
+            cf_client.create_invalidation(
+                DistributionId=dist_id,
+                InvalidationBatch={"Paths": {"Quantity": 1, "Items": ["/*"]},
+                                   "CallerReference": str(time.time())})
+
+    # Device simulator config.js
+    ds_bucket = outputs.get("DeviceSimBucketName", "")
+    if ds_bucket:
+        ds_config = f"""window.__CONFIG__ = {{
+  iotEndpoint: "{outputs['IoTEndpointOutput']}",
+  region: "{REGION}",
+  cognitoIdentityPoolId: "{outputs['IdentityPoolId']}"
+}};"""
+        print("Updating device simulator config.js...")
+        s3.put_object(Bucket=ds_bucket, Key="config.js",
+                      Body=ds_config, ContentType="application/javascript")
+        _invalidate(outputs.get("DeviceSimDistributionId", ""))
+
+    if runtime_arn:
+        chatbot_config = f"""window.__CONFIG__ = {{
   cognitoUserPoolId: "{outputs['UserPoolId']}",
   cognitoClientId: "{outputs['UserPoolClientId']}",
   cognitoDomain: "{outputs['CognitoDomain']}",
@@ -274,14 +342,24 @@ def main():
   region: "{REGION}"
 }};"""
         print("Updating chatbot config.js...")
-        s3.put_object(Bucket=bucket, Key="config.js", Body=config_js, ContentType="application/javascript")
+        s3.put_object(Bucket=outputs["ChatbotBucketName"], Key="config.js",
+                      Body=chatbot_config, ContentType="application/javascript")
+        _invalidate(outputs.get("ChatbotDistributionId", ""))
 
-        dist_id = outputs.get("ChatbotDistributionId", "")
-        if dist_id:
-            boto3.client("cloudfront", region_name=REGION).create_invalidation(
-                DistributionId=dist_id,
-                InvalidationBatch={"Paths": {"Quantity": 1, "Items": ["/config.js"]}, "CallerReference": str(time.time())},
-            )
+    admin_bucket = outputs.get("AdminConsoleBucketName", "")
+    admin_api_url = outputs.get("AdminApiUrl", "")
+    if admin_bucket and admin_api_url:
+        admin_config = f"""window.__CONFIG__ = {{
+  cognitoUserPoolId: "{outputs['UserPoolId']}",
+  cognitoClientId: "{outputs['UserPoolClientId']}",
+  adminApiUrl: "{admin_api_url}",
+  agentRuntimeArn: "{runtime_arn}",
+  region: "{REGION}"
+}};"""
+        print("Updating admin console config.js...")
+        s3.put_object(Bucket=admin_bucket, Key="config.js",
+                      Body=admin_config, ContentType="application/javascript")
+        _invalidate(outputs.get("AdminConsoleDistributionId", ""))
 
     # Save state for teardown
     state_file = os.path.join(PROJECT_ROOT, "agentcore-state.json")
@@ -300,6 +378,10 @@ def main():
     print(f"  Runtime ARN:   {runtime_arn}")
     print(f"\n  Device Sim:    {outputs.get('DeviceSimulatorUrl', '')}")
     print(f"  Chatbot:       {outputs.get('ChatbotUrl', '')}")
+    print(f"  Admin Console: {outputs.get('AdminConsoleUrl', '')}")
+    print(f"  Admin API:     {outputs.get('AdminApiUrl', '')}")
+    if outputs.get("AdminUsername"):
+        print(f"\n  Admin Login:   {outputs['AdminUsername']} / {outputs.get('AdminPassword', '')}")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as apigw from "aws-cdk-lib/aws-apigateway";
 import { Construct } from "constructs";
 import * as path from "path";
 
@@ -130,6 +132,173 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // Cognito Admin Group + Default Admin User
+    // ========================
+    new cognito.CfnUserPoolGroup(this, "AdminGroup", {
+      userPoolId: userPool.userPoolId,
+      groupName: "admin",
+      description: "Administrators who can manage agent skills",
+    });
+
+    const adminUsername = "admin@smarthome.local";
+    const adminPassword = "SmartHome#Admin1";
+
+    // Create the admin user with a permanent password
+    const adminUser = new cr.AwsCustomResource(this, "CreateAdminUser", {
+      onCreate: {
+        service: "CognitoIdentityServiceProvider",
+        action: "adminCreateUser",
+        parameters: {
+          UserPoolId: userPool.userPoolId,
+          Username: adminUsername,
+          TemporaryPassword: adminPassword,
+          MessageAction: "SUPPRESS",
+          UserAttributes: [
+            { Name: "email", Value: `admin@smarthome.local` },
+            { Name: "email_verified", Value: "true" },
+          ],
+        },
+        physicalResourceId: cr.PhysicalResourceId.of("admin-user"),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ["cognito-idp:AdminCreateUser"],
+          resources: [userPool.userPoolArn],
+        }),
+      ]),
+    });
+
+    // Set a permanent password (moves user out of FORCE_CHANGE_PASSWORD state)
+    const adminSetPassword = new cr.AwsCustomResource(this, "SetAdminPassword", {
+      onCreate: {
+        service: "CognitoIdentityServiceProvider",
+        action: "adminSetUserPassword",
+        parameters: {
+          UserPoolId: userPool.userPoolId,
+          Username: adminUsername,
+          Password: adminPassword,
+          Permanent: true,
+        },
+        physicalResourceId: cr.PhysicalResourceId.of("admin-password"),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ["cognito-idp:AdminSetUserPassword"],
+          resources: [userPool.userPoolArn],
+        }),
+      ]),
+    });
+    adminSetPassword.node.addDependency(adminUser);
+
+    // Add admin user to admin group
+    const adminGroupMembership = new cr.AwsCustomResource(this, "AddAdminToGroup", {
+      onCreate: {
+        service: "CognitoIdentityServiceProvider",
+        action: "adminAddUserToGroup",
+        parameters: {
+          UserPoolId: userPool.userPoolId,
+          Username: adminUsername,
+          GroupName: "admin",
+        },
+        physicalResourceId: cr.PhysicalResourceId.of("admin-group-membership"),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ["cognito-idp:AdminAddUserToGroup"],
+          resources: [userPool.userPoolArn],
+        }),
+      ]),
+    });
+    adminGroupMembership.node.addDependency(adminUser);
+
+    // ========================
+    // DynamoDB - Skills Table
+    // ========================
+    const skillsTable = new dynamodb.Table(this, "SkillsTable", {
+      tableName: `smarthome-skills`,
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "skillName", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
+    // Lambda - Admin API
+    // ========================
+    const adminLambda = new lambda.Function(this, "AdminLambda", {
+      functionName: "smarthome-admin-api",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/admin-api")),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        SKILLS_TABLE_NAME: skillsTable.tableName,
+        AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+    skillsTable.grantReadWriteData(adminLambda);
+
+    // ========================
+    // API Gateway - Admin API
+    // ========================
+    const adminApi = new apigw.RestApi(this, "AdminApi", {
+      restApiName: "smarthome-admin-api",
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigw.Cors.ALL_ORIGINS,
+        allowMethods: apigw.Cors.ALL_METHODS,
+        allowHeaders: ["Content-Type", "Authorization"],
+      },
+    });
+
+    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, "AdminAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+    const authMethodOptions: apigw.MethodOptions = {
+      authorizer: cognitoAuthorizer,
+      authorizationType: apigw.AuthorizationType.COGNITO,
+    };
+
+    const adminIntegration = new apigw.LambdaIntegration(adminLambda);
+
+    // /skills
+    const skillsResource = adminApi.root.addResource("skills");
+    skillsResource.addMethod("GET", adminIntegration, authMethodOptions);
+    skillsResource.addMethod("POST", adminIntegration, authMethodOptions);
+
+    // /skills/users
+    const usersResource = skillsResource.addResource("users");
+    usersResource.addMethod("GET", adminIntegration, authMethodOptions);
+
+    // /skills/{userId}/{skillName}
+    const userIdResource = skillsResource.addResource("{userId}");
+    const skillNameResource = userIdResource.addResource("{skillName}");
+    skillNameResource.addMethod("GET", adminIntegration, authMethodOptions);
+    skillNameResource.addMethod("PUT", adminIntegration, authMethodOptions);
+    skillNameResource.addMethod("DELETE", adminIntegration, authMethodOptions);
+
+    // /settings/{userId}
+    const settingsResource = adminApi.root.addResource("settings").addResource("{userId}");
+    settingsResource.addMethod("GET", adminIntegration, authMethodOptions);
+    settingsResource.addMethod("PUT", adminIntegration, authMethodOptions);
+
+    // /sessions
+    const sessionsResource = adminApi.root.addResource("sessions");
+    sessionsResource.addMethod("GET", adminIntegration, authMethodOptions);
+
+    // /sessions/{sessionId}/stop
+    const sessionIdResource = sessionsResource.addResource("{sessionId}");
+    const stopResource = sessionIdResource.addResource("stop");
+    stopResource.addMethod("POST", adminIntegration, authMethodOptions);
+
+    // Grant admin Lambda permission to stop runtime sessions
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["bedrock-agentcore:StopRuntimeSession"],
+      resources: ["*"],
+    }));
+
+    // ========================
     // S3 + CloudFront - Device Simulator
     // ========================
     const deviceSimBucket = new s3.Bucket(this, "DeviceSimBucket", {
@@ -165,6 +334,27 @@ export class SmartHomeStack extends cdk.Stack {
     const chatbotDistribution = new cloudfront.Distribution(this, "ChatbotDistribution", {
       defaultBehavior: {
         origin: new origins.S3Origin(chatbotBucket, { originAccessIdentity: chatbotOAI }),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      defaultRootObject: "index.html",
+      errorResponses: [{ httpStatus: 404, responsePagePath: "/index.html", responseHttpStatus: 200 }],
+    });
+
+    // ========================
+    // S3 + CloudFront - Admin Console
+    // ========================
+    const adminBucket = new s3.Bucket(this, "AdminConsoleBucket", {
+      bucketName: `smarthome-admin-console-${cdk.Aws.ACCOUNT_ID}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+    const adminOAI = new cloudfront.OriginAccessIdentity(this, "AdminConsoleOAI");
+    adminBucket.grantRead(adminOAI);
+
+    const adminDistribution = new cloudfront.Distribution(this, "AdminConsoleDistribution", {
+      defaultBehavior: {
+        origin: new origins.S3Origin(adminBucket, { originAccessIdentity: adminOAI }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       },
       defaultRootObject: "index.html",
@@ -228,6 +418,28 @@ export class SmartHomeStack extends cdk.Stack {
       policy: cr.AwsCustomResourcePolicy.fromSdkCalls({ resources: [`${chatbotBucket.bucketArn}/*`] }),
     });
 
+    // Admin Console config.js
+    const adminConsoleConfig = `window.__CONFIG__ = {
+  cognitoUserPoolId: "${userPool.userPoolId}",
+  cognitoClientId: "${userPoolClient.userPoolClientId}",
+  adminApiUrl: "${adminApi.url}",
+  region: "${cdk.Aws.REGION}"
+};`;
+
+    new cr.AwsCustomResource(this, "WriteAdminConsoleConfig", {
+      onCreate: {
+        service: "S3", action: "putObject",
+        parameters: { Bucket: adminBucket.bucketName, Key: "config.js", Body: adminConsoleConfig, ContentType: "application/javascript" },
+        physicalResourceId: cr.PhysicalResourceId.of("admin-console-config"),
+      },
+      onUpdate: {
+        service: "S3", action: "putObject",
+        parameters: { Bucket: adminBucket.bucketName, Key: "config.js", Body: adminConsoleConfig, ContentType: "application/javascript" },
+        physicalResourceId: cr.PhysicalResourceId.of("admin-console-config"),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({ resources: [`${adminBucket.bucketArn}/*`] }),
+    });
+
     // ========================
     // Deploy static assets
     // ========================
@@ -245,6 +457,13 @@ export class SmartHomeStack extends cdk.Stack {
       distributionPaths: ["/*"],
     });
 
+    new s3deploy.BucketDeployment(this, "DeployAdminConsole", {
+      sources: [s3deploy.Source.asset(path.join(__dirname, "../../admin-console/dist"))],
+      destinationBucket: adminBucket,
+      distribution: adminDistribution,
+      distributionPaths: ["/*"],
+    });
+
     // ========================
     // Outputs (consumed by scripts/setup-agentcore.py)
     // ========================
@@ -258,11 +477,22 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "IoTControlLambdaArn", { value: iotControlLambda.functionArn });
     new cdk.CfnOutput(this, "ChatbotBucketName", { value: chatbotBucket.bucketName });
     new cdk.CfnOutput(this, "ChatbotDistributionId", { value: chatbotDistribution.distributionId });
+    new cdk.CfnOutput(this, "DeviceSimBucketName", { value: deviceSimBucket.bucketName });
+    new cdk.CfnOutput(this, "DeviceSimDistributionId", { value: deviceSimDistribution.distributionId });
     new cdk.CfnOutput(this, "DeviceSimulatorUrl", {
       value: `https://${deviceSimDistribution.distributionDomainName}`,
     });
     new cdk.CfnOutput(this, "ChatbotUrl", {
       value: `https://${chatbotDistribution.distributionDomainName}`,
     });
+    new cdk.CfnOutput(this, "AdminApiUrl", { value: adminApi.url });
+    new cdk.CfnOutput(this, "SkillsTableName", { value: skillsTable.tableName });
+    new cdk.CfnOutput(this, "AdminConsoleBucketName", { value: adminBucket.bucketName });
+    new cdk.CfnOutput(this, "AdminConsoleDistributionId", { value: adminDistribution.distributionId });
+    new cdk.CfnOutput(this, "AdminConsoleUrl", {
+      value: `https://${adminDistribution.distributionDomainName}`,
+    });
+    new cdk.CfnOutput(this, "AdminUsername", { value: adminUsername });
+    new cdk.CfnOutput(this, "AdminPassword", { value: adminPassword });
   }
 }

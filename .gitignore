@@ -15,6 +15,13 @@ agentcore-state.json
 *.key
 __pycache__/
 *.pyc
+cdk/lambda/admin-api/boto3/
+cdk/lambda/admin-api/botocore/
+cdk/lambda/admin-api/s3transfer/
+cdk/lambda/admin-api/jmespath/
+cdk/lambda/admin-api/urllib3/
+cdk/lambda/admin-api/dateutil/
+cdk/lambda/admin-api/*.dist-info/
 .venv/
 .DS_Store
 venv/
