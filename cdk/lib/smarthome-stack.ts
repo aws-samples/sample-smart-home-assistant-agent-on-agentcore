@@ -132,6 +132,23 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // Lambda - IoT Discovery (AgentCore Gateway target)
+    // ========================
+    const iotDiscoveryLambda = new lambda.Function(this, "IoTDiscoveryLambda", {
+      functionName: "smarthome-iot-discovery",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/iot-discovery")),
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    iotDiscoveryLambda.addPermission("AgentCoreGatewayInvoke", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+    });
+
+    // ========================
     // Cognito Admin Group + Default Admin User
     // ========================
     new cognito.CfnUserPoolGroup(this, "AdminGroup", {
@@ -475,6 +492,7 @@ export class SmartHomeStack extends cdk.Stack {
       value: `${userPoolDomain.domainName}.auth.${cdk.Aws.REGION}.amazoncognito.com`,
     });
     new cdk.CfnOutput(this, "IoTControlLambdaArn", { value: iotControlLambda.functionArn });
+    new cdk.CfnOutput(this, "IoTDiscoveryLambdaArn", { value: iotDiscoveryLambda.functionArn });
     new cdk.CfnOutput(this, "ChatbotBucketName", { value: chatbotBucket.bucketName });
     new cdk.CfnOutput(this, "ChatbotDistributionId", { value: chatbotDistribution.distributionId });
     new cdk.CfnOutput(this, "DeviceSimBucketName", { value: deviceSimBucket.bucketName });
