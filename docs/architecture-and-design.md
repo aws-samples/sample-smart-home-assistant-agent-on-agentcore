@@ -33,7 +33,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Device Simulator | React + TypeScript + MQTT | Visual simulation of 4 smart home devices |
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
-| Tool Access | AgentCore Gateway (MCP Server) + Lambda | Command routing and device control via MCP |
+| Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, and device control via MCP |
 | Admin Console | React + TypeScript + REST API | Manage agent skills (CRUD) per user |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
@@ -66,29 +66,34 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 |  (SigV4)    |         |  | AgentCore Gateway     |     |                |                   |
 |             v         |  +-----+-----------------+  +--v-------------+  |                   |
 |  +------------------+ |        |                    | admin-api      |  |                   |
-|  | AWS IoT Core     | |        | Lambda Target      | Lambda         |  |                   |
+|  | AWS IoT Core     | |        | Lambda Targets     | Lambda         |  |                   |
 |  | MQTT Broker      |<+--------+                    +--+-------------+  |                   |
 |  +------------------+ |  +-----v-----------------+     |                |                   |
 |                       |  | iot-control Lambda     |  +--v-------------+  |                   |
 |                       |  | Validates & publishes  |  | DynamoDB       |  |                   |
 |                       +->| MQTT                   |  | (skills table) |<-+ Agent reads      |
-|                          +------------------------+  +----------------+                     |
+|                       |  +------------------------+  +----------------+                     |
+|                       |  +------------------------+                                         |
+|                       |  | iot-discovery Lambda   |                                         |
+|                       |  | Returns device list    |                                         |
+|                       |  +------------------------+                                         |
 +--------------------------------------------------------------------------------------------+
 ```
 
 ### Component Interaction Matrix
 
 ```
-                    Cognito   Cognito    IoT     AgentCore  AgentCore   IoT Control  Admin   DynamoDB
-                    UserPool  Identity   Core    Runtime    Gateway     Lambda       Lambda  Skills
+                    Cognito   Cognito    IoT     AgentCore  AgentCore   IoT Control  IoT Discovery  Admin   DynamoDB
+                    UserPool  Identity   Core    Runtime    Gateway     Lambda       Lambda         Lambda  Skills
                               Pool
 Device Simulator                 R        R/W
 Chatbot App          R                            R/W
-Admin Console        R                                                               R/W
-AgentCore Runtime    V                                       I (MCP)                          R
-AgentCore Gateway    V                                       (self)      I
+Admin Console        R                                                                              R/W
+AgentCore Runtime    V                                       I (MCP)                                         R
+AgentCore Gateway    V                                       (self)      I            I
 IoT Control Lambda                        W
-Admin Lambda                                                                         (self)  R/W
+IoT Discovery Lambda                                                                 (self)
+Admin Lambda                                                                                 (self)  R/W
 
 R = Read/Subscribe   W = Write/Publish   V = Validate JWT   I = Invoke
 ```
@@ -126,7 +131,34 @@ AgentCore Runtime (HTTP POST /invocations) --> Strands Agent (Kimi K2.5)
                                 {"action":"setMode","mode":"rainbow"}
 ```
 
-### Flow 2: User Authentication
+### Flow 2: Device Discovery
+
+```
+User (Chatbot)
+    |
+    | "Turn on all my devices"
+    v
+AgentCore Runtime --> Strands Agent (activates all-devices-on skill)
+                                       |
+                                       | 1. MCP call: discover_devices()
+                                       v
+                                AgentCore Gateway
+                                       |
+                                       | Lambda Target
+                                       v
+                                iot-discovery Lambda
+                                       |
+                                       | Returns device list with powerOn/powerOff commands
+                                       v
+                                Agent receives device list
+                                       |
+                                       | 2. For each device (sequentially, 5s apart):
+                                       |    MCP call: control_device(device_type, powerOn command)
+                                       v
+                                iot-control Lambda --> IoT Core --> Device Simulator
+```
+
+### Flow 3: User Authentication
 
 ```
 User (Browser)
@@ -153,7 +185,7 @@ AgentCore Runtime
 Strands Agent processes request
 ```
 
-### Flow 3: Device Simulator MQTT Connection
+### Flow 4: Device Simulator MQTT Connection
 
 ```
 Device Simulator (Browser)
@@ -217,7 +249,8 @@ Internet
     +---> HTTPS: AgentCore Gateway (MCP Server, internal to agent)
     |         https://{gateway-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp
     |         |
-    |         +---> Lambda Target: iot-control Lambda
+    |         +---> Lambda Target: iot-control Lambda (control_device tool)
+    |         +---> Lambda Target: iot-discovery Lambda (discover_devices tool)
     |         +---> Auth: NONE (only called by the runtime internally)
     |
     +---> WSS: IoT Core (iot-endpoint.iot.region.amazonaws.com)
@@ -709,9 +742,9 @@ The following diagram shows the complete lifecycle of a single user request as i
                     |                               |
                     |  11. Session manager retrieves  |
                     |      memory context:            |
-                    |      - /facts/{actor}/          |
-                    |      - /summaries/{actor}/{sid}/|
-                    |      - /preferences/{actor}/   |
+                    |      - /users/{actor}/facts     |
+                    |      - /summaries/{actor}/{sid} |
+                    |      - /users/{actor}/prefs     |
                     |                               |
                     |  12. LLM receives:             |
                     |      - System prompt            |
@@ -830,7 +863,7 @@ Strands Agent (with dynamic skills)
 
 **Skill Override Rule:** When a user-specific skill has the same name as a global skill, the user-specific version takes precedence. Global skills are loaded first, then user-specific skills overwrite by name.
 
-**Fallback:** If the `SKILLS_TABLE_NAME` environment variable is not set or the DynamoDB query fails, the agent falls back to loading skills from the local `./skills/` directory (the 4 built-in skills).
+**Fallback:** If the `SKILLS_TABLE_NAME` environment variable is not set or the DynamoDB query fails, the agent falls back to loading skills from the local `./skills/` directory (the 5 built-in skills).
 
 **Admin API Endpoints:**
 
@@ -902,7 +935,8 @@ Cognito User Pool
   +-> Admin Group (for skill management access)
 
 IoT Endpoint (Custom Resource)
-  +-> iot-control Lambda (env: IOT_ENDPOINT)
+  +-> iot-control Lambda (env: IOT_ENDPOINT) — validates & publishes MQTT commands
+  +-> iot-discovery Lambda — returns available devices (mock)
   +-> Device Simulator config.js
 
 DynamoDB Table (smarthome-skills)
@@ -979,15 +1013,20 @@ deploy.sh (one-click)
     |
     +---> [8] scripts/setup-agentcore.py
               |
-              +---> [1/6] agentcore create --name smarthome --defaults
-              +---> [2/6] Replace default agent code with agent/
+              +---> [1/8] agentcore create --name smarthome --defaults
+              +---> [2/8] Replace default agent code with agent/
               |           Patch agentcore.json (entrypoint, JWT auth, env vars)
               |           Seed aws-targets.json (required for CLI deploy)
-              +---> [3/6] agentcore add memory --name SmartHomeMemory
+              +---> [3/8] agentcore add memory --name SmartHomeMemory
               |           --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
-              +---> [4/6] agentcore add gateway (NONE auth)
-              +---> [5/6] agentcore add gateway-target (Lambda, tool schema)
-              +---> [6/6] agentcore deploy -y --verbose
+              +---> [4/8] agentcore add gateway (NONE auth)
+              +---> [5/8] agentcore add gateway-target SmartHomeDeviceControl
+              |           (iot-control Lambda + control_device tool schema)
+              +---> [5b/8] agentcore add gateway-target SmartHomeDeviceDiscovery
+              |           (iot-discovery Lambda + discover_devices tool schema)
+              +---> [6/8] agentcore add evaluator
+              +---> [7/8] agentcore add online-eval
+              +---> [8/8] agentcore deploy -y --verbose
               |         CloudFormation: AgentCore-smarthome-default
               |         -> Runtime, Gateway, Memory, IAM Role
               +---> Fetch resource IDs (from CFN stack outputs)
@@ -999,7 +1038,7 @@ deploy.sh (one-click)
               +---> Invalidate CloudFront cache
     |
     +---> scripts/seed-skills.py
-              +---> Read 4 SKILL.md files from agent/skills/
+              +---> Read 5 SKILL.md files from agent/skills/
               +---> Write to DynamoDB as __global__ skills
 ```
 
@@ -1103,7 +1142,28 @@ The gateway exposes device control tools via MCP protocol. The Strands Agent con
 - `control_device(device_type, command)` — Send a control command to a smart home device (via `iot-control` Lambda)
 - `discover_devices()` — List available smart home devices with their types, actions, and power-on/off commands (via `iot-discovery` Lambda)
 
-### 10.3 iot-control Lambda Response Format
+### 10.3 iot-discovery Lambda Response Format
+
+**MCP tool response (via AgentCore Gateway):**
+```json
+{
+  "devices": [
+    {
+      "thingName": "smarthome-led_matrix",
+      "deviceType": "led_matrix",
+      "displayName": "LED Matrix",
+      "actions": ["setPower", "setMode", "setBrightness", "setColor"],
+      "powerOn": {"action": "setPower", "power": true},
+      "powerOff": {"action": "setPower", "power": false}
+    }
+  ],
+  "count": 4
+}
+```
+
+Currently returns a mock list of 4 devices. In production, this would query IoT Core `listThings` to return user-specific devices.
+
+### 10.4 iot-control Lambda Response Format
 
 **MCP tool response (via AgentCore Gateway):**
 ```json
@@ -1122,7 +1182,7 @@ The gateway exposes device control tools via MCP protocol. The Strands Agent con
 }
 ```
 
-### 10.4 Stack Outputs
+### 10.5 Stack Outputs
 
 **CDK Stack outputs** (consumed by `scripts/setup-agentcore.py`):
 
