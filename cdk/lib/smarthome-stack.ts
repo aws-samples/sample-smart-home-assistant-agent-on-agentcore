@@ -240,6 +240,24 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // S3 - Skill Files (scripts, references, assets)
+    // ========================
+    const skillFilesBucket = new s3.Bucket(this, "SkillFilesBucket", {
+      bucketName: `smarthome-skill-files-${cdk.Aws.ACCOUNT_ID}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT],
+          allowedOrigins: ["*"],
+          allowedHeaders: ["*"],
+          maxAge: 3600,
+        },
+      ],
+    });
+
+    // ========================
     // Lambda - Admin API
     // ========================
     const adminLambda = new lambda.Function(this, "AdminLambda", {
@@ -251,11 +269,13 @@ export class SmartHomeStack extends cdk.Stack {
       memorySize: 256,
       environment: {
         SKILLS_TABLE_NAME: skillsTable.tableName,
+        SKILL_FILES_BUCKET: skillFilesBucket.bucketName,
         AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
     skillsTable.grantReadWriteData(adminLambda);
+    skillFilesBucket.grantReadWrite(adminLambda);
 
     // ========================
     // API Gateway - Admin API
@@ -294,6 +314,19 @@ export class SmartHomeStack extends cdk.Stack {
     skillNameResource.addMethod("GET", adminIntegration, authMethodOptions);
     skillNameResource.addMethod("PUT", adminIntegration, authMethodOptions);
     skillNameResource.addMethod("DELETE", adminIntegration, authMethodOptions);
+
+    // /skills/{userId}/{skillName}/files
+    const filesResource = skillNameResource.addResource("files");
+    filesResource.addMethod("GET", adminIntegration, authMethodOptions);
+    filesResource.addMethod("DELETE", adminIntegration, authMethodOptions);
+
+    // /skills/{userId}/{skillName}/files/upload-url
+    const uploadUrlResource = filesResource.addResource("upload-url");
+    uploadUrlResource.addMethod("POST", adminIntegration, authMethodOptions);
+
+    // /skills/{userId}/{skillName}/files/download-url
+    const downloadUrlResource = filesResource.addResource("download-url");
+    downloadUrlResource.addMethod("POST", adminIntegration, authMethodOptions);
 
     // /settings/{userId}
     const settingsResource = adminApi.root.addResource("settings").addResource("{userId}");
@@ -510,6 +543,7 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AdminConsoleUrl", {
       value: `https://${adminDistribution.distributionDomainName}`,
     });
+    new cdk.CfnOutput(this, "SkillFilesBucketName", { value: skillFilesBucket.bucketName });
     new cdk.CfnOutput(this, "AdminUsername", { value: adminUsername });
     new cdk.CfnOutput(this, "AdminPassword", { value: adminPassword });
   }

@@ -9,8 +9,14 @@ import {
   updateSettings,
   listSessions,
   stopSession,
+  listSkillFiles,
+  getUploadUrl,
+  uploadSkillFile,
+  getDownloadUrl,
+  deleteSkillFile,
   SkillItem,
   SkillInput,
+  SkillFile,
   SessionInfo,
 } from '../api/adminApi';
 
@@ -63,12 +69,20 @@ const AVAILABLE_MODELS = [
   { id: 'openai.gpt-oss-20b-1:0', label: 'GPT OSS 20B' },
 ] as const;
 
+interface MetadataEntry {
+  key: string;
+  value: string;
+}
+
 interface SkillFormData {
   userId: string;
   skillName: string;
   description: string;
   instructions: string;
   allowedTools: string;
+  license: string;
+  compatibility: string;
+  metadata: MetadataEntry[];
 }
 
 const emptyForm: SkillFormData = {
@@ -77,6 +91,9 @@ const emptyForm: SkillFormData = {
   description: '',
   instructions: '',
   allowedTools: 'device_control',
+  license: '',
+  compatibility: '',
+  metadata: [],
 };
 
 const AdminConsole: React.FC = () => {
@@ -105,6 +122,16 @@ const AdminConsole: React.FC = () => {
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+
+  // File manager (shown when editing a skill)
+  const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({
+    scripts: true,
+    references: true,
+    assets: true,
+  });
 
   const loadSkills = useCallback(async () => {
     setIsLoading(true);
@@ -141,6 +168,61 @@ const AdminConsole: React.FC = () => {
       setSessionsLoading(false);
     }
   }, []);
+
+  const loadSkillFiles = useCallback(async (userId: string, skillName: string) => {
+    setFilesLoading(true);
+    try {
+      const files = await listSkillFiles(userId, skillName);
+      setSkillFiles(files);
+    } catch {
+      setSkillFiles([]);
+    } finally {
+      setFilesLoading(false);
+    }
+  }, []);
+
+  const handleFileUpload = async (directory: string, file: File) => {
+    if (!isEditing) return;
+    setUploading(true);
+    clearMessages();
+    try {
+      const { uploadUrl } = await getUploadUrl(
+        form.userId,
+        form.skillName,
+        directory,
+        file.name,
+        file.type || 'application/octet-stream'
+      );
+      await uploadSkillFile(uploadUrl, file);
+      setSuccess(`File "${file.name}" uploaded to ${directory}/`);
+      loadSkillFiles(form.userId, form.skillName);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleFileDownload = async (filePath: string) => {
+    clearMessages();
+    try {
+      const url = await getDownloadUrl(form.userId, form.skillName, filePath);
+      window.open(url, '_blank');
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleFileDelete = async (filePath: string) => {
+    clearMessages();
+    try {
+      await deleteSkillFile(form.userId, form.skillName, filePath);
+      setSuccess(`File "${filePath}" deleted.`);
+      loadSkillFiles(form.userId, form.skillName);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
 
   const handleStopSession = async (sessionId: string) => {
     clearMessages();
@@ -202,20 +284,28 @@ const AdminConsole: React.FC = () => {
 
   const handleEdit = (skill: SkillItem) => {
     clearMessages();
+    const metadataEntries: MetadataEntry[] = skill.metadata
+      ? Object.entries(skill.metadata).map(([key, value]) => ({ key, value }))
+      : [];
     setForm({
       userId: skill.userId,
       skillName: skill.skillName,
       description: skill.description,
       instructions: skill.instructions,
       allowedTools: (skill.allowedTools || []).join(', '),
+      license: skill.license || '',
+      compatibility: skill.compatibility || '',
+      metadata: metadataEntries,
     });
     setIsEditing(true);
     setShowForm(true);
+    loadSkillFiles(skill.userId, skill.skillName);
   };
 
   const handleCancel = () => {
     setShowForm(false);
     setForm(emptyForm);
+    setSkillFiles([]);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -239,12 +329,23 @@ const AdminConsole: React.FC = () => {
       .map((t) => t.trim())
       .filter(Boolean);
 
+    // Convert metadata entries to object, filtering empty keys
+    const metadata: Record<string, string> = {};
+    for (const entry of form.metadata) {
+      if (entry.key.trim()) {
+        metadata[entry.key.trim()] = entry.value;
+      }
+    }
+
     try {
       if (isEditing) {
         await updateSkill(form.userId, form.skillName, {
           description: form.description,
           instructions: form.instructions,
           allowedTools,
+          license: form.license,
+          compatibility: form.compatibility,
+          metadata,
         });
         setSuccess(`Skill "${form.skillName}" updated.`);
       } else {
@@ -254,12 +355,16 @@ const AdminConsole: React.FC = () => {
           description: form.description,
           instructions: form.instructions,
           allowedTools,
+          license: form.license || undefined,
+          compatibility: form.compatibility || undefined,
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
         };
         await createSkill(input);
         setSuccess(`Skill "${form.skillName}" created.`);
       }
       setShowForm(false);
       setForm(emptyForm);
+      setSkillFiles([]);
       loadSkills();
       loadUsers();
     } catch (err: any) {
@@ -400,6 +505,7 @@ const AdminConsole: React.FC = () => {
         <div className="skill-form-container">
           <h3>{isEditing ? 'Edit Skill' : 'Create Skill'}</h3>
           <form onSubmit={handleSubmit}>
+            {/* Required fields */}
             <div className="form-row">
               <div className="form-group">
                 <label>User Scope</label>
@@ -425,16 +531,17 @@ const AdminConsole: React.FC = () => {
               </div>
             </div>
             <div className="form-group">
-              <label>Description</label>
+              <label>Description <span className="field-required">*</span></label>
               <input
                 type="text"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
-                placeholder="What this skill does..."
+                placeholder="What this skill does and when to use it..."
+                maxLength={1024}
               />
             </div>
             <div className="form-group">
-              <label>Allowed Tools (comma-separated)</label>
+              <label>Allowed Tools (space-separated)</label>
               <input
                 type="text"
                 value={form.allowedTools}
@@ -442,6 +549,87 @@ const AdminConsole: React.FC = () => {
                 placeholder="device_control"
               />
             </div>
+
+            {/* Optional spec fields */}
+            <div className="form-section-label">Optional Fields</div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>License</label>
+                <input
+                  type="text"
+                  value={form.license}
+                  onChange={(e) => setForm({ ...form, license: e.target.value })}
+                  placeholder="e.g. Apache-2.0"
+                />
+              </div>
+              <div className="form-group">
+                <label>Compatibility</label>
+                <input
+                  type="text"
+                  value={form.compatibility}
+                  onChange={(e) => setForm({ ...form, compatibility: e.target.value })}
+                  placeholder="e.g. Requires Python 3.12+"
+                  maxLength={500}
+                />
+              </div>
+            </div>
+
+            {/* Metadata key-value editor */}
+            <div className="form-group">
+              <label>Metadata</label>
+              <div className="metadata-editor">
+                {form.metadata.map((entry, i) => (
+                  <div key={i} className="metadata-row">
+                    <input
+                      type="text"
+                      className="metadata-key"
+                      value={entry.key}
+                      onChange={(e) => {
+                        const updated = [...form.metadata];
+                        updated[i] = { ...updated[i], key: e.target.value };
+                        setForm({ ...form, metadata: updated });
+                      }}
+                      placeholder="key"
+                    />
+                    <input
+                      type="text"
+                      className="metadata-value"
+                      value={entry.value}
+                      onChange={(e) => {
+                        const updated = [...form.metadata];
+                        updated[i] = { ...updated[i], value: e.target.value };
+                        setForm({ ...form, metadata: updated });
+                      }}
+                      placeholder="value"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger metadata-remove"
+                      onClick={() => {
+                        const updated = form.metadata.filter((_, idx) => idx !== i);
+                        setForm({ ...form, metadata: updated });
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="btn btn-sm btn-secondary"
+                  onClick={() =>
+                    setForm({
+                      ...form,
+                      metadata: [...form.metadata, { key: '', value: '' }],
+                    })
+                  }
+                >
+                  + Add Entry
+                </button>
+              </div>
+            </div>
+
+            {/* Instructions */}
             <div className="form-group">
               <label>Instructions (Markdown)</label>
               <textarea
@@ -452,6 +640,7 @@ const AdminConsole: React.FC = () => {
                 rows={12}
               />
             </div>
+
             <div className="form-actions">
               <button type="button" className="btn btn-secondary" onClick={handleCancel}>
                 Cancel
@@ -461,6 +650,107 @@ const AdminConsole: React.FC = () => {
               </button>
             </div>
           </form>
+
+          {/* File Manager (only when editing) */}
+          {isEditing && (
+            <div className="file-manager">
+              <h4>Skill Files</h4>
+              <p className="file-manager-hint">
+                Upload scripts, reference docs, and assets for this skill.
+              </p>
+              {filesLoading ? (
+                <div className="loading">Loading files...</div>
+              ) : (
+                ['scripts', 'references', 'assets'].map((dir) => {
+                  const dirFiles = skillFiles.filter((f) => f.path.startsWith(dir + '/'));
+                  return (
+                    <div key={dir} className="file-dir-section">
+                      <button
+                        type="button"
+                        className="file-dir-header"
+                        onClick={() =>
+                          setExpandedDirs((prev) => ({ ...prev, [dir]: !prev[dir] }))
+                        }
+                      >
+                        <span className="file-dir-arrow">
+                          {expandedDirs[dir] ? '\u25BE' : '\u25B8'}
+                        </span>
+                        <span className="file-dir-name">{dir}/</span>
+                        <span className="file-dir-count">
+                          {dirFiles.length} file{dirFiles.length !== 1 ? 's' : ''}
+                        </span>
+                      </button>
+                      {expandedDirs[dir] && (
+                        <div className="file-dir-body">
+                          {dirFiles.length > 0 && (
+                            <table className="file-table">
+                              <thead>
+                                <tr>
+                                  <th>Name</th>
+                                  <th>Size</th>
+                                  <th>Modified</th>
+                                  <th>Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {dirFiles.map((f) => {
+                                  const name = f.path.split('/').pop() || f.path;
+                                  return (
+                                    <tr key={f.path}>
+                                      <td className="cell-name">{name}</td>
+                                      <td className="cell-date">
+                                        {f.size < 1024
+                                          ? `${f.size} B`
+                                          : `${(f.size / 1024).toFixed(1)} KB`}
+                                      </td>
+                                      <td className="cell-date">
+                                        {new Date(f.lastModified).toLocaleDateString()}
+                                      </td>
+                                      <td className="cell-actions">
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-secondary"
+                                          onClick={() => handleFileDownload(f.path)}
+                                        >
+                                          Download
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-danger"
+                                          onClick={() => handleFileDelete(f.path)}
+                                        >
+                                          Delete
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          )}
+                          <label className="file-upload-btn btn btn-sm btn-secondary">
+                            {uploading ? 'Uploading...' : `Upload to ${dir}/`}
+                            <input
+                              type="file"
+                              hidden
+                              disabled={uploading}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  handleFileUpload(dir, file);
+                                  e.target.value = '';
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
         </div>
       )}
 

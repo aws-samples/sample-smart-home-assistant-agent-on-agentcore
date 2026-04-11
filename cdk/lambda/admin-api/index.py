@@ -13,11 +13,15 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "smarthome-skills")
+SKILL_FILES_BUCKET = os.environ.get("SKILL_FILES_BUCKET", "")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
+s3_client = boto3.client("s3", region_name=REGION)
 agentcore_client = boto3.client("bedrock-agentcore", region_name=REGION)
+
+ALLOWED_FILE_DIRS = {"scripts", "references", "assets"}
 
 # Strands SDK skill name pattern: lowercase alphanumeric + hyphens, 1-64 chars
 SKILL_NAME_RE = re.compile(r"^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$")
@@ -67,13 +71,16 @@ def list_skills(event):
 
 
 def create_skill(event):
-    """POST /skills  body: {userId, skillName, description, instructions, allowedTools}"""
+    """POST /skills  body: {userId, skillName, description, instructions, allowedTools, license, compatibility, metadata}"""
     body = json.loads(event.get("body") or "{}")
     user_id = body.get("userId", "__global__")
     skill_name = body.get("skillName", "")
     description = body.get("description", "")
     instructions = body.get("instructions", "")
     allowed_tools = body.get("allowedTools", [])
+    skill_license = body.get("license", "")
+    compatibility = body.get("compatibility", "")
+    metadata = body.get("metadata", {})
 
     if not skill_name or not SKILL_NAME_RE.match(skill_name):
         return response(400, {
@@ -81,19 +88,31 @@ def create_skill(event):
         })
     if not description:
         return response(400, {"error": "description is required"})
+    if compatibility and len(compatibility) > 500:
+        return response(400, {"error": "compatibility must be at most 500 characters"})
+    if not isinstance(metadata, dict):
+        return response(400, {"error": "metadata must be a key-value object"})
 
     ts = now_iso()
+    item = {
+        "userId": user_id,
+        "skillName": skill_name,
+        "description": description,
+        "instructions": instructions,
+        "allowedTools": allowed_tools,
+        "createdAt": ts,
+        "updatedAt": ts,
+    }
+    if skill_license:
+        item["license"] = skill_license
+    if compatibility:
+        item["compatibility"] = compatibility
+    if metadata:
+        item["metadata"] = metadata
+
     try:
         table.put_item(
-            Item={
-                "userId": user_id,
-                "skillName": skill_name,
-                "description": description,
-                "instructions": instructions,
-                "allowedTools": allowed_tools,
-                "createdAt": ts,
-                "updatedAt": ts,
-            },
+            Item=item,
             ConditionExpression="attribute_not_exists(userId) AND attribute_not_exists(skillName)",
         )
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
@@ -118,11 +137,16 @@ def get_skill(event):
 
 
 def update_skill(event):
-    """PUT /skills/{userId}/{skillName}  body: {description, instructions, allowedTools}"""
+    """PUT /skills/{userId}/{skillName}  body: {description, instructions, allowedTools, license, compatibility, metadata}"""
     path_params = event.get("pathParameters") or {}
     user_id = path_params.get("userId", "")
     skill_name = path_params.get("skillName", "")
     body = json.loads(event.get("body") or "{}")
+
+    if "compatibility" in body and body["compatibility"] and len(body["compatibility"]) > 500:
+        return response(400, {"error": "compatibility must be at most 500 characters"})
+    if "metadata" in body and not isinstance(body["metadata"], dict):
+        return response(400, {"error": "metadata must be a key-value object"})
 
     # Build update expression dynamically
     update_parts = []
@@ -131,7 +155,7 @@ def update_skill(event):
     update_parts.append("#updatedAt = :updatedAt")
     expr_names["#updatedAt"] = "updatedAt"
 
-    for field in ("description", "instructions", "allowedTools"):
+    for field in ("description", "instructions", "allowedTools", "license", "compatibility", "metadata"):
         if field in body:
             safe = f"#{field}"
             expr_names[safe] = field
@@ -139,7 +163,7 @@ def update_skill(event):
             update_parts.append(f"{safe} = :{field}")
 
     if len(update_parts) == 1:
-        return response(400, {"error": "No fields to update. Provide description, instructions, or allowedTools."})
+        return response(400, {"error": "No fields to update."})
 
     try:
         table.update_item(
@@ -162,6 +186,21 @@ def delete_skill(event):
     skill_name = path_params.get("skillName", "")
 
     table.delete_item(Key={"userId": user_id, "skillName": skill_name})
+
+    # Cascade-delete S3 files for this skill
+    if SKILL_FILES_BUCKET:
+        prefix = f"{user_id}/{skill_name}/"
+        try:
+            resp = s3_client.list_objects_v2(Bucket=SKILL_FILES_BUCKET, Prefix=prefix)
+            objects = resp.get("Contents", [])
+            if objects:
+                s3_client.delete_objects(
+                    Bucket=SKILL_FILES_BUCKET,
+                    Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
+                )
+        except Exception as e:
+            logger.warning(f"Failed to delete S3 files for {user_id}/{skill_name}: {e}")
+
     return response(200, {"message": f"Skill '{skill_name}' deleted", "userId": user_id, "skillName": skill_name})
 
 
@@ -242,6 +281,105 @@ def stop_session(event):
 
 
 # ---------------------------------------------------------------------------
+# Skill File Management (S3)
+# ---------------------------------------------------------------------------
+
+def list_skill_files(event):
+    """GET /skills/{userId}/{skillName}/files — list files in skill directory."""
+    if not SKILL_FILES_BUCKET:
+        return response(500, {"error": "Skill files bucket not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    user_id = path_params.get("userId", "")
+    skill_name = path_params.get("skillName", "")
+    prefix = f"{user_id}/{skill_name}/"
+
+    resp = s3_client.list_objects_v2(Bucket=SKILL_FILES_BUCKET, Prefix=prefix)
+    files = []
+    for obj in resp.get("Contents", []):
+        key = obj["Key"]
+        relative = key[len(prefix):]
+        if not relative:
+            continue
+        files.append({
+            "path": relative,
+            "size": obj["Size"],
+            "lastModified": obj["LastModified"].isoformat(),
+        })
+    return response(200, {"files": files})
+
+
+def get_upload_url(event):
+    """POST /skills/{userId}/{skillName}/files/upload-url — generate presigned PUT URL."""
+    if not SKILL_FILES_BUCKET:
+        return response(500, {"error": "Skill files bucket not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    user_id = path_params.get("userId", "")
+    skill_name = path_params.get("skillName", "")
+    body = json.loads(event.get("body") or "{}")
+    directory = body.get("directory", "")
+    filename = body.get("filename", "")
+
+    if directory not in ALLOWED_FILE_DIRS:
+        return response(400, {"error": f"Invalid directory '{directory}'. Must be one of: {', '.join(sorted(ALLOWED_FILE_DIRS))}"})
+    if not filename or "/" in filename or "\\" in filename:
+        return response(400, {"error": "Invalid filename"})
+
+    key = f"{user_id}/{skill_name}/{directory}/{filename}"
+    content_type = body.get("contentType", "application/octet-stream")
+
+    url = s3_client.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": SKILL_FILES_BUCKET, "Key": key, "ContentType": content_type},
+        ExpiresIn=900,
+    )
+    return response(200, {"uploadUrl": url, "key": key})
+
+
+def get_download_url(event):
+    """POST /skills/{userId}/{skillName}/files/download-url — generate presigned GET URL."""
+    if not SKILL_FILES_BUCKET:
+        return response(500, {"error": "Skill files bucket not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    user_id = path_params.get("userId", "")
+    skill_name = path_params.get("skillName", "")
+    body = json.loads(event.get("body") or "{}")
+    file_path = body.get("path", "")
+
+    if not file_path:
+        return response(400, {"error": "path is required"})
+
+    key = f"{user_id}/{skill_name}/{file_path}"
+    url = s3_client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": SKILL_FILES_BUCKET, "Key": key},
+        ExpiresIn=900,
+    )
+    return response(200, {"downloadUrl": url})
+
+
+def delete_skill_file(event):
+    """DELETE /skills/{userId}/{skillName}/files?path=... — delete a file."""
+    if not SKILL_FILES_BUCKET:
+        return response(500, {"error": "Skill files bucket not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    user_id = path_params.get("userId", "")
+    skill_name = path_params.get("skillName", "")
+    params = event.get("queryStringParameters") or {}
+    file_path = params.get("path", "")
+
+    if not file_path:
+        return response(400, {"error": "path query parameter is required"})
+
+    key = f"{user_id}/{skill_name}/{file_path}"
+    s3_client.delete_object(Bucket=SKILL_FILES_BUCKET, Key=key)
+    return response(200, {"message": f"File '{file_path}' deleted"})
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -266,6 +404,14 @@ def handler(event, context):
         return update_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "DELETE":
         return delete_skill(event)
+    if resource == "/skills/{userId}/{skillName}/files" and method == "GET":
+        return list_skill_files(event)
+    if resource == "/skills/{userId}/{skillName}/files" and method == "DELETE":
+        return delete_skill_file(event)
+    if resource == "/skills/{userId}/{skillName}/files/upload-url" and method == "POST":
+        return get_upload_url(event)
+    if resource == "/skills/{userId}/{skillName}/files/download-url" and method == "POST":
+        return get_download_url(event)
     if resource == "/settings/{userId}" and method == "GET":
         return get_settings(event)
     if resource == "/settings/{userId}" and method == "PUT":

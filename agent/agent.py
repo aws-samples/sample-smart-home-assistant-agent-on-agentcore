@@ -69,6 +69,9 @@ def load_skills_from_dynamodb(actor_id: str) -> list:
             description=item.get("description", ""),
             instructions=item.get("instructions", ""),
             allowed_tools=allowed_tools,
+            license=item.get("license"),
+            compatibility=item.get("compatibility"),
+            metadata=item.get("metadata") or {},
         )
 
     # User-specific skills override global by name
@@ -83,6 +86,9 @@ def load_skills_from_dynamodb(actor_id: str) -> list:
                 description=item.get("description", ""),
                 instructions=item.get("instructions", ""),
                 allowed_tools=allowed_tools,
+                license=item.get("license"),
+                compatibility=item.get("compatibility"),
+                metadata=item.get("metadata") or {},
             )
 
     return list(skills_by_name.values())

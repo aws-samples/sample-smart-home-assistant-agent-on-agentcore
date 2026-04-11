@@ -318,17 +318,22 @@ def main():
     if runtime_arn:
         try:
             lambda_client = boto3.client("lambda", region_name=REGION)
+            admin_env = {
+                "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
+                "AGENT_RUNTIME_ARN": runtime_arn,
+                "AWS_REGION_OVERRIDE": REGION,
+            }
+            # Preserve SKILL_FILES_BUCKET from CDK stack
+            skill_files_bucket = outputs.get("SkillFilesBucketName", "")
+            if skill_files_bucket:
+                admin_env["SKILL_FILES_BUCKET"] = skill_files_bucket
             lambda_client.update_function_configuration(
                 FunctionName="smarthome-admin-api",
-                Environment={
-                    "Variables": {
-                        "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
-                        "AGENT_RUNTIME_ARN": runtime_arn,
-                        "AWS_REGION_OVERRIDE": REGION,
-                    }
-                },
+                Environment={"Variables": admin_env},
             )
             print(f"  Patched admin Lambda with AGENT_RUNTIME_ARN")
+            if skill_files_bucket:
+                print(f"  Patched admin Lambda with SKILL_FILES_BUCKET={skill_files_bucket}")
         except Exception as e:
             print(f"  Warning: Failed to patch admin Lambda: {e}")
 

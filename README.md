@@ -12,7 +12,8 @@ smarthome-assistant-agent/
 │   ├── lib/smarthome-stack.ts
 │   └── lambda/
 │       ├── iot-control/     # Validates & publishes MQTT commands
-│       └── admin-api/       # Skill CRUD, user settings, session management API
+│       ├── iot-discovery/   # Returns available device list
+│       └── admin-api/       # Skill CRUD, file management, user settings, sessions
 ├── device-simulator/        # React app — 4 simulated IoT devices
 ├── chatbot/                 # React app — chat UI with Cognito auth
 ├── admin-console/           # React app — admin user management UI
@@ -80,8 +81,9 @@ The deployment creates two separate CloudFormation stacks:
 **CDK Stack** (`SmartHomeAssistantStack`) — standard AWS resources:
 - Cognito User Pool + Identity Pool + Admin group and default admin user
 - IoT Core things + endpoint lookup
-- Lambda functions: iot-control (MQTT), admin-api (skill CRUD + settings + sessions)
+- Lambda functions: iot-control (MQTT), iot-discovery (device list), admin-api (skill CRUD + file management + settings + sessions)
 - DynamoDB table (smarthome-skills) for agent skill storage, user settings, and session tracking
+- S3 bucket (smarthome-skill-files) for skill directory files (scripts, references, assets) per the [Agent Skills spec](https://agentskills.io/specification)
 - API Gateway with Cognito authorizer for admin API
 - S3 + CloudFront for Device Simulator, Chatbot, and Admin Console
 
@@ -100,10 +102,13 @@ The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs,
 The Admin Console is a separate React app for administrators. Log in with a user in the `admin` Cognito group (default admin credentials are shown in deploy output).
 
 ### Skills Management (Skills Tab)
+- **Full [Agent Skills spec](https://agentskills.io/specification) support**: all frontmatter fields (name, description, allowed-tools, license, compatibility, metadata) are editable per skill
 - **Global skills** (`__global__`) are shared across all users
 - **Per-user skills** override global skills with the same name for a specific user
 - Create, edit, and delete skills with a markdown instruction editor
-- Skills are stored in DynamoDB and loaded dynamically per invocation — no agent redeployment needed
+- **Metadata editor**: dynamic key-value pairs for custom skill metadata
+- **Skill file manager**: upload, download, and delete files in `scripts/`, `references/`, and `assets/` directories per skill (stored in S3, managed via presigned URLs)
+- Skills are stored in DynamoDB (metadata + instructions) and S3 (directory files), loaded dynamically per invocation — no agent redeployment needed
 
 ### Per-User Model Selection
 - Set the LLM model per user or a global default via a dropdown

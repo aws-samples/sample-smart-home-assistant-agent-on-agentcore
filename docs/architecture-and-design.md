@@ -34,7 +34,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, and device control via MCP |
-| Admin Console | React + TypeScript + REST API | Manage agent skills (CRUD) per user |
+| Admin Console | React + TypeScript + REST API | Manage agent skills (full [Agent Skills spec](https://agentskills.io/specification)), files, model selection per user |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
 ---
@@ -73,18 +73,18 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 |                       |  | Validates & publishes  |  | DynamoDB       |  |                   |
 |                       +->| MQTT                   |  | (skills table) |<-+ Agent reads      |
 |                       |  +------------------------+  +----------------+                     |
-|                       |  +------------------------+                                         |
-|                       |  | iot-discovery Lambda   |                                         |
-|                       |  | Returns device list    |                                         |
-|                       |  +------------------------+                                         |
+|                       |  +------------------------+  +----------------+                     |
+|                       |  | iot-discovery Lambda   |  | S3 Bucket      |                     |
+|                       |  | Returns device list    |  | (skill files)  |<-- Admin Lambda     |
+|                       |  +------------------------+  +----------------+    (presigned URLs) |
 +--------------------------------------------------------------------------------------------+
 ```
 
 ### Component Interaction Matrix
 
 ```
-                    Cognito   Cognito    IoT     AgentCore  AgentCore   IoT Control  IoT Discovery  Admin   DynamoDB
-                    UserPool  Identity   Core    Runtime    Gateway     Lambda       Lambda         Lambda  Skills
+                    Cognito   Cognito    IoT     AgentCore  AgentCore   IoT Control  IoT Discovery  Admin   DynamoDB  S3 Skill
+                    UserPool  Identity   Core    Runtime    Gateway     Lambda       Lambda         Lambda  Skills    Files
                               Pool
 Device Simulator                 R        R/W
 Chatbot App          R                            R/W
@@ -93,7 +93,7 @@ AgentCore Runtime    V                                       I (MCP)            
 AgentCore Gateway    V                                       (self)      I            I
 IoT Control Lambda                        W
 IoT Discovery Lambda                                                                 (self)
-Admin Lambda                                                                                 (self)  R/W
+Admin Lambda                                                                                 (self)  R/W     R/W
 
 R = Read/Subscribe   W = Write/Publish   V = Validate JWT   I = Invoke
 ```
@@ -244,7 +244,8 @@ Internet
     |         |
     |         +---> Lambda Target: admin-api Lambda
     |         +---> Auth: Cognito User Pool Authorizer (admin group required)
-    |         +---> DynamoDB: smarthome-skills table (CRUD)
+    |         +---> DynamoDB: smarthome-skills table (skill CRUD, all spec fields)
+    |         +---> S3: smarthome-skill-files bucket (file management via presigned URLs)
     |
     +---> HTTPS: AgentCore Gateway (MCP Server, internal to agent)
     |         https://{gateway-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp
@@ -320,6 +321,7 @@ Internet
 | iot-control Lambda | iot:Publish | `arn:...:topic/smarthome/*` |
 | iot-discovery Lambda | (none) | Returns mock device list |
 | admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
+| admin-api Lambda | s3:GetObject, PutObject, DeleteObject, ListBucket | `arn:...:smarthome-skill-files-*` |
 | AgentCore Runtime Role | bedrock:InvokeModel | Kimi-2.5 model |
 | AgentCore Runtime Role | dynamodb:Query, GetItem, Scan | `arn:...:table/smarthome-skills` |
 
@@ -833,33 +835,59 @@ API Gateway (Cognito Authorizer)
     v
 admin-api Lambda
     |
-    | CRUD operations
-    v
-DynamoDB: smarthome-skills
-    PK: userId (__global__ or specific user)
-    SK: skillName
+    +--- CRUD operations ---> DynamoDB: smarthome-skills
+    |                           PK: userId (__global__ or specific user)
+    |                           SK: skillName
+    |                           Fields: description, instructions, allowedTools,
+    |                                   license, compatibility, metadata
+    |
+    +--- File management ---> S3: smarthome-skill-files-{accountId}
+    |    (presigned URLs)       {userId}/{skillName}/scripts/...
+    |                           {userId}/{skillName}/references/...
+    |                           {userId}/{skillName}/assets/...
     |
     v (per invocation)
 agent.py: load_skills_from_dynamodb(actor_id)
     |
     +-> Query userId = "__global__" (shared skills)
     +-> Query userId = actor_id (user-specific overrides)
-    +-> Construct Skill objects -> AgentSkills plugin
+    +-> Construct Skill objects (all spec fields) -> AgentSkills plugin
     v
 Strands Agent (with dynamic skills)
 ```
 
 **DynamoDB Table Schema (`smarthome-skills`):**
 
+All fields from the [Agent Skills specification](https://agentskills.io/specification) are supported:
+
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `userId` (PK) | String | `__global__` for shared skills, or Cognito username for per-user |
-| `skillName` (SK) | String | Skill identifier (e.g., `led-control`) |
-| `description` | String | Skill description (shown in skill metadata) |
-| `instructions` | String | Full markdown instructions (loaded on skill activation) |
+| `skillName` (SK) | String | Skill identifier (e.g., `led-control`). 1-64 chars, lowercase alphanumeric + hyphens |
+| `description` | String | Skill description, max 1024 chars (shown in skill metadata) |
+| `instructions` | String | Full markdown instructions (SKILL.md body, loaded on skill activation) |
 | `allowedTools` | List\<String\> | Tools the skill can use (e.g., `["device_control"]`) |
+| `license` | String | Optional. License name or reference (e.g., `Apache-2.0`) |
+| `compatibility` | String | Optional, max 500 chars. Environment requirements (e.g., `Requires Python 3.12+`) |
+| `metadata` | Map\<String, String\> | Optional. Arbitrary key-value pairs for additional metadata |
 | `createdAt` | String | ISO 8601 timestamp |
 | `updatedAt` | String | ISO 8601 timestamp |
+
+**Skill File Storage (S3):**
+
+Skill directory files (scripts, references, assets) are stored in S3:
+
+```
+S3: smarthome-skill-files-{accountId}
+  {userId}/{skillName}/scripts/extract.py
+  {userId}/{skillName}/references/REFERENCE.md
+  {userId}/{skillName}/assets/template.json
+```
+
+- Files are managed via presigned URLs (browser uploads/downloads directly to S3)
+- Admin API generates time-limited presigned URLs for PUT (upload) and GET (download)
+- Only three directories are allowed: `scripts`, `references`, `assets`
+- When a skill is deleted, all its S3 files are cascade-deleted
 
 **Skill Override Rule:** When a user-specific skill has the same name as a global skill, the user-specific version takes precedence. Global skills are loaded first, then user-specific skills overwrite by name.
 
@@ -870,11 +898,15 @@ Strands Agent (with dynamic skills)
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/skills?userId=` | List skills for a user scope |
-| `POST` | `/skills` | Create a new skill |
+| `POST` | `/skills` | Create a new skill (all spec fields) |
 | `GET` | `/skills/{userId}/{skillName}` | Get a single skill |
-| `PUT` | `/skills/{userId}/{skillName}` | Update a skill |
-| `DELETE` | `/skills/{userId}/{skillName}` | Delete a skill |
+| `PUT` | `/skills/{userId}/{skillName}` | Update a skill (all spec fields) |
+| `DELETE` | `/skills/{userId}/{skillName}` | Delete a skill (cascade-deletes S3 files) |
 | `GET` | `/skills/users` | List distinct user scopes |
+| `GET` | `/skills/{userId}/{skillName}/files` | List files in a skill directory |
+| `POST` | `/skills/{userId}/{skillName}/files/upload-url` | Get presigned S3 upload URL |
+| `POST` | `/skills/{userId}/{skillName}/files/download-url` | Get presigned S3 download URL |
+| `DELETE` | `/skills/{userId}/{skillName}/files?path=` | Delete a skill file |
 | `GET` | `/settings/{userId}` | Get user settings (modelId) |
 | `PUT` | `/settings/{userId}` | Update user settings |
 | `GET` | `/sessions` | List all user runtime sessions |
@@ -940,12 +972,18 @@ IoT Endpoint (Custom Resource)
   +-> Device Simulator config.js
 
 DynamoDB Table (smarthome-skills)
-  +-> Skill storage (global + per-user)
+  +-> Skill storage (global + per-user, full Agent Skills spec fields)
+  +-> Admin Lambda read/write access
+
+S3 Bucket (smarthome-skill-files)
+  +-> Skill directory files: scripts/, references/, assets/
+  +-> CORS enabled for presigned URL uploads from browser
   +-> Admin Lambda read/write access
 
 Admin API (API Gateway + Lambda)
   +-> Cognito Authorizer (admin group check)
-  +-> CRUD endpoints for skill management
+  +-> CRUD endpoints for skill management (all spec fields)
+  +-> File management endpoints (presigned URL upload/download, list, delete)
 
 S3 Buckets + CloudFront (x3)
   +-> Device Simulator, Chatbot, Admin Console
@@ -1031,6 +1069,7 @@ deploy.sh (one-click)
               |         -> Runtime, Gateway, Memory, IAM Role
               +---> Fetch resource IDs (from CFN stack outputs)
               +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
+              +---> Patch admin Lambda env vars (AGENT_RUNTIME_ARN, SKILL_FILES_BUCKET)
               +---> Grant runtime role DynamoDB read access (inline IAM policy)
               |     (agentcore CLI drops custom env vars during deploy;
               |      MEMORY_SMARTHOMEMEMORY_ID is set by CLI automatically)
@@ -1068,9 +1107,9 @@ admin-console/
 │   │   ├── CognitoAuth.ts   # Sign in, session management, admin role check
 │   │   └── LoginPage.tsx    # Login form
 │   ├── api/
-│   │   └── adminApi.ts      # REST client for admin API (CRUD operations)
+│   │   └── adminApi.ts      # REST client for admin API (skill CRUD, file management, settings, sessions)
 │   └── components/
-│       └── AdminConsole.tsx  # Skill list table, create/edit form, delete confirmation
+│       └── AdminConsole.tsx  # Skill table, create/edit form (all spec fields), metadata editor, file manager
 ├── public/
 │   ├── index.html           # HTML template with config.js loader
 │   └── config.js            # Runtime config placeholder (overwritten by CDK)
@@ -1084,7 +1123,11 @@ admin-console/
 - **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see an "Access Denied" page.
 - **Two tabs**: Skills (skill CRUD + model selection) and Sessions (runtime session management).
 - **User scope selector**: Dropdown to switch between `__global__` (shared) and per-user skill views. "Add User" button to manage skills for a specific user.
-- **Skill CRUD**: Table view with Edit/Delete actions; create/edit form with fields for name, description, instructions (monospace textarea), and allowed tools.
+- **Skill CRUD**: Table view with Edit/Delete actions; create/edit form with all [Agent Skills spec](https://agentskills.io/specification) fields:
+  - Required: name, description
+  - Optional: allowed tools, license, compatibility, metadata (key-value editor), instructions (monospace textarea)
+- **Metadata editor**: Dynamic key-value pair editor for the `metadata` field — add/remove rows with key and value inputs.
+- **Skill file manager** (shown when editing): Three collapsible sections for `scripts/`, `references/`, and `assets/` directories. Each section shows files with size and last modified date, and provides upload (via presigned URL), download, and delete actions.
 - **Per-user model selection**: Dropdown with curated Bedrock model IDs (Kimi, Claude, Llama, GPT). Settings saved per user scope.
 - **Session management**: Table showing user sessions with User ID, Session ID, Last Active timestamp, and Stop button.
 - **Stop session**: Calls AgentCore StopRuntimeSession API directly from the browser with the admin's JWT token.
@@ -1094,6 +1137,7 @@ admin-console/
 | Resource | Description |
 |----------|-------------|
 | `smarthome-admin-console-{accountId}` S3 Bucket | Static assets |
+| `smarthome-skill-files-{accountId}` S3 Bucket | Skill directory files (scripts, references, assets) with CORS |
 | CloudFront Distribution | HTTPS CDN |
 | `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region` |
 
@@ -1201,6 +1245,7 @@ Currently returns a mock list of 4 devices. In production, this would query IoT 
 | `ChatbotUrl` | Chatbot URL | `https://d0987654321.cloudfront.net` |
 | `AdminApiUrl` | Admin API Gateway URL | `https://abc123.execute-api.us-west-2.amazonaws.com/prod/` |
 | `SkillsTableName` | DynamoDB skills table name | `smarthome-skills` |
+| `SkillFilesBucketName` | S3 bucket for skill directory files | `smarthome-skill-files-123456789` |
 | `AdminConsoleBucketName` | S3 bucket for admin console | `smarthome-admin-console-123456789` |
 | `AdminConsoleDistributionId` | CloudFront ID for admin console | `E2345678901` |
 | `AdminConsoleUrl` | Admin Console URL | `https://d1122334455.cloudfront.net` |
