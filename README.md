@@ -1,6 +1,8 @@
-# Smart Home Assistant Agent
+# Smart Home Assistant Agent — Agent Harness 管理平台
 
-基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。通过 Strands Agent 托管在 AgentCore Runtime 上，用户可以使用自然语言聊天机器人控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。设备控制命令通过 AgentCore Gateway 发送，并通过 AWS IoT Core 进行实时 MQTT 通信。包含管理控制台（Agent Harness Management），支持技能管理、模型选择、会话监控、长期记忆查看，以及通过 AgentCore Policy Engine（Cedar 策略）实现的**按用户工具权限管控**。
+> **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、外部集成、会话监控、长期记忆查看和安全护栏。
+
+基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。通过 Strands Agent 托管在 AgentCore Runtime 上，用户可以使用自然语言聊天机器人控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。设备控制命令通过 AgentCore Gateway 发送，并通过 AWS IoT Core 进行实时 MQTT 通信。管理控制台（Agent Harness Management）提供 7 个管理维度，覆盖 Agent 全生命周期的运维管控需求。
 
 ![chatbot](docs/screenshots/smarthomeassistant-chat.png)
 ![device simulator](docs/screenshots/smarthomeassistant-devices-v2.png)
@@ -388,7 +390,9 @@ aws cloudformation wait stack-delete-complete --stack-name AgentCore-smarthome-d
 
 # English Version
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core. Includes an admin console (Agent Harness Management) for managing agent skills, model selection, user sessions, long-term memories, and **per-user tool permission management** via AgentCore Policy Engine with Cedar policies.
+> **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), external integrations, session monitoring, long-term memory viewing, and safety guardrails.
+
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core. The admin console (Agent Harness Management) provides 7 management dimensions covering the full Agent lifecycle.
 
 ```
 smarthome-assistant-agent/
