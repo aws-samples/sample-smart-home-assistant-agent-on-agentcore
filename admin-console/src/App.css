@@ -739,6 +739,136 @@
   color: #ffffff;
 }
 
+/* --- Permission Editor --- */
+.perm-editor {
+  background: rgba(20, 20, 35, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 28px;
+}
+
+.perm-editor h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 0 0 8px 0;
+}
+
+.perm-user-email {
+  color: #4a9eff;
+}
+
+.perm-hint {
+  font-size: 13px;
+  color: #8888aa;
+  margin: 0 0 20px 0;
+}
+
+.perm-hint code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #aaaacc;
+}
+
+.perm-select-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.perm-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 20px;
+}
+
+.perm-tool-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.perm-tool-item:hover {
+  background: rgba(74, 158, 255, 0.06);
+}
+
+.perm-tool-checkbox {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  accent-color: #4a9eff;
+  flex-shrink: 0;
+}
+
+.perm-tool-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e0e0e0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  min-width: 160px;
+  flex-shrink: 0;
+}
+
+.perm-tool-desc {
+  font-size: 13px;
+  color: #8888aa;
+  line-height: 1.4;
+  flex: 1;
+}
+
+.perm-tool-target {
+  font-size: 12px;
+  color: #666688;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+/* --- Badges --- */
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-right: 4px;
+}
+
+.badge-active {
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.2);
+}
+
+.badge-inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #8888aa;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.badge-admin {
+  background: rgba(74, 158, 255, 0.12);
+  color: #4a9eff;
+  border: 1px solid rgba(74, 158, 255, 0.2);
+}
+
+.badge-group {
+  background: rgba(255, 255, 255, 0.04);
+  color: #aaaacc;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 /* --- Responsive --- */
 @media (max-width: 768px) {
   .app-main {

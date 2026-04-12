@@ -119,11 +119,17 @@ const ChatInterface: React.FC = () => {
             </div>
             <h3 className="empty-title">Welcome to Smart Home Assistant</h3>
             <p className="empty-subtitle">
-              Control your LED Matrix, Rice Cooker, Fan, and Oven with natural language.
+              Control your smart home devices with natural language.
             </p>
             <div className="suggestion-chips">
-              <button className="chip" onClick={() => setInputValue('Set the LED matrix to rainbow mode')}>
-                Set LED to rainbow mode
+              <button className="chip" onClick={() => setInputValue('Check what smart home devices I have')}>
+                Check what devices I have
+              </button>
+              <button className="chip" onClick={() => setInputValue('Turn on all my devices')}>
+                Turn on all my devices
+              </button>
+              <button className="chip" onClick={() => setInputValue('Change the LED mode to rainbow')}>
+                Change the LED mode
               </button>
               <button className="chip" onClick={() => setInputValue('Start cooking white rice')}>
                 Start cooking white rice

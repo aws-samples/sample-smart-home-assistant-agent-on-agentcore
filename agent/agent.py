@@ -130,11 +130,12 @@ def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
     agent_kwargs = dict(
         model=model,
         system_prompt="""You are a smart home assistant that controls devices in the user's home.
-You can control: LED Matrix, Rice Cooker, Fan, and Oven.
 Be helpful, concise, and confirm actions taken. If a user asks to do something, use the appropriate device control tool.
 You can also suggest creative lighting scenes, cooking presets, and comfort settings.
 Use what you remember about the user's preferences to personalize your responses.
-IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.""",
+IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.
+IMPORTANT: Never fabricate or assume the result of a tool call. If a tool call fails, is rejected, or returns an error, you MUST honestly report the failure to the user. Do not pretend the action succeeded. Tell the user what went wrong and suggest they contact an administrator if the issue persists.
+IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If the tool is unavailable or fails, tell the user you cannot access device information and suggest they contact an administrator.""",
         plugins=[skills_plugin],
     )
 
@@ -159,7 +160,7 @@ def get_mcp_tools(mcp_client):
     return tools
 
 
-def invoke_agent(prompt, session_id="default", actor_id="default"):
+def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None):
     """Run agent with MCP tools from Gateway if available, with memory persistence."""
     session_manager = get_memory_session_manager(session_id, actor_id)
 
@@ -180,7 +181,15 @@ def invoke_agent(prompt, session_id="default", actor_id="default"):
             logger.warning(f"Failed to load user settings: {e}")
 
     if GATEWAY_URL:
-        mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL))
+        # Forward user's JWT to the CUSTOM_JWT gateway for per-user policy evaluation.
+        # Requires runtime requestHeaderConfiguration.requestHeaderAllowlist: ["Authorization"]
+        gw_headers = {}
+        if auth_header:
+            gw_headers["Authorization"] = auth_header
+            logger.info(f"Forwarding user JWT to gateway for policy evaluation")
+        else:
+            logger.warning("No Authorization header available — gateway per-user policies won't apply")
+        mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
         with mcp_client:
             tools = get_mcp_tools(mcp_client)
             agent = create_agent(tools=tools, session_manager=session_manager, skills=skills, model_id=user_model_id)
@@ -222,7 +231,12 @@ def handle_invocation(payload, context):
         except Exception as e:
             logger.warning(f"Failed to record session: {e}")
 
-    response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id)
+    # Extract user's JWT from request headers (propagated via requestHeaderConfiguration)
+    auth_header = None
+    if hasattr(context, 'request_headers') and context.request_headers:
+        auth_header = context.request_headers.get("Authorization") or context.request_headers.get("authorization")
+
+    response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id, auth_header=auth_header)
     return {"response": response, "status": "success"}
 
 

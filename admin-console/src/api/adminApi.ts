@@ -170,6 +170,31 @@ export interface SessionInfo {
   lastActiveAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// Cognito Users & Tool Permissions
+// ---------------------------------------------------------------------------
+
+export interface CognitoUserInfo {
+  username: string;
+  email: string;
+  sub: string;
+  status: string;
+  createdAt: string;
+  groups: string[];
+}
+
+export interface GatewayTool {
+  name: string;
+  description: string;
+  targetName: string;
+}
+
+export interface UserPermissions {
+  userId: string;
+  allowedTools: string[];
+  updatedAt?: string;
+}
+
 export async function listSessions(): Promise<SessionInfo[]> {
   const headers = await authHeaders();
   const res = await fetch(`${getBaseUrl()}/sessions`, { headers });
@@ -272,6 +297,101 @@ export async function deleteSkillFile(
     const body = await res.json();
     throw new Error(body.error || `Failed to delete file (${res.status})`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cognito Users & Tool Permissions
+// ---------------------------------------------------------------------------
+
+export async function listCognitoUsers(): Promise<CognitoUserInfo[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/users`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list users (${res.status})`);
+  }
+  const data = await res.json();
+  return data.users || [];
+}
+
+export async function listGatewayTools(): Promise<GatewayTool[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/tools`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list tools (${res.status})`);
+  }
+  const data = await res.json();
+  return data.tools || [];
+}
+
+export async function getUserPermissions(userId: string): Promise<UserPermissions> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get permissions (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function updateUserPermissions(
+  userId: string,
+  allowedTools: string[]
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ allowedTools }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to update permissions (${res.status})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memories
+// ---------------------------------------------------------------------------
+
+export interface MemoryRecord {
+  id: string;
+  type: string;
+  text: string;
+  strategy: string;
+  createdAt: string;
+}
+
+export async function listMemoryActors(): Promise<string[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/memories`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list memory actors (${res.status})`);
+  }
+  const data = await res.json();
+  return data.actors || [];
+}
+
+export async function getMemoryRecords(actorId: string): Promise<MemoryRecord[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/memories/${encodeURIComponent(actorId)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get memory records (${res.status})`);
+  }
+  const data = await res.json();
+  return data.records || [];
 }
 
 // ---------------------------------------------------------------------------

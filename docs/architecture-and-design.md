@@ -15,6 +15,7 @@
 - [8.9. Fixed Session ID and Session Tracking](#89-fixed-session-id-and-session-tracking)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
+- [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -34,7 +35,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, and device control via MCP |
-| Admin Console | React + TypeScript + REST API | Manage agent skills (full [Agent Skills spec](https://agentskills.io/specification)), files, model selection per user |
+| Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, models, tool access, integrations, sessions, memories, guardrails |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
 ---
@@ -252,7 +253,8 @@ Internet
     |         |
     |         +---> Lambda Target: iot-control Lambda (control_device tool)
     |         +---> Lambda Target: iot-discovery Lambda (discover_devices tool)
-    |         +---> Auth: NONE (only called by the runtime internally)
+    |         +---> Auth: CUSTOM_JWT (Cognito, validates user JWT for per-user Cedar policies)
+    |         +---> Policy Engine: Cedar per-user tool access control (ENFORCE mode)
     |
     +---> WSS: IoT Core (iot-endpoint.iot.region.amazonaws.com)
               |
@@ -293,12 +295,14 @@ Internet
 |  | - Protects: /invocations, /ping endpoints                   |  |
 |  +------------------------------------------------------------+  |
 |                                                                   |
-|  Layer 4: AgentCore Gateway (No Auth)                            |
+|  Layer 4: AgentCore Gateway (CUSTOM_JWT + Policy Engine)          |
 |  +------------------------------------------------------------+  |
-|  | - Auth: NONE (gateway is only called by the runtime)        |  |
-|  | - Runtime already authenticates users at Layer 3            |  |
-|  | - Gateway auth type cannot be changed after creation;       |  |
-|  |   setting to NONE avoids runtime-to-gateway auth issues     |  |
+|  | - Auth: CUSTOM_JWT (same Cognito User Pool as runtime)      |  |
+|  | - Runtime propagates user JWT to agent via                  |  |
+|  |   requestHeaderAllowlist: ["Authorization"]                 |  |
+|  | - Agent forwards JWT to gateway MCP client                  |  |
+|  | - Policy Engine: Cedar per-user permit policies (ENFORCE)   |  |
+|  |   principal.id from JWT sub claim for per-user control      |  |
 |  +------------------------------------------------------------+  |
 |                                                                   |
 |  Layer 5: Admin API (Cognito + Group Check)                      |
@@ -322,6 +326,10 @@ Internet
 | iot-discovery Lambda | (none) | Returns mock device list |
 | admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
 | admin-api Lambda | s3:GetObject, PutObject, DeleteObject, ListBucket | `arn:...:smarthome-skill-files-*` |
+| admin-api Lambda | cognito-idp:ListUsers, AdminListGroupsForUser | Cognito User Pool |
+| admin-api Lambda | bedrock-agentcore:ListActors, ListMemoryRecords | `*` (AgentCore Memory) |
+| admin-api Lambda | bedrock-agentcore:Create/Get/Update/Delete Policy* | `*` (policy engine + gateway management) |
+| admin-api Lambda | iam:PassRole, iam:PutRolePolicy | AgentCore roles |
 | AgentCore Runtime Role | bedrock:InvokeModel | Kimi-2.5 model |
 | AgentCore Runtime Role | dynamodb:Query, GetItem, Scan | `arn:...:table/smarthome-skills` |
 
@@ -558,7 +566,7 @@ The agent is a Strands Agent deployed to Amazon Bedrock AgentCore Runtime via Co
 | Memory | AgentCore Memory with semantic, summary, and user preference strategies |
 
 **System instruction:**
-> You are a smart home assistant that controls devices in the user's home. You can control: LED Matrix, Rice Cooker, Fan, and Oven. Be helpful, concise, and confirm actions taken. Suggest creative lighting scenes, cooking presets, and comfort settings. Use what you remember about the user's preferences to personalize your responses.
+> You are a smart home assistant that controls devices in the user's home. You can control: LED Matrix, Rice Cooker, Fan, and Oven. Be helpful, concise, and confirm actions taken. Suggest creative lighting scenes, cooking presets, and comfort settings. Use what you remember about the user's preferences to personalize your responses. Never fabricate tool results — if a tool call fails or is rejected, report the failure honestly to the user.
 
 ### 8.2 AgentCore Memory
 
@@ -619,9 +627,10 @@ Strands Agent (MCP Client)
     v
 AgentCore Gateway (MCP Server)
     URL: https://{gateway-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp
-    Auth: NONE (internal — only called by the runtime)
+    Auth: CUSTOM_JWT (Cognito — user JWT forwarded by agent for per-user policy)
+    Policy Engine: SmartHomeUserPermissions (ENFORCE mode, Cedar permit policies)
     |
-    | Lambda Target
+    | Lambda Target (if permitted by policy)
     v
 iot-control Lambda
     |
@@ -910,6 +919,12 @@ S3: smarthome-skill-files-{accountId}
 | `GET` | `/settings/{userId}` | Get user settings (modelId) |
 | `PUT` | `/settings/{userId}` | Update user settings |
 | `GET` | `/sessions` | List all user runtime sessions |
+| `GET` | `/users` | List all Cognito users with groups |
+| `GET` | `/tools` | List all gateway tools (reads tool schemas from targets) |
+| `GET` | `/users/{userId}/permissions` | Get user's allowed tools |
+| `PUT` | `/users/{userId}/permissions` | Update allowed tools + sync Cedar policies |
+| `GET` | `/memories` | List all memory actors |
+| `GET` | `/memories/{actorId}` | Get long-term memory records (facts + preferences) for an actor |
 
 **Authorization:** All admin API endpoints require a valid Cognito JWT. The Lambda additionally checks that the caller belongs to the `admin` Cognito group (returns 403 if not).
 
@@ -994,7 +1009,8 @@ S3 Buckets + CloudFront (x3)
 **Stack 2: `AgentCore-smarthome-default`** (managed by `agentcore` CLI) — AgentCore resources:
 ```
 AgentCore Gateway (MCP Server)
-  +-> Auth: NONE (only called by the runtime internally)
+  +-> Auth: CUSTOM_JWT (Cognito — same User Pool as runtime)
+  +-> Policy Engine: SmartHomeUserPermissions (ENFORCE mode)
   +-> Lambda Target: SmartHomeDeviceControl (iot-control Lambda + tool schema)
   +-> Lambda Target: SmartHomeDeviceDiscovery (iot-discovery Lambda + tool schema)
 
@@ -1002,6 +1018,7 @@ AgentCore Runtime
   +-> CodeZip (Python 3.13, agent code from S3)
   +-> BedrockAgentCoreApp (Strands Agent)
   +-> JWT Auth (Cognito User Pool)
+  +-> requestHeaderAllowlist: ["Authorization"] (propagate user JWT to agent)
   +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MEMORY_SMARTHOMEMEMORY_ID, MODEL_ID, SKILLS_TABLE_NAME
 
 AgentCore Memory (managed by agentcore CLI: `agentcore add memory`)
@@ -1024,7 +1041,7 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - `--outbound-auth` is not applicable for `lambda-function-arn` targets (Lambda targets don't need credential provider config)
 - Agent code must include `pyproject.toml` for the CLI to package it as CodeZip
 - Gateway `authorizerType` cannot be changed after creation — must delete and recreate the CloudFormation stack
-- Gateway auth should be `NONE` for runtime-to-gateway calls; the runtime strips the user's JWT before passing to the handler, so the agent cannot forward it to the gateway
+- Gateway auth should be `CUSTOM_JWT` for per-user tool control; the runtime propagates the user's JWT to agent code via `requestHeaderAllowlist: ["Authorization"]` (set in `UpdateAgentRuntime`), and the agent forwards it to the gateway MCP client
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
 - `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
 - `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
@@ -1057,7 +1074,7 @@ deploy.sh (one-click)
               |           Seed aws-targets.json (required for CLI deploy)
               +---> [3/8] agentcore add memory --name SmartHomeMemory
               |           --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
-              +---> [4/8] agentcore add gateway (NONE auth)
+              +---> [4/8] agentcore add gateway (CUSTOM_JWT auth, Cognito)
               +---> [5/8] agentcore add gateway-target SmartHomeDeviceControl
               |           (iot-control Lambda + control_device tool schema)
               +---> [5b/8] agentcore add gateway-target SmartHomeDeviceDiscovery
@@ -1069,7 +1086,10 @@ deploy.sh (one-click)
               |         -> Runtime, Gateway, Memory, IAM Role
               +---> Fetch resource IDs (from CFN stack outputs)
               +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
-              +---> Patch admin Lambda env vars (AGENT_RUNTIME_ARN, SKILL_FILES_BUCKET)
+              +---> Patch runtime: requestHeaderAllowlist: ["Authorization"]
+              |     (propagate user JWT to agent for gateway auth)
+              +---> Patch admin Lambda env vars (AGENT_RUNTIME_ARN, SKILL_FILES_BUCKET,
+              |     GATEWAY_ID, COGNITO_USER_POOL_ID)
               +---> Grant runtime role DynamoDB read access (inline IAM policy)
               |     (agentcore CLI drops custom env vars during deploy;
               |      MEMORY_SMARTHOMEMEMORY_ID is set by CLI automatically)
@@ -1107,9 +1127,9 @@ admin-console/
 │   │   ├── CognitoAuth.ts   # Sign in, session management, admin role check
 │   │   └── LoginPage.tsx    # Login form
 │   ├── api/
-│   │   └── adminApi.ts      # REST client for admin API (skill CRUD, file management, settings, sessions)
+│   │   └── adminApi.ts      # REST client for admin API (skills, models, tool access, memories, sessions)
 │   └── components/
-│       └── AdminConsole.tsx  # Skill table, create/edit form (all spec fields), metadata editor, file manager
+│       └── AdminConsole.tsx  # 7-tab harness management (skills, models, tool access, integrations, sessions, memories, guardrails)
 ├── public/
 │   ├── index.html           # HTML template with config.js loader
 │   └── config.js            # Runtime config placeholder (overwritten by CDK)
@@ -1121,16 +1141,17 @@ admin-console/
 **Key Features:**
 
 - **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see an "Access Denied" page.
-- **Two tabs**: Skills (skill CRUD + model selection) and Sessions (runtime session management).
-- **User scope selector**: Dropdown to switch between `__global__` (shared) and per-user skill views. "Add User" button to manage skills for a specific user.
-- **Skill CRUD**: Table view with Edit/Delete actions; create/edit form with all [Agent Skills spec](https://agentskills.io/specification) fields:
-  - Required: name, description
-  - Optional: allowed tools, license, compatibility, metadata (key-value editor), instructions (monospace textarea)
-- **Metadata editor**: Dynamic key-value pair editor for the `metadata` field — add/remove rows with key and value inputs.
-- **Skill file manager** (shown when editing): Three collapsible sections for `scripts/`, `references/`, and `assets/` directories. Each section shows files with size and last modified date, and provides upload (via presigned URL), download, and delete actions.
-- **Per-user model selection**: Dropdown with curated Bedrock model IDs (Kimi, Claude, Llama, GPT). Settings saved per user scope.
-- **Session management**: Table showing user sessions with User ID, Session ID, Last Active timestamp, and Stop button.
-- **Stop session**: Calls AgentCore StopRuntimeSession API directly from the browser with the admin's JWT token.
+- **Seven tabs** for comprehensive agent harness management:
+
+| Tab | Purpose |
+|-----|---------|
+| **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor |
+| **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
+| **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY) |
+| **Integrations** | Tool source registry — Lambda targets (active), MCP servers, A2A agents, API Gateway (planned) |
+| **Sessions** | Runtime session monitoring with User ID, Session ID, Last Active, and Stop button |
+| **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory |
+| **Guardrails** | Links to AgentCore Evaluator, Bedrock Guardrails consoles, and Cedar Policy Engine settings |
 
 **CDK Resources:**
 
@@ -1140,6 +1161,83 @@ admin-console/
 | `smarthome-skill-files-{accountId}` S3 Bucket | Skill directory files (scripts, references, assets) with CORS |
 | CloudFront Distribution | HTTPS CDN |
 | `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region` |
+
+### 9.5 Per-User Tool Permission Management
+
+Administrators can control which gateway tools each user is allowed to invoke via the Admin Console's **Users** tab.
+
+**Architecture:**
+
+```
+Admin Console (Users tab)
+    |
+    | 1. List Cognito users (GET /users)
+    | 2. List gateway tools (GET /tools)
+    | 3. Load user permissions (GET /users/{userId}/permissions)
+    | 4. Save permissions (PUT /users/{userId}/permissions)
+    v
+admin-api Lambda
+    |
+    +--- Cognito ListUsers + AdminListGroupsForUser
+    +--- AgentCore Control: ListGatewayTargets + GetGatewayTarget (tool schemas)
+    +--- DynamoDB: user-tool mappings (userId, __permissions__)
+    +--- AgentCore Policy Engine: Cedar per-user permit policies
+    v
+AgentCore Gateway (CUSTOM_JWT auth, ENFORCE mode)
+    |
+    +--- Per-tool permit policies (allow specific users per tool)
+    +--- Default deny (no permit = tool hidden from user)
+```
+
+**Cedar Policy Model (Permit with principal.id):**
+
+Uses the **permit model with default-deny**: each tool gets a Cedar `permit` policy listing authorized user IDs via `principal.id` (from JWT `sub` claim). Tools without a permit policy are hidden from users by the gateway.
+
+```cedar
+permit(
+  principal,
+  action == AgentCore::Action::"SmartHomeDeviceControl___control_device",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:...:gateway/{id}"
+) when {
+  ((principal is AgentCore::OAuthUser) || (principal is AgentCore::IamEntity)) &&
+  ((principal.id) == "cognito-sub-uuid-1" || (principal.id) == "cognito-sub-uuid-2")
+};
+```
+
+**Key requirement for per-user control:** The gateway must use `CUSTOM_JWT` auth (Cognito), and the runtime must propagate the user's JWT to the agent via `requestHeaderAllowlist: ["Authorization"]`. The agent forwards the JWT to the gateway MCP client, enabling Cedar to evaluate `principal.id` from the JWT `sub` claim.
+
+**Cedar Schema (discovered via `StartPolicyGeneration`):**
+
+| Entity | Format | Example |
+|--------|--------|---------|
+| Action | `AgentCore::Action::"{TargetName}___{toolName}"` | `AgentCore::Action::"SmartHomeDeviceControl___control_device"` |
+| Resource | `AgentCore::Gateway::"{gatewayArn}"` | `AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-west-2:...:gateway/..."` |
+| Principal | `AgentCore::OAuthUser` or `AgentCore::IamEntity` | `principal.id == "78d153c0-7011-704b-fb6c-4e1a80cf55ce"` (Cognito sub) |
+
+**Permission Save Flow:**
+
+When the admin clicks "Save Permissions" for a user:
+
+1. Save user-tool mapping to DynamoDB (`cognitoSub → __permissions__ → allowedTools[]`)
+2. For each affected tool, scan DynamoDB for ALL users who have that tool
+3. Build Cedar `permit` statement with the authorized user IDs (`principal.id`)
+4. Create or update the tool's Cedar policy in the policy engine
+5. If no users have a tool, delete its permit policy (default-deny blocks it)
+6. On first save: create policy engine, grant gateway role IAM permissions (PolicyEngineAccess), associate with gateway (ENFORCE mode)
+
+**User Identity:**
+
+Cedar `principal.id` maps to the JWT `sub` claim (Cognito sub UUID). The Admin Console stores permissions keyed by `user.sub` to match.
+
+**DynamoDB Records:**
+
+| userId | skillName | Purpose |
+|--------|-----------|---------|
+| `{cognito-sub}` | `__permissions__` | User's allowed tools list |
+| `__system__` | `__policy_engine__` | Policy engine ID and ARN |
+| `__system__` | `__tool_policy_{toolName}__` | Policy ID for each tool |
+
+**Scalability:** One Cedar policy per tool (not per user). Each tool policy lists authorized user IDs. Cedar statement limit is 153KB (~3,800 user IDs per tool). Suitable for most deployments.
 
 ---
 

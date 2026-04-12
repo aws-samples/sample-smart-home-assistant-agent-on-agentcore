@@ -271,6 +271,7 @@ export class SmartHomeStack extends cdk.Stack {
         SKILLS_TABLE_NAME: skillsTable.tableName,
         SKILL_FILES_BUCKET: skillFilesBucket.bucketName,
         AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
+        COGNITO_USER_POOL_ID: userPool.userPoolId,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
@@ -299,14 +300,36 @@ export class SmartHomeStack extends cdk.Stack {
 
     const adminIntegration = new apigw.LambdaIntegration(adminLambda);
 
+    // /users (Cognito users)
+    const usersApiResource = adminApi.root.addResource("users");
+    usersApiResource.addMethod("GET", adminIntegration, authMethodOptions);
+
+    // /users/{userId}/permissions
+    const userIdPermResource = usersApiResource.addResource("{userId}");
+    const permissionsResource = userIdPermResource.addResource("permissions");
+    permissionsResource.addMethod("GET", adminIntegration, authMethodOptions);
+    permissionsResource.addMethod("PUT", adminIntegration, authMethodOptions);
+
+    // /tools (Gateway tools)
+    const toolsResource = adminApi.root.addResource("tools");
+    toolsResource.addMethod("GET", adminIntegration, authMethodOptions);
+
+    // /memories
+    const memoriesResource = adminApi.root.addResource("memories");
+    memoriesResource.addMethod("GET", adminIntegration, authMethodOptions);
+
+    // /memories/{actorId}
+    const memoryActorResource = memoriesResource.addResource("{actorId}");
+    memoryActorResource.addMethod("GET", adminIntegration, authMethodOptions);
+
     // /skills
     const skillsResource = adminApi.root.addResource("skills");
     skillsResource.addMethod("GET", adminIntegration, authMethodOptions);
     skillsResource.addMethod("POST", adminIntegration, authMethodOptions);
 
     // /skills/users
-    const usersResource = skillsResource.addResource("users");
-    usersResource.addMethod("GET", adminIntegration, authMethodOptions);
+    const skillUsersResource = skillsResource.addResource("users");
+    skillUsersResource.addMethod("GET", adminIntegration, authMethodOptions);
 
     // /skills/{userId}/{skillName}
     const userIdResource = skillsResource.addResource("{userId}");
@@ -342,10 +365,66 @@ export class SmartHomeStack extends cdk.Stack {
     const stopResource = sessionIdResource.addResource("stop");
     stopResource.addMethod("POST", adminIntegration, authMethodOptions);
 
-    // Grant admin Lambda permission to stop runtime sessions
+    // Grant admin Lambda permission to stop runtime sessions and read memory
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["bedrock-agentcore:StopRuntimeSession"],
+      actions: [
+        "bedrock-agentcore:StopRuntimeSession",
+        "bedrock-agentcore:ListActors",
+        "bedrock-agentcore:ListMemoryRecords",
+      ],
       resources: ["*"],
+    }));
+
+    // Grant admin Lambda S3 read for gateway tool schemas (stored in CDK assets bucket)
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject"],
+      resources: [`arn:aws:s3:::cdk-*-assets-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}/*`],
+    }));
+
+    // Grant admin Lambda permissions for Cognito user listing
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "cognito-idp:ListUsers",
+        "cognito-idp:AdminListGroupsForUser",
+      ],
+      resources: [userPool.userPoolArn],
+    }));
+
+    // Grant admin Lambda permissions for AgentCore Gateway tools and policy management
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock-agentcore:CreatePolicyEngine",
+        "bedrock-agentcore:GetPolicyEngine",
+        "bedrock-agentcore:ListPolicyEngines",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy",
+        "bedrock-agentcore:ListPolicies",
+        "bedrock-agentcore:GetPolicy",
+        "bedrock-agentcore:ManageAdminPolicy",
+        "bedrock-agentcore:ManageResourceScopedPolicy",
+        "bedrock-agentcore:GetGateway",
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:ListGatewayTargets",
+        "bedrock-agentcore:GetGatewayTarget",
+      ],
+      resources: ["*"],
+    }));
+
+    // UpdateGateway requires iam:PassRole; gateway role needs policy engine permissions
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PassRole", "iam:PutRolePolicy"],
+      resources: ["*"],
+      conditions: {
+        StringEquals: {
+          "iam:PassedToService": "bedrock-agentcore.amazonaws.com",
+        },
+      },
+    }));
+    // iam:PutRolePolicy without condition (for granting gateway role policy engine access)
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PutRolePolicy"],
+      resources: ["arn:aws:iam::*:role/AgentCore-*"],
     }));
 
     // ========================

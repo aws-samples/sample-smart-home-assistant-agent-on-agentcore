@@ -14,10 +14,19 @@ import {
   uploadSkillFile,
   getDownloadUrl,
   deleteSkillFile,
+  listCognitoUsers,
+  listGatewayTools,
+  getUserPermissions,
+  updateUserPermissions,
+  listMemoryActors,
+  getMemoryRecords,
   SkillItem,
   SkillInput,
   SkillFile,
   SessionInfo,
+  CognitoUserInfo,
+  GatewayTool,
+  MemoryRecord,
 } from '../api/adminApi';
 
 // Skill name validation (matches Strands SDK pattern)
@@ -96,6 +105,344 @@ const emptyForm: SkillFormData = {
   metadata: [],
 };
 
+// ---------------------------------------------------------------------------
+// Models Tab — standalone component
+// ---------------------------------------------------------------------------
+interface ModelsTabProps {
+  error: string;
+  success: string;
+  clearMessages: () => void;
+  setError: (msg: string) => void;
+  setSuccess: (msg: string) => void;
+}
+
+const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, setError, setSuccess }) => {
+  const [globalModelId, setGlobalModelId] = useState('');
+  const [savedGlobalModelId, setSavedGlobalModelId] = useState('');
+  const [users, setUsers] = useState<CognitoUserInfo[]>([]);
+  const [userModels, setUserModels] = useState<Record<string, string>>({});
+  const [savedUserModels, setSavedUserModels] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Load global default model
+      const globalSettings = await getSettings('__global__');
+      setGlobalModelId(globalSettings.modelId || '');
+      setSavedGlobalModelId(globalSettings.modelId || '');
+
+      // Load all users
+      const cognitoUsers = await listCognitoUsers();
+      setUsers(cognitoUsers);
+
+      // Load per-user models
+      const models: Record<string, string> = {};
+      for (const u of cognitoUsers) {
+        try {
+          const s = await getSettings(u.email || u.username || u.sub);
+          models[u.sub] = s.modelId || '';
+        } catch {
+          models[u.sub] = '';
+        }
+      }
+      setUserModels(models);
+      setSavedUserModels({ ...models });
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [setError]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleSaveGlobal = async () => {
+    clearMessages();
+    try {
+      await updateSettings('__global__', { modelId: globalModelId });
+      setSavedGlobalModelId(globalModelId);
+      setSuccess('Global default model updated.');
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleSaveUserModel = async (user: CognitoUserInfo) => {
+    clearMessages();
+    const userId = user.email || user.username || user.sub;
+    const newModel = userModels[user.sub] || '';
+    try {
+      await updateSettings(userId, { modelId: newModel });
+      setSavedUserModels((prev) => ({ ...prev, [user.sub]: newModel }));
+      setSuccess(`Model updated for ${user.email || user.username}.`);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  return (
+    <div className="models-section">
+      {error && <div className="alert alert-error">{error}</div>}
+      {success && <div className="alert alert-success">{success}</div>}
+
+      {/* Global Default Model */}
+      <div className="settings-panel" style={{ marginBottom: '20px' }}>
+        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>Global Default Model</h3>
+        <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>
+          Used for all users who do not have a per-user model configured.
+        </p>
+        <div className="settings-row">
+          <select
+            className="settings-select"
+            value={globalModelId}
+            onChange={(e) => setGlobalModelId(e.target.value)}
+          >
+            <option value="">-- Not set --</option>
+            {AVAILABLE_MODELS.map((m, i) =>
+              (m as any).disabled ? (
+                <option key={i} disabled>{m.label}</option>
+              ) : (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              )
+            )}
+          </select>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={handleSaveGlobal}
+            disabled={globalModelId === savedGlobalModelId}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      {/* Per-User Model Selection */}
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <span className="toolbar-label">Per-User Model Override</span>
+        </div>
+        <button className="btn btn-secondary btn-sm" onClick={loadData}>
+          Refresh
+        </button>
+      </div>
+
+      <div className="skills-table-container">
+        {loading ? (
+          <div className="loading">Loading users...</div>
+        ) : users.length === 0 ? (
+          <div className="empty-state">
+            <p>No users found in the user pool.</p>
+          </div>
+        ) : (
+          <table className="skills-table">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Status</th>
+                <th>Model</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.sub}>
+                  <td className="cell-name">{u.email || u.username}</td>
+                  <td>
+                    <span className={`badge ${u.status === 'CONFIRMED' ? 'badge-active' : 'badge-inactive'}`}>
+                      {u.status}
+                    </span>
+                  </td>
+                  <td>
+                    <select
+                      className="settings-select"
+                      style={{ minWidth: '240px' }}
+                      value={userModels[u.sub] || ''}
+                      onChange={(e) =>
+                        setUserModels((prev) => ({ ...prev, [u.sub]: e.target.value }))
+                      }
+                    >
+                      <option value="">-- Use global default --</option>
+                      {AVAILABLE_MODELS.map((m, i) =>
+                        (m as any).disabled ? (
+                          <option key={i} disabled>{m.label}</option>
+                        ) : (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        )
+                      )}
+                    </select>
+                  </td>
+                  <td className="cell-actions">
+                    <button
+                      className="btn btn-sm btn-primary"
+                      onClick={() => handleSaveUserModel(u)}
+                      disabled={(userModels[u.sub] || '') === (savedUserModels[u.sub] || '')}
+                    >
+                      Save
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Memories Tab — standalone component
+// ---------------------------------------------------------------------------
+interface MemoriesTabProps {
+  error: string;
+  success: string;
+  setError: (msg: string) => void;
+  setSuccess: (msg: string) => void;
+  clearMessages: () => void;
+}
+
+const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, clearMessages }) => {
+  const [actors, setActors] = useState<string[]>([]);
+  const [selectedActor, setSelectedActor] = useState<string | null>(null);
+  const [records, setRecords] = useState<MemoryRecord[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+
+  const loadActors = useCallback(async () => {
+    setLoading(true);
+    try {
+      const a = await listMemoryActors();
+      setActors(a);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [setError]);
+
+  useEffect(() => { loadActors(); }, [loadActors]);
+
+  const handleSelectActor = async (actorId: string) => {
+    clearMessages();
+    setSelectedActor(actorId);
+    setRecordsLoading(true);
+    try {
+      const r = await getMemoryRecords(actorId);
+      setRecords(r);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRecordsLoading(false);
+    }
+  };
+
+  return (
+    <div className="memories-section">
+      {error && <div className="alert alert-error">{error}</div>}
+      {success && <div className="alert alert-success">{success}</div>}
+
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <span className="toolbar-label">Long-term Memory (AgentCore Memory)</span>
+        </div>
+        <button className="btn btn-secondary btn-sm" onClick={() => { setSelectedActor(null); loadActors(); }}>
+          Refresh
+        </button>
+      </div>
+
+      {/* Actor list */}
+      {!selectedActor && (
+        <div className="skills-table-container">
+          {loading ? (
+            <div className="loading">Loading actors...</div>
+          ) : actors.length === 0 ? (
+            <div className="empty-state">
+              <p>No memory actors found.</p>
+              <p className="empty-hint">Memories are created when users interact with the chatbot.</p>
+            </div>
+          ) : (
+            <table className="skills-table">
+              <thead>
+                <tr>
+                  <th>Actor ID</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {actors.map((a) => (
+                  <tr key={a}>
+                    <td className="cell-name">{a}</td>
+                    <td className="cell-actions">
+                      <button className="btn btn-sm btn-primary" onClick={() => handleSelectActor(a)}>
+                        View Memories
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* Memory records for selected actor */}
+      {selectedActor && (
+        <div>
+          <div style={{ marginBottom: '16px' }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => setSelectedActor(null)}>
+              Back to Actors
+            </button>
+            <span className="toolbar-label" style={{ marginLeft: '12px' }}>
+              Memories for: <code style={{ color: '#4a9eff' }}>{selectedActor}</code>
+            </span>
+          </div>
+
+          <div className="skills-table-container">
+            {recordsLoading ? (
+              <div className="loading">Loading memories...</div>
+            ) : records.length === 0 ? (
+              <div className="empty-state">
+                <p>No memory records found for this actor.</p>
+              </div>
+            ) : (
+              <table className="skills-table">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Content</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {records.map((r) => (
+                    <tr key={r.id}>
+                      <td>
+                        <span className={`badge ${r.type === 'facts' ? 'badge-active' : 'badge-admin'}`}>
+                          {r.type}
+                        </span>
+                      </td>
+                      <td className="cell-desc" style={{ maxWidth: '500px', whiteSpace: 'normal' }}>
+                        {r.text}
+                      </td>
+                      <td className="cell-date">
+                        {r.createdAt ? new Date(r.createdAt).toLocaleString() : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Main AdminConsole component
+// ---------------------------------------------------------------------------
 const AdminConsole: React.FC = () => {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [userIds, setUserIds] = useState<string[]>(['__global__']);
@@ -116,12 +463,23 @@ const AdminConsole: React.FC = () => {
   const [modelId, setModelId] = useState('');
   const [savedModelId, setSavedModelId] = useState('');
 
-  // Tab: 'skills' or 'sessions'
-  const [activeTab, setActiveTab] = useState<'skills' | 'sessions'>('skills');
+  // Tabs
+  const [activeTab, setActiveTab] = useState<'skills' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails'>('skills');
 
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+
+  // Users tab
+  const [cognitoUsers, setCognitoUsers] = useState<CognitoUserInfo[]>([]);
+  const [gatewayTools, setGatewayTools] = useState<GatewayTool[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [selectedPermUser, setSelectedPermUser] = useState<CognitoUserInfo | null>(null);
+  const [userToolSelections, setUserToolSelections] = useState<Record<string, boolean>>({});
+  const [permSaving, setPermSaving] = useState(false);
+  const [policyMode, setPolicyMode] = useState<'ENFORCE' | 'LOG_ONLY'>('ENFORCE');
+  const [policyModeSaving, setPolicyModeSaving] = useState(false);
+  const [permOriginal, setPermOriginal] = useState<string[]>([]);
 
   // File manager (shown when editing a skill)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
@@ -235,6 +593,73 @@ const AdminConsole: React.FC = () => {
     }
   };
 
+  // Users tab loaders
+  const loadCognitoUsers = useCallback(async () => {
+    setUsersLoading(true);
+    try {
+      const [users, tools] = await Promise.all([listCognitoUsers(), listGatewayTools()]);
+      setCognitoUsers(users);
+      setGatewayTools(tools);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setUsersLoading(false);
+    }
+  }, []);
+
+  // Cedar principal.id maps to JWT sub claim (Cognito sub UUID)
+  const getActorId = (user: CognitoUserInfo) => user.sub;
+
+  const handleManagePermissions = async (user: CognitoUserInfo) => {
+    clearMessages();
+    setSelectedPermUser(user);
+    try {
+      const perms = await getUserPermissions(getActorId(user));
+      const allowed = perms.allowedTools || [];
+      setPermOriginal(allowed);
+      const selections: Record<string, boolean> = {};
+      for (const tool of gatewayTools) {
+        selections[tool.name] = allowed.includes(tool.name);
+      }
+      setUserToolSelections(selections);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleSavePermissions = async () => {
+    if (!selectedPermUser) return;
+    setPermSaving(true);
+    clearMessages();
+    try {
+      const selectedTools = Object.entries(userToolSelections)
+        .filter(([, checked]) => checked)
+        .map(([name]) => name);
+      await updateUserPermissions(getActorId(selectedPermUser), selectedTools);
+      setPermOriginal(selectedTools);
+      setSuccess(`Permissions updated for ${selectedPermUser.email || selectedPermUser.username}.`);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setPermSaving(false);
+    }
+  };
+
+  const handleCancelPermissions = () => {
+    setSelectedPermUser(null);
+    setUserToolSelections({});
+    setPermOriginal([]);
+  };
+
+  const permIsDirty = (() => {
+    const current = Object.entries(userToolSelections)
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+      .sort();
+    const orig = [...permOriginal].sort();
+    return JSON.stringify(current) !== JSON.stringify(orig);
+  })();
+
   const handleSaveSettings = async () => {
     clearMessages();
     try {
@@ -268,7 +693,14 @@ const AdminConsole: React.FC = () => {
     if (activeTab === 'sessions') {
       loadSessions();
     }
-  }, [activeTab, loadSessions]);
+    if (activeTab === 'users') {
+      loadCognitoUsers();
+    }
+    if (activeTab === 'models') {
+      loadUsers();
+      loadSettings();
+    }
+  }, [activeTab, loadSessions, loadCognitoUsers, loadUsers, loadSettings]);
 
   const clearMessages = () => {
     setError('');
@@ -409,10 +841,40 @@ const AdminConsole: React.FC = () => {
           Skills
         </button>
         <button
+          className={`tab ${activeTab === 'models' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('models')}
+        >
+          Models
+        </button>
+        <button
+          className={`tab ${activeTab === 'users' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('users')}
+        >
+          Tool Access
+        </button>
+        <button
+          className={`tab ${activeTab === 'integrations' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('integrations')}
+        >
+          Integrations
+        </button>
+        <button
           className={`tab ${activeTab === 'sessions' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('sessions')}
         >
           Sessions
+        </button>
+        <button
+          className={`tab ${activeTab === 'memories' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('memories')}
+        >
+          Memories
+        </button>
+        <button
+          className={`tab ${activeTab === 'guardrails' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('guardrails')}
+        >
+          Guardrails
         </button>
       </div>
 
@@ -440,39 +902,6 @@ const AdminConsole: React.FC = () => {
         <button className="btn btn-primary" onClick={handleCreate}>
           + Create Skill
         </button>
-      </div>
-
-      {/* User Settings — Model ID */}
-      <div className="settings-panel">
-        <div className="settings-row">
-          <label className="toolbar-label">
-            {selectedUserId === '__global__' ? 'Default Model:' : 'Model:'}
-          </label>
-          <select
-            className="settings-select"
-            value={modelId}
-            onChange={(e) => setModelId(e.target.value)}
-          >
-            <option value="">-- Not set (use default) --</option>
-            {AVAILABLE_MODELS.map((m, i) =>
-              (m as any).disabled ? (
-                <option key={i} disabled>{m.label}</option>
-              ) : (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              )
-            )}
-          </select>
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={handleSaveSettings}
-            disabled={modelId === savedModelId}
-          >
-            Save
-          </button>
-          {selectedUserId === '__global__' && (
-            <span className="settings-hint">Default for users without a per-user model</span>
-          )}
-        </div>
       </div>
 
       {/* Messages */}
@@ -809,6 +1238,17 @@ const AdminConsole: React.FC = () => {
       </>
       )}
 
+      {/* Models Tab */}
+      {activeTab === 'models' && (
+        <ModelsTab
+          error={error}
+          success={success}
+          clearMessages={clearMessages}
+          setError={setError}
+          setSuccess={setSuccess}
+        />
+      )}
+
       {/* Sessions Tab */}
       {activeTab === 'sessions' && (
         <div className="sessions-section">
@@ -868,6 +1308,333 @@ const AdminConsole: React.FC = () => {
                 </tbody>
               </table>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Tool Access Tab */}
+      {activeTab === 'users' && (
+        <div className="users-section">
+          {/* Messages */}
+          {error && <div className="alert alert-error">{error}</div>}
+          {success && <div className="alert alert-success">{success}</div>}
+
+          {/* Policy Engine Mode */}
+          <div className="settings-panel">
+            <div className="settings-row">
+              <label className="toolbar-label">Policy Engine:</label>
+              <select
+                className="toolbar-select"
+                style={{ minWidth: '140px' }}
+                value={policyMode}
+                onChange={(e) => setPolicyMode(e.target.value as 'ENFORCE' | 'LOG_ONLY')}
+              >
+                <option value="ENFORCE">ENFORCE</option>
+                <option value="LOG_ONLY">LOG_ONLY</option>
+              </select>
+              <span className={`badge ${policyMode === 'ENFORCE' ? 'badge-active' : 'badge-inactive'}`}>
+                {policyMode === 'ENFORCE' ? 'Policies enforced' : 'Audit only'}
+              </span>
+            </div>
+          </div>
+
+          <div className="toolbar">
+            <div className="toolbar-left">
+              <span className="toolbar-label">Per-User Tool Permissions</span>
+            </div>
+            <button className="btn btn-secondary btn-sm" onClick={loadCognitoUsers}>
+              Refresh
+            </button>
+          </div>
+
+          {/* Permission Editor Panel */}
+          {selectedPermUser && (
+            <div className="perm-editor">
+              <h3>
+                Tool Permissions for{' '}
+                <span className="perm-user-email">
+                  {selectedPermUser.email || selectedPermUser.username}
+                </span>
+              </h3>
+              <p className="perm-hint">
+                Select which gateway tools this user is allowed to invoke.
+                Actor ID: <code>{getActorId(selectedPermUser)}</code>
+              </p>
+
+              {gatewayTools.length === 0 ? (
+                <div className="empty-state">
+                  <p>No gateway tools found.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="perm-select-bar">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-secondary"
+                      onClick={() => {
+                        const all: Record<string, boolean> = {};
+                        for (const t of gatewayTools) all[t.name] = true;
+                        setUserToolSelections(all);
+                      }}
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-secondary"
+                      onClick={() => {
+                        const none: Record<string, boolean> = {};
+                        for (const t of gatewayTools) none[t.name] = false;
+                        setUserToolSelections(none);
+                      }}
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                  <div className="perm-tool-list">
+                    {gatewayTools.map((tool) => (
+                      <label key={tool.name} className="perm-tool-item">
+                        <input
+                          type="checkbox"
+                          className="perm-tool-checkbox"
+                          checked={!!userToolSelections[tool.name]}
+                          onChange={(e) =>
+                            setUserToolSelections((prev) => ({
+                              ...prev,
+                              [tool.name]: e.target.checked,
+                            }))
+                          }
+                        />
+                        <span className="perm-tool-name">{tool.name}</span>
+                        <span className="perm-tool-desc">{tool.description}</span>
+                        <span className="perm-tool-target">{tool.targetName}</span>
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleCancelPermissions}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleSavePermissions}
+                  disabled={!permIsDirty || permSaving}
+                >
+                  {permSaving ? 'Saving...' : 'Save Permissions'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Users Table */}
+          {!selectedPermUser && (
+            <div className="skills-table-container">
+              {usersLoading ? (
+                <div className="loading">Loading users...</div>
+              ) : cognitoUsers.length === 0 ? (
+                <div className="empty-state">
+                  <p>No users found in the user pool.</p>
+                </div>
+              ) : (
+                <table className="skills-table">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>User ID (sub)</th>
+                      <th>Status</th>
+                      <th>Groups</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cognitoUsers.map((u) => (
+                      <tr key={u.sub}>
+                        <td className="cell-name">{u.email || u.username}</td>
+                        <td className="cell-tools" title={u.sub}>
+                          {u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}
+                        </td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              u.status === 'CONFIRMED'
+                                ? 'badge-active'
+                                : 'badge-inactive'
+                            }`}
+                          >
+                            {u.status}
+                          </span>
+                        </td>
+                        <td>
+                          {u.groups.length > 0
+                            ? u.groups.map((g) => (
+                                <span
+                                  key={g}
+                                  className={`badge ${
+                                    g === 'admin' ? 'badge-admin' : 'badge-group'
+                                  }`}
+                                >
+                                  {g}
+                                </span>
+                              ))
+                            : '-'}
+                        </td>
+                        <td className="cell-actions">
+                          <button
+                            className="btn btn-sm btn-primary"
+                            onClick={() => handleManagePermissions(u)}
+                          >
+                            Manage Permissions
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Integrations Tab */}
+      {activeTab === 'integrations' && (
+        <div className="integrations-section">
+          <div className="settings-panel" style={{ marginBottom: '16px' }}>
+            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>Tool Integrations</h3>
+            <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
+              Manage external tool sources connected to the AgentCore Gateway.
+              Tools registered here become available to the agent and can be controlled via the Tool Access tab.
+            </p>
+          </div>
+
+          <div className="skills-table-container">
+            <table className="skills-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Description</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="cell-name">Lambda Targets</td>
+                  <td className="cell-desc">AWS Lambda functions exposed as MCP tools via AgentCore Gateway</td>
+                  <td><span className="badge badge-active">Active</span></td>
+                </tr>
+                <tr>
+                  <td className="cell-name">MCP Servers</td>
+                  <td className="cell-desc">Remote MCP server endpoints for third-party tool access</td>
+                  <td><span className="badge badge-inactive">Planned</span></td>
+                </tr>
+                <tr>
+                  <td className="cell-name">A2A Agents</td>
+                  <td className="cell-desc">Agent-to-Agent protocol for delegating tasks to specialized agents</td>
+                  <td><span className="badge badge-inactive">Planned</span></td>
+                </tr>
+                <tr>
+                  <td className="cell-name">API Gateway</td>
+                  <td className="cell-desc">REST/HTTP API endpoints exposed as tools via OpenAPI schema</td>
+                  <td><span className="badge badge-inactive">Planned</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="settings-panel" style={{ marginTop: '16px' }}>
+            <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>Roadmap</h3>
+            <p className="settings-hint" style={{ margin: 0, lineHeight: '1.6' }}>
+              Future releases will allow administrators to add, configure, and remove tool integrations
+              directly from this console. This includes registering new MCP server endpoints,
+              connecting A2A agents for cross-agent collaboration, and importing API Gateway
+              endpoints as tools with automatic schema discovery.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Memories Tab */}
+      {activeTab === 'memories' && (
+        <MemoriesTab error={error} success={success} setError={setError} setSuccess={setSuccess} clearMessages={clearMessages} />
+      )}
+
+      {/* Guardrails Tab */}
+      {activeTab === 'guardrails' && (
+        <div className="guardrails-section">
+          <div className="settings-panel" style={{ marginBottom: '16px' }}>
+            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>Agent Guardrails</h3>
+            <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
+              Monitor and configure safety guardrails for the agent. Use the links below
+              to access evaluation results and content filtering in the AWS Console.
+            </p>
+          </div>
+
+          <div className="skills-table-container">
+            <table className="skills-table">
+              <thead>
+                <tr>
+                  <th>Guardrail</th>
+                  <th>Description</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="cell-name">AgentCore Evaluator</td>
+                  <td className="cell-desc">
+                    LLM-as-a-Judge evaluation of agent response quality. Reviews each session
+                    for intent understanding, tool usage, and response helpfulness.
+                  </td>
+                  <td className="cell-actions">
+                    <a
+                      className="btn btn-sm btn-primary"
+                      href="https://console.aws.amazon.com/bedrock-agentcore/home#/evaluators"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open Console
+                    </a>
+                  </td>
+                </tr>
+                <tr>
+                  <td className="cell-name">Bedrock Guardrails</td>
+                  <td className="cell-desc">
+                    Content filtering, topic denial, and PII redaction. Configurable safety
+                    policies applied to model inputs and outputs.
+                  </td>
+                  <td className="cell-actions">
+                    <a
+                      className="btn btn-sm btn-primary"
+                      href="https://console.aws.amazon.com/bedrock/home#/guardrails"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open Console
+                    </a>
+                  </td>
+                </tr>
+                <tr>
+                  <td className="cell-name">Cedar Policy Engine</td>
+                  <td className="cell-desc">
+                    Per-user tool access control via Cedar policies. Managed in the Tool Access tab.
+                    Current mode is displayed and configurable there.
+                  </td>
+                  <td className="cell-actions">
+                    <button className="btn btn-sm btn-secondary" onClick={() => setActiveTab('users')}>
+                      Go to Tool Access
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       )}
