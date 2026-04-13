@@ -579,6 +579,296 @@
   gap: 12px;
 }
 
+/* --- Form Section Label --- */
+.form-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8888aa;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 20px 0 12px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.field-required {
+  color: #f87171;
+}
+
+/* --- Metadata Editor --- */
+.metadata-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metadata-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.metadata-key,
+.metadata-value {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(10, 10, 20, 0.6);
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  outline: none;
+}
+
+.metadata-key:focus,
+.metadata-value:focus {
+  border-color: rgba(74, 158, 255, 0.4);
+  box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.08);
+}
+
+.metadata-remove {
+  flex-shrink: 0;
+}
+
+/* --- File Manager --- */
+.file-manager {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.file-manager h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 0 0 4px 0;
+}
+
+.file-manager-hint {
+  font-size: 13px;
+  color: #8888aa;
+  margin: 0 0 16px 0;
+}
+
+.file-dir-section {
+  margin-bottom: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.file-dir-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: rgba(10, 10, 20, 0.5);
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.2s;
+}
+
+.file-dir-header:hover {
+  background: rgba(74, 158, 255, 0.06);
+}
+
+.file-dir-arrow {
+  font-size: 12px;
+  color: #8888aa;
+  width: 14px;
+}
+
+.file-dir-name {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: #4a9eff;
+}
+
+.file-dir-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: #666688;
+}
+
+.file-dir-body {
+  padding: 12px 14px;
+}
+
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.file-table th {
+  padding: 6px 10px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: #8888aa;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.file-table td {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #e0e0e0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.file-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.file-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.file-upload-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+/* --- Permission Editor --- */
+.perm-editor {
+  background: rgba(20, 20, 35, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 28px;
+}
+
+.perm-editor h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 0 0 8px 0;
+}
+
+.perm-user-email {
+  color: #4a9eff;
+}
+
+.perm-hint {
+  font-size: 13px;
+  color: #8888aa;
+  margin: 0 0 20px 0;
+}
+
+.perm-hint code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #aaaacc;
+}
+
+.perm-select-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.perm-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 20px;
+}
+
+.perm-tool-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.perm-tool-item:hover {
+  background: rgba(74, 158, 255, 0.06);
+}
+
+.perm-tool-checkbox {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  accent-color: #4a9eff;
+  flex-shrink: 0;
+}
+
+.perm-tool-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e0e0e0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  min-width: 160px;
+  flex-shrink: 0;
+}
+
+.perm-tool-desc {
+  font-size: 13px;
+  color: #8888aa;
+  line-height: 1.4;
+  flex: 1;
+}
+
+.perm-tool-target {
+  font-size: 12px;
+  color: #666688;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+/* --- Badges --- */
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-right: 4px;
+}
+
+.badge-active {
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.2);
+}
+
+.badge-inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #8888aa;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.badge-admin {
+  background: rgba(74, 158, 255, 0.12);
+  color: #4a9eff;
+  border: 1px solid rgba(74, 158, 255, 0.2);
+}
+
+.badge-group {
+  background: rgba(255, 255, 255, 0.04);
+  color: #aaaacc;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 /* --- Responsive --- */
 @media (max-width: 768px) {
   .app-main {

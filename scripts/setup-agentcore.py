@@ -129,10 +129,12 @@ def main():
     # --------------------------------------------------------
     # Step 4: Add AgentCore Gateway
     # --------------------------------------------------------
-    print("\n[4/8] Adding AgentCore Gateway...")
+    print("\n[4/8] Adding AgentCore Gateway (JWT auth for per-user tool control)...")
     r = run(
         f'agentcore add gateway --name SmartHomeGateway '
-        f'--authorizer-type NONE',
+        f'--authorizer-type CUSTOM_JWT '
+        f'--discovery-url {discovery_url} '
+        f'--allowed-audience {client_id}',
         cwd=project_dir,
     )
     if r.returncode != 0:
@@ -285,11 +287,17 @@ def main():
             roleArn=rt_info["roleArn"],
             networkConfiguration=rt_info["networkConfiguration"],
             environmentVariables=existing_env,
+            # Propagate Authorization header to agent code so it can forward
+            # the user's JWT to the CUSTOM_JWT gateway for per-user policy evaluation.
+            requestHeaderConfiguration={
+                "requestHeaderAllowlist": ["Authorization"],
+            },
         )
         if rt_info.get("authorizerConfiguration"):
             update_kwargs["authorizerConfiguration"] = rt_info["authorizerConfiguration"]
         ac.update_agent_runtime(**update_kwargs)
         print(f"  Patched MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME={skills_table}")
+        print(f"  Enabled Authorization header propagation to agent code")
 
         # Grant runtime role DynamoDB read access for skills table
         role_arn = rt_info.get("roleArn", "")
@@ -318,19 +326,49 @@ def main():
     if runtime_arn:
         try:
             lambda_client = boto3.client("lambda", region_name=REGION)
+            # Get memory ID from runtime env vars (auto-set by agentcore CLI)
+            memory_id = ""
+            for k, v in existing_env.items():
+                if k.startswith("MEMORY_") and k.endswith("_ID"):
+                    memory_id = v
+                    break
+            admin_env = {
+                "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
+                "AGENT_RUNTIME_ARN": runtime_arn,
+                "AWS_REGION_OVERRIDE": REGION,
+                "COGNITO_USER_POOL_ID": outputs.get("UserPoolId", ""),
+                "GATEWAY_ID": gateway_id,
+                "MEMORY_ID": memory_id,
+            }
+            # Preserve SKILL_FILES_BUCKET from CDK stack
+            skill_files_bucket = outputs.get("SkillFilesBucketName", "")
+            if skill_files_bucket:
+                admin_env["SKILL_FILES_BUCKET"] = skill_files_bucket
             lambda_client.update_function_configuration(
                 FunctionName="smarthome-admin-api",
-                Environment={
-                    "Variables": {
-                        "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
-                        "AGENT_RUNTIME_ARN": runtime_arn,
-                        "AWS_REGION_OVERRIDE": REGION,
-                    }
-                },
+                Environment={"Variables": admin_env},
             )
             print(f"  Patched admin Lambda with AGENT_RUNTIME_ARN")
+            print(f"  Patched admin Lambda with GATEWAY_ID={gateway_id}")
+            if skill_files_bucket:
+                print(f"  Patched admin Lambda with SKILL_FILES_BUCKET={skill_files_bucket}")
         except Exception as e:
             print(f"  Warning: Failed to patch admin Lambda: {e}")
+
+        # Patch user-init Lambda with GATEWAY_ID
+        try:
+            user_init_resp = lambda_client.get_function_configuration(
+                FunctionName="smarthome-user-init"
+            )
+            user_init_env = user_init_resp.get("Environment", {}).get("Variables", {})
+            user_init_env["GATEWAY_ID"] = gateway_id
+            lambda_client.update_function_configuration(
+                FunctionName="smarthome-user-init",
+                Environment={"Variables": user_init_env},
+            )
+            print(f"  Patched user-init Lambda with GATEWAY_ID={gateway_id}")
+        except Exception as e:
+            print(f"  Warning: Failed to patch user-init Lambda: {e}")
 
     # Re-write config.js for ALL frontends.
     # CDK BucketDeployment syncs dist/ to S3 and removes files not in the source,

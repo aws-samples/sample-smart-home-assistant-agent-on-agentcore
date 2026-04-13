@@ -7,6 +7,9 @@ export interface SkillItem {
   description: string;
   instructions: string;
   allowedTools: string[];
+  license?: string;
+  compatibility?: string;
+  metadata?: Record<string, string>;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -17,6 +20,15 @@ export interface SkillInput {
   description: string;
   instructions: string;
   allowedTools: string[];
+  license?: string;
+  compatibility?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface SkillFile {
+  path: string;
+  size: number;
+  lastModified: string;
 }
 
 function getBaseUrl(): string {
@@ -75,7 +87,7 @@ export async function createSkill(skill: SkillInput): Promise<void> {
 export async function updateSkill(
   userId: string,
   skillName: string,
-  updates: Partial<Pick<SkillInput, 'description' | 'instructions' | 'allowedTools'>>
+  updates: Partial<Pick<SkillInput, 'description' | 'instructions' | 'allowedTools' | 'license' | 'compatibility' | 'metadata'>>
 ): Promise<void> {
   const headers = await authHeaders();
   const res = await fetch(
@@ -158,6 +170,31 @@ export interface SessionInfo {
   lastActiveAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// Cognito Users & Tool Permissions
+// ---------------------------------------------------------------------------
+
+export interface CognitoUserInfo {
+  username: string;
+  email: string;
+  sub: string;
+  status: string;
+  createdAt: string;
+  groups: string[];
+}
+
+export interface GatewayTool {
+  name: string;
+  description: string;
+  targetName: string;
+}
+
+export interface UserPermissions {
+  userId: string;
+  allowedTools: string[];
+  updatedAt?: string;
+}
+
 export async function listSessions(): Promise<SessionInfo[]> {
   const headers = await authHeaders();
   const res = await fetch(`${getBaseUrl()}/sessions`, { headers });
@@ -168,6 +205,198 @@ export async function listSessions(): Promise<SessionInfo[]> {
   const data = await res.json();
   return data.sessions || [];
 }
+
+// ---------------------------------------------------------------------------
+// Skill File Management
+// ---------------------------------------------------------------------------
+
+export async function listSkillFiles(
+  userId: string,
+  skillName: string
+): Promise<SkillFile[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${encodeURIComponent(skillName)}/files`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list files (${res.status})`);
+  }
+  const data = await res.json();
+  return data.files || [];
+}
+
+export async function getUploadUrl(
+  userId: string,
+  skillName: string,
+  directory: string,
+  filename: string,
+  contentType: string = 'application/octet-stream'
+): Promise<{ uploadUrl: string; key: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${encodeURIComponent(skillName)}/files/upload-url`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ directory, filename, contentType }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get upload URL (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function uploadSkillFile(uploadUrl: string, file: File): Promise<void> {
+  const res = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  if (!res.ok) {
+    throw new Error(`Upload failed (${res.status})`);
+  }
+}
+
+export async function getDownloadUrl(
+  userId: string,
+  skillName: string,
+  filePath: string
+): Promise<string> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${encodeURIComponent(skillName)}/files/download-url`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ path: filePath }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get download URL (${res.status})`);
+  }
+  const data = await res.json();
+  return data.downloadUrl;
+}
+
+export async function deleteSkillFile(
+  userId: string,
+  skillName: string,
+  filePath: string
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${encodeURIComponent(skillName)}/files?path=${encodeURIComponent(filePath)}`,
+    { method: 'DELETE', headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to delete file (${res.status})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cognito Users & Tool Permissions
+// ---------------------------------------------------------------------------
+
+export async function listCognitoUsers(): Promise<CognitoUserInfo[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/users`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list users (${res.status})`);
+  }
+  const data = await res.json();
+  return data.users || [];
+}
+
+export async function listGatewayTools(): Promise<GatewayTool[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/tools`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list tools (${res.status})`);
+  }
+  const data = await res.json();
+  return data.tools || [];
+}
+
+export async function getUserPermissions(userId: string): Promise<UserPermissions> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get permissions (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function updateUserPermissions(
+  userId: string,
+  allowedTools: string[]
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ allowedTools }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to update permissions (${res.status})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memories
+// ---------------------------------------------------------------------------
+
+export interface MemoryRecord {
+  id: string;
+  type: string;
+  text: string;
+  strategy: string;
+  createdAt: string;
+}
+
+export async function listMemoryActors(): Promise<string[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/memories`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list memory actors (${res.status})`);
+  }
+  const data = await res.json();
+  return data.actors || [];
+}
+
+export async function getMemoryRecords(actorId: string): Promise<MemoryRecord[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/memories/${encodeURIComponent(actorId)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get memory records (${res.status})`);
+  }
+  const data = await res.json();
+  return data.records || [];
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
 
 export async function stopSession(sessionId: string): Promise<void> {
   // Call AgentCore Runtime StopRuntimeSession API directly with JWT
