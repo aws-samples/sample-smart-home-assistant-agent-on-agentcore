@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { MqttClient } from '../mqtt/MqttClient';
+import { useI18n } from '../i18n';
 
 type CookerStatus = 'idle' | 'cooking' | 'keep_warm' | 'done';
 type CookingMode = 'white_rice' | 'brown_rice' | 'porridge' | 'steam';
@@ -18,11 +19,18 @@ const TARGET_TEMPS: Record<CookingMode, number> = {
   steam: 100,
 };
 
-const MODE_LABELS: Record<CookingMode, string> = {
-  white_rice: 'White Rice',
-  brown_rice: 'Brown Rice',
-  porridge: 'Porridge',
-  steam: 'Steam',
+const MODE_LABEL_KEYS: Record<CookingMode, string> = {
+  white_rice: 'rice.mode.whiteRice',
+  brown_rice: 'rice.mode.brownRice',
+  porridge: 'rice.mode.porridge',
+  steam: 'rice.mode.steam',
+};
+
+const STATUS_LABEL_KEYS: Record<CookerStatus, string> = {
+  idle: 'rice.status.idle',
+  cooking: 'rice.status.cooking',
+  keep_warm: 'rice.status.keepWarm',
+  done: 'rice.status.done',
 };
 
 const RiceCooker: React.FC = () => {
@@ -32,6 +40,7 @@ const RiceCooker: React.FC = () => {
   const [temperature, setTemperature] = useState(25);
   const [keepWarm, setKeepWarm] = useState(false);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (status === 'cooking' && timeRemaining > 0) {
@@ -108,20 +117,13 @@ const RiceCooker: React.FC = () => {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const statusLabels: Record<CookerStatus, string> = {
-    idle: 'Idle',
-    cooking: 'Cooking',
-    keep_warm: 'Keep Warm',
-    done: 'Done',
-  };
-
   return (
     <div className="device-card">
       <div className="device-card-header">
-        <h2>Rice Cooker</h2>
+        <h2>{t('rice.title')}</h2>
         <div className="device-status">
           <span className={`dot ${status !== 'idle' ? 'on' : 'off'}`} />
-          {statusLabels[status]}
+          {t(STATUS_LABEL_KEYS[status])}
         </div>
       </div>
       <div className="rice-cooker-body">
@@ -136,33 +138,33 @@ const RiceCooker: React.FC = () => {
           <div className="cooker-lid" />
           <div className={`cooker-display ${status === 'cooking' ? 'cooking' : ''}`}>
             <div className="mode-label">
-              {status === 'idle' ? 'Ready' : MODE_LABELS[cookingMode]}
+              {status === 'idle' ? t('rice.ready') : t(MODE_LABEL_KEYS[cookingMode])}
             </div>
             <div className="timer-display">
-              {status === 'cooking' ? formatTime(timeRemaining) : status === 'keep_warm' ? 'WARM' : status === 'done' ? 'DONE' : '--:--'}
+              {status === 'cooking' ? formatTime(timeRemaining) : status === 'keep_warm' ? t('rice.warm') : status === 'done' ? t('rice.done') : '--:--'}
             </div>
-            <div className="temp-display">{temperature}°C</div>
+            <div className="temp-display">{temperature}\u00b0C</div>
           </div>
         </div>
         <div className="cooker-buttons">
-          {(Object.keys(MODE_LABELS) as CookingMode[]).map((m) => (
+          {(Object.keys(MODE_LABEL_KEYS) as CookingMode[]).map((m) => (
             <button
               key={m}
               className={status === 'cooking' && cookingMode === m ? 'active' : ''}
               onClick={() => startCooking(m)}
               disabled={status === 'cooking'}
             >
-              {MODE_LABELS[m]}
+              {t(MODE_LABEL_KEYS[m])}
             </button>
           ))}
           <button onClick={stopCooking} disabled={status === 'idle'}>
-            Stop
+            {t('rice.stop')}
           </button>
           <button
             className={keepWarm ? 'active' : ''}
             onClick={() => setKeepWarm(!keepWarm)}
           >
-            Keep Warm: {keepWarm ? 'ON' : 'OFF'}
+            {t('rice.keepWarm')} {keepWarm ? t('common.on') : t('common.off')}
           </button>
         </div>
       </div>

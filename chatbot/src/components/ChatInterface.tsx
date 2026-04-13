@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { jwtDecode } from 'jwt-decode';
 import { getConfig } from '../config';
 import { getIdToken } from '../auth/CognitoAuth';
+import { useI18n } from '../i18n';
 
 interface ChatMessage {
   id: string;
@@ -19,6 +20,7 @@ const ChatInterface: React.FC = () => {
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState('');
+  const { t } = useI18n();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -87,11 +89,11 @@ const ChatInterface: React.FC = () => {
         },
       ]);
     } catch (err: any) {
-      setError(err.message || 'Failed to send message');
+      setError(err.message || t('chat.sendFailed'));
     } finally {
       setIsTyping(false);
     }
-  }, [inputValue]);
+  }, [inputValue, t]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -117,28 +119,28 @@ const ChatInterface: React.FC = () => {
                 <polyline points="9 22 9 12 15 12 15 22" />
               </svg>
             </div>
-            <h3 className="empty-title">Welcome to Smart Home Assistant</h3>
+            <h3 className="empty-title">{t('chat.welcome')}</h3>
             <p className="empty-subtitle">
-              Control your smart home devices with natural language.
+              {t('chat.subtitle')}
             </p>
             <div className="suggestion-chips">
-              <button className="chip" onClick={() => setInputValue('Check what smart home devices I have')}>
-                Check what devices I have
+              <button className="chip" onClick={() => setInputValue(t('chat.chip.checkDevices.prompt'))}>
+                {t('chat.chip.checkDevices')}
               </button>
-              <button className="chip" onClick={() => setInputValue('Turn on all my devices')}>
-                Turn on all my devices
+              <button className="chip" onClick={() => setInputValue(t('chat.chip.turnOnAll.prompt'))}>
+                {t('chat.chip.turnOnAll')}
               </button>
-              <button className="chip" onClick={() => setInputValue('Change the LED mode to rainbow')}>
-                Change the LED mode
+              <button className="chip" onClick={() => setInputValue(t('chat.chip.changeLed.prompt'))}>
+                {t('chat.chip.changeLed')}
               </button>
-              <button className="chip" onClick={() => setInputValue('Start cooking white rice')}>
-                Start cooking white rice
+              <button className="chip" onClick={() => setInputValue(t('chat.chip.cookRice.prompt'))}>
+                {t('chat.chip.cookRice')}
               </button>
-              <button className="chip" onClick={() => setInputValue('Turn on the fan at speed 2')}>
-                Turn on fan at speed 2
+              <button className="chip" onClick={() => setInputValue(t('chat.chip.turnOnFan.prompt'))}>
+                {t('chat.chip.turnOnFan')}
               </button>
-              <button className="chip" onClick={() => setInputValue('Preheat oven to 350 degrees')}>
-                Preheat oven to 350°F
+              <button className="chip" onClick={() => setInputValue(t('chat.chip.preheatOven.prompt'))}>
+                {t('chat.chip.preheatOven')}
               </button>
             </div>
           </div>
@@ -191,7 +193,7 @@ const ChatInterface: React.FC = () => {
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
+            placeholder={t('chat.placeholder')}
             rows={1}
           />
           <button

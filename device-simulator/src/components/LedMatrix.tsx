@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { MqttClient } from '../mqtt/MqttClient';
+import { useI18n } from '../i18n';
 
 const GRID_SIZE = 16;
 const TOTAL_PIXELS = GRID_SIZE * GRID_SIZE;
@@ -39,12 +40,13 @@ const LedMatrix: React.FC = () => {
   const [pixels, setPixels] = useState<string[]>(new Array(TOTAL_PIXELS).fill('#000000'));
   const frameRef = useRef(0);
   const tickRef = useRef(0);
+  const { t } = useI18n();
 
   const generateFrame = useCallback(() => {
     if (!power) {
       return new Array(TOTAL_PIXELS).fill('#000000');
     }
-    const t = tickRef.current;
+    const tick = tickRef.current;
     const bMul = brightness / 100;
     const newPixels: string[] = new Array(TOTAL_PIXELS);
 
@@ -53,21 +55,21 @@ const LedMatrix: React.FC = () => {
         for (let row = 0; row < GRID_SIZE; row++) {
           for (let col = 0; col < GRID_SIZE; col++) {
             const idx = row * GRID_SIZE + col;
-            const hue = (t * 4 + row * 20 + col * 20) % 360;
-            const lightness = 50 + Math.sin((t * 0.06) + row * 0.4 + col * 0.4) * 15;
+            const hue = (tick * 4 + row * 20 + col * 20) % 360;
+            const lightness = 50 + Math.sin((tick * 0.06) + row * 0.4 + col * 0.4) * 15;
             newPixels[idx] = hslToHex(hue, 100, lightness * bMul);
           }
         }
         break;
       }
       case 'breathing': {
-        const breathPhase = (Math.sin(t * 0.04) + 1) / 2;
-        const pulseHue = (t * 0.5) % 360;
+        const breathPhase = (Math.sin(tick * 0.04) + 1) / 2;
+        const pulseHue = (tick * 0.5) % 360;
         for (let i = 0; i < TOTAL_PIXELS; i++) {
           const row = Math.floor(i / GRID_SIZE);
           const col = i % GRID_SIZE;
           const dist = Math.sqrt(Math.pow(row - 7.5, 2) + Math.pow(col - 7.5, 2));
-          const wave = Math.sin(t * 0.04 - dist * 0.4) * 0.4 + 0.6;
+          const wave = Math.sin(tick * 0.04 - dist * 0.4) * 0.4 + 0.6;
           const light = wave * breathPhase * 60 * bMul;
           const hue = (pulseHue + dist * 8) % 360;
           newPixels[i] = hslToHex(hue, 100, Math.max(2, light));
@@ -78,9 +80,9 @@ const LedMatrix: React.FC = () => {
         for (let row = 0; row < GRID_SIZE; row++) {
           for (let col = 0; col < GRID_SIZE; col++) {
             const idx = row * GRID_SIZE + col;
-            const pos = (row + col + t * 0.4) % 16;
+            const pos = (row + col + tick * 0.4) % 16;
             const trail = Math.max(0, 1 - (pos % 6) / 3);
-            const hue = (t * 3 + (row + col) * 25) % 360;
+            const hue = (tick * 3 + (row + col) * 25) % 360;
             newPixels[idx] = hslToHex(hue, 100, trail * 60 * bMul);
           }
         }
@@ -95,8 +97,8 @@ const LedMatrix: React.FC = () => {
           } else {
             const row = Math.floor(i / GRID_SIZE);
             const col = i % GRID_SIZE;
-            const ambient = Math.sin(t * 0.03 + row * 0.5 + col * 0.5) * 5 + 8;
-            newPixels[i] = hslToHex((t * 0.5 + row * 10) % 360, 60, ambient * bMul);
+            const ambient = Math.sin(tick * 0.03 + row * 0.5 + col * 0.5) * 5 + 8;
+            newPixels[i] = hslToHex((tick * 0.5 + row * 10) % 360, 60, ambient * bMul);
           }
         }
         break;
@@ -106,8 +108,8 @@ const LedMatrix: React.FC = () => {
           for (let col = 0; col < GRID_SIZE; col++) {
             const idx = row * GRID_SIZE + col;
             const heat = Math.max(0, (GRID_SIZE - row) / GRID_SIZE
-              + Math.sin(t * 0.1 + col * 0.8) * 0.35
-              + Math.sin(t * 0.15 + col * 1.3 + row * 0.5) * 0.25
+              + Math.sin(tick * 0.1 + col * 0.8) * 0.35
+              + Math.sin(tick * 0.15 + col * 1.3 + row * 0.5) * 0.25
               + (Math.random() * 0.18));
             const clampedHeat = Math.min(1, heat);
             const hue = clampedHeat < 0.5 ? clampedHeat * 30 : 15 + clampedHeat * 30;
@@ -121,8 +123,8 @@ const LedMatrix: React.FC = () => {
         for (let row = 0; row < GRID_SIZE; row++) {
           for (let col = 0; col < GRID_SIZE; col++) {
             const idx = row * GRID_SIZE + col;
-            const wave1 = Math.sin(t * 0.04 + col * 0.5 + row * 0.25) * 0.5 + 0.5;
-            const wave2 = Math.sin(t * 0.06 + col * 0.25 - row * 0.35) * 0.4 + 0.5;
+            const wave1 = Math.sin(tick * 0.04 + col * 0.5 + row * 0.25) * 0.5 + 0.5;
+            const wave2 = Math.sin(tick * 0.06 + col * 0.25 - row * 0.35) * 0.4 + 0.5;
             const combined = (wave1 + wave2) / 2;
             const hue = 180 + combined * 60;
             const light = 20 + combined * 45;
@@ -135,8 +137,8 @@ const LedMatrix: React.FC = () => {
         for (let row = 0; row < GRID_SIZE; row++) {
           for (let col = 0; col < GRID_SIZE; col++) {
             const idx = row * GRID_SIZE + col;
-            const n1 = Math.sin(t * 0.025 + col * 0.35) * Math.cos(t * 0.018 + row * 0.45);
-            const n2 = Math.sin(t * 0.03 + row * 0.25 + col * 0.15);
+            const n1 = Math.sin(tick * 0.025 + col * 0.35) * Math.cos(tick * 0.018 + row * 0.45);
+            const n2 = Math.sin(tick * 0.03 + row * 0.25 + col * 0.15);
             const combined = (n1 + n2 + 2) / 4;
             const hue = 90 + combined * 200;
             const verticalFade = Math.pow(1 - row / GRID_SIZE, 0.5);
@@ -198,24 +200,24 @@ const LedMatrix: React.FC = () => {
     return () => mqtt.unsubscribe(topic, handler);
   }, []);
 
-  const modes: { key: LedMode; label: string }[] = [
-    { key: 'rainbow', label: 'Rainbow Wave' },
-    { key: 'breathing', label: 'Breathing' },
-    { key: 'chase', label: 'Color Chase' },
-    { key: 'sparkle', label: 'Sparkle' },
-    { key: 'fire', label: 'Fire' },
-    { key: 'ocean', label: 'Ocean Wave' },
-    { key: 'aurora', label: 'Aurora' },
-    { key: 'solid', label: 'Solid' },
+  const modes: { key: LedMode; labelKey: string }[] = [
+    { key: 'rainbow', labelKey: 'led.mode.rainbow' },
+    { key: 'breathing', labelKey: 'led.mode.breathing' },
+    { key: 'chase', labelKey: 'led.mode.chase' },
+    { key: 'sparkle', labelKey: 'led.mode.sparkle' },
+    { key: 'fire', labelKey: 'led.mode.fire' },
+    { key: 'ocean', labelKey: 'led.mode.ocean' },
+    { key: 'aurora', labelKey: 'led.mode.aurora' },
+    { key: 'solid', labelKey: 'led.mode.solid' },
   ];
 
   return (
     <div className="device-card">
       <div className="device-card-header">
-        <h2>LED Matrix</h2>
+        <h2>{t('led.title')}</h2>
         <div className="device-status">
           <span className={`dot ${power ? 'on' : 'off'}`} />
-          {power ? mode.charAt(0).toUpperCase() + mode.slice(1) : 'Off'}
+          {power ? mode.charAt(0).toUpperCase() + mode.slice(1) : t('common.off')}
         </div>
       </div>
       <div className="led-panel">
@@ -237,7 +239,7 @@ const LedMatrix: React.FC = () => {
             onClick={() => setPower(!power)}
             style={power ? { background: '#1a3a1a', borderColor: '#22c55e', color: '#22c55e' } : {}}
           >
-            {power ? 'ON' : 'OFF'}
+            {power ? t('common.on') : t('common.off')}
           </button>
           {modes.map((m) => (
             <button
@@ -245,13 +247,13 @@ const LedMatrix: React.FC = () => {
               className={mode === m.key && power ? 'active' : ''}
               onClick={() => { setMode(m.key); setPower(true); }}
             >
-              {m.label}
+              {t(m.labelKey)}
             </button>
           ))}
         </div>
         <div className="led-info">
           <span>
-            Brightness:
+            {t('led.brightness')}
             <input
               type="range"
               min={0}
