@@ -279,6 +279,70 @@ export class SmartHomeStack extends cdk.Stack {
     skillFilesBucket.grantReadWrite(adminLambda);
 
     // ========================
+    // Lambda - User Init (Cognito Post-Confirmation trigger)
+    // Auto-provisions all tool permissions for newly confirmed users.
+    // Separate Lambda to avoid circular dependency with admin API's Cognito authorizer.
+    // ========================
+    const userInitLambda = new lambda.Function(this, "UserInitLambda", {
+      functionName: "smarthome-user-init",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/user-init")),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 256,
+      environment: {
+        SKILLS_TABLE_NAME: skillsTable.tableName,
+        GATEWAY_ID: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+    skillsTable.grantReadWriteData(userInitLambda);
+
+    // Grant permissions for AgentCore Gateway tools and policy management
+    userInitLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock-agentcore:CreatePolicyEngine",
+        "bedrock-agentcore:GetPolicyEngine",
+        "bedrock-agentcore:ListPolicyEngines",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy",
+        "bedrock-agentcore:ListPolicies",
+        "bedrock-agentcore:GetPolicy",
+        "bedrock-agentcore:ManageAdminPolicy",
+        "bedrock-agentcore:ManageResourceScopedPolicy",
+        "bedrock-agentcore:GetGateway",
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:ListGatewayTargets",
+        "bedrock-agentcore:GetGatewayTarget",
+      ],
+      resources: ["*"],
+    }));
+
+    // S3 read for gateway tool schemas stored in CDK assets bucket
+    userInitLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject"],
+      resources: [`arn:aws:s3:::cdk-*-assets-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}/*`],
+    }));
+
+    // iam:PassRole + PutRolePolicy for gateway policy engine association
+    userInitLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PassRole", "iam:PutRolePolicy"],
+      resources: ["*"],
+      conditions: {
+        StringEquals: {
+          "iam:PassedToService": "bedrock-agentcore.amazonaws.com",
+        },
+      },
+    }));
+    userInitLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PutRolePolicy"],
+      resources: ["arn:aws:iam::*:role/AgentCore-*"],
+    }));
+
+    userPool.addTrigger(cognito.UserPoolOperation.POST_CONFIRMATION, userInitLambda);
+
+    // ========================
     // API Gateway - Admin API
     // ========================
     const adminApi = new apigw.RestApi(this, "AdminApi", {

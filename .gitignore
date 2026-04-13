@@ -22,6 +22,17 @@ cdk/lambda/admin-api/jmespath/
 cdk/lambda/admin-api/urllib3/
 cdk/lambda/admin-api/dateutil/
 cdk/lambda/admin-api/*.dist-info/
+cdk/lambda/admin-api/bin/
+cdk/lambda/admin-api/six.py
+cdk/lambda/user-init/boto3/
+cdk/lambda/user-init/botocore/
+cdk/lambda/user-init/s3transfer/
+cdk/lambda/user-init/jmespath/
+cdk/lambda/user-init/urllib3/
+cdk/lambda/user-init/dateutil/
+cdk/lambda/user-init/*.dist-info/
+cdk/lambda/user-init/bin/
+cdk/lambda/user-init/six.py
 .venv/
 .DS_Store
 venv/

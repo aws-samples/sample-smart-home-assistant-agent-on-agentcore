@@ -355,6 +355,21 @@ def main():
         except Exception as e:
             print(f"  Warning: Failed to patch admin Lambda: {e}")
 
+        # Patch user-init Lambda with GATEWAY_ID
+        try:
+            user_init_resp = lambda_client.get_function_configuration(
+                FunctionName="smarthome-user-init"
+            )
+            user_init_env = user_init_resp.get("Environment", {}).get("Variables", {})
+            user_init_env["GATEWAY_ID"] = gateway_id
+            lambda_client.update_function_configuration(
+                FunctionName="smarthome-user-init",
+                Environment={"Variables": user_init_env},
+            )
+            print(f"  Patched user-init Lambda with GATEWAY_ID={gateway_id}")
+        except Exception as e:
+            print(f"  Warning: Failed to patch user-init Lambda: {e}")
+
     # Re-write config.js for ALL frontends.
     # CDK BucketDeployment syncs dist/ to S3 and removes files not in the source,
     # which wipes config.js that was written by CDK custom resources.

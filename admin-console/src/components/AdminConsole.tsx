@@ -28,6 +28,7 @@ import {
   GatewayTool,
   MemoryRecord,
 } from '../api/adminApi';
+import { getConfig } from '../config';
 
 // Skill name validation (matches Strands SDK pattern)
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
@@ -1567,7 +1568,22 @@ const AdminConsole: React.FC = () => {
       )}
 
       {/* Guardrails Tab */}
-      {activeTab === 'guardrails' && (
+      {activeTab === 'guardrails' && (() => {
+        const cfg = getConfig();
+        // Build CloudWatch Evaluations URL from runtime ARN
+        // ARN format: arn:aws:bedrock-agentcore:{region}:{account}:runtime/{runtimeId}
+        const arnParts = cfg.agentRuntimeArn.split(':');
+        const runtimeId = arnParts.length >= 6 ? arnParts[5].replace('runtime/', '') : '';
+        const agentName = runtimeId.replace(/-[^-]+$/, ''); // strip random suffix
+        const resourceId = encodeURIComponent(
+          `${cfg.agentRuntimeArn}/runtime-endpoint/DEFAULT:DEFAULT`
+        );
+        const evaluatorUrl = runtimeId
+          ? `https://${cfg.region}.console.aws.amazon.com/cloudwatch/home?region=${cfg.region}`
+            + `#/gen-ai-observability/agent-core/agent-alias/${runtimeId}/endpoint/DEFAULT/agent/${agentName}`
+            + `?resourceId=${resourceId}&serviceName=${agentName}.DEFAULT&tabId=evaluations`
+          : 'https://console.aws.amazon.com/cloudwatch/home#/gen-ai-observability';
+        return (
         <div className="guardrails-section">
           <div className="settings-panel" style={{ marginBottom: '16px' }}>
             <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>Agent Guardrails</h3>
@@ -1596,7 +1612,7 @@ const AdminConsole: React.FC = () => {
                   <td className="cell-actions">
                     <a
                       className="btn btn-sm btn-primary"
-                      href="https://console.aws.amazon.com/bedrock-agentcore/home#/evaluators"
+                      href={evaluatorUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
@@ -1637,7 +1653,8 @@ const AdminConsole: React.FC = () => {
             </table>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

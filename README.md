@@ -15,7 +15,8 @@ smarthome-assistant-agent/
 │   └── lambda/
 │       ├── iot-control/     # 验证并发布 MQTT 命令
 │       ├── iot-discovery/   # 返回可用设备列表
-│       └── admin-api/       # 技能、模型、工具权限、记忆、会话管理
+│       ├── admin-api/       # 技能、模型、工具权限、记忆、会话管理
+│       └── user-init/       # Cognito 注册触发器 — 新用户自动分配工具权限
 ├── device-simulator/        # React 应用 — 4 个模拟 IoT 设备
 ├── chatbot/                 # React 应用 — 带 Cognito 认证的聊天 UI
 ├── admin-console/           # React 应用 — Agent Harness 管理控制台
@@ -44,6 +45,214 @@ smarthome-assistant-agent/
 | AWS 账号 | — | 需开通 Bedrock AgentCore 和 Kimi-2.5 模型访问权限 |
 
 **重要：** 部署前需在 [Bedrock 控制台 > 模型访问](https://console.aws.amazon.com/bedrock/home#/modelaccess) 中申请 **Kimi K2.5**（`moonshotai.kimi-k2.5`）的访问权限。
+
+### 部署者 IAM 权限
+
+执行 `deploy.sh` 的 IAM 用户/角色需要以下 AWS 服务权限：
+
+| AWS 服务 | 权限 | 用途 |
+|---------|------|------|
+| **CloudFormation** | `CreateStack`, `UpdateStack`, `DeleteStack`, `DescribeStacks`, `DescribeStackEvents`, `CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`, `GetTemplate`, `ListStacks` | CDK 和 agentcore CLI 部署 |
+| **S3** | `CreateBucket`, `DeleteBucket`, `PutObject`, `GetObject`, `DeleteObject`, `ListBucket`, `PutBucketPolicy`, `PutBucketCors`, `PutBucketVersioning`, `GetBucketLocation` | CDK 资产桶、静态网站桶、技能文件桶、config.js 写入 |
+| **CloudFront** | `CreateDistribution`, `GetDistribution`, `UpdateDistribution`, `DeleteDistribution`, `CreateInvalidation` | 三个前端 CDN 分发 |
+| **Lambda** | `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `UpdateFunctionConfiguration`, `UpdateFunctionCode`, `AddPermission`, `RemovePermission`, `DeleteFunction` | 4 个 Lambda 函数（iot-control、iot-discovery、admin-api、user-init） |
+| **DynamoDB** | `CreateTable`, `DeleteTable`, `DescribeTable`, `PutItem`, `Query`, `Scan` | 技能表创建 + seed-skills.py 写入初始数据 |
+| **Cognito** | `CreateUserPool`, `UpdateUserPool`, `DeleteUserPool`, `CreateUserPoolClient`, `CreateUserPoolDomain`, `AdminCreateUser`, `AdminSetUserPassword`, `CreateUserPoolGroup`, `AdminAddUserToGroup` | 用户池、管理员用户、admin 组 |
+| **Cognito Identity** | `CreateIdentityPool`, `SetIdentityPoolRoles`, `DeleteIdentityPool` | 设备模拟器 MQTT 认证 |
+| **IoT Core** | `DescribeEndpoint`, `CreateThing`, `DeleteThing` | IoT 端点发现 + 设备 Thing 创建 |
+| **IAM** | `CreateRole`, `DeleteRole`, `GetRole`, `PutRolePolicy`, `DeleteRolePolicy`, `AttachRolePolicy`, `DetachRolePolicy`, `PassRole`, `CreateServiceLinkedRole` | Lambda 执行角色、Cognito 角色、Gateway 角色 |
+| **Bedrock AgentCore** | `Create/Get/Update/Delete` Gateway、AgentRuntime、PolicyEngine、Policy、Memory、Evaluator、OnlineEval；`ListGatewayTargets`、`GetGatewayTarget`、`ListPolicies`、`ListPolicyEngines` | Gateway、Runtime、策略引擎、Memory、Evaluator 全生命周期 |
+| **CloudWatch Logs** | `CreateLogGroup`, `PutRetentionPolicy`, `DeleteLogGroup` | Lambda 日志组 |
+| **STS** | `GetCallerIdentity` | 部署脚本获取账号 ID |
+
+<details>
+<summary>最小 IAM 策略 JSON（点击展开）</summary>
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormation",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
+        "cloudformation:DescribeStacks", "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate",
+        "cloudformation:ListStacks", "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet", "cloudformation:ExecuteChangeSet"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:*:*:stack/SmartHomeAssistantStack/*",
+        "arn:aws:cloudformation:*:*:stack/AgentCore-*/*",
+        "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
+      ]
+    },
+    {
+      "Sid": "S3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketLocation",
+        "s3:PutBucketPolicy", "s3:GetBucketPolicy", "s3:PutBucketVersioning",
+        "s3:PutBucketCors", "s3:PutObject", "s3:GetObject", "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::smarthome-*", "arn:aws:s3:::smarthome-*/*",
+        "arn:aws:s3:::cdk-*-assets-*", "arn:aws:s3:::cdk-*-assets-*/*"
+      ]
+    },
+    {
+      "Sid": "CloudFront",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateDistribution", "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig", "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution", "cloudfront:CreateInvalidation",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:CreateCloudFrontOriginAccessIdentity",
+        "cloudfront:GetCloudFrontOriginAccessIdentity",
+        "cloudfront:DeleteCloudFrontOriginAccessIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction", "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration", "lambda:UpdateFunctionConfiguration",
+        "lambda:UpdateFunctionCode", "lambda:AddPermission",
+        "lambda:RemovePermission", "lambda:DeleteFunction",
+        "lambda:InvokeFunction"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:smarthome-*"
+    },
+    {
+      "Sid": "LambdaCDKCustomResource",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction", "lambda:GetFunction",
+        "lambda:UpdateFunctionConfiguration", "lambda:UpdateFunctionCode",
+        "lambda:DeleteFunction", "lambda:AddPermission",
+        "lambda:RemovePermission", "lambda:InvokeFunction"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:SmartHomeAssistantStack-*"
+    },
+    {
+      "Sid": "DynamoDB",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:DescribeTable",
+        "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/smarthome-skills"
+    },
+    {
+      "Sid": "Cognito",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:CreateUserPool", "cognito-idp:UpdateUserPool",
+        "cognito-idp:DeleteUserPool", "cognito-idp:DescribeUserPool",
+        "cognito-idp:CreateUserPoolClient", "cognito-idp:DeleteUserPoolClient",
+        "cognito-idp:CreateUserPoolDomain", "cognito-idp:DeleteUserPoolDomain",
+        "cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword",
+        "cognito-idp:AdminDeleteUser", "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:ListUsers", "cognito-idp:AdminListGroupsForUser"
+      ],
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+    },
+    {
+      "Sid": "CognitoIdentity",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-identity:CreateIdentityPool", "cognito-identity:DeleteIdentityPool",
+        "cognito-identity:SetIdentityPoolRoles",
+        "cognito-identity:DescribeIdentityPool",
+        "cognito-identity:UpdateIdentityPool"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IoTCore",
+      "Effect": "Allow",
+      "Action": [
+        "iot:DescribeEndpoint", "iot:CreateThing", "iot:DeleteThing", "iot:DescribeThing"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAM",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:ListRoles",
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
+        "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:PassRole", "iam:CreateServiceLinkedRole", "iam:TagRole"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BedrockAgentCore",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup", "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy", "logs:DescribeLogGroups"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/smarthome-*"
+    },
+    {
+      "Sid": "CloudWatchLogsCDK",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup", "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy", "logs:DescribeLogGroups"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/SmartHomeAssistantStack-*"
+    },
+    {
+      "Sid": "STS",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "APIGateway",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:POST", "apigateway:GET", "apigateway:PUT",
+        "apigateway:DELETE", "apigateway:PATCH"
+      ],
+      "Resource": "arn:aws:apigateway:*::/*"
+    },
+    {
+      "Sid": "SSM",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+    },
+    {
+      "Sid": "ECR",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository", "ecr:DescribeRepositories",
+        "ecr:SetRepositoryPolicy", "ecr:GetRepositoryPolicy"
+      ],
+      "Resource": "arn:aws:ecr:*:*:repository/cdk-*"
+    }
+  ]
+}
+```
+
+</details>
 
 ---
 
@@ -83,7 +292,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 **CDK 堆栈** (`SmartHomeAssistantStack`) — 标准 AWS 资源：
 - Cognito 用户池 + 身份池 + 管理员组和默认管理员用户
 - IoT Core 设备 + 端点查询
-- Lambda 函数：iot-control（MQTT）、iot-discovery（设备列表）、admin-api（技能、模型、工具权限、记忆、会话）
+- Lambda 函数：iot-control（MQTT）、iot-discovery（设备列表）、admin-api（技能、模型、工具权限、记忆、会话）、user-init（新用户自动分配工具权限）
 - DynamoDB 表（smarthome-skills）用于 Agent 技能存储、用户设置和会话追踪
 - S3 桶（smarthome-skill-files）用于技能目录文件（scripts、references、assets），符合 [Agent Skills 规范](https://agentskills.io/specification)
 - API Gateway + Cognito 授权器用于管理 API
@@ -401,7 +610,8 @@ smarthome-assistant-agent/
 │   └── lambda/
 │       ├── iot-control/     # Validates & publishes MQTT commands
 │       ├── iot-discovery/   # Returns available device list
-│       └── admin-api/       # Skills, models, tool access, memories, sessions
+│       ├── admin-api/       # Skills, models, tool access, memories, sessions
+│       └── user-init/       # Cognito signup trigger — auto-provision tool permissions
 ├── device-simulator/        # React app — 4 simulated IoT devices
 ├── chatbot/                 # React app — chat UI with Cognito auth
 ├── admin-console/           # React app — Agent Harness Management console
@@ -430,6 +640,214 @@ smarthome-assistant-agent/
 | AWS Account | — | With Bedrock AgentCore and Kimi-2.5 model access |
 
 **Important:** Request access to **Kimi K2.5** (`moonshotai.kimi-k2.5`) in [Bedrock Console > Model Access](https://console.aws.amazon.com/bedrock/home#/modelaccess) before deploying.
+
+### Deployer IAM Permissions
+
+The IAM user/role running `deploy.sh` needs the following AWS service permissions:
+
+| AWS Service | Actions | Purpose |
+|-------------|---------|---------|
+| **CloudFormation** | `CreateStack`, `UpdateStack`, `DeleteStack`, `DescribeStacks`, `DescribeStackEvents`, `CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`, `GetTemplate`, `ListStacks` | CDK and agentcore CLI deployment |
+| **S3** | `CreateBucket`, `DeleteBucket`, `PutObject`, `GetObject`, `DeleteObject`, `ListBucket`, `PutBucketPolicy`, `PutBucketCors`, `PutBucketVersioning`, `GetBucketLocation` | CDK asset bucket, static site buckets, skill files bucket, config.js writes |
+| **CloudFront** | `CreateDistribution`, `GetDistribution`, `UpdateDistribution`, `DeleteDistribution`, `CreateInvalidation` | Three frontend CDN distributions |
+| **Lambda** | `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `UpdateFunctionConfiguration`, `UpdateFunctionCode`, `AddPermission`, `RemovePermission`, `DeleteFunction` | 4 Lambda functions (iot-control, iot-discovery, admin-api, user-init) |
+| **DynamoDB** | `CreateTable`, `DeleteTable`, `DescribeTable`, `PutItem`, `Query`, `Scan` | Skills table creation + seed-skills.py initial data |
+| **Cognito** | `CreateUserPool`, `UpdateUserPool`, `DeleteUserPool`, `CreateUserPoolClient`, `CreateUserPoolDomain`, `AdminCreateUser`, `AdminSetUserPassword`, `CreateGroup`, `AdminAddUserToGroup` | User pool, admin user, admin group |
+| **Cognito Identity** | `CreateIdentityPool`, `SetIdentityPoolRoles`, `DeleteIdentityPool` | Device simulator MQTT auth |
+| **IoT Core** | `DescribeEndpoint`, `CreateThing`, `DeleteThing` | IoT endpoint discovery + device Thing creation |
+| **IAM** | `CreateRole`, `DeleteRole`, `GetRole`, `PutRolePolicy`, `DeleteRolePolicy`, `AttachRolePolicy`, `DetachRolePolicy`, `PassRole`, `CreateServiceLinkedRole` | Lambda execution roles, Cognito roles, Gateway roles |
+| **Bedrock AgentCore** | `Create/Get/Update/Delete` Gateway, AgentRuntime, PolicyEngine, Policy, Memory, Evaluator, OnlineEval; `ListGatewayTargets`, `GetGatewayTarget`, `ListPolicies`, `ListPolicyEngines` | Gateway, Runtime, policy engine, Memory, Evaluator lifecycle |
+| **CloudWatch Logs** | `CreateLogGroup`, `PutRetentionPolicy`, `DeleteLogGroup` | Lambda log groups |
+| **STS** | `GetCallerIdentity` | Setup scripts to get account ID |
+
+<details>
+<summary>Minimal IAM Policy JSON (click to expand)</summary>
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormation",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
+        "cloudformation:DescribeStacks", "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate",
+        "cloudformation:ListStacks", "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet", "cloudformation:ExecuteChangeSet"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:*:*:stack/SmartHomeAssistantStack/*",
+        "arn:aws:cloudformation:*:*:stack/AgentCore-*/*",
+        "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
+      ]
+    },
+    {
+      "Sid": "S3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketLocation",
+        "s3:PutBucketPolicy", "s3:GetBucketPolicy", "s3:PutBucketVersioning",
+        "s3:PutBucketCors", "s3:PutObject", "s3:GetObject", "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::smarthome-*", "arn:aws:s3:::smarthome-*/*",
+        "arn:aws:s3:::cdk-*-assets-*", "arn:aws:s3:::cdk-*-assets-*/*"
+      ]
+    },
+    {
+      "Sid": "CloudFront",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateDistribution", "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig", "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution", "cloudfront:CreateInvalidation",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:CreateCloudFrontOriginAccessIdentity",
+        "cloudfront:GetCloudFrontOriginAccessIdentity",
+        "cloudfront:DeleteCloudFrontOriginAccessIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction", "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration", "lambda:UpdateFunctionConfiguration",
+        "lambda:UpdateFunctionCode", "lambda:AddPermission",
+        "lambda:RemovePermission", "lambda:DeleteFunction",
+        "lambda:InvokeFunction"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:smarthome-*"
+    },
+    {
+      "Sid": "LambdaCDKCustomResource",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction", "lambda:GetFunction",
+        "lambda:UpdateFunctionConfiguration", "lambda:UpdateFunctionCode",
+        "lambda:DeleteFunction", "lambda:AddPermission",
+        "lambda:RemovePermission", "lambda:InvokeFunction"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:SmartHomeAssistantStack-*"
+    },
+    {
+      "Sid": "DynamoDB",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:DescribeTable",
+        "dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/smarthome-skills"
+    },
+    {
+      "Sid": "Cognito",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:CreateUserPool", "cognito-idp:UpdateUserPool",
+        "cognito-idp:DeleteUserPool", "cognito-idp:DescribeUserPool",
+        "cognito-idp:CreateUserPoolClient", "cognito-idp:DeleteUserPoolClient",
+        "cognito-idp:CreateUserPoolDomain", "cognito-idp:DeleteUserPoolDomain",
+        "cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword",
+        "cognito-idp:AdminDeleteUser", "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:ListUsers", "cognito-idp:AdminListGroupsForUser"
+      ],
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+    },
+    {
+      "Sid": "CognitoIdentity",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-identity:CreateIdentityPool", "cognito-identity:DeleteIdentityPool",
+        "cognito-identity:SetIdentityPoolRoles",
+        "cognito-identity:DescribeIdentityPool",
+        "cognito-identity:UpdateIdentityPool"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IoTCore",
+      "Effect": "Allow",
+      "Action": [
+        "iot:DescribeEndpoint", "iot:CreateThing", "iot:DeleteThing", "iot:DescribeThing"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAM",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:ListRoles",
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
+        "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:PassRole", "iam:CreateServiceLinkedRole", "iam:TagRole"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BedrockAgentCore",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup", "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy", "logs:DescribeLogGroups"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/smarthome-*"
+    },
+    {
+      "Sid": "CloudWatchLogsCDK",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup", "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy", "logs:DescribeLogGroups"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/SmartHomeAssistantStack-*"
+    },
+    {
+      "Sid": "STS",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "APIGateway",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:POST", "apigateway:GET", "apigateway:PUT",
+        "apigateway:DELETE", "apigateway:PATCH"
+      ],
+      "Resource": "arn:aws:apigateway:*::/*"
+    },
+    {
+      "Sid": "SSM",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+    },
+    {
+      "Sid": "ECR",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository", "ecr:DescribeRepositories",
+        "ecr:SetRepositoryPolicy", "ecr:GetRepositoryPolicy"
+      ],
+      "Resource": "arn:aws:ecr:*:*:repository/cdk-*"
+    }
+  ]
+}
+```
+
+</details>
 
 ---
 
@@ -469,7 +887,7 @@ The deployment creates two separate CloudFormation stacks:
 **CDK Stack** (`SmartHomeAssistantStack`) — standard AWS resources:
 - Cognito User Pool + Identity Pool + Admin group and default admin user
 - IoT Core things + endpoint lookup
-- Lambda functions: iot-control (MQTT), iot-discovery (device list), admin-api (skills, models, tool access, memories, sessions)
+- Lambda functions: iot-control (MQTT), iot-discovery (device list), admin-api (skills, models, tool access, memories, sessions), user-init (auto-provision tool permissions for new users)
 - DynamoDB table (smarthome-skills) for agent skill storage, user settings, and session tracking
 - S3 bucket (smarthome-skill-files) for skill directory files (scripts, references, assets) per the [Agent Skills spec](https://agentskills.io/specification)
 - API Gateway with Cognito authorizer for admin API
