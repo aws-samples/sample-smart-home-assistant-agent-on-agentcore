@@ -4,6 +4,7 @@
 
 基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。通过 Strands Agent 托管在 AgentCore Runtime 上，用户可以使用自然语言聊天机器人控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。设备控制命令通过 AgentCore Gateway 发送，并通过 AWS IoT Core 进行实时 MQTT 通信。管理控制台（Agent Harness Management）提供 7 个管理维度，覆盖 Agent 全生命周期的运维管控需求。
 
+![architecture](docs/screenshots/architecture.drawio.png)
 ![chatbot](docs/screenshots/smarthomeassistant-chat.png)
 ![device simulator](docs/screenshots/smarthomeassistant-devices-v2.png)
 ![admin console](docs/screenshots/smarthomeassistant-admin.png)
