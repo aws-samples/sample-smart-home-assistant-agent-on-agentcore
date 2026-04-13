@@ -1,14 +1,15 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { MqttClient } from '../mqtt/MqttClient';
+import { useI18n } from '../i18n';
 
 type OvenMode = 'off' | 'bake' | 'broil' | 'convection' | 'preheat';
 
-const MODE_LABELS: Record<OvenMode, string> = {
-  off: 'Off',
-  bake: 'Bake',
-  broil: 'Broil',
-  convection: 'Convection',
-  preheat: 'Preheat',
+const MODE_LABEL_KEYS: Record<OvenMode, string> = {
+  off: 'oven.mode.off',
+  bake: 'oven.mode.bake',
+  broil: 'oven.mode.broil',
+  convection: 'oven.mode.convection',
+  preheat: 'oven.mode.preheat',
 };
 
 const Oven: React.FC = () => {
@@ -18,6 +19,7 @@ const Oven: React.FC = () => {
   const [currentTemp, setCurrentTemp] = useState(72);
   const [timer, setTimer] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const { t } = useI18n();
 
   // Temperature simulation
   useEffect(() => {
@@ -132,10 +134,10 @@ const Oven: React.FC = () => {
   return (
     <div className="device-card">
       <div className="device-card-header">
-        <h2>Oven</h2>
+        <h2>{t('oven.title')}</h2>
         <div className="device-status">
           <span className={`dot ${power ? 'on' : 'off'}`} />
-          {MODE_LABELS[mode]}
+          {t(MODE_LABEL_KEYS[mode])}
         </div>
       </div>
       <div className="oven-body">
@@ -143,12 +145,12 @@ const Oven: React.FC = () => {
           <div className="oven-control-panel">
             <div className="oven-knob" />
             <div className="oven-screen">
-              <div className="oven-mode">{MODE_LABELS[mode]}</div>
+              <div className="oven-mode">{t(MODE_LABEL_KEYS[mode])}</div>
               <div className="oven-temp" style={{ color: isHeating ? '#ef4444' : '#666' }}>
-                {currentTemp}°F
+                {currentTemp}\u00b0F
               </div>
               <div className="oven-timer">
-                {timer > 0 ? formatTime(timer) : isHeating ? `Target: ${targetTemp}°F` : ''}
+                {timer > 0 ? formatTime(timer) : isHeating ? `${t('oven.target')} ${targetTemp}\u00b0F` : ''}
               </div>
             </div>
             <div className="oven-knob" />
@@ -171,7 +173,7 @@ const Oven: React.FC = () => {
             }}
             style={power ? { background: '#3a1a1a', borderColor: '#ef4444', color: '#ef4444' } : {}}
           >
-            {power ? 'ON' : 'OFF'}
+            {power ? t('common.on') : t('common.off')}
           </button>
           {(['bake', 'broil', 'convection'] as OvenMode[]).map((m) => (
             <button
@@ -179,13 +181,13 @@ const Oven: React.FC = () => {
               className={mode === m ? 'active' : ''}
               onClick={() => setOvenMode(m)}
             >
-              {MODE_LABELS[m]}
+              {t(MODE_LABEL_KEYS[m])}
             </button>
           ))}
         </div>
         <div className="oven-info" style={{ flexDirection: 'column', alignItems: 'center', gap: 8 }}>
           <span>
-            Temperature:
+            {t('oven.temperature')}
             <input
               type="range"
               min={200}
@@ -195,9 +197,9 @@ const Oven: React.FC = () => {
               onChange={(e) => setTargetTemp(Number(e.target.value))}
               style={{ width: 100, marginLeft: 6, accentColor: '#ef4444' }}
             />
-            {targetTemp}°F
+            {targetTemp}\u00b0F
           </span>
-          {timer > 0 && <span>Timer: {formatTime(timer)}</span>}
+          {timer > 0 && <span>{t('oven.timer')} {formatTime(timer)}</span>}
         </div>
       </div>
     </div>

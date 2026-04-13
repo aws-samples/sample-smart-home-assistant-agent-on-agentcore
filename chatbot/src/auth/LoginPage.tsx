@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { signIn, signUp, confirmSignUp, AuthTokens } from './CognitoAuth';
+import { useI18n } from '../i18n';
 
 interface LoginPageProps {
   onAuthenticated: (tokens: AuthTokens) => void;
@@ -15,6 +16,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
   const [confirmCode, setConfirmCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const { t, language, setLanguage } = useI18n();
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +26,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
       const tokens = await signIn(username, password);
       onAuthenticated(tokens);
     } catch (err: any) {
-      setError(err.message || 'Sign in failed');
+      setError(err.message || t('login.signInFailed'));
     } finally {
       setLoading(false);
     }
@@ -38,7 +40,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
       await signUp(username, password, email);
       setMode('confirm');
     } catch (err: any) {
-      setError(err.message || 'Sign up failed');
+      setError(err.message || t('login.signUpFailed'));
     } finally {
       setLoading(false);
     }
@@ -53,7 +55,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
       const tokens = await signIn(username, password);
       onAuthenticated(tokens);
     } catch (err: any) {
-      setError(err.message || 'Confirmation failed');
+      setError(err.message || t('login.confirmFailed'));
     } finally {
       setLoading(false);
     }
@@ -62,6 +64,14 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
   return (
     <div style={styles.container}>
       <div style={styles.card}>
+        <div style={styles.langRow}>
+          <button
+            style={styles.langButton}
+            onClick={() => setLanguage(language === 'en' ? 'zh' : 'en')}
+          >
+            {language === 'en' ? '中文' : 'EN'}
+          </button>
+        </div>
         <div style={styles.logoArea}>
           <div style={styles.logoIcon}>
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#4a9eff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -69,11 +79,11 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
               <polyline points="9 22 9 12 15 12 15 22" />
             </svg>
           </div>
-          <h1 style={styles.title}>Smart Home Assistant</h1>
+          <h1 style={styles.title}>{t('login.title')}</h1>
           <p style={styles.subtitle}>
-            {mode === 'signIn' && 'Sign in to your account'}
-            {mode === 'signUp' && 'Create a new account'}
-            {mode === 'confirm' && 'Verify your email'}
+            {mode === 'signIn' && t('login.signIn.subtitle')}
+            {mode === 'signUp' && t('login.signUp.subtitle')}
+            {mode === 'confirm' && t('login.confirm.subtitle')}
           </p>
         </div>
 
@@ -82,36 +92,36 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
         {mode === 'signIn' && (
           <form onSubmit={handleSignIn} style={styles.form}>
             <div style={styles.field}>
-              <label style={styles.label}>Username</label>
+              <label style={styles.label}>{t('login.username')}</label>
               <input
                 style={styles.input}
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter your username"
+                placeholder={t('login.enterUsername')}
                 required
                 autoComplete="username"
               />
             </div>
             <div style={styles.field}>
-              <label style={styles.label}>Password</label>
+              <label style={styles.label}>{t('login.password')}</label>
               <input
                 style={styles.input}
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
+                placeholder={t('login.enterPassword')}
                 required
                 autoComplete="current-password"
               />
             </div>
             <button style={styles.button} type="submit" disabled={loading}>
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? t('login.signingIn') : t('login.signIn')}
             </button>
             <p style={styles.switchText}>
-              Don't have an account?{' '}
+              {t('login.noAccount')}{' '}
               <span style={styles.link} onClick={() => { setMode('signUp'); setError(''); }}>
-                Sign Up
+                {t('login.signUp')}
               </span>
             </p>
           </form>
@@ -120,48 +130,48 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
         {mode === 'signUp' && (
           <form onSubmit={handleSignUp} style={styles.form}>
             <div style={styles.field}>
-              <label style={styles.label}>Username</label>
+              <label style={styles.label}>{t('login.username')}</label>
               <input
                 style={styles.input}
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Choose a username"
+                placeholder={t('login.chooseUsername')}
                 required
                 autoComplete="username"
               />
             </div>
             <div style={styles.field}>
-              <label style={styles.label}>Email</label>
+              <label style={styles.label}>{t('login.email')}</label>
               <input
                 style={styles.input}
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="Enter your email"
+                placeholder={t('login.enterEmail')}
                 required
                 autoComplete="email"
               />
             </div>
             <div style={styles.field}>
-              <label style={styles.label}>Password</label>
+              <label style={styles.label}>{t('login.password')}</label>
               <input
                 style={styles.input}
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Choose a password"
+                placeholder={t('login.choosePassword')}
                 required
                 autoComplete="new-password"
               />
             </div>
             <button style={styles.button} type="submit" disabled={loading}>
-              {loading ? 'Creating account...' : 'Sign Up'}
+              {loading ? t('login.creatingAccount') : t('login.signUp')}
             </button>
             <p style={styles.switchText}>
-              Already have an account?{' '}
+              {t('login.hasAccount')}{' '}
               <span style={styles.link} onClick={() => { setMode('signIn'); setError(''); }}>
-                Sign In
+                {t('login.signIn')}
               </span>
             </p>
           </form>
@@ -170,26 +180,26 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
         {mode === 'confirm' && (
           <form onSubmit={handleConfirm} style={styles.form}>
             <p style={styles.confirmInfo}>
-              A verification code has been sent to your email address.
+              {t('login.verificationSent')}
             </p>
             <div style={styles.field}>
-              <label style={styles.label}>Confirmation Code</label>
+              <label style={styles.label}>{t('login.confirmCode')}</label>
               <input
                 style={styles.input}
                 type="text"
                 value={confirmCode}
                 onChange={(e) => setConfirmCode(e.target.value)}
-                placeholder="Enter the 6-digit code"
+                placeholder={t('login.enterCode')}
                 required
                 autoComplete="one-time-code"
               />
             </div>
             <button style={styles.button} type="submit" disabled={loading}>
-              {loading ? 'Verifying...' : 'Confirm Account'}
+              {loading ? t('login.verifying') : t('login.confirmAccount')}
             </button>
             <p style={styles.switchText}>
               <span style={styles.link} onClick={() => { setMode('signIn'); setError(''); }}>
-                Back to Sign In
+                {t('login.backToSignIn')}
               </span>
             </p>
           </form>
@@ -216,6 +226,22 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '40px',
     border: '1px solid rgba(74, 158, 255, 0.15)',
     boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5), 0 0 40px rgba(74, 158, 255, 0.05)',
+  },
+  langRow: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    marginBottom: '8px',
+    marginTop: '-12px',
+  },
+  langButton: {
+    padding: '4px 12px',
+    borderRadius: '6px',
+    border: '1px solid rgba(255, 255, 255, 0.15)',
+    background: 'rgba(255, 255, 255, 0.05)',
+    color: '#aaaacc',
+    fontSize: '12px',
+    fontWeight: 500,
+    cursor: 'pointer',
   },
   logoArea: {
     textAlign: 'center' as const,

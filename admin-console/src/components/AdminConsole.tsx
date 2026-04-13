@@ -29,6 +29,7 @@ import {
   MemoryRecord,
 } from '../api/adminApi';
 import { getConfig } from '../config';
+import { useI18n } from '../i18n';
 
 // Skill name validation (matches Strands SDK pattern)
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
@@ -124,20 +125,18 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
   const [userModels, setUserModels] = useState<Record<string, string>>({});
   const [savedUserModels, setSavedUserModels] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+  const { t } = useI18n();
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      // Load global default model
       const globalSettings = await getSettings('__global__');
       setGlobalModelId(globalSettings.modelId || '');
       setSavedGlobalModelId(globalSettings.modelId || '');
 
-      // Load all users
       const cognitoUsers = await listCognitoUsers();
       setUsers(cognitoUsers);
 
-      // Load per-user models
       const models: Record<string, string> = {};
       for (const u of cognitoUsers) {
         try {
@@ -163,7 +162,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     try {
       await updateSettings('__global__', { modelId: globalModelId });
       setSavedGlobalModelId(globalModelId);
-      setSuccess('Global default model updated.');
+      setSuccess(t('models.globalUpdated'));
     } catch (err: any) {
       setError(err.message);
     }
@@ -176,7 +175,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     try {
       await updateSettings(userId, { modelId: newModel });
       setSavedUserModels((prev) => ({ ...prev, [user.sub]: newModel }));
-      setSuccess(`Model updated for ${user.email || user.username}.`);
+      setSuccess(t('models.userUpdated').replace('{user}', user.email || user.username || ''));
     } catch (err: any) {
       setError(err.message);
     }
@@ -187,11 +186,10 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      {/* Global Default Model */}
       <div className="settings-panel" style={{ marginBottom: '20px' }}>
-        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>Global Default Model</h3>
+        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>{t('models.globalDefault')}</h3>
         <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>
-          Used for all users who do not have a per-user model configured.
+          {t('models.globalHint')}
         </p>
         <div className="settings-row">
           <select
@@ -199,7 +197,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             value={globalModelId}
             onChange={(e) => setGlobalModelId(e.target.value)}
           >
-            <option value="">-- Not set --</option>
+            <option value="">{t('models.notSet')}</option>
             {AVAILABLE_MODELS.map((m, i) =>
               (m as any).disabled ? (
                 <option key={i} disabled>{m.label}</option>
@@ -213,36 +211,35 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             onClick={handleSaveGlobal}
             disabled={globalModelId === savedGlobalModelId}
           >
-            Save
+            {t('models.save')}
           </button>
         </div>
       </div>
 
-      {/* Per-User Model Selection */}
       <div className="toolbar">
         <div className="toolbar-left">
-          <span className="toolbar-label">Per-User Model Override</span>
+          <span className="toolbar-label">{t('models.perUser')}</span>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={loadData}>
-          Refresh
+          {t('models.refresh')}
         </button>
       </div>
 
       <div className="skills-table-container">
         {loading ? (
-          <div className="loading">Loading users...</div>
+          <div className="loading">{t('models.loadingUsers')}</div>
         ) : users.length === 0 ? (
           <div className="empty-state">
-            <p>No users found in the user pool.</p>
+            <p>{t('models.noUsers')}</p>
           </div>
         ) : (
           <table className="skills-table">
             <thead>
               <tr>
-                <th>Email</th>
-                <th>Status</th>
-                <th>Model</th>
-                <th>Actions</th>
+                <th>{t('models.colEmail')}</th>
+                <th>{t('models.colStatus')}</th>
+                <th>{t('models.colModel')}</th>
+                <th>{t('models.colActions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -263,7 +260,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
                         setUserModels((prev) => ({ ...prev, [u.sub]: e.target.value }))
                       }
                     >
-                      <option value="">-- Use global default --</option>
+                      <option value="">{t('models.useGlobalDefault')}</option>
                       {AVAILABLE_MODELS.map((m, i) =>
                         (m as any).disabled ? (
                           <option key={i} disabled>{m.label}</option>
@@ -279,7 +276,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
                       onClick={() => handleSaveUserModel(u)}
                       disabled={(userModels[u.sub] || '') === (savedUserModels[u.sub] || '')}
                     >
-                      Save
+                      {t('models.save')}
                     </button>
                   </td>
                 </tr>
@@ -309,6 +306,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
   const [records, setRecords] = useState<MemoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
+  const { t } = useI18n();
 
   const loadActors = useCallback(async () => {
     setLoading(true);
@@ -345,29 +343,28 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
 
       <div className="toolbar">
         <div className="toolbar-left">
-          <span className="toolbar-label">Long-term Memory (AgentCore Memory)</span>
+          <span className="toolbar-label">{t('memories.title')}</span>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={() => { setSelectedActor(null); loadActors(); }}>
-          Refresh
+          {t('memories.refresh')}
         </button>
       </div>
 
-      {/* Actor list */}
       {!selectedActor && (
         <div className="skills-table-container">
           {loading ? (
-            <div className="loading">Loading actors...</div>
+            <div className="loading">{t('memories.loadingActors')}</div>
           ) : actors.length === 0 ? (
             <div className="empty-state">
-              <p>No memory actors found.</p>
-              <p className="empty-hint">Memories are created when users interact with the chatbot.</p>
+              <p>{t('memories.noActors')}</p>
+              <p className="empty-hint">{t('memories.noActorsHint')}</p>
             </div>
           ) : (
             <table className="skills-table">
               <thead>
                 <tr>
-                  <th>Actor ID</th>
-                  <th>Actions</th>
+                  <th>{t('memories.colActorId')}</th>
+                  <th>{t('memories.colActions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -376,7 +373,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
                     <td className="cell-name">{a}</td>
                     <td className="cell-actions">
                       <button className="btn btn-sm btn-primary" onClick={() => handleSelectActor(a)}>
-                        View Memories
+                        {t('memories.viewMemories')}
                       </button>
                     </td>
                   </tr>
@@ -387,32 +384,31 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
         </div>
       )}
 
-      {/* Memory records for selected actor */}
       {selectedActor && (
         <div>
           <div style={{ marginBottom: '16px' }}>
             <button className="btn btn-secondary btn-sm" onClick={() => setSelectedActor(null)}>
-              Back to Actors
+              {t('memories.backToActors')}
             </button>
             <span className="toolbar-label" style={{ marginLeft: '12px' }}>
-              Memories for: <code style={{ color: '#4a9eff' }}>{selectedActor}</code>
+              {t('memories.memoriesFor')} <code style={{ color: '#4a9eff' }}>{selectedActor}</code>
             </span>
           </div>
 
           <div className="skills-table-container">
             {recordsLoading ? (
-              <div className="loading">Loading memories...</div>
+              <div className="loading">{t('memories.loadingMemories')}</div>
             ) : records.length === 0 ? (
               <div className="empty-state">
-                <p>No memory records found for this actor.</p>
+                <p>{t('memories.noRecords')}</p>
               </div>
             ) : (
               <table className="skills-table">
                 <thead>
                   <tr>
-                    <th>Type</th>
-                    <th>Content</th>
-                    <th>Created</th>
+                    <th>{t('memories.colType')}</th>
+                    <th>{t('memories.colContent')}</th>
+                    <th>{t('memories.colCreated')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -451,6 +447,7 @@ const AdminConsole: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const { t } = useI18n();
 
   // Form state
   const [showForm, setShowForm] = useState(false);
@@ -553,7 +550,7 @@ const AdminConsole: React.FC = () => {
         file.type || 'application/octet-stream'
       );
       await uploadSkillFile(uploadUrl, file);
-      setSuccess(`File "${file.name}" uploaded to ${directory}/`);
+      setSuccess(t('files.fileUploaded').replace('{name}', file.name).replace('{dir}', directory));
       loadSkillFiles(form.userId, form.skillName);
     } catch (err: any) {
       setError(err.message);
@@ -576,7 +573,7 @@ const AdminConsole: React.FC = () => {
     clearMessages();
     try {
       await deleteSkillFile(form.userId, form.skillName, filePath);
-      setSuccess(`File "${filePath}" deleted.`);
+      setSuccess(t('files.fileDeleted').replace('{path}', filePath));
       loadSkillFiles(form.userId, form.skillName);
     } catch (err: any) {
       setError(err.message);
@@ -587,12 +584,22 @@ const AdminConsole: React.FC = () => {
     clearMessages();
     try {
       await stopSession(sessionId);
-      setSuccess(`Stop requested for session "${sessionId}".`);
+      setSuccess(t('sessions.stopRequested').replace('{id}', sessionId));
       loadSessions();
     } catch (err: any) {
       setError(err.message);
     }
   };
+
+  // Resolve a userId (sub, email, or username) to a display-friendly email
+  const displayUserId = useCallback((id: string): string => {
+    if (id === '__global__') return t('skills.globalAll');
+    // Try matching by sub, email, or username
+    const match = cognitoUsers.find(
+      (u) => u.sub === id || u.email === id || u.username === id
+    );
+    return match?.email || match?.username || id;
+  }, [cognitoUsers, t]);
 
   // Users tab loaders
   const loadCognitoUsers = useCallback(async () => {
@@ -638,7 +645,7 @@ const AdminConsole: React.FC = () => {
         .map(([name]) => name);
       await updateUserPermissions(getActorId(selectedPermUser), selectedTools);
       setPermOriginal(selectedTools);
-      setSuccess(`Permissions updated for ${selectedPermUser.email || selectedPermUser.username}.`);
+      setSuccess(t('users.permsUpdated').replace('{user}', selectedPermUser.email || selectedPermUser.username || ''));
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -666,16 +673,18 @@ const AdminConsole: React.FC = () => {
     try {
       await updateSettings(selectedUserId, { modelId });
       setSavedModelId(modelId);
-      setSuccess(`Model ID updated for ${selectedUserId === '__global__' ? 'default (all users)' : selectedUserId}.`);
+      setSuccess(t('users.modelUpdated').replace('{user}', selectedUserId === '__global__' ? 'default (all users)' : selectedUserId));
     } catch (err: any) {
       setError(err.message);
     }
   };
 
-  const loadUsers = useCallback(async () => {
+  const loadUserIds = useCallback(async () => {
     try {
       const ids = await listUsers();
-      setUserIds(ids.length > 0 ? ids : ['__global__']);
+      // Always ensure __global__ is the first entry
+      const withGlobal = ids.includes('__global__') ? ids : ['__global__', ...ids];
+      setUserIds(withGlobal);
     } catch {
       // Ignore — user list is optional
     }
@@ -687,8 +696,10 @@ const AdminConsole: React.FC = () => {
   }, [loadSkills, loadSettings]);
 
   useEffect(() => {
-    loadUsers();
-  }, [loadUsers]);
+    loadUserIds();
+    // Load Cognito users early so we can resolve sub → email everywhere
+    listCognitoUsers().then((users) => setCognitoUsers(users)).catch(() => {});
+  }, [loadUserIds]);
 
   useEffect(() => {
     if (activeTab === 'sessions') {
@@ -698,10 +709,10 @@ const AdminConsole: React.FC = () => {
       loadCognitoUsers();
     }
     if (activeTab === 'models') {
-      loadUsers();
+      loadUserIds();
       loadSettings();
     }
-  }, [activeTab, loadSessions, loadCognitoUsers, loadUsers, loadSettings]);
+  }, [activeTab, loadSessions, loadCognitoUsers, loadUserIds, loadSettings]);
 
   const clearMessages = () => {
     setError('');
@@ -746,23 +757,20 @@ const AdminConsole: React.FC = () => {
     clearMessages();
 
     if (!isEditing && !SKILL_NAME_RE.test(form.skillName)) {
-      setError(
-        'Invalid skill name. Use 1-64 lowercase alphanumeric characters and hyphens. No leading/trailing/consecutive hyphens.'
-      );
+      setError(t('skills.invalidName'));
       return;
     }
 
     if (!form.description.trim()) {
-      setError('Description is required.');
+      setError(t('skills.descriptionRequired'));
       return;
     }
 
     const allowedTools = form.allowedTools
       .split(',')
-      .map((t) => t.trim())
+      .map((tt) => tt.trim())
       .filter(Boolean);
 
-    // Convert metadata entries to object, filtering empty keys
     const metadata: Record<string, string> = {};
     for (const entry of form.metadata) {
       if (entry.key.trim()) {
@@ -780,7 +788,7 @@ const AdminConsole: React.FC = () => {
           compatibility: form.compatibility,
           metadata,
         });
-        setSuccess(`Skill "${form.skillName}" updated.`);
+        setSuccess(t('skills.skillUpdated').replace('{name}', form.skillName));
       } else {
         const input: SkillInput = {
           userId: form.userId,
@@ -793,13 +801,13 @@ const AdminConsole: React.FC = () => {
           metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
         };
         await createSkill(input);
-        setSuccess(`Skill "${form.skillName}" created.`);
+        setSuccess(t('skills.skillCreated').replace('{name}', form.skillName));
       }
       setShowForm(false);
       setForm(emptyForm);
       setSkillFiles([]);
       loadSkills();
-      loadUsers();
+      loadUserIds();
     } catch (err: any) {
       setError(err.message);
     }
@@ -810,10 +818,10 @@ const AdminConsole: React.FC = () => {
     clearMessages();
     try {
       await deleteSkill(deleteTarget.userId, deleteTarget.skillName);
-      setSuccess(`Skill "${deleteTarget.skillName}" deleted.`);
+      setSuccess(t('skills.skillDeleted').replace('{name}', deleteTarget.skillName));
       setDeleteTarget(null);
       loadSkills();
-      loadUsers();
+      loadUserIds();
     } catch (err: any) {
       setError(err.message);
       setDeleteTarget(null);
@@ -821,7 +829,7 @@ const AdminConsole: React.FC = () => {
   };
 
   const handleAddUserScope = () => {
-    const newUser = prompt('Enter user ID (Cognito username or sub):');
+    const newUser = prompt(t('skills.promptUserId'));
     if (newUser && newUser.trim()) {
       const trimmed = newUser.trim();
       if (!userIds.includes(trimmed)) {
@@ -839,43 +847,43 @@ const AdminConsole: React.FC = () => {
           className={`tab ${activeTab === 'skills' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('skills')}
         >
-          Skills
+          {t('tab.skills')}
         </button>
         <button
           className={`tab ${activeTab === 'models' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('models')}
         >
-          Models
+          {t('tab.models')}
         </button>
         <button
           className={`tab ${activeTab === 'users' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('users')}
         >
-          Tool Access
+          {t('tab.toolAccess')}
         </button>
         <button
           className={`tab ${activeTab === 'integrations' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('integrations')}
         >
-          Integrations
+          {t('tab.integrations')}
         </button>
         <button
           className={`tab ${activeTab === 'sessions' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('sessions')}
         >
-          Sessions
+          {t('tab.sessions')}
         </button>
         <button
           className={`tab ${activeTab === 'memories' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('memories')}
         >
-          Memories
+          {t('tab.memories')}
         </button>
         <button
           className={`tab ${activeTab === 'guardrails' ? 'tab-active' : ''}`}
           onClick={() => setActiveTab('guardrails')}
         >
-          Guardrails
+          {t('tab.guardrails')}
         </button>
       </div>
 
@@ -884,7 +892,7 @@ const AdminConsole: React.FC = () => {
       {/* Toolbar */}
       <div className="toolbar">
         <div className="toolbar-left">
-          <label className="toolbar-label">User Scope:</label>
+          <label className="toolbar-label">{t('skills.userScope')}</label>
           <select
             className="toolbar-select"
             value={selectedUserId}
@@ -892,16 +900,16 @@ const AdminConsole: React.FC = () => {
           >
             {userIds.map((id) => (
               <option key={id} value={id}>
-                {id === '__global__' ? 'Global (all users)' : id}
+                {displayUserId(id)}
               </option>
             ))}
           </select>
           <button className="btn btn-secondary btn-sm" onClick={handleAddUserScope}>
-            + User
+            {t('skills.addUser')}
           </button>
         </div>
         <button className="btn btn-primary" onClick={handleCreate}>
-          + Create Skill
+          {t('skills.createSkill')}
         </button>
       </div>
 
@@ -913,17 +921,16 @@ const AdminConsole: React.FC = () => {
       {deleteTarget && (
         <div className="modal-overlay" onClick={() => setDeleteTarget(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Delete Skill</h3>
+            <h3>{t('skills.deleteSkill')}</h3>
             <p>
-              Are you sure you want to delete <strong>{deleteTarget.skillName}</strong> for
-              user scope <strong>{deleteTarget.userId}</strong>?
+              {t('skills.deleteConfirm')} <strong>{deleteTarget.skillName}</strong> {t('skills.forUserScope')} <strong>{displayUserId(deleteTarget.userId)}</strong>?
             </p>
             <div className="modal-actions">
               <button className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>
-                Cancel
+                {t('skills.cancel')}
               </button>
               <button className="btn btn-danger" onClick={handleDelete}>
-                Delete
+                {t('skills.delete')}
               </button>
             </div>
           </div>
@@ -933,22 +940,21 @@ const AdminConsole: React.FC = () => {
       {/* Skill Form */}
       {showForm && (
         <div className="skill-form-container">
-          <h3>{isEditing ? 'Edit Skill' : 'Create Skill'}</h3>
+          <h3>{isEditing ? t('skills.editSkill') : t('skills.createSkillTitle')}</h3>
           <form onSubmit={handleSubmit}>
-            {/* Required fields */}
             <div className="form-row">
               <div className="form-group">
-                <label>User Scope</label>
+                <label>{t('skills.userScopeLabel')}</label>
                 <input
                   type="text"
-                  value={form.userId}
+                  value={isEditing ? displayUserId(form.userId) : form.userId}
                   onChange={(e) => setForm({ ...form, userId: e.target.value })}
                   disabled={isEditing}
                   placeholder="__global__"
                 />
               </div>
               <div className="form-group">
-                <label>Skill Name</label>
+                <label>{t('skills.skillName')}</label>
                 <input
                   type="text"
                   value={form.skillName}
@@ -956,57 +962,55 @@ const AdminConsole: React.FC = () => {
                     setForm({ ...form, skillName: e.target.value.toLowerCase() })
                   }
                   disabled={isEditing}
-                  placeholder="my-custom-skill"
+                  placeholder={t('skills.skillNamePlaceholder')}
                 />
               </div>
             </div>
             <div className="form-group">
-              <label>Description <span className="field-required">*</span></label>
+              <label>{t('skills.description')} <span className="field-required">*</span></label>
               <input
                 type="text"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
-                placeholder="What this skill does and when to use it..."
+                placeholder={t('skills.descriptionPlaceholder')}
                 maxLength={1024}
               />
             </div>
             <div className="form-group">
-              <label>Allowed Tools (space-separated)</label>
+              <label>{t('skills.allowedTools')}</label>
               <input
                 type="text"
                 value={form.allowedTools}
                 onChange={(e) => setForm({ ...form, allowedTools: e.target.value })}
-                placeholder="device_control"
+                placeholder={t('skills.allowedToolsPlaceholder')}
               />
             </div>
 
-            {/* Optional spec fields */}
-            <div className="form-section-label">Optional Fields</div>
+            <div className="form-section-label">{t('skills.optionalFields')}</div>
             <div className="form-row">
               <div className="form-group">
-                <label>License</label>
+                <label>{t('skills.license')}</label>
                 <input
                   type="text"
                   value={form.license}
                   onChange={(e) => setForm({ ...form, license: e.target.value })}
-                  placeholder="e.g. Apache-2.0"
+                  placeholder={t('skills.licensePlaceholder')}
                 />
               </div>
               <div className="form-group">
-                <label>Compatibility</label>
+                <label>{t('skills.compatibility')}</label>
                 <input
                   type="text"
                   value={form.compatibility}
                   onChange={(e) => setForm({ ...form, compatibility: e.target.value })}
-                  placeholder="e.g. Requires Python 3.12+"
+                  placeholder={t('skills.compatibilityPlaceholder')}
                   maxLength={500}
                 />
               </div>
             </div>
 
-            {/* Metadata key-value editor */}
             <div className="form-group">
-              <label>Metadata</label>
+              <label>{t('skills.metadata')}</label>
               <div className="metadata-editor">
                 {form.metadata.map((entry, i) => (
                   <div key={i} className="metadata-row">
@@ -1019,7 +1023,7 @@ const AdminConsole: React.FC = () => {
                         updated[i] = { ...updated[i], key: e.target.value };
                         setForm({ ...form, metadata: updated });
                       }}
-                      placeholder="key"
+                      placeholder={t('skills.metadataKey')}
                     />
                     <input
                       type="text"
@@ -1030,7 +1034,7 @@ const AdminConsole: React.FC = () => {
                         updated[i] = { ...updated[i], value: e.target.value };
                         setForm({ ...form, metadata: updated });
                       }}
-                      placeholder="value"
+                      placeholder={t('skills.metadataValue')}
                     />
                     <button
                       type="button"
@@ -1040,7 +1044,7 @@ const AdminConsole: React.FC = () => {
                         setForm({ ...form, metadata: updated });
                       }}
                     >
-                      Remove
+                      {t('skills.remove')}
                     </button>
                   </div>
                 ))}
@@ -1054,29 +1058,28 @@ const AdminConsole: React.FC = () => {
                     })
                   }
                 >
-                  + Add Entry
+                  {t('skills.addEntry')}
                 </button>
               </div>
             </div>
 
-            {/* Instructions */}
             <div className="form-group">
-              <label>Instructions (Markdown)</label>
+              <label>{t('skills.instructions')}</label>
               <textarea
                 className="instructions-textarea"
                 value={form.instructions}
                 onChange={(e) => setForm({ ...form, instructions: e.target.value })}
-                placeholder="# Skill Instructions&#10;&#10;Detailed instructions for the agent..."
+                placeholder={t('skills.instructionsPlaceholder')}
                 rows={12}
               />
             </div>
 
             <div className="form-actions">
               <button type="button" className="btn btn-secondary" onClick={handleCancel}>
-                Cancel
+                {t('skills.cancel')}
               </button>
               <button type="submit" className="btn btn-primary">
-                {isEditing ? 'Save Changes' : 'Create Skill'}
+                {isEditing ? t('skills.saveChanges') : t('skills.createSkill')}
               </button>
             </div>
           </form>
@@ -1084,12 +1087,12 @@ const AdminConsole: React.FC = () => {
           {/* File Manager (only when editing) */}
           {isEditing && (
             <div className="file-manager">
-              <h4>Skill Files</h4>
+              <h4>{t('files.title')}</h4>
               <p className="file-manager-hint">
-                Upload scripts, reference docs, and assets for this skill.
+                {t('files.hint')}
               </p>
               {filesLoading ? (
-                <div className="loading">Loading files...</div>
+                <div className="loading">{t('files.loading')}</div>
               ) : (
                 ['scripts', 'references', 'assets'].map((dir) => {
                   const dirFiles = skillFiles.filter((f) => f.path.startsWith(dir + '/'));
@@ -1116,10 +1119,10 @@ const AdminConsole: React.FC = () => {
                             <table className="file-table">
                               <thead>
                                 <tr>
-                                  <th>Name</th>
-                                  <th>Size</th>
-                                  <th>Modified</th>
-                                  <th>Actions</th>
+                                  <th>{t('files.colName')}</th>
+                                  <th>{t('files.colSize')}</th>
+                                  <th>{t('files.colModified')}</th>
+                                  <th>{t('files.colActions')}</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1142,14 +1145,14 @@ const AdminConsole: React.FC = () => {
                                           className="btn btn-sm btn-secondary"
                                           onClick={() => handleFileDownload(f.path)}
                                         >
-                                          Download
+                                          {t('files.download')}
                                         </button>
                                         <button
                                           type="button"
                                           className="btn btn-sm btn-danger"
                                           onClick={() => handleFileDelete(f.path)}
                                         >
-                                          Delete
+                                          {t('files.delete')}
                                         </button>
                                       </td>
                                     </tr>
@@ -1159,7 +1162,7 @@ const AdminConsole: React.FC = () => {
                             </table>
                           )}
                           <label className="file-upload-btn btn btn-sm btn-secondary">
-                            {uploading ? 'Uploading...' : `Upload to ${dir}/`}
+                            {uploading ? t('files.uploading') : t('files.uploadTo').replace('{dir}', dir)}
                             <input
                               type="file"
                               hidden
@@ -1188,21 +1191,21 @@ const AdminConsole: React.FC = () => {
       {!showForm && (
         <div className="skills-table-container">
           {isLoading ? (
-            <div className="loading">Loading skills...</div>
+            <div className="loading">{t('skills.loading')}</div>
           ) : skills.length === 0 ? (
             <div className="empty-state">
-              <p>No skills found for this user scope.</p>
-              <p className="empty-hint">Click "Create Skill" to add one.</p>
+              <p>{t('skills.noSkills')}</p>
+              <p className="empty-hint">{t('skills.noSkillsHint')}</p>
             </div>
           ) : (
             <table className="skills-table">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Description</th>
-                  <th>Tools</th>
-                  <th>Updated</th>
-                  <th>Actions</th>
+                  <th>{t('skills.colName')}</th>
+                  <th>{t('skills.colDescription')}</th>
+                  <th>{t('skills.colTools')}</th>
+                  <th>{t('skills.colUpdated')}</th>
+                  <th>{t('skills.colActions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -1220,13 +1223,13 @@ const AdminConsole: React.FC = () => {
                     </td>
                     <td className="cell-actions">
                       <button className="btn btn-sm btn-secondary" onClick={() => handleEdit(skill)}>
-                        Edit
+                        {t('skills.edit')}
                       </button>
                       <button
                         className="btn btn-sm btn-danger"
                         onClick={() => setDeleteTarget(skill)}
                       >
-                        Delete
+                        {t('skills.delete')}
                       </button>
                     </td>
                   </tr>
@@ -1253,35 +1256,34 @@ const AdminConsole: React.FC = () => {
       {/* Sessions Tab */}
       {activeTab === 'sessions' && (
         <div className="sessions-section">
-          {/* Messages */}
           {error && <div className="alert alert-error">{error}</div>}
           {success && <div className="alert alert-success">{success}</div>}
 
           <div className="toolbar">
             <div className="toolbar-left">
-              <span className="toolbar-label">User Runtime Sessions</span>
+              <span className="toolbar-label">{t('sessions.title')}</span>
             </div>
             <button className="btn btn-secondary btn-sm" onClick={loadSessions}>
-              Refresh
+              {t('sessions.refresh')}
             </button>
           </div>
 
           <div className="skills-table-container">
             {sessionsLoading ? (
-              <div className="loading">Loading sessions...</div>
+              <div className="loading">{t('sessions.loading')}</div>
             ) : sessions.length === 0 ? (
               <div className="empty-state">
-                <p>No sessions recorded yet.</p>
-                <p className="empty-hint">Sessions appear after users interact with the chatbot.</p>
+                <p>{t('sessions.noSessions')}</p>
+                <p className="empty-hint">{t('sessions.noSessionsHint')}</p>
               </div>
             ) : (
               <table className="skills-table">
                 <thead>
                   <tr>
-                    <th>User ID</th>
-                    <th>Session ID</th>
-                    <th>Last Active</th>
-                    <th>Actions</th>
+                    <th>{t('sessions.colUserId')}</th>
+                    <th>{t('sessions.colSessionId')}</th>
+                    <th>{t('sessions.colLastActive')}</th>
+                    <th>{t('sessions.colActions')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1301,7 +1303,7 @@ const AdminConsole: React.FC = () => {
                           className="btn btn-sm btn-danger"
                           onClick={() => handleStopSession(s.sessionId)}
                         >
-                          Stop
+                          {t('sessions.stop')}
                         </button>
                       </td>
                     </tr>
@@ -1316,55 +1318,52 @@ const AdminConsole: React.FC = () => {
       {/* Tool Access Tab */}
       {activeTab === 'users' && (
         <div className="users-section">
-          {/* Messages */}
           {error && <div className="alert alert-error">{error}</div>}
           {success && <div className="alert alert-success">{success}</div>}
 
-          {/* Policy Engine Mode */}
           <div className="settings-panel">
             <div className="settings-row">
-              <label className="toolbar-label">Policy Engine:</label>
+              <label className="toolbar-label">{t('users.policyEngine')}</label>
               <select
                 className="toolbar-select"
                 style={{ minWidth: '140px' }}
                 value={policyMode}
                 onChange={(e) => setPolicyMode(e.target.value as 'ENFORCE' | 'LOG_ONLY')}
               >
-                <option value="ENFORCE">ENFORCE</option>
-                <option value="LOG_ONLY">LOG_ONLY</option>
+                <option value="ENFORCE">{t('users.enforce')}</option>
+                <option value="LOG_ONLY">{t('users.logOnly')}</option>
               </select>
               <span className={`badge ${policyMode === 'ENFORCE' ? 'badge-active' : 'badge-inactive'}`}>
-                {policyMode === 'ENFORCE' ? 'Policies enforced' : 'Audit only'}
+                {policyMode === 'ENFORCE' ? t('users.enforced') : t('users.auditOnly')}
               </span>
             </div>
           </div>
 
           <div className="toolbar">
             <div className="toolbar-left">
-              <span className="toolbar-label">Per-User Tool Permissions</span>
+              <span className="toolbar-label">{t('users.perUserPerms')}</span>
             </div>
             <button className="btn btn-secondary btn-sm" onClick={loadCognitoUsers}>
-              Refresh
+              {t('users.refresh')}
             </button>
           </div>
 
-          {/* Permission Editor Panel */}
           {selectedPermUser && (
             <div className="perm-editor">
               <h3>
-                Tool Permissions for{' '}
+                {t('users.toolPermsFor')}{' '}
                 <span className="perm-user-email">
                   {selectedPermUser.email || selectedPermUser.username}
                 </span>
               </h3>
               <p className="perm-hint">
-                Select which gateway tools this user is allowed to invoke.
-                Actor ID: <code>{getActorId(selectedPermUser)}</code>
+                {t('users.toolPermsHint')}{' '}
+                {t('users.actorId')} <code>{getActorId(selectedPermUser)}</code>
               </p>
 
               {gatewayTools.length === 0 ? (
                 <div className="empty-state">
-                  <p>No gateway tools found.</p>
+                  <p>{t('users.noTools')}</p>
                 </div>
               ) : (
                 <>
@@ -1374,22 +1373,22 @@ const AdminConsole: React.FC = () => {
                       className="btn btn-sm btn-secondary"
                       onClick={() => {
                         const all: Record<string, boolean> = {};
-                        for (const t of gatewayTools) all[t.name] = true;
+                        for (const tt of gatewayTools) all[tt.name] = true;
                         setUserToolSelections(all);
                       }}
                     >
-                      Select All
+                      {t('users.selectAll')}
                     </button>
                     <button
                       type="button"
                       className="btn btn-sm btn-secondary"
                       onClick={() => {
                         const none: Record<string, boolean> = {};
-                        for (const t of gatewayTools) none[t.name] = false;
+                        for (const tt of gatewayTools) none[tt.name] = false;
                         setUserToolSelections(none);
                       }}
                     >
-                      Deselect All
+                      {t('users.deselectAll')}
                     </button>
                   </div>
                   <div className="perm-tool-list">
@@ -1421,7 +1420,7 @@ const AdminConsole: React.FC = () => {
                   className="btn btn-secondary"
                   onClick={handleCancelPermissions}
                 >
-                  Cancel
+                  {t('users.cancel')}
                 </button>
                 <button
                   type="button"
@@ -1429,30 +1428,29 @@ const AdminConsole: React.FC = () => {
                   onClick={handleSavePermissions}
                   disabled={!permIsDirty || permSaving}
                 >
-                  {permSaving ? 'Saving...' : 'Save Permissions'}
+                  {permSaving ? t('users.saving') : t('users.savePermissions')}
                 </button>
               </div>
             </div>
           )}
 
-          {/* Users Table */}
           {!selectedPermUser && (
             <div className="skills-table-container">
               {usersLoading ? (
-                <div className="loading">Loading users...</div>
+                <div className="loading">{t('users.loadingUsers')}</div>
               ) : cognitoUsers.length === 0 ? (
                 <div className="empty-state">
-                  <p>No users found in the user pool.</p>
+                  <p>{t('users.noUsers')}</p>
                 </div>
               ) : (
                 <table className="skills-table">
                   <thead>
                     <tr>
-                      <th>Email</th>
-                      <th>User ID (sub)</th>
-                      <th>Status</th>
-                      <th>Groups</th>
-                      <th>Actions</th>
+                      <th>{t('users.colEmail')}</th>
+                      <th>{t('users.colUserId')}</th>
+                      <th>{t('users.colStatus')}</th>
+                      <th>{t('users.colGroups')}</th>
+                      <th>{t('users.colActions')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1492,7 +1490,7 @@ const AdminConsole: React.FC = () => {
                             className="btn btn-sm btn-primary"
                             onClick={() => handleManagePermissions(u)}
                           >
-                            Manage Permissions
+                            {t('users.managePermissions')}
                           </button>
                         </td>
                       </tr>
@@ -1509,10 +1507,9 @@ const AdminConsole: React.FC = () => {
       {activeTab === 'integrations' && (
         <div className="integrations-section">
           <div className="settings-panel" style={{ marginBottom: '16px' }}>
-            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>Tool Integrations</h3>
+            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>{t('integrations.title')}</h3>
             <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
-              Manage external tool sources connected to the AgentCore Gateway.
-              Tools registered here become available to the agent and can be controlled via the Tool Access tab.
+              {t('integrations.desc')}
             </p>
           </div>
 
@@ -1520,43 +1517,40 @@ const AdminConsole: React.FC = () => {
             <table className="skills-table">
               <thead>
                 <tr>
-                  <th>Type</th>
-                  <th>Description</th>
-                  <th>Status</th>
+                  <th>{t('integrations.colType')}</th>
+                  <th>{t('integrations.colDescription')}</th>
+                  <th>{t('integrations.colStatus')}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td className="cell-name">Lambda Targets</td>
-                  <td className="cell-desc">AWS Lambda functions exposed as MCP tools via AgentCore Gateway</td>
-                  <td><span className="badge badge-active">Active</span></td>
+                  <td className="cell-name">{t('integrations.lambdaTargets')}</td>
+                  <td className="cell-desc">{t('integrations.lambdaDesc')}</td>
+                  <td><span className="badge badge-active">{t('integrations.active')}</span></td>
                 </tr>
                 <tr>
-                  <td className="cell-name">MCP Servers</td>
-                  <td className="cell-desc">Remote MCP server endpoints for third-party tool access</td>
-                  <td><span className="badge badge-inactive">Planned</span></td>
+                  <td className="cell-name">{t('integrations.mcpServers')}</td>
+                  <td className="cell-desc">{t('integrations.mcpDesc')}</td>
+                  <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
                 </tr>
                 <tr>
-                  <td className="cell-name">A2A Agents</td>
-                  <td className="cell-desc">Agent-to-Agent protocol for delegating tasks to specialized agents</td>
-                  <td><span className="badge badge-inactive">Planned</span></td>
+                  <td className="cell-name">{t('integrations.a2aAgents')}</td>
+                  <td className="cell-desc">{t('integrations.a2aDesc')}</td>
+                  <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
                 </tr>
                 <tr>
-                  <td className="cell-name">API Gateway</td>
-                  <td className="cell-desc">REST/HTTP API endpoints exposed as tools via OpenAPI schema</td>
-                  <td><span className="badge badge-inactive">Planned</span></td>
+                  <td className="cell-name">{t('integrations.apiGateway')}</td>
+                  <td className="cell-desc">{t('integrations.apiDesc')}</td>
+                  <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
                 </tr>
               </tbody>
             </table>
           </div>
 
           <div className="settings-panel" style={{ marginTop: '16px' }}>
-            <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>Roadmap</h3>
+            <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>{t('integrations.roadmap')}</h3>
             <p className="settings-hint" style={{ margin: 0, lineHeight: '1.6' }}>
-              Future releases will allow administrators to add, configure, and remove tool integrations
-              directly from this console. This includes registering new MCP server endpoints,
-              connecting A2A agents for cross-agent collaboration, and importing API Gateway
-              endpoints as tools with automatic schema discovery.
+              {t('integrations.roadmapDesc')}
             </p>
           </div>
         </div>
@@ -1570,11 +1564,9 @@ const AdminConsole: React.FC = () => {
       {/* Guardrails Tab */}
       {activeTab === 'guardrails' && (() => {
         const cfg = getConfig();
-        // Build CloudWatch Evaluations URL from runtime ARN
-        // ARN format: arn:aws:bedrock-agentcore:{region}:{account}:runtime/{runtimeId}
         const arnParts = cfg.agentRuntimeArn.split(':');
         const runtimeId = arnParts.length >= 6 ? arnParts[5].replace('runtime/', '') : '';
-        const agentName = runtimeId.replace(/-[^-]+$/, ''); // strip random suffix
+        const agentName = runtimeId.replace(/-[^-]+$/, '');
         const resourceId = encodeURIComponent(
           `${cfg.agentRuntimeArn}/runtime-endpoint/DEFAULT:DEFAULT`
         );
@@ -1586,10 +1578,9 @@ const AdminConsole: React.FC = () => {
         return (
         <div className="guardrails-section">
           <div className="settings-panel" style={{ marginBottom: '16px' }}>
-            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>Agent Guardrails</h3>
+            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>{t('guardrails.title')}</h3>
             <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
-              Monitor and configure safety guardrails for the agent. Use the links below
-              to access evaluation results and content filtering in the AWS Console.
+              {t('guardrails.desc')}
             </p>
           </div>
 
@@ -1597,17 +1588,16 @@ const AdminConsole: React.FC = () => {
             <table className="skills-table">
               <thead>
                 <tr>
-                  <th>Guardrail</th>
-                  <th>Description</th>
-                  <th>Action</th>
+                  <th>{t('guardrails.colGuardrail')}</th>
+                  <th>{t('guardrails.colDescription')}</th>
+                  <th>{t('guardrails.colAction')}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td className="cell-name">AgentCore Evaluator</td>
+                  <td className="cell-name">{t('guardrails.evaluator')}</td>
                   <td className="cell-desc">
-                    LLM-as-a-Judge evaluation of agent response quality. Reviews each session
-                    for intent understanding, tool usage, and response helpfulness.
+                    {t('guardrails.evaluatorDesc')}
                   </td>
                   <td className="cell-actions">
                     <a
@@ -1616,15 +1606,14 @@ const AdminConsole: React.FC = () => {
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Open Console
+                      {t('guardrails.openConsole')}
                     </a>
                   </td>
                 </tr>
                 <tr>
-                  <td className="cell-name">Bedrock Guardrails</td>
+                  <td className="cell-name">{t('guardrails.bedrockGuardrails')}</td>
                   <td className="cell-desc">
-                    Content filtering, topic denial, and PII redaction. Configurable safety
-                    policies applied to model inputs and outputs.
+                    {t('guardrails.bedrockDesc')}
                   </td>
                   <td className="cell-actions">
                     <a
@@ -1633,19 +1622,18 @@ const AdminConsole: React.FC = () => {
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Open Console
+                      {t('guardrails.openConsole')}
                     </a>
                   </td>
                 </tr>
                 <tr>
-                  <td className="cell-name">Cedar Policy Engine</td>
+                  <td className="cell-name">{t('guardrails.cedarPolicy')}</td>
                   <td className="cell-desc">
-                    Per-user tool access control via Cedar policies. Managed in the Tool Access tab.
-                    Current mode is displayed and configurable there.
+                    {t('guardrails.cedarDesc')}
                   </td>
                   <td className="cell-actions">
                     <button className="btn btn-sm btn-secondary" onClick={() => setActiveTab('users')}>
-                      Go to Tool Access
+                      {t('guardrails.goToToolAccess')}
                     </button>
                   </td>
                 </tr>

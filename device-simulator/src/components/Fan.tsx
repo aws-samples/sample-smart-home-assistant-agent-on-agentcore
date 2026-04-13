@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { MqttClient } from '../mqtt/MqttClient';
+import { useI18n } from '../i18n';
 
-const SPEED_LABELS = ['Off', 'Low', 'Medium', 'High'];
+const SPEED_LABEL_KEYS = ['fan.speed.off', 'fan.speed.low', 'fan.speed.medium', 'fan.speed.high'];
 const SPIN_DURATIONS = ['0s', '3s', '1.5s', '0.6s'];
 
 const Fan: React.FC = () => {
@@ -9,6 +10,7 @@ const Fan: React.FC = () => {
   const [speed, setSpeed] = useState(0);
   const [oscillation, setOscillation] = useState(false);
   const [timer, setTimer] = useState(0);
+  const { t } = useI18n();
 
   // Timer countdown
   useEffect(() => {
@@ -79,17 +81,13 @@ const Fan: React.FC = () => {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const oscillateStyle: React.CSSProperties = oscillation && power && speed > 0
-    ? { animation: `spin ${SPIN_DURATIONS[speed]} linear infinite` , transform: 'none' }
-    : {};
-
   return (
     <div className="device-card">
       <div className="device-card-header">
-        <h2>Fan</h2>
+        <h2>{t('fan.title')}</h2>
         <div className="device-status">
           <span className={`dot ${power ? 'on' : 'off'}`} />
-          {power ? `Speed ${speed} - ${SPEED_LABELS[speed]}` : 'Off'}
+          {power ? `${t('fan.speed')} ${speed} - ${t(SPEED_LABEL_KEYS[speed])}` : t('common.off')}
         </div>
       </div>
       <div className="fan-body">
@@ -121,7 +119,7 @@ const Fan: React.FC = () => {
             onClick={togglePower}
             style={power ? { background: '#1a3a1a', borderColor: '#22c55e', color: '#22c55e' } : {}}
           >
-            {power ? 'ON' : 'OFF'}
+            {power ? t('common.on') : t('common.off')}
           </button>
           {[0, 1, 2, 3].map((s) => (
             <button
@@ -129,19 +127,19 @@ const Fan: React.FC = () => {
               className={speed === s && (s > 0 || !power) ? 'active' : ''}
               onClick={() => changeSpeed(s)}
             >
-              {SPEED_LABELS[s]}
+              {t(SPEED_LABEL_KEYS[s])}
             </button>
           ))}
           <button
             className={oscillation ? 'active' : ''}
             onClick={() => setOscillation(!oscillation)}
           >
-            Oscillate: {oscillation ? 'ON' : 'OFF'}
+            {t('fan.oscillate')} {oscillation ? t('common.on') : t('common.off')}
           </button>
         </div>
         <div className="fan-info">
-          {timer > 0 && <span>Timer: {formatTime(timer)}</span>}
-          {oscillation && <span>Oscillating</span>}
+          {timer > 0 && <span>{t('fan.timer')} {formatTime(timer)}</span>}
+          {oscillation && <span>{t('fan.oscillating')}</span>}
         </div>
       </div>
     </div>
