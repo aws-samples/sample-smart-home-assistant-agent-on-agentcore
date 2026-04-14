@@ -357,6 +357,64 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 ---
 
+## 管理控制台操作指南
+
+使用部署输出中的管理员凭证登录管理控制台。登录用户必须属于 Cognito `admin` 组。
+
+### 管理技能
+
+**创建技能：**
+1. 进入 **Skills** Tab，从"用户范围"下拉框选择 `__global__`（全局）或指定用户
+2. 点击 **Create Skill**，填写技能名称（小写字母、数字和连字符，如 `my-skill`）、描述（必填）和 Markdown 指令
+3. 可选填写允许工具、许可证、兼容性和元数据键值对
+4. 点击 **Create Skill** 提交
+
+**编辑/删除技能：**
+- 在技能列表中点击 **Edit** 修改描述、指令等字段（名称和用户范围不可修改）
+- 点击 **Delete** 并确认即可删除技能
+
+**管理技能文件：**
+- 编辑技能时，表单下方显示文件管理器，包含 `scripts/`、`references/`、`assets/` 三个目录
+- 点击 **Upload to scripts/** 等按钮上传文件，点击 **Download** 下载，点击 **Delete** 删除
+
+### 配置模型
+
+**设置全局默认模型：**
+1. 进入 **Models** Tab，在顶部"全局默认模型"下拉框中选择模型
+2. 点击 **Save** 保存（Agent 下次调用时生效）
+
+**按用户覆盖模型：**
+- 在下方用户表格中，为指定用户选择不同模型，点击对应行的 **Save**
+- 选择"使用全局默认"可清除用户覆盖
+
+### 管理工具权限
+
+**配置策略引擎模式：**
+1. 进入 **Tool Access** Tab，在顶部切换 **ENFORCE**（阻止未授权访问）或 **LOG_ONLY**（仅审计）
+
+**分配用户工具权限：**
+1. 在用户列表中点击目标用户的 **Manage Permissions**
+2. 勾选/取消勾选该用户可使用的 Gateway 工具（可用 **Select All** / **Deselect All** 批量操作）
+3. 点击 **Save Permissions** 保存（Cedar 策略即时生效）
+
+### 监控会话
+
+1. 进入 **Sessions** Tab 查看所有活跃的运行时会话
+2. 点击 **Stop** 终止指定用户的会话
+3. 点击 **Refresh** 刷新列表
+
+### 查看用户记忆
+
+1. 进入 **Memories** Tab，列表显示所有与聊天机器人交互过的用户
+2. 点击 **View Memories** 查看该用户的长期记忆（事实和偏好）
+
+### 安全护栏
+
+- 进入 **Guardrails** Tab，点击 **Open Console** 跳转到 AgentCore Evaluator 或 Bedrock Guardrails 的 AWS 控制台
+- 点击 **Go to Tool Access** 快速跳转到工具权限配置
+
+---
+
 ## 分步部署
 
 ### 1. 构建前端
@@ -949,6 +1007,64 @@ The Admin Console ("Agent Harness Management") is a separate React app for admin
 - Links to **AgentCore Evaluator** console (LLM-as-a-Judge quality evaluation)
 - Links to **Bedrock Guardrails** console (content filtering, PII redaction)
 - Quick link to **Cedar Policy Engine** settings in the Tool Access tab
+
+---
+
+## Admin Console Usage Guide
+
+Log in to the Admin Console with the admin credentials shown in the deploy output. The user must belong to the Cognito `admin` group.
+
+### Managing Skills
+
+**Create a skill:**
+1. Go to the **Skills** tab, select `__global__` (shared) or a specific user from the "User Scope" dropdown
+2. Click **Create Skill**, fill in the skill name (lowercase, digits, hyphens, e.g. `my-skill`), description (required), and Markdown instructions
+3. Optionally fill in allowed tools, license, compatibility, and metadata key-value pairs
+4. Click **Create Skill** to submit
+
+**Edit / Delete a skill:**
+- Click **Edit** in the skill list to modify description, instructions, etc. (name and user scope cannot be changed)
+- Click **Delete** and confirm to remove a skill
+
+**Manage skill files:**
+- When editing a skill, a file manager appears below the form with `scripts/`, `references/`, and `assets/` directories
+- Click **Upload to scripts/** etc. to upload files, **Download** to download, **Delete** to remove
+
+### Configuring Models
+
+**Set the global default model:**
+1. Go to the **Models** tab, select a model from the "Global Default Model" dropdown
+2. Click **Save** (takes effect on the agent's next invocation)
+
+**Override model per user:**
+- In the user table below, select a different model for a specific user and click **Save** on that row
+- Select "Use global default" to clear the user override
+
+### Managing Tool Permissions
+
+**Configure policy engine mode:**
+1. Go to the **Tool Access** tab, toggle between **ENFORCE** (block unauthorized access) and **LOG_ONLY** (audit only) at the top
+
+**Assign tool permissions to a user:**
+1. Click **Manage Permissions** for the target user in the user list
+2. Check/uncheck the Gateway tools the user can invoke (use **Select All** / **Deselect All** for bulk operations)
+3. Click **Save Permissions** (Cedar policies take effect immediately)
+
+### Monitoring Sessions
+
+1. Go to the **Sessions** tab to view all active runtime sessions
+2. Click **Stop** to terminate a specific user's session
+3. Click **Refresh** to reload the list
+
+### Viewing User Memories
+
+1. Go to the **Memories** tab — the list shows all users who have interacted with the chatbot
+2. Click **View Memories** to see a user's long-term memories (facts and preferences)
+
+### Guardrails
+
+- Go to the **Guardrails** tab, click **Open Console** to jump to the AgentCore Evaluator or Bedrock Guardrails AWS console
+- Click **Go to Tool Access** to quickly navigate to tool permission settings
 
 ---
 
