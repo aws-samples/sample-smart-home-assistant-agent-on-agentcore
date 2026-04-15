@@ -18,6 +18,7 @@ logger.setLevel(logging.INFO)
 
 TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "smarthome-skills")
 GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
+KB_DOCS_BUCKET = os.environ.get("KB_DOCS_BUCKET", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 dynamodb = boto3.resource("dynamodb")
@@ -321,5 +322,22 @@ def handler(event, context):
 
     except Exception as e:
         logger.error(f"Auto-provision failed for user '{username}': {e}")
+
+    # Create user's KB document folder in S3
+    if KB_DOCS_BUCKET:
+        user_email = event.get("request", {}).get("userAttributes", {}).get("email", "")
+        if user_email:
+            try:
+                s3_client.put_object(
+                    Bucket=KB_DOCS_BUCKET,
+                    Key=f"{user_email}/",
+                    Body=b"",
+                    ContentType="application/x-directory",
+                )
+                logger.info(f"Created KB folder for user '{user_email}' in s3://{KB_DOCS_BUCKET}/{user_email}/")
+            except Exception as e:
+                logger.warning(f"Failed to create KB folder for '{user_email}': {e}")
+        else:
+            logger.warning(f"No email for user '{username}', skipping KB folder creation")
 
     return event

@@ -1,8 +1,8 @@
 # Smart Home Assistant Agent — Agent Harness 管理平台
 
-> **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、外部集成、会话监控、长期记忆查看和安全护栏。
+> **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、**企业知识库**、外部集成、会话监控、长期记忆查看和质量评估。
 
-基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。通过 Strands Agent 托管在 AgentCore Runtime 上，用户可以使用自然语言聊天机器人控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。设备控制命令通过 AgentCore Gateway 发送，并通过 AWS IoT Core 进行实时 MQTT 通信。管理控制台（Agent Harness Management）提供 7 个管理维度，覆盖 Agent 全生命周期的运维管控需求。
+基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。通过 Strands Agent 托管在 AgentCore Runtime 上，用户可以使用自然语言聊天机器人控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。设备控制命令通过 AgentCore Gateway 发送，并通过 AWS IoT Core 进行实时 MQTT 通信。管理控制台（Agent Harness Management）提供 8 个管理维度，覆盖 Agent 全生命周期的运维管控需求，包括基于 AWS Bedrock Knowledge Base 的企业知识库管理，支持按用户维度进行文档隔离和权限控制。
 
 ![architecture](docs/screenshots/architecture.drawio.png)
 ![chatbot](docs/screenshots/smarthomeassistant-chat.png)
@@ -16,7 +16,8 @@ smarthome-assistant-agent/
 │   └── lambda/
 │       ├── iot-control/     # 验证并发布 MQTT 命令
 │       ├── iot-discovery/   # 返回可用设备列表
-│       ├── admin-api/       # 技能、模型、工具权限、记忆、会话管理
+│       ├── admin-api/       # 技能、模型、工具权限、知识库、记忆、会话管理
+│       ├── kb-query/        # 企业知识库查询（Bedrock KB 检索 + 按用户 metadata 过滤）
 │       └── user-init/       # Cognito 注册触发器 — 新用户自动分配工具权限
 ├── device-simulator/        # React 应用 — 4 个模拟 IoT 设备
 ├── chatbot/                 # React 应用 — 带 Cognito 认证的聊天 UI
@@ -56,8 +57,10 @@ smarthome-assistant-agent/
 | **CloudFormation** | `CreateStack`, `UpdateStack`, `DeleteStack`, `DescribeStacks`, `DescribeStackEvents`, `CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`, `GetTemplate`, `ListStacks` | CDK 和 agentcore CLI 部署 |
 | **S3** | `CreateBucket`, `DeleteBucket`, `PutObject`, `GetObject`, `DeleteObject`, `ListBucket`, `PutBucketPolicy`, `PutBucketCors`, `PutBucketVersioning`, `GetBucketLocation` | CDK 资产桶、静态网站桶、技能文件桶、config.js 写入 |
 | **CloudFront** | `CreateDistribution`, `GetDistribution`, `UpdateDistribution`, `DeleteDistribution`, `CreateInvalidation` | 三个前端 CDN 分发 |
-| **Lambda** | `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `UpdateFunctionConfiguration`, `UpdateFunctionCode`, `AddPermission`, `RemovePermission`, `DeleteFunction` | 4 个 Lambda 函数（iot-control、iot-discovery、admin-api、user-init） |
+| **Lambda** | `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `UpdateFunctionConfiguration`, `UpdateFunctionCode`, `AddPermission`, `RemovePermission`, `DeleteFunction` | 5 个 Lambda 函数（iot-control、iot-discovery、admin-api、kb-query、user-init） |
 | **DynamoDB** | `CreateTable`, `DeleteTable`, `DescribeTable`, `PutItem`, `Query`, `Scan` | 技能表创建 + seed-skills.py 写入初始数据 |
+| **Bedrock** | `CreateKnowledgeBase`, `DeleteKnowledgeBase`, `GetKnowledgeBase`, `CreateDataSource`, `StartIngestionJob`, `GetIngestionJob`, `Retrieve` | 企业知识库创建、文档同步和检索 |
+| **OpenSearch Serverless** | `CreateCollection`, `DeleteCollection`, `CreateSecurityPolicy`, `CreateAccessPolicy`, `UpdateAccessPolicy`, `BatchGetCollection`, `APIAccessAll` | 知识库向量存储（AOSS 集合 + 索引） |
 | **Cognito** | `CreateUserPool`, `UpdateUserPool`, `DeleteUserPool`, `CreateUserPoolClient`, `CreateUserPoolDomain`, `AdminCreateUser`, `AdminSetUserPassword`, `CreateUserPoolGroup`, `AdminAddUserToGroup` | 用户池、管理员用户、admin 组 |
 | **Cognito Identity** | `CreateIdentityPool`, `SetIdentityPoolRoles`, `DeleteIdentityPool` | 设备模拟器 MQTT 认证 |
 | **IoT Core** | `DescribeEndpoint`, `CreateThing`, `DeleteThing` | IoT 端点发现 + 设备 Thing 创建 |
@@ -293,19 +296,22 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 **CDK 堆栈** (`SmartHomeAssistantStack`) — 标准 AWS 资源：
 - Cognito 用户池 + 身份池 + 管理员组和默认管理员用户
 - IoT Core 设备 + 端点查询
-- Lambda 函数：iot-control（MQTT）、iot-discovery（设备列表）、admin-api（技能、模型、工具权限、记忆、会话）、user-init（新用户自动分配工具权限）
-- DynamoDB 表（smarthome-skills）用于 Agent 技能存储、用户设置和会话追踪
+- Lambda 函数：iot-control（MQTT）、iot-discovery（设备列表）、admin-api（技能、模型、工具权限、知识库、记忆、会话）、kb-query（知识库检索）、user-init（新用户自动分配工具权限）
+- DynamoDB 表（smarthome-skills）用于 Agent 技能存储、用户设置、知识库配置和会话追踪
 - S3 桶（smarthome-skill-files）用于技能目录文件（scripts、references、assets），符合 [Agent Skills 规范](https://agentskills.io/specification)
+- S3 桶（smarthome-kb-docs）用于企业知识库文档存储，按用户范围（S3 prefix）隔离
+- OpenSearch Serverless 集合（smarthome-kb）用于知识库向量索引
+- Bedrock Knowledge Base + S3 数据源用于文档向量化和语义检索（Embedding: `cohere.embed-multilingual-v3`）
 - API Gateway + Cognito 授权器用于管理 API
 - S3 + CloudFront 用于设备模拟器、聊天机器人和管理控制台
 
 **AgentCore 堆栈**（由 `agentcore` CLI 管理）— AgentCore 资源：
 - AgentCore Gateway（MCP 服务器），CUSTOM_JWT 认证（Cognito）用于按用户工具策略执行
-- Gateway Lambda Target 指向 iot-control 和 iot-discovery Lambda
+- Gateway Lambda Target 指向 iot-control、iot-discovery 和 kb-query Lambda
 - AgentCore Runtime 运行 Strands Agent（CodeZip，Python 3.13）
 - AgentCore Memory，含语义、摘要和用户偏好提取策略
 
-部署脚本（`scripts/setup-agentcore.py`）桥接两者：读取 CDK 输出、创建 `agentcore` 项目、注入 Agent 代码、添加 memory + gateway + targets、部署所有资源，然后配置 runtime 的 `SKILLS_TABLE_NAME`、`requestHeaderAllowlist: ["Authorization"]`（用于 JWT 转发到 gateway），并授予 DynamoDB 访问权限。最后 `scripts/seed-skills.py` 将 5 个内置技能写入 DynamoDB。
+部署脚本（`scripts/setup-agentcore.py`）桥接两者：读取 CDK 输出、创建 `agentcore` 项目、注入 Agent 代码、添加 memory + gateway + targets（含 kb-query）、部署所有资源，然后初始化企业知识库（创建 AOSS 向量索引、Bedrock KB、S3 数据源），配置 runtime 的 `SKILLS_TABLE_NAME`、`requestHeaderAllowlist: ["Authorization"]`（用于 JWT 转发到 gateway），并授予 DynamoDB 和 Bedrock Retrieve 访问权限。最后 `scripts/seed-skills.py` 将 5 个内置技能写入 DynamoDB。
 
 ---
 
@@ -335,6 +341,15 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
   - Gateway 使用 CUSTOM_JWT 认证；Runtime 通过 `requestHeaderAllowlist: ["Authorization"]` 转发用户 JWT
   - 默认拒绝：未配置工具权限的用户无法调用 gateway 工具
 
+### 企业知识库（Knowledge Base Tab）
+- **基于 AWS Bedrock Knowledge Base** 的 RAG 检索增强生成
+- **按用户文档隔离**：S3 prefix（`__shared__/` 公共 + `user@email/` 私有）+ metadata 过滤
+- **文档管理**：上传、列表、删除文档，支持 PDF/TXT/MD/DOCX/CSV 等格式
+- **同步管理**：一键触发 Bedrock KB 向量化 ingestion，查看同步状态和统计
+- **用户范围选择器**：下拉框展示 `公共知识（所有用户）` + 所有 Cognito 用户
+- **安全**：Agent 代码中的本地 tool wrapper 自动从 Runtime 验证的用户身份注入 `user_id`，LLM 无法伪造或篡改；Gateway Cedar 策略确保仅认证用户可调用
+- **向量存储**：OpenSearch Serverless (AOSS) + `cohere.embed-multilingual-v3`（1024 维，中英文）
+
 ### 集成（Integrations Tab）
 - 显示当前工具集成类型（Lambda Targets — 已激活）和未来路线图
 - 计划集成：MCP Servers、A2A Agents、API Gateway 端点
@@ -350,7 +365,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 - 点击"查看记忆"显示提取的**事实**（语义知识）和**偏好**（用户偏好）
 - 按创建时间倒序排列，显示类型标签、内容和时间戳
 
-### 安全护栏（Guardrails Tab）
+### 质量评估（Guardrails Tab）
 - 链接到 **AgentCore Evaluator** 控制台（LLM-as-a-Judge 质量评估）
 - 链接到 **Bedrock Guardrails** 控制台（内容过滤、PII 脱敏）
 - 快速跳转到 Tool Access tab 中的 **Cedar Policy Engine** 设置
@@ -408,7 +423,24 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 1. 进入 **Memories** Tab，列表显示所有与聊天机器人交互过的用户
 2. 点击 **View Memories** 查看该用户的长期记忆（事实和偏好）
 
-### 安全护栏
+### 管理企业知识库
+
+**上传文档：**
+1. 进入 **Knowledge Base** Tab，从"用户范围"下拉框选择 `公共知识（所有用户）`（文档对所有人可见）或指定用户邮箱（仅该用户可查）
+2. 点击 **上传文档**，选择文件（支持 PDF、TXT、MD、DOCX、CSV 等）
+3. 上传完成后系统自动创建 metadata sidecar 文件（标记文档所属范围）
+
+**同步知识库：**
+1. 上传/删除文档后，点击 **同步知识库** 触发 Bedrock KB 向量化
+2. 同步状态表格实时显示 ingestion job 状态（STARTING → IN_PROGRESS → COMPLETE）
+3. 同步完成后，Agent 即可通过 `query_knowledge_base` 工具检索新文档
+
+**权限模型：**
+- **公共文档**（`__shared__/` 前缀）：所有用户通过 Agent 聊天均可检索到
+- **用户专属文档**（`user@email/` 前缀）：仅对应用户可检索
+- Agent 代码中的 tool wrapper 从 Runtime 验证上下文自动注入用户身份，LLM 无法控制 `user_id` 参数
+
+### 质量评估
 
 - 进入 **Guardrails** Tab，点击 **Open Console** 跳转到 AgentCore Evaluator 或 Bedrock Guardrails 的 AWS 控制台
 - 点击 **Go to Tool Access** 快速跳转到工具权限配置
@@ -550,6 +582,51 @@ certificate: acm.Certificate.fromCertificateArn(this, "Cert", "arn:aws:acm:...")
 
 ---
 
+## 月度成本估算
+
+本方案全部采用 AWS Serverless 托管服务，**无需预置服务器**，按实际用量付费，空闲时成本趋近于零。以下按日活用户（DAU）1 万、10 万、100 万三个量级估算月度成本（us-west-2 区域，价格截至 2025 年）。
+
+### 成本假设
+
+- 每用户每天平均 10 次对话，每次对话含 1 次 LLM 调用 + 1.5 次工具调用 + 0.3 次 KB 查询
+- LLM 模型：Kimi K2.5（输入 ~800 tokens/次，输出 ~200 tokens/次）
+- 知识库文档总量：1,000 个文档（~500MB），每月同步 4 次
+- 管理员操作忽略不计
+
+### 分项成本表
+
+| 模块 | 服务 | 计费维度 | 1 万 DAU | 10 万 DAU | 100 万 DAU |
+|------|------|---------|---------|----------|-----------|
+| **AI Agent** | AgentCore Runtime | 调用次数 + 运行时长 | ~$150 | ~$1,500 | ~$15,000 |
+| **LLM 推理** | Bedrock (Kimi K2.5) | Input/Output tokens | ~$80 | ~$800 | ~$8,000 |
+| **工具路由** | AgentCore Gateway | MCP 调用次数 | ~$15 | ~$150 | ~$1,500 |
+| **策略引擎** | AgentCore Policy Engine | 策略评估次数 | ~$5 | ~$50 | ~$500 |
+| **长期记忆** | AgentCore Memory | 读写次数 + 存储 | ~$20 | ~$200 | ~$2,000 |
+| **知识库检索** | Bedrock KB (Retrieve) | 查询次数 | ~$10 | ~$100 | ~$1,000 |
+| **向量嵌入** | Bedrock (Cohere Embed) | Embedding tokens | ~$2 | ~$2 | ~$2 |
+| **向量存储** | OpenSearch Serverless | OCU 小时（最低 2 OCU） | ~$350 | ~$350 | ~$700 |
+| **文档存储** | S3 | 存储 + 请求 | <$1 | <$1 | ~$5 |
+| **设备控制** | Lambda (iot-control) | 调用次数 | ~$3 | ~$30 | ~$300 |
+| **管理 API** | API Gateway + Lambda | 调用次数 | <$1 | ~$5 | ~$50 |
+| **用户认证** | Cognito | MAU（前 50,000 免费） | $0 | ~$250 | ~$4,500 |
+| **前端托管** | S3 + CloudFront | 存储 + 流量 | ~$5 | ~$20 | ~$100 |
+| **数据存储** | DynamoDB | 读写 + 存储（按需） | ~$5 | ~$50 | ~$500 |
+| **质量评估** | AgentCore Evaluator | LLM-as-Judge 调用 | ~$10 | ~$100 | ~$1,000 |
+| | | **月度总计** | **~$656** | **~$3,607** | **~$35,157** |
+| | | **每用户每月** | **~$0.066** | **~$0.036** | **~$0.035** |
+
+### Serverless 成本优势
+
+- **零空闲成本**：Lambda、API Gateway、DynamoDB、AgentCore Runtime 在无请求时不产生费用（OpenSearch Serverless 最低 2 OCU 除外）
+- **线性扩展**：从 1 万到 100 万用户，核心成本（Agent + LLM + Gateway）线性增长，无阶梯跳跃
+- **无运维成本**：无需管理服务器、集群或容量规划，全部由 AWS 自动扩缩容
+- **单用户成本递减**：规模从 1 万到 100 万时，单用户月成本从 $0.066 降至 $0.035，体现规模经济
+- **OpenSearch Serverless** 是最大固定成本项（最低 ~$350/月），适合中大型部署；小型部署可考虑切换为 Bedrock 内置向量存储（预览中）以进一步降低成本
+
+> **注意：** 以上为估算值，实际成本取决于具体使用模式、对话长度、模型选择和区域定价。建议使用 [AWS Pricing Calculator](https://calculator.aws/) 进行精确计算。AgentCore 和 Bedrock KB 定价可能随服务更新而变化。
+
+---
+
 ## 销毁资源
 
 **顺序很重要：** AgentCore 资源必须在 CDK 堆栈之前销毁，因为 AgentCore Gateway 引用了 Lambda 函数。
@@ -658,9 +735,9 @@ aws cloudformation wait stack-delete-complete --stack-name AgentCore-smarthome-d
 
 # English Version
 
-> **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), external integrations, session monitoring, long-term memory viewing, and safety guardrails.
+> **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base**, external integrations, session monitoring, long-term memory viewing, and safety guardrails.
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core. The admin console (Agent Harness Management) provides 7 management dimensions covering the full Agent lifecycle.
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Natural language chatbot controls simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven) through a Strands Agent hosted on AgentCore Runtime, with remote control command through AgentCore Gateway and real-time MQTT communication with AWS IoT Core. The admin console (Agent Harness Management) provides 8 management dimensions covering the full Agent lifecycle, including an enterprise knowledge base powered by AWS Bedrock Knowledge Base with per-user document isolation and access control.
 
 ```
 smarthome-assistant-agent/
@@ -669,7 +746,8 @@ smarthome-assistant-agent/
 │   └── lambda/
 │       ├── iot-control/     # Validates & publishes MQTT commands
 │       ├── iot-discovery/   # Returns available device list
-│       ├── admin-api/       # Skills, models, tool access, memories, sessions
+│       ├── admin-api/       # Skills, models, tool access, knowledge base, memories, sessions
+│       ├── kb-query/        # Enterprise KB query (Bedrock KB retrieval + per-user metadata filtering)
 │       └── user-init/       # Cognito signup trigger — auto-provision tool permissions
 ├── device-simulator/        # React app — 4 simulated IoT devices
 ├── chatbot/                 # React app — chat UI with Cognito auth
@@ -709,8 +787,10 @@ The IAM user/role running `deploy.sh` needs the following AWS service permission
 | **CloudFormation** | `CreateStack`, `UpdateStack`, `DeleteStack`, `DescribeStacks`, `DescribeStackEvents`, `CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`, `GetTemplate`, `ListStacks` | CDK and agentcore CLI deployment |
 | **S3** | `CreateBucket`, `DeleteBucket`, `PutObject`, `GetObject`, `DeleteObject`, `ListBucket`, `PutBucketPolicy`, `PutBucketCors`, `PutBucketVersioning`, `GetBucketLocation` | CDK asset bucket, static site buckets, skill files bucket, config.js writes |
 | **CloudFront** | `CreateDistribution`, `GetDistribution`, `UpdateDistribution`, `DeleteDistribution`, `CreateInvalidation` | Three frontend CDN distributions |
-| **Lambda** | `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `UpdateFunctionConfiguration`, `UpdateFunctionCode`, `AddPermission`, `RemovePermission`, `DeleteFunction` | 4 Lambda functions (iot-control, iot-discovery, admin-api, user-init) |
+| **Lambda** | `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `UpdateFunctionConfiguration`, `UpdateFunctionCode`, `AddPermission`, `RemovePermission`, `DeleteFunction` | 5 Lambda functions (iot-control, iot-discovery, admin-api, kb-query, user-init) |
 | **DynamoDB** | `CreateTable`, `DeleteTable`, `DescribeTable`, `PutItem`, `Query`, `Scan` | Skills table creation + seed-skills.py initial data |
+| **Bedrock** | `CreateKnowledgeBase`, `DeleteKnowledgeBase`, `GetKnowledgeBase`, `CreateDataSource`, `StartIngestionJob`, `GetIngestionJob`, `Retrieve` | Enterprise knowledge base creation, document sync, and retrieval |
+| **OpenSearch Serverless** | `CreateCollection`, `DeleteCollection`, `CreateSecurityPolicy`, `CreateAccessPolicy`, `UpdateAccessPolicy`, `BatchGetCollection`, `APIAccessAll` | KB vector store (AOSS collection + index) |
 | **Cognito** | `CreateUserPool`, `UpdateUserPool`, `DeleteUserPool`, `CreateUserPoolClient`, `CreateUserPoolDomain`, `AdminCreateUser`, `AdminSetUserPassword`, `CreateGroup`, `AdminAddUserToGroup` | User pool, admin user, admin group |
 | **Cognito Identity** | `CreateIdentityPool`, `SetIdentityPoolRoles`, `DeleteIdentityPool` | Device simulator MQTT auth |
 | **IoT Core** | `DescribeEndpoint`, `CreateThing`, `DeleteThing` | IoT endpoint discovery + device Thing creation |
@@ -946,19 +1026,22 @@ The deployment creates two separate CloudFormation stacks:
 **CDK Stack** (`SmartHomeAssistantStack`) — standard AWS resources:
 - Cognito User Pool + Identity Pool + Admin group and default admin user
 - IoT Core things + endpoint lookup
-- Lambda functions: iot-control (MQTT), iot-discovery (device list), admin-api (skills, models, tool access, memories, sessions), user-init (auto-provision tool permissions for new users)
-- DynamoDB table (smarthome-skills) for agent skill storage, user settings, and session tracking
+- Lambda functions: iot-control (MQTT), iot-discovery (device list), admin-api (skills, models, tool access, knowledge base, memories, sessions), kb-query (knowledge base retrieval), user-init (auto-provision tool permissions for new users)
+- DynamoDB table (smarthome-skills) for agent skill storage, user settings, KB configuration, and session tracking
 - S3 bucket (smarthome-skill-files) for skill directory files (scripts, references, assets) per the [Agent Skills spec](https://agentskills.io/specification)
+- S3 bucket (smarthome-kb-docs) for enterprise knowledge base documents, organized by user scope (S3 prefix)
+- OpenSearch Serverless collection (smarthome-kb) for knowledge base vector indexing
+- Bedrock Knowledge Base + S3 data source for document vectorization and semantic retrieval (Embedding: `cohere.embed-multilingual-v3`)
 - API Gateway with Cognito authorizer for admin API
 - S3 + CloudFront for Device Simulator, Chatbot, and Admin Console
 
 **AgentCore Stack** (managed by `agentcore` CLI) — AgentCore resources:
 - AgentCore Gateway (MCP server) with CUSTOM_JWT auth (Cognito) for per-user tool policy enforcement
-- Gateway Lambda Targets pointing to iot-control and iot-discovery Lambdas
+- Gateway Lambda Targets pointing to iot-control, iot-discovery, and kb-query Lambdas
 - AgentCore Runtime running the Strands agent (CodeZip, Python 3.13)
 - AgentCore Memory with semantic, summary, and user preference extraction strategies
 
-The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates an `agentcore` project, injects our agent code, adds memory + gateway + targets, deploys everything, then patches the runtime with `SKILLS_TABLE_NAME`, `requestHeaderAllowlist: ["Authorization"]` (for JWT forwarding to gateway), and grants DynamoDB access. Finally, `scripts/seed-skills.py` populates the DynamoDB table with the 5 built-in skills.
+The setup script (`scripts/setup-agentcore.py`) bridges them: reads CDK outputs, creates an `agentcore` project, injects our agent code, adds memory + gateway + targets (including kb-query), deploys everything, then initializes the enterprise knowledge base (creates AOSS vector index, Bedrock KB, S3 data source), patches the runtime with `SKILLS_TABLE_NAME`, `requestHeaderAllowlist: ["Authorization"]` (for JWT forwarding to gateway), and grants DynamoDB + Bedrock Retrieve access. Finally, `scripts/seed-skills.py` populates the DynamoDB table with the 5 built-in skills.
 
 ---
 
@@ -988,6 +1071,15 @@ The Admin Console ("Agent Harness Management") is a separate React app for admin
   - Gateway uses CUSTOM_JWT auth; runtime forwards user JWT via `requestHeaderAllowlist: ["Authorization"]`
   - Default deny: users without explicit tool permissions cannot invoke gateway tools
 
+### Knowledge Base (Knowledge Base Tab)
+- **RAG (Retrieval-Augmented Generation)** powered by AWS Bedrock Knowledge Base
+- **Per-user document isolation**: S3 prefix (`__shared__/` public + `user@email/` private) + metadata filtering at query time
+- **Document management**: upload, list, and delete documents (PDF, TXT, MD, DOCX, CSV, etc.)
+- **Sync management**: one-click Bedrock KB vectorization ingestion with real-time status tracking
+- **User scope selector**: dropdown showing `Shared (all users)` + all Cognito users
+- **Security**: a local tool wrapper in the agent code auto-injects `user_id` from the Runtime-verified identity — the LLM cannot fabricate or override it; Gateway Cedar policy ensures only authenticated users can invoke the tool
+- **Vector store**: OpenSearch Serverless (AOSS) + `cohere.embed-multilingual-v3` (1024 dimensions, multilingual Chinese/English)
+
 ### Integrations (Integrations Tab)
 - Shows current tool integration types (Lambda Targets — active) and future roadmap
 - Planned integrations: MCP Servers, A2A Agents, API Gateway endpoints
@@ -1003,7 +1095,7 @@ The Admin Console ("Agent Harness Management") is a separate React app for admin
 - Click "View Memories" to see extracted **facts** (semantic knowledge) and **preferences** (user preferences)
 - Records sorted by creation time, showing type badge, content, and timestamp
 
-### Guardrails (Guardrails Tab)
+### Quality Evaluation (Quality Evaluation Tab)
 - Links to **AgentCore Evaluator** console (LLM-as-a-Judge quality evaluation)
 - Links to **Bedrock Guardrails** console (content filtering, PII redaction)
 - Quick link to **Cedar Policy Engine** settings in the Tool Access tab
@@ -1061,9 +1153,26 @@ Log in to the Admin Console with the admin credentials shown in the deploy outpu
 1. Go to the **Memories** tab — the list shows all users who have interacted with the chatbot
 2. Click **View Memories** to see a user's long-term memories (facts and preferences)
 
-### Guardrails
+### Managing the Enterprise Knowledge Base
 
-- Go to the **Guardrails** tab, click **Open Console** to jump to the AgentCore Evaluator or Bedrock Guardrails AWS console
+**Upload documents:**
+1. Go to the **Knowledge Base** tab, select `Shared (all users)` (visible to everyone) or a specific user email (visible only to that user) from the "User Scope" dropdown
+2. Click **Upload Document** and select a file (PDF, TXT, MD, DOCX, CSV, etc.)
+3. The system automatically creates a metadata sidecar file to tag the document's scope
+
+**Sync the knowledge base:**
+1. After uploading or deleting documents, click **Sync Knowledge Base** to trigger Bedrock KB vectorization
+2. The sync status table shows ingestion job progress in real time (STARTING → IN_PROGRESS → COMPLETE)
+3. Once synced, the agent can retrieve the new documents via the `query_knowledge_base` tool
+
+**Permission model:**
+- **Shared documents** (`__shared__/` prefix): retrievable by all users through agent chat
+- **User-scoped documents** (`user@email/` prefix): retrievable only by the corresponding user
+- A local tool wrapper in the agent code injects `user_id` from the verified runtime context — the LLM cannot control this parameter
+
+### Quality Evaluation
+
+- Go to the **Quality Evaluation** tab, click **Open Console** to jump to the AgentCore Evaluator or Bedrock Guardrails AWS console
 - Click **Go to Tool Access** to quickly navigate to tool permission settings
 
 ---
@@ -1200,6 +1309,51 @@ Add to `cdk/lib/smarthome-stack.ts`:
 domainNames: ["chat.yourdomain.com"],
 certificate: acm.Certificate.fromCertificateArn(this, "Cert", "arn:aws:acm:..."),
 ```
+
+---
+
+## Monthly Cost Estimation
+
+This solution uses **100% AWS Serverless managed services** — no servers to provision, pay only for actual usage, costs approach zero when idle. Estimates below are for DAU (Daily Active Users) at 10K, 100K, and 1M tiers (us-west-2 region, pricing as of 2025).
+
+### Assumptions
+
+- Each user averages 10 conversations/day, each with 1 LLM call + 1.5 tool calls + 0.3 KB queries
+- LLM model: Kimi K2.5 (~800 input tokens/call, ~200 output tokens/call)
+- Knowledge base: 1,000 documents (~500MB total), synced 4 times/month
+- Admin operations are negligible
+
+### Cost Breakdown
+
+| Module | Service | Billing Dimension | 10K DAU | 100K DAU | 1M DAU |
+|--------|---------|-------------------|---------|----------|--------|
+| **AI Agent** | AgentCore Runtime | Invocations + duration | ~$150 | ~$1,500 | ~$15,000 |
+| **LLM Inference** | Bedrock (Kimi K2.5) | Input/Output tokens | ~$80 | ~$800 | ~$8,000 |
+| **Tool Routing** | AgentCore Gateway | MCP invocations | ~$15 | ~$150 | ~$1,500 |
+| **Policy Engine** | AgentCore Policy Engine | Policy evaluations | ~$5 | ~$50 | ~$500 |
+| **Long-term Memory** | AgentCore Memory | Read/Write + storage | ~$20 | ~$200 | ~$2,000 |
+| **KB Retrieval** | Bedrock KB (Retrieve) | Query count | ~$10 | ~$100 | ~$1,000 |
+| **Vector Embedding** | Bedrock (Cohere Embed) | Embedding tokens | ~$2 | ~$2 | ~$2 |
+| **Vector Store** | OpenSearch Serverless | OCU hours (min 2 OCU) | ~$350 | ~$350 | ~$700 |
+| **Document Storage** | S3 | Storage + requests | <$1 | <$1 | ~$5 |
+| **Device Control** | Lambda (iot-control) | Invocations | ~$3 | ~$30 | ~$300 |
+| **Admin API** | API Gateway + Lambda | Invocations | <$1 | ~$5 | ~$50 |
+| **Authentication** | Cognito | MAU (first 50K free) | $0 | ~$250 | ~$4,500 |
+| **Frontend Hosting** | S3 + CloudFront | Storage + transfer | ~$5 | ~$20 | ~$100 |
+| **Data Storage** | DynamoDB | Read/Write + storage (on-demand) | ~$5 | ~$50 | ~$500 |
+| **Quality Evaluation** | AgentCore Evaluator | LLM-as-Judge calls | ~$10 | ~$100 | ~$1,000 |
+| | | **Monthly Total** | **~$656** | **~$3,607** | **~$35,157** |
+| | | **Per User / Month** | **~$0.066** | **~$0.036** | **~$0.035** |
+
+### Serverless Cost Advantages
+
+- **Zero idle cost**: Lambda, API Gateway, DynamoDB, and AgentCore Runtime incur no charges when idle (except OpenSearch Serverless minimum 2 OCU)
+- **Linear scaling**: Core costs (Agent + LLM + Gateway) scale linearly from 10K to 1M users with no step-function jumps
+- **Zero ops overhead**: No servers, clusters, or capacity planning — AWS handles all auto-scaling
+- **Decreasing per-user cost**: Per-user monthly cost drops from $0.066 (10K) to $0.035 (1M), demonstrating economies of scale
+- **OpenSearch Serverless** is the largest fixed cost (~$350/month minimum) — suitable for medium to large deployments; smaller deployments can consider switching to Bedrock managed vector store (in preview) to further reduce costs
+
+> **Note:** These are estimates. Actual costs depend on conversation patterns, message length, model choice, and regional pricing. Use the [AWS Pricing Calculator](https://calculator.aws/) for precise calculations. AgentCore and Bedrock KB pricing may change as services evolve.
 
 ---
 

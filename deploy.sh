@@ -28,6 +28,7 @@ npm install
 # Bundle latest boto3 in Lambda functions (Lambda runtime's boto3 is too old for AgentCore APIs)
 pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/admin-api" -q --upgrade 2>/dev/null || true
 pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/user-init" -q --upgrade 2>/dev/null || true
+pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/kb-query" -q --upgrade 2>/dev/null || true
 
 echo ""
 echo "[2/8] Building Device Simulator..."
