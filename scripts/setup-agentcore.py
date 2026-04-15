@@ -58,6 +58,11 @@ def main():
     client_id = outputs["UserPoolClientId"]
     lambda_arn = outputs["IoTControlLambdaArn"]
     discovery_lambda_arn = outputs["IoTDiscoveryLambdaArn"]
+    kb_query_lambda_arn = outputs.get("KBQueryLambdaArn", "")
+    aoss_endpoint = outputs.get("AOSSCollectionEndpoint", "")
+    aoss_collection_arn = outputs.get("AOSSCollectionArn", "")
+    kb_service_role_arn = outputs.get("KBServiceRoleArn", "")
+    kb_docs_bucket = outputs.get("KBDocsBucketName", "")
     discovery_url = f"https://cognito-idp.{REGION}.amazonaws.com/{user_pool_id}/.well-known/openid-configuration"
     agent_code_src = os.path.join(PROJECT_ROOT, "agent")
 
@@ -207,6 +212,44 @@ def main():
     if r.returncode != 0:
         raise Exception("Failed to add discovery gateway target")
 
+    # Add KB query Lambda target to gateway (if KB infrastructure exists)
+    if kb_query_lambda_arn:
+        print("  Adding KB query Lambda target to gateway...")
+        with open(os.path.join(project_dir, "kb-query-tools.json"), "w") as f:
+            json.dump([{
+                "name": "query_knowledge_base",
+                "description": (
+                    "Query the enterprise knowledge base to retrieve relevant documents. "
+                    "Use this when users ask about company documents, product manuals, "
+                    "troubleshooting guides, or internal knowledge."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query to find relevant documents",
+                        },
+                        "user_id": {
+                            "type": "string",
+                            "description": "User email for scoped retrieval. The agent MUST pass the current user's email so they can access their private documents.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            }], f, indent=2)
+
+        r = run(
+            f'agentcore add gateway-target --name SmartHomeKnowledgeBase '
+            f'--gateway SmartHomeGateway '
+            f'--type lambda-function-arn '
+            f'--lambda-arn {kb_query_lambda_arn} '
+            f'--tool-schema-file kb-query-tools.json',
+            cwd=project_dir,
+        )
+        if r.returncode != 0:
+            print("  Warning: Failed to add KB query gateway target (non-fatal)")
+
     # --------------------------------------------------------
     # Step 6: Add evaluator (LLM-as-a-Judge for response quality)
     # --------------------------------------------------------
@@ -270,6 +313,193 @@ def main():
         elif "RuntimeArnOutput" in key:
             runtime_arn = val
 
+    # --------------------------------------------------------
+    # Post-deploy: Initialize Bedrock Knowledge Base
+    # --------------------------------------------------------
+    kb_id = ""
+    kb_data_source_id = ""
+    if aoss_endpoint and aoss_collection_arn and kb_service_role_arn and kb_docs_bucket:
+        print("\nInitializing Bedrock Knowledge Base...")
+
+        # Step A: Ensure caller's IAM identity is in AOSS data access policy
+        print("  Ensuring AOSS data access for current IAM identity...")
+        caller_arn = boto3.client("sts", region_name=REGION).get_caller_identity()["Arn"]
+        aoss_client = boto3.client("opensearchserverless", region_name=REGION)
+        try:
+            policy_resp = aoss_client.get_access_policy(name="smarthome-kb-data", type="data")
+            policy_detail = policy_resp["accessPolicyDetail"]
+            policy_doc = policy_detail["policy"]
+            # Add caller ARN if not already a principal
+            principals = policy_doc[0].get("Principal", [])
+            if caller_arn not in principals:
+                principals.append(caller_arn)
+                policy_doc[0]["Principal"] = principals
+                aoss_client.update_access_policy(
+                    name="smarthome-kb-data",
+                    type="data",
+                    policyVersion=policy_detail["policyVersion"],
+                    policy=json.dumps(policy_doc),
+                )
+                print(f"  Added {caller_arn} to AOSS data access policy")
+                print("  Waiting 30s for AOSS policy propagation...")
+                time.sleep(30)
+            else:
+                print(f"  IAM identity already in AOSS data access policy")
+        except Exception as e:
+            print(f"  Warning: Could not update AOSS data access policy: {e}")
+            print("  Will attempt index creation anyway...")
+
+        # Step B: Create AOSS vector index using opensearch-py
+        print("  Creating AOSS vector index...")
+        endpoint = aoss_endpoint if aoss_endpoint.startswith("https://") else f"https://{aoss_endpoint}"
+        host = endpoint.replace("https://", "")
+        index_name = "smarthome-kb-index"
+
+        # Install opensearch-py if needed
+        try:
+            from opensearchpy import OpenSearch, RequestsHttpConnection
+            from requests_aws4auth import AWS4Auth
+        except ImportError:
+            import subprocess as _sp
+            _sp.run([sys.executable, "-m", "pip", "install", "-q", "opensearch-py", "requests-aws4auth"], check=True)
+            from opensearchpy import OpenSearch, RequestsHttpConnection
+            from requests_aws4auth import AWS4Auth
+
+        session = boto3.Session(region_name=REGION)
+        credentials = session.get_credentials().get_frozen_credentials()
+        awsauth = AWS4Auth(
+            credentials.access_key, credentials.secret_key, REGION, "aoss",
+            session_token=credentials.token,
+        )
+        os_client = OpenSearch(
+            hosts=[{"host": host, "port": 443}],
+            http_auth=awsauth,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection,
+            timeout=30,
+        )
+
+        index_body = {
+            "settings": {"index": {"knn": True, "knn.algo_param.ef_search": 512}},
+            "mappings": {
+                "properties": {
+                    "bedrock-knowledge-base-default-vector": {
+                        "type": "knn_vector", "dimension": 1024,
+                        "method": {"engine": "faiss", "space_type": "l2", "name": "hnsw",
+                                   "parameters": {"ef_construction": 512, "m": 16}},
+                    },
+                    "AMAZON_BEDROCK_TEXT_CHUNK": {"type": "text"},
+                    "AMAZON_BEDROCK_METADATA": {"type": "text"},
+                }
+            },
+        }
+
+        try:
+            os_client.indices.create(index=index_name, body=index_body)
+            print("  AOSS index created successfully")
+        except Exception as e:
+            if "resource_already_exists_exception" in str(e):
+                print("  AOSS index already exists")
+            else:
+                raise Exception(f"Failed to create AOSS index: {e}")
+
+        # Step B: Create Bedrock Knowledge Base
+        print("  Creating Bedrock Knowledge Base...")
+        bedrock_agent = boto3.client("bedrock-agent", region_name=REGION)
+        embedding_model_arn = f"arn:aws:bedrock:{REGION}::foundation-model/cohere.embed-multilingual-v3"
+        try:
+            kb_resp = bedrock_agent.create_knowledge_base(
+                name="SmartHomeEnterpriseKB",
+                description="Enterprise knowledge base for smart home assistant",
+                roleArn=kb_service_role_arn,
+                knowledgeBaseConfiguration={
+                    "type": "VECTOR",
+                    "vectorKnowledgeBaseConfiguration": {
+                        "embeddingModelArn": embedding_model_arn,
+                    },
+                },
+                storageConfiguration={
+                    "type": "OPENSEARCH_SERVERLESS",
+                    "opensearchServerlessConfiguration": {
+                        "collectionArn": aoss_collection_arn,
+                        "vectorIndexName": index_name,
+                        "fieldMapping": {
+                            "vectorField": "bedrock-knowledge-base-default-vector",
+                            "textField": "AMAZON_BEDROCK_TEXT_CHUNK",
+                            "metadataField": "AMAZON_BEDROCK_METADATA",
+                        },
+                    },
+                },
+            )
+            kb_id = kb_resp["knowledgeBase"]["knowledgeBaseId"]
+            print(f"  Knowledge Base created: {kb_id}")
+
+            # Wait for ACTIVE
+            for _ in range(30):
+                kb = bedrock_agent.get_knowledge_base(knowledgeBaseId=kb_id)
+                if kb["knowledgeBase"]["status"] == "ACTIVE":
+                    break
+                time.sleep(2)
+
+            # Step C: Create S3 data source
+            print("  Creating S3 data source...")
+            ds_resp = bedrock_agent.create_data_source(
+                knowledgeBaseId=kb_id,
+                name="SmartHomeKBDocuments",
+                dataSourceConfiguration={
+                    "type": "S3",
+                    "s3Configuration": {
+                        "bucketArn": f"arn:aws:s3:::{kb_docs_bucket}",
+                    },
+                },
+            )
+            kb_data_source_id = ds_resp["dataSource"]["dataSourceId"]
+            print(f"  Data source created: {kb_data_source_id}")
+
+            # Store KB config in DynamoDB
+            skills_table = outputs.get("SkillsTableName", "smarthome-skills")
+            ddb = boto3.resource("dynamodb", region_name=REGION)
+            ddb_table = ddb.Table(skills_table)
+            from datetime import datetime, timezone
+            ddb_table.put_item(Item={
+                "userId": "__kb_config__",
+                "skillName": "__default__",
+                "knowledgeBaseId": kb_id,
+                "dataSourceId": kb_data_source_id,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            })
+            print("  KB config stored in DynamoDB")
+
+        except bedrock_agent.exceptions.ConflictException:
+            print("  Knowledge Base already exists, looking up existing...")
+            list_resp = bedrock_agent.list_knowledge_bases(maxResults=100)
+            for kb_summary in list_resp.get("knowledgeBaseSummaries", []):
+                if kb_summary.get("name") == "SmartHomeEnterpriseKB":
+                    kb_id = kb_summary["knowledgeBaseId"]
+                    # Get data source
+                    ds_list = bedrock_agent.list_data_sources(knowledgeBaseId=kb_id, maxResults=10)
+                    for ds in ds_list.get("dataSourceSummaries", []):
+                        kb_data_source_id = ds["dataSourceId"]
+                        break
+                    print(f"  Found existing KB: {kb_id}, DS: {kb_data_source_id}")
+                    break
+        except Exception as e:
+            print(f"  Warning: Failed to create Knowledge Base: {e}")
+        # Create default KB folders (__shared__ + admin user)
+        print("  Creating default KB folders...")
+        s3_setup = boto3.client("s3", region_name=REGION)
+        for folder in ["__shared__/", "admin@smarthome.local/"]:
+            try:
+                s3_setup.put_object(Bucket=kb_docs_bucket, Key=folder, Body=b"", ContentType="application/x-directory")
+            except Exception:
+                pass
+        print(f"  Created __shared__/ and admin@smarthome.local/ in s3://{kb_docs_bucket}")
+
+    else:
+        print("\nSkipping KB initialization (missing AOSS/KB infrastructure outputs)")
+
     # Patch runtime env vars (agentcore CLI drops custom env vars during deploy)
     if runtime_id:
         print("Patching runtime environment variables...")
@@ -306,11 +536,18 @@ def main():
             iam_client = boto3.client("iam", region_name=REGION)
             policy_doc = json.dumps({
                 "Version": "2012-10-17",
-                "Statement": [{
-                    "Effect": "Allow",
-                    "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
-                    "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
-                }],
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
+                        "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"],
+                        "Resource": "*",
+                    },
+                ],
             })
             try:
                 iam_client.put_role_policy(
@@ -344,6 +581,19 @@ def main():
             skill_files_bucket = outputs.get("SkillFilesBucketName", "")
             if skill_files_bucket:
                 admin_env["SKILL_FILES_BUCKET"] = skill_files_bucket
+            # KB-related env vars
+            if kb_docs_bucket:
+                admin_env["KB_DOCS_BUCKET"] = kb_docs_bucket
+            if aoss_endpoint:
+                admin_env["AOSS_ENDPOINT"] = aoss_endpoint
+            if aoss_collection_arn:
+                admin_env["AOSS_COLLECTION_ARN"] = aoss_collection_arn
+            if kb_service_role_arn:
+                admin_env["KB_SERVICE_ROLE_ARN"] = kb_service_role_arn
+            if kb_id:
+                admin_env["KB_ID"] = kb_id
+            if kb_data_source_id:
+                admin_env["KB_DATA_SOURCE_ID"] = kb_data_source_id
             lambda_client.update_function_configuration(
                 FunctionName="smarthome-admin-api",
                 Environment={"Variables": admin_env},
@@ -362,13 +612,74 @@ def main():
             )
             user_init_env = user_init_resp.get("Environment", {}).get("Variables", {})
             user_init_env["GATEWAY_ID"] = gateway_id
+            if kb_docs_bucket:
+                user_init_env["KB_DOCS_BUCKET"] = kb_docs_bucket
             lambda_client.update_function_configuration(
                 FunctionName="smarthome-user-init",
                 Environment={"Variables": user_init_env},
             )
             print(f"  Patched user-init Lambda with GATEWAY_ID={gateway_id}")
+            if kb_docs_bucket:
+                print(f"  Patched user-init Lambda with KB_DOCS_BUCKET={kb_docs_bucket}")
         except Exception as e:
             print(f"  Warning: Failed to patch user-init Lambda: {e}")
+
+    # Patch KB Gateway target with inline tool schema.
+    # agentcore deploy stores the schema in S3 which the Gateway may cache.
+    # Updating to inline guarantees the agent sees the latest schema (including user_id).
+    if gateway_id and kb_query_lambda_arn:
+        print("Patching KB Gateway target with inline tool schema...")
+        ac_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+        try:
+            targets = ac_control.list_gateway_targets(gatewayIdentifier=gateway_id)
+            for t in targets.get("items", []):
+                if "KnowledgeBase" in t.get("name", ""):
+                    target = ac_control.get_gateway_target(
+                        gatewayIdentifier=gateway_id, targetId=t["targetId"])
+                    creds = target.get("credentialProviderConfigurations", [
+                        {"credentialProviderType": "GATEWAY_IAM_ROLE"}])
+                    ac_control.update_gateway_target(
+                        gatewayIdentifier=gateway_id,
+                        targetId=t["targetId"],
+                        name=t["name"],
+                        targetConfiguration={
+                            "mcp": {
+                                "lambda": {
+                                    "lambdaArn": kb_query_lambda_arn,
+                                    "toolSchema": {
+                                        "inlinePayload": [{
+                                            "name": "query_knowledge_base",
+                                            "description": (
+                                                "Query the enterprise knowledge base to retrieve "
+                                                "relevant documents. Use this when users ask about "
+                                                "company documents, product manuals, troubleshooting "
+                                                "guides, or internal knowledge."
+                                            ),
+                                            "inputSchema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "query": {
+                                                        "type": "string",
+                                                        "description": "The search query to find relevant documents",
+                                                    },
+                                                    "user_id": {
+                                                        "type": "string",
+                                                        "description": "User email for scoped retrieval. MUST pass the current user email.",
+                                                    },
+                                                },
+                                                "required": ["query"],
+                                            },
+                                        }],
+                                    },
+                                },
+                            },
+                        },
+                        credentialProviderConfigurations=creds,
+                    )
+                    print(f"  Updated target {t['name']} with inline schema (user_id included)")
+                    break
+        except Exception as e:
+            print(f"  Warning: Failed to patch KB Gateway target: {e}")
 
     # Re-write config.js for ALL frontends.
     # CDK BucketDeployment syncs dist/ to S3 and removes files not in the source,
@@ -431,6 +742,7 @@ def main():
         json.dump({
             "gatewayId": gateway_id, "runtimeId": runtime_id,
             "runtimeArn": runtime_arn, "projectDir": project_dir,
+            "knowledgeBaseId": kb_id, "dataSourceId": kb_data_source_id,
         }, f, indent=2)
 
     print("\n" + "=" * 60)

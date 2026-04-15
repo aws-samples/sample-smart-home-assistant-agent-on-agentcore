@@ -20,6 +20,13 @@ import {
   updateUserPermissions,
   listMemoryActors,
   getMemoryRecords,
+  getKBStatus,
+  listKBDocuments,
+  getKBUploadUrl,
+  uploadKBDocument,
+  deleteKBDocument,
+  startKBSync,
+  getKBSyncStatus,
   SkillItem,
   SkillInput,
   SkillFile,
@@ -27,6 +34,9 @@ import {
   CognitoUserInfo,
   GatewayTool,
   MemoryRecord,
+  KBDocument,
+  KBScopeInfo,
+  KBSyncJob,
 } from '../api/adminApi';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
@@ -438,6 +448,340 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
 };
 
 // ---------------------------------------------------------------------------
+// Knowledge Base Tab — standalone component
+// ---------------------------------------------------------------------------
+interface KnowledgeBaseTabProps {
+  error: string;
+  success: string;
+  setError: (msg: string) => void;
+  setSuccess: (msg: string) => void;
+  clearMessages: () => void;
+  cognitoUsers: CognitoUserInfo[];
+}
+
+const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
+  error, success, setError, setSuccess, clearMessages, cognitoUsers,
+}) => {
+  const [scopes, setScopes] = useState<(string | KBScopeInfo)[]>([]);
+  const [selectedScope, setSelectedScope] = useState('__shared__');
+  const [documents, setDocuments] = useState<KBDocument[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [kbStatus, setKbStatus] = useState<string>('');
+  const [syncJobs, setSyncJobs] = useState<KBSyncJob[]>([]);
+  const { t } = useI18n();
+
+  const displayScope = useCallback((scope: string): string => {
+    if (scope === '__shared__') return t('kb.sharedScope');
+    const match = cognitoUsers.find(
+      (u) => u.email === scope || u.username === scope || u.sub === scope
+    );
+    return match?.email || match?.username || scope;
+  }, [cognitoUsers, t]);
+
+  const loadStatus = useCallback(async () => {
+    setLoading(true);
+    try {
+      const status = await getKBStatus();
+      setKbStatus(status.status);
+      // Build scope list: __shared__ + S3 scopes + Cognito users
+      const scopeMap = new Map<string, number>();
+      scopeMap.set('__shared__', 0);
+      for (const s of status.scopes) {
+        scopeMap.set(s.scope, s.documentCount);
+      }
+      // Add Cognito user emails as available scopes
+      for (const u of cognitoUsers) {
+        const email = u.email || u.username;
+        if (email && !scopeMap.has(email)) {
+          scopeMap.set(email, 0);
+        }
+      }
+      setScopes(Array.from(scopeMap.entries()).map(([scope, documentCount]) => ({ scope, documentCount })));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [setError, cognitoUsers]);
+
+  const loadDocuments = useCallback(async (scope: string) => {
+    setDocsLoading(true);
+    try {
+      const docs = await listKBDocuments(scope);
+      setDocuments(docs);
+    } catch (err: any) {
+      setError(err.message);
+      setDocuments([]);
+    } finally {
+      setDocsLoading(false);
+    }
+  }, [setError]);
+
+  const loadSyncStatus = useCallback(async () => {
+    try {
+      const resp = await getKBSyncStatus();
+      setSyncJobs(resp.jobs || []);
+    } catch {
+      setSyncJobs([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+    loadSyncStatus();
+  }, [loadStatus, loadSyncStatus]);
+
+  useEffect(() => {
+    loadDocuments(selectedScope);
+  }, [selectedScope, loadDocuments]);
+
+  const handleUpload = async (file: File) => {
+    setUploading(true);
+    clearMessages();
+    try {
+      const { uploadUrl } = await getKBUploadUrl(
+        selectedScope,
+        file.name,
+        file.type || 'application/octet-stream'
+      );
+      await uploadKBDocument(uploadUrl, file);
+      setSuccess(t('kb.docUploaded').replace('{name}', file.name).replace('{scope}', displayScope(selectedScope)));
+      loadDocuments(selectedScope);
+      loadStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (key: string) => {
+    clearMessages();
+    try {
+      await deleteKBDocument(key);
+      setSuccess(t('kb.docDeleted'));
+      loadDocuments(selectedScope);
+      loadStatus();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleSync = async () => {
+    setSyncing(true);
+    clearMessages();
+    try {
+      await startKBSync();
+      setSuccess(t('kb.syncStarted'));
+      loadSyncStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleAddScope = () => {
+    const email = prompt(t('kb.promptScope'));
+    if (email && email.trim()) {
+      const trimmed = email.trim();
+      const existing = (scopes as KBScopeInfo[]).map(s => typeof s === 'string' ? s : s.scope);
+      if (!existing.includes(trimmed)) {
+        setScopes(prev => [...prev, { scope: trimmed, documentCount: 0 } as KBScopeInfo]);
+      }
+      setSelectedScope(trimmed);
+    }
+  };
+
+  const scopeItems = (scopes as KBScopeInfo[]).map(s => typeof s === 'string' ? { scope: s, documentCount: 0 } : s);
+  // Ensure __shared__ is always first
+  if (!scopeItems.find(s => s.scope === '__shared__')) {
+    scopeItems.unshift({ scope: '__shared__', documentCount: 0 });
+  }
+
+  return (
+    <div className="kb-section">
+      {error && <div className="alert alert-error">{error}</div>}
+      {success && <div className="alert alert-success">{success}</div>}
+
+      <div className="settings-panel" style={{ marginBottom: '16px' }}>
+        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>{t('kb.title')}</h3>
+        <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>
+          {t('kb.desc')}
+        </p>
+        <div className="settings-row">
+          <span className="toolbar-label">{t('kb.status')}</span>
+          <span className={`badge ${kbStatus === 'ACTIVE' ? 'badge-active' : kbStatus === 'NOT_INITIALIZED' ? 'badge-inactive' : 'badge-group'}`}>
+            {kbStatus === 'ACTIVE' ? t('kb.statusActive') : kbStatus === 'NOT_INITIALIZED' ? t('kb.statusNotInit') : kbStatus}
+          </span>
+        </div>
+      </div>
+
+      {/* Scope summary cards */}
+      {scopeItems.length > 0 && (
+        <div className="settings-panel" style={{ marginBottom: '16px' }}>
+          <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>{t('kb.scopeSummary')}</h3>
+          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+            {scopeItems.map((s) => (
+              <button
+                key={s.scope}
+                className={`btn btn-sm ${selectedScope === s.scope ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setSelectedScope(s.scope)}
+                style={{ minWidth: '120px' }}
+              >
+                {displayScope(s.scope)} ({s.documentCount} {t('kb.documents')})
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Toolbar */}
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <label className="toolbar-label">{t('kb.scope')}</label>
+          <select
+            className="toolbar-select"
+            value={selectedScope}
+            onChange={(e) => setSelectedScope(e.target.value)}
+          >
+            {scopeItems.map((s) => (
+              <option key={s.scope} value={s.scope}>
+                {displayScope(s.scope)}
+              </option>
+            ))}
+          </select>
+          <button className="btn btn-secondary btn-sm" onClick={handleAddScope}>
+            {t('kb.addScope')}
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <label className="file-upload-btn btn btn-primary btn-sm" style={{ marginBottom: 0 }}>
+            {uploading ? t('kb.uploading') : t('kb.uploadDoc')}
+            <input
+              type="file"
+              hidden
+              disabled={uploading}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                  handleUpload(file);
+                  e.target.value = '';
+                }
+              }}
+            />
+          </label>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={handleSync}
+            disabled={syncing}
+          >
+            {syncing ? t('kb.syncing') : t('kb.sync')}
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={() => { loadStatus(); loadDocuments(selectedScope); loadSyncStatus(); }}>
+            {t('kb.refresh')}
+          </button>
+        </div>
+      </div>
+
+      {/* Document list */}
+      <div className="skills-table-container">
+        {docsLoading ? (
+          <div className="loading">{t('files.loading')}</div>
+        ) : documents.length === 0 ? (
+          <div className="empty-state">
+            <p>{kbStatus === 'NOT_INITIALIZED' ? t('kb.notInitialized') : t('kb.noDocuments')}</p>
+            <p className="empty-hint">{t('kb.noDocumentsHint')}</p>
+          </div>
+        ) : (
+          <table className="skills-table">
+            <thead>
+              <tr>
+                <th>{t('kb.colName')}</th>
+                <th>{t('kb.colSize')}</th>
+                <th>{t('kb.colModified')}</th>
+                <th>{t('kb.colActions')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documents.map((doc) => (
+                <tr key={doc.key}>
+                  <td className="cell-name">{doc.name}</td>
+                  <td className="cell-date">
+                    {doc.size < 1024
+                      ? `${doc.size} B`
+                      : doc.size < 1048576
+                        ? `${(doc.size / 1024).toFixed(1)} KB`
+                        : `${(doc.size / 1048576).toFixed(1)} MB`}
+                  </td>
+                  <td className="cell-date">
+                    {new Date(doc.lastModified).toLocaleDateString()}
+                  </td>
+                  <td className="cell-actions">
+                    <button
+                      className="btn btn-sm btn-danger"
+                      onClick={() => handleDelete(doc.key)}
+                    >
+                      {t('kb.delete')}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Sync status */}
+      {syncJobs.length > 0 && (
+        <div style={{ marginTop: '16px' }}>
+          <div className="toolbar">
+            <div className="toolbar-left">
+              <span className="toolbar-label">{t('kb.syncStatus')}</span>
+            </div>
+          </div>
+          <div className="skills-table-container">
+            <table className="skills-table">
+              <thead>
+                <tr>
+                  <th>{t('kb.syncJobStatus')}</th>
+                  <th>{t('kb.syncJobStarted')}</th>
+                  <th>{t('kb.syncJobUpdated')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {syncJobs.map((job) => (
+                  <tr key={job.ingestionJobId}>
+                    <td>
+                      <span className={`badge ${
+                        job.status === 'COMPLETE' ? 'badge-active' :
+                        job.status === 'IN_PROGRESS' || job.status === 'STARTING' ? 'badge-group' :
+                        'badge-inactive'
+                      }`}>
+                        {job.status}
+                      </span>
+                    </td>
+                    <td className="cell-date">
+                      {job.startedAt ? new Date(job.startedAt).toLocaleString() : '-'}
+                    </td>
+                    <td className="cell-date">
+                      {job.updatedAt ? new Date(job.updatedAt).toLocaleString() : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Main AdminConsole component
 // ---------------------------------------------------------------------------
 const AdminConsole: React.FC = () => {
@@ -462,7 +806,7 @@ const AdminConsole: React.FC = () => {
   const [savedModelId, setSavedModelId] = useState('');
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'skills' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails'>('skills');
+  const [activeTab, setActiveTab] = useState<'skills' | 'knowledgeBase' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails'>('skills');
 
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -848,6 +1192,12 @@ const AdminConsole: React.FC = () => {
           onClick={() => setActiveTab('skills')}
         >
           {t('tab.skills')}
+        </button>
+        <button
+          className={`tab ${activeTab === 'knowledgeBase' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('knowledgeBase')}
+        >
+          {t('tab.knowledgeBase')}
         </button>
         <button
           className={`tab ${activeTab === 'models' ? 'tab-active' : ''}`}
@@ -1240,6 +1590,18 @@ const AdminConsole: React.FC = () => {
         </div>
       )}
       </>
+      )}
+
+      {/* Knowledge Base Tab */}
+      {activeTab === 'knowledgeBase' && (
+        <KnowledgeBaseTab
+          error={error}
+          success={success}
+          clearMessages={clearMessages}
+          setError={setError}
+          setSuccess={setSuccess}
+          cognitoUsers={cognitoUsers}
+        />
       )}
 
       {/* Models Tab */}

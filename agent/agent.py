@@ -114,6 +114,16 @@ def load_user_settings(actor_id: str) -> dict:
 _static_skills_plugin = AgentSkills(skills="./skills/")
 
 
+SYSTEM_PROMPT = """You are a smart home assistant that controls devices in the user's home.
+Be helpful, concise, and confirm actions taken. If a user asks to do something, use the appropriate device control tool.
+You can also suggest creative lighting scenes, cooking presets, and comfort settings.
+Use what you remember about the user's preferences to personalize your responses.
+IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.
+IMPORTANT: Never fabricate or assume the result of a tool call. If a tool call fails, is rejected, or returns an error, you MUST honestly report the failure to the user. Do not pretend the action succeeded. Tell the user what went wrong and suggest they contact an administrator if the issue persists.
+IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If the tool is unavailable or fails, tell the user you cannot access device information and suggest they contact an administrator.
+KNOWLEDGE BASE: You have access to an enterprise knowledge base. When users ask questions that may relate to company documents, product manuals, troubleshooting guides, or internal knowledge, use the query_knowledge_base tool to retrieve relevant information. Cite the source document when presenting information from the knowledge base."""
+
+
 def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
     """Create a Strands agent with Bedrock model, optional MCP tools, and memory."""
     model = BedrockModel(
@@ -129,13 +139,7 @@ def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
 
     agent_kwargs = dict(
         model=model,
-        system_prompt="""You are a smart home assistant that controls devices in the user's home.
-Be helpful, concise, and confirm actions taken. If a user asks to do something, use the appropriate device control tool.
-You can also suggest creative lighting scenes, cooking presets, and comfort settings.
-Use what you remember about the user's preferences to personalize your responses.
-IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.
-IMPORTANT: Never fabricate or assume the result of a tool call. If a tool call fails, is rejected, or returns an error, you MUST honestly report the failure to the user. Do not pretend the action succeeded. Tell the user what went wrong and suggest they contact an administrator if the issue persists.
-IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If the tool is unavailable or fails, tell the user you cannot access device information and suggest they contact an administrator.""",
+        system_prompt=SYSTEM_PROMPT,
         plugins=[skills_plugin],
     )
 
@@ -191,8 +195,44 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             logger.warning("No Authorization header available — gateway per-user policies won't apply")
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
         with mcp_client:
-            tools = get_mcp_tools(mcp_client)
-            agent = create_agent(tools=tools, session_manager=session_manager, skills=skills, model_id=user_model_id)
+            mcp_tools = get_mcp_tools(mcp_client)
+
+            # Secure KB tool: replace the MCP query_knowledge_base with a local wrapper
+            # that auto-injects user_id from the verified actor_id (from JWT → Runtime context).
+            # This prevents the LLM from fabricating or omitting the user identity.
+            kb_tool_present = any(t.tool_name == "query_knowledge_base" for t in mcp_tools)
+            if kb_tool_present:
+                non_kb_tools = [t for t in mcp_tools if t.tool_name != "query_knowledge_base"]
+                kb_user_id = actor_id if actor_id not in ("default", "__global__", "") else None
+
+                from strands import tool as strands_tool
+
+                @strands_tool
+                def query_knowledge_base(query: str) -> str:
+                    """Query the enterprise knowledge base to retrieve relevant documents.
+                    Use this when users ask about company documents, product manuals,
+                    troubleshooting guides, or internal knowledge."""
+                    import uuid
+                    args = {"query": query}
+                    if kb_user_id:
+                        args["user_id"] = kb_user_id
+                    result = mcp_client.call_tool_sync(
+                        tool_use_id=str(uuid.uuid4()),
+                        name="query_knowledge_base",
+                        arguments=args,
+                    )
+                    # MCPToolResult has .content list; extract text
+                    if hasattr(result, 'content') and result.content:
+                        texts = [c.text for c in result.content if hasattr(c, 'text')]
+                        return "\n".join(texts) if texts else json.dumps(result.content, default=str)
+                    return str(result)
+
+                all_tools = non_kb_tools + [query_knowledge_base]
+                logger.info(f"KB tool wrapped with user_id={kb_user_id} (LLM cannot override)")
+            else:
+                all_tools = mcp_tools
+
+            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id)
             return str(agent(prompt))
     else:
         agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id)

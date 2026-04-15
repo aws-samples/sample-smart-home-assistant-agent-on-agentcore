@@ -16,6 +16,7 @@
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
+- [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -27,15 +28,16 @@
 
 ## 1. System Overview
 
-The Smart Home Assistant Agent is a full-stack application that demonstrates AI-driven smart home device control on AWS. It consists of five main subsystems:
+The Smart Home Assistant Agent is a full-stack application that demonstrates AI-driven smart home device control on AWS. It consists of six main subsystems:
 
 | Subsystem | Technology | Purpose |
 |-----------|-----------|---------|
 | Device Simulator | React + TypeScript + MQTT | Visual simulation of 4 smart home devices |
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
-| Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, and device control via MCP |
-| Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, models, tool access, integrations, sessions, memories, guardrails |
+| Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
+| Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, tool access, integrations, sessions, memories, quality evaluation |
+| Enterprise Knowledge Base | Bedrock KB + OpenSearch Serverless + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
 ---
@@ -1127,9 +1129,9 @@ admin-console/
 │   │   ├── CognitoAuth.ts   # Sign in, session management, admin role check
 │   │   └── LoginPage.tsx    # Login form
 │   ├── api/
-│   │   └── adminApi.ts      # REST client for admin API (skills, models, tool access, memories, sessions)
+│   │   └── adminApi.ts      # REST client for admin API (skills, models, tool access, knowledge base, memories, sessions)
 │   └── components/
-│       └── AdminConsole.tsx  # 7-tab harness management (skills, models, tool access, integrations, sessions, memories, guardrails)
+│       └── AdminConsole.tsx  # 8-tab harness management (skills, knowledge base, models, tool access, integrations, sessions, memories, quality evaluation)
 ├── public/
 │   ├── index.html           # HTML template with config.js loader
 │   └── config.js            # Runtime config placeholder (overwritten by CDK)
@@ -1141,17 +1143,18 @@ admin-console/
 **Key Features:**
 
 - **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see an "Access Denied" page.
-- **Seven tabs** for comprehensive agent harness management:
+- **Eight tabs** for comprehensive agent harness management:
 
 | Tab | Purpose |
 |-----|---------|
 | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor |
+| **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
 | **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
 | **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY) |
 | **Integrations** | Tool source registry — Lambda targets (active), MCP servers, A2A agents, API Gateway (planned) |
 | **Sessions** | Runtime session monitoring with User ID, Session ID, Last Active, and Stop button |
 | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory |
-| **Guardrails** | Links to AgentCore Evaluator, Bedrock Guardrails consoles, and Cedar Policy Engine settings |
+| **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles, and Cedar Policy Engine settings |
 
 **CDK Resources:**
 
@@ -1159,6 +1162,10 @@ admin-console/
 |----------|-------------|
 | `smarthome-admin-console-{accountId}` S3 Bucket | Static assets |
 | `smarthome-skill-files-{accountId}` S3 Bucket | Skill directory files (scripts, references, assets) with CORS |
+| `smarthome-kb-docs-{accountId}` S3 Bucket | Knowledge base documents organized by scope prefix (`__shared__/`, `user@email/`) |
+| `smarthome-kb` OpenSearch Serverless Collection | Vector store for KB document embeddings (VECTORSEARCH type) |
+| Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model |
+| `smarthome-kb-query` Lambda | Gateway target for agent KB retrieval with JWT-based user identity extraction |
 | CloudFront Distribution | HTTPS CDN |
 | `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region` |
 
@@ -1238,6 +1245,133 @@ Cedar `principal.id` maps to the JWT `sub` claim (Cognito sub UUID). The Admin C
 | `__system__` | `__tool_policy_{toolName}__` | Policy ID for each tool |
 
 **Scalability:** One Cedar policy per tool (not per user). Each tool policy lists authorized user IDs. Cedar statement limit is 153KB (~3,800 user IDs per tool). Suitable for most deployments.
+
+### 9.6 Enterprise Knowledge Base
+
+The enterprise knowledge base provides RAG (Retrieval-Augmented Generation) capabilities, allowing the AI agent to answer questions based on uploaded company documents.
+
+**Architecture:**
+
+```
+Admin Console                          Agent (Chatbot)
+     │                                       │
+     │ Upload/Delete/Sync                    │ query_knowledge_base(query)
+     │                                       │
+     v                                       v
+┌─────────────┐                    ┌──────────────────┐
+│  Admin API  │                    │ AgentCore Gateway │ ← validates JWT
+│  Lambda     │                    │  (MCP)            │
+└──────┬──────┘                    └────────┬─────────┘
+       │                                    │
+       │ S3 PutObject                       │ Lambda invoke
+       │ + metadata sidecar                 │
+       v                                    v
+┌──────────────────┐              ┌──────────────────┐
+│  S3 Bucket       │              │  kb-query Lambda  │ ← extracts email from JWT
+│  (kb-docs)       │              │                   │
+│  __shared__/     │  Ingestion   │  bedrock:Retrieve │
+│  user@email/     │◄────────────►│  + metadata filter│
+└──────────────────┘              └──────────────────┘
+       │                                    │
+       │ StartIngestionJob                  │ filter: scope=__shared__ OR scope=user_email
+       v                                    v
+┌──────────────────┐              ┌──────────────────┐
+│  Bedrock KB      │              │  OpenSearch       │
+│  (SmartHome      │──────────────│  Serverless       │
+│   EnterpriseKB)  │  knn_vector  │  (smarthome-kb)   │
+└──────────────────┘              └──────────────────┘
+       │
+       │ cohere.embed-multilingual-v3
+       │ (1024 dimensions, Chinese/English)
+```
+
+**Per-User Document Isolation:**
+
+Documents are organized by S3 prefix, with metadata sidecar files enabling query-time filtering:
+
+```
+smarthome-kb-docs-{accountId}/
+├── __shared__/                              # Shared documents (all users)
+│   ├── product-guide.pdf
+│   └── product-guide.pdf.metadata.json      # {"metadataAttributes": {"scope": "__shared__"}}
+├── alice@example.com/                       # Alice's private documents
+│   ├── notes.pdf
+│   └── notes.pdf.metadata.json              # {"metadataAttributes": {"scope": "alice@example.com"}}
+└── bob@example.com/                         # Bob's private documents
+    └── ...
+```
+
+When the agent queries the KB, the `kb-query` Lambda applies a metadata filter:
+```python
+filter = {
+    "orAll": [
+        {"equals": {"key": "scope", "value": "__shared__"}},
+        {"equals": {"key": "scope", "value": user_email}},  # from JWT
+    ]
+}
+```
+
+**Security — Secure Tool Wrapper (LLM-Proof Identity Injection):**
+
+The LLM never controls the `user_id` parameter. Instead, the agent code replaces the MCP `query_knowledge_base` tool with a **local wrapper** that auto-injects the user identity:
+
+```python
+# In agent.py invoke_agent():
+# 1. Filter out the MCP KB tool (which has user_id in its schema)
+non_kb_tools = [t for t in mcp_tools if t.tool_name != "query_knowledge_base"]
+
+# 2. Create a local wrapper — LLM only sees "query" parameter
+@tool
+def query_knowledge_base(query: str) -> str:
+    # user_id injected from verified actor_id, NOT from LLM
+    result = mcp_client.call_tool_sync("query_knowledge_base",
+        {"query": query, "user_id": actor_id})  # actor_id from JWT → Runtime
+    return result
+
+# 3. Agent uses the wrapper instead of the MCP tool
+agent = create_agent(tools=non_kb_tools + [query_knowledge_base], ...)
+```
+
+Identity chain: **Cognito JWT → AgentCore Runtime (verified `userId`) → `actor_id` (Python variable) → tool wrapper closure → `user_id` MCP parameter → kb-query Lambda → metadata filter**. The LLM cannot fabricate, omit, or alter the identity. If identity is unavailable, only `__shared__` documents are returned (safe default). The Gateway's CUSTOM_JWT + Cedar policy provides an additional layer ensuring only authenticated users can invoke the tool.
+
+**DynamoDB Schema:**
+
+| userId | skillName | Purpose |
+|--------|-----------|---------|
+| `__kb_config__` | `__default__` | KB ID, data source ID, creation timestamps |
+
+**CDK Resources:**
+
+| Resource | Purpose |
+|----------|---------|
+| `smarthome-kb-docs-{accountId}` S3 Bucket | Document storage with CORS for presigned URL uploads |
+| `smarthome-kb` AOSS Collection (VECTORSEARCH) | Vector embeddings store |
+| AOSS Encryption/Network/Data Access Policies | Collection security |
+| `KBServiceRole` IAM Role | Bedrock KB service role (S3 read + AOSS access + Bedrock InvokeModel) |
+| `smarthome-kb-query` Lambda | MCP tool target for agent KB retrieval |
+
+**Setup Script Initialization:**
+
+The `setup-agentcore.py` script handles one-time KB setup:
+1. Adds deployer's IAM identity to AOSS data access policy
+2. Creates AOSS vector index (`smarthome-kb-index`) via `opensearch-py`
+3. Creates Bedrock Knowledge Base with AOSS storage configuration
+4. Creates S3 data source pointing to the KB docs bucket
+5. Stores KB config in DynamoDB
+6. Creates default S3 folders (`__shared__/`, `admin@smarthome.local/`)
+7. Registers `kb-query` Lambda as an AgentCore Gateway target
+8. Post-deploy: patches Gateway target with inline tool schema (includes `user_id` parameter) to bypass S3 schema caching
+
+**Admin API Endpoints (consolidated under `GET/POST /knowledge-bases`):**
+
+| Method | Action | Purpose |
+|--------|--------|---------|
+| `GET` | `status` | KB status, scopes, document counts |
+| `GET` | `documents` | List documents in a scope (filters out `.metadata.json`) |
+| `GET` | `sync-status` | Latest ingestion job statuses |
+| `POST` | `upload-url` | Generate presigned PUT URL + create metadata sidecar |
+| `POST` | `delete` | Delete document + metadata sidecar |
+| `POST` | `sync` | Start Bedrock KB ingestion job |
 
 ---
 

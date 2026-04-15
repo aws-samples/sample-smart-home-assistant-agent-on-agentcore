@@ -11,6 +11,7 @@ import * as cr from "aws-cdk-lib/custom-resources";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
+import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import { Construct } from "constructs";
 import * as path from "path";
 
@@ -429,6 +430,11 @@ export class SmartHomeStack extends cdk.Stack {
     const stopResource = sessionIdResource.addResource("stop");
     stopResource.addMethod("POST", adminIntegration, authMethodOptions);
 
+    // /knowledge-bases (consolidated: action-based dispatch to avoid Lambda policy size limit)
+    const kbResource = adminApi.root.addResource("knowledge-bases");
+    kbResource.addMethod("GET", adminIntegration, authMethodOptions);
+    kbResource.addMethod("POST", adminIntegration, authMethodOptions);
+
     // Grant admin Lambda permission to stop runtime sessions and read memory
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
@@ -490,6 +496,159 @@ export class SmartHomeStack extends cdk.Stack {
       actions: ["iam:PutRolePolicy"],
       resources: ["arn:aws:iam::*:role/AgentCore-*"],
     }));
+
+    // ========================
+    // Knowledge Base Infrastructure (AOSS + S3 + Bedrock KB support)
+    // ========================
+
+    // S3 bucket for KB documents (organized by scope prefix: __shared__/, user@example.com/)
+    const kbDocsBucket = new s3.Bucket(this, "KBDocsBucket", {
+      bucketName: `smarthome-kb-docs-${cdk.Aws.ACCOUNT_ID}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT],
+          allowedOrigins: ["*"],
+          allowedHeaders: ["*"],
+          maxAge: 3600,
+        },
+      ],
+    });
+
+    // IAM Role for Bedrock Knowledge Base service
+    const kbServiceRole = new iam.Role(this, "KBServiceRole", {
+      assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com"),
+    });
+    kbServiceRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject", "s3:ListBucket"],
+      resources: [kbDocsBucket.bucketArn, `${kbDocsBucket.bucketArn}/*`],
+    }));
+    kbServiceRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["aoss:APIAccessAll"],
+      resources: ["*"],
+    }));
+    kbServiceRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["bedrock:InvokeModel"],
+      resources: [`arn:aws:bedrock:${cdk.Aws.REGION}::foundation-model/cohere.embed-multilingual-v3`],
+    }));
+
+    // AOSS Encryption Policy (required before collection creation)
+    const aossEncPolicy = new opensearchserverless.CfnSecurityPolicy(this, "KBAOSSEncPolicy", {
+      name: "smarthome-kb-enc",
+      type: "encryption",
+      policy: JSON.stringify({
+        Rules: [{ ResourceType: "collection", Resource: ["collection/smarthome-kb"] }],
+        AWSOwnedKey: true,
+      }),
+    });
+
+    // AOSS Network Policy (allow public access for Lambda + setup script)
+    const aossNetPolicy = new opensearchserverless.CfnSecurityPolicy(this, "KBAOSSNetPolicy", {
+      name: "smarthome-kb-net",
+      type: "network",
+      policy: JSON.stringify([{
+        Rules: [
+          { ResourceType: "collection", Resource: ["collection/smarthome-kb"] },
+          { ResourceType: "dashboard", Resource: ["collection/smarthome-kb"] },
+        ],
+        AllowFromPublic: true,
+      }]),
+    });
+
+    // AOSS Vector Search Collection
+    const aossCollection = new opensearchserverless.CfnCollection(this, "KBAOSSCollection", {
+      name: "smarthome-kb",
+      type: "VECTORSEARCH",
+    });
+    aossCollection.addDependency(aossEncPolicy);
+    aossCollection.addDependency(aossNetPolicy);
+
+    // AOSS Data Access Policy (grants access to KB role, admin Lambda, and account root for setup script)
+    new opensearchserverless.CfnAccessPolicy(this, "KBAOSSDataPolicy", {
+      name: "smarthome-kb-data",
+      type: "data",
+      policy: JSON.stringify([{
+        Rules: [
+          {
+            ResourceType: "collection",
+            Resource: ["collection/smarthome-kb"],
+            Permission: ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems", "aoss:DescribeCollectionItems"],
+          },
+          {
+            ResourceType: "index",
+            Resource: ["index/smarthome-kb/*"],
+            Permission: ["aoss:CreateIndex", "aoss:UpdateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"],
+          },
+        ],
+        Principal: [
+          kbServiceRole.roleArn,
+          adminLambda.role!.roleArn,
+          `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:root`,
+        ],
+      }]),
+    });
+
+    // Lambda - KB Query (AgentCore Gateway target for agent to query knowledge base)
+    const kbQueryLambda = new lambda.Function(this, "KBQueryLambda", {
+      functionName: "smarthome-kb-query",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/kb-query")),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        SKILLS_TABLE_NAME: skillsTable.tableName,
+        AWS_KB_REGION: cdk.Aws.REGION,
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+    skillsTable.grantReadData(kbQueryLambda);
+    kbQueryLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"],
+      resources: ["*"],
+    }));
+    kbQueryLambda.addPermission("AgentCoreGatewayInvoke", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+    });
+
+    // Grant admin Lambda KB-related permissions
+    adminLambda.addEnvironment("KB_DOCS_BUCKET", kbDocsBucket.bucketName);
+    adminLambda.addEnvironment("AOSS_ENDPOINT", aossCollection.attrCollectionEndpoint);
+    adminLambda.addEnvironment("AOSS_COLLECTION_ARN", aossCollection.attrArn);
+    adminLambda.addEnvironment("KB_SERVICE_ROLE_ARN", kbServiceRole.roleArn);
+    kbDocsBucket.grantReadWrite(adminLambda);
+
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock:CreateKnowledgeBase",
+        "bedrock:DeleteKnowledgeBase",
+        "bedrock:GetKnowledgeBase",
+        "bedrock:ListKnowledgeBases",
+        "bedrock:CreateDataSource",
+        "bedrock:DeleteDataSource",
+        "bedrock:GetDataSource",
+        "bedrock:StartIngestionJob",
+        "bedrock:GetIngestionJob",
+        "bedrock:ListIngestionJobs",
+      ],
+      resources: ["*"],
+    }));
+
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["aoss:APIAccessAll"],
+      resources: ["*"],
+    }));
+
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PassRole"],
+      resources: [kbServiceRole.roleArn],
+    }));
+
+    // Grant user-init Lambda access to KB docs bucket (create user folder on signup)
+    userInitLambda.addEnvironment("KB_DOCS_BUCKET", kbDocsBucket.bucketName);
+    kbDocsBucket.grantWrite(userInitLambda);
 
     // ========================
     // S3 + CloudFront - Device Simulator
@@ -689,5 +848,10 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "SkillFilesBucketName", { value: skillFilesBucket.bucketName });
     new cdk.CfnOutput(this, "AdminUsername", { value: adminUsername });
     new cdk.CfnOutput(this, "AdminPassword", { value: adminPassword });
+    new cdk.CfnOutput(this, "KBDocsBucketName", { value: kbDocsBucket.bucketName });
+    new cdk.CfnOutput(this, "KBQueryLambdaArn", { value: kbQueryLambda.functionArn });
+    new cdk.CfnOutput(this, "AOSSCollectionEndpoint", { value: aossCollection.attrCollectionEndpoint });
+    new cdk.CfnOutput(this, "AOSSCollectionArn", { value: aossCollection.attrArn });
+    new cdk.CfnOutput(this, "KBServiceRoleArn", { value: kbServiceRole.roleArn });
   }
 }

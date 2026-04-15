@@ -22,6 +22,12 @@ MEMORY_ID = os.environ.get("MEMORY_ID", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
+KB_DOCS_BUCKET = os.environ.get("KB_DOCS_BUCKET", "")
+AOSS_ENDPOINT = os.environ.get("AOSS_ENDPOINT", "")
+AOSS_COLLECTION_ARN = os.environ.get("AOSS_COLLECTION_ARN", "")
+KB_SERVICE_ROLE_ARN = os.environ.get("KB_SERVICE_ROLE_ARN", "")
+KB_ID = os.environ.get("KB_ID", "")
+KB_DATA_SOURCE_ID = os.environ.get("KB_DATA_SOURCE_ID", "")
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
@@ -29,6 +35,7 @@ s3_client = boto3.client("s3", region_name=REGION)
 agentcore_client = boto3.client("bedrock-agentcore", region_name=REGION)
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
 cognito_client = boto3.client("cognito-idp", region_name=REGION)
+bedrock_agent_client = boto3.client("bedrock-agent", region_name=REGION)
 
 ALLOWED_FILE_DIRS = {"scripts", "references", "assets"}
 
@@ -887,6 +894,204 @@ def delete_skill_file(event):
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Base Management
+# ---------------------------------------------------------------------------
+
+
+def _get_kb_config():
+    """Get KB configuration from DynamoDB. Returns (kb_id, data_source_id) or (None, None)."""
+    # Prefer env vars (set by setup script)
+    if KB_ID and KB_DATA_SOURCE_ID:
+        return KB_ID, KB_DATA_SOURCE_ID
+    resp = table.get_item(Key={"userId": "__kb_config__", "skillName": "__default__"})
+    item = resp.get("Item")
+    if item and item.get("knowledgeBaseId"):
+        return item["knowledgeBaseId"], item.get("dataSourceId", "")
+    return None, None
+
+
+
+
+def get_kb_status(_event):
+    """GET /knowledge-bases — return KB status and document counts per scope."""
+    kb_id, ds_id = _get_kb_config()
+
+    result = {
+        "initialized": bool(kb_id),
+        "knowledgeBaseId": kb_id or "",
+        "dataSourceId": ds_id or "",
+        "status": "NOT_INITIALIZED",
+        "scopes": [],
+    }
+
+    if kb_id:
+        try:
+            kb = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=kb_id)
+            result["status"] = kb["knowledgeBase"]["status"]
+        except Exception as e:
+            result["status"] = f"ERROR: {str(e)}"
+
+    # List scopes (top-level prefixes in KB docs bucket)
+    if KB_DOCS_BUCKET:
+        try:
+            resp = s3_client.list_objects_v2(Bucket=KB_DOCS_BUCKET, Delimiter="/")
+            for prefix in resp.get("CommonPrefixes", []):
+                scope = prefix["Prefix"].rstrip("/")
+                # Count files in this scope (exclude .metadata.json files)
+                scope_resp = s3_client.list_objects_v2(Bucket=KB_DOCS_BUCKET, Prefix=f"{scope}/")
+                doc_count = sum(
+                    1 for obj in scope_resp.get("Contents", [])
+                    if not obj["Key"].endswith(".metadata.json")
+                )
+                result["scopes"].append({"scope": scope, "documentCount": doc_count})
+        except Exception as e:
+            logger.warning(f"Failed to list KB scopes: {e}")
+
+    return response(200, result)
+
+
+def list_kb_documents(event):
+    """GET /knowledge-bases/documents?scope=__shared__ — list documents in a scope."""
+    if not KB_DOCS_BUCKET:
+        return response(500, {"error": "KB_DOCS_BUCKET not configured"})
+
+    params = event.get("queryStringParameters") or {}
+    scope = params.get("scope", "__shared__")
+
+    prefix = f"{scope}/"
+    resp = s3_client.list_objects_v2(Bucket=KB_DOCS_BUCKET, Prefix=prefix)
+
+    files = []
+    for obj in resp.get("Contents", []):
+        key = obj["Key"]
+        # Skip metadata sidecar files
+        if key.endswith(".metadata.json"):
+            continue
+        relative = key[len(prefix):]
+        if not relative:
+            continue
+        files.append({
+            "name": relative,
+            "key": key,
+            "size": obj["Size"],
+            "lastModified": obj["LastModified"].isoformat(),
+        })
+
+    return response(200, {"scope": scope, "documents": files})
+
+
+def get_kb_upload_url(event):
+    """POST /knowledge-bases/documents/upload-url — get presigned PUT URL and create metadata sidecar."""
+    if not KB_DOCS_BUCKET:
+        return response(500, {"error": "KB_DOCS_BUCKET not configured"})
+
+    body = json.loads(event.get("body") or "{}")
+    scope = body.get("scope", "__shared__")
+    filename = body.get("filename", "")
+
+    if not filename or "/" in filename or "\\" in filename:
+        return response(400, {"error": "Invalid filename"})
+
+    key = f"{scope}/{filename}"
+    content_type = body.get("contentType", "application/octet-stream")
+
+    # Generate presigned upload URL
+    url = s3_client.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": KB_DOCS_BUCKET, "Key": key, "ContentType": content_type},
+        ExpiresIn=900,
+    )
+
+    # Pre-create metadata sidecar file (Bedrock KB expects simple key-value pairs)
+    metadata_key = f"{key}.metadata.json"
+    metadata_content = {
+        "metadataAttributes": {
+            "scope": scope,
+        }
+    }
+    s3_client.put_object(
+        Bucket=KB_DOCS_BUCKET,
+        Key=metadata_key,
+        Body=json.dumps(metadata_content),
+        ContentType="application/json",
+    )
+
+    return response(200, {"uploadUrl": url, "key": key})
+
+
+def delete_kb_document(event):
+    """POST /knowledge-bases/documents/delete — delete a document and its metadata sidecar."""
+    if not KB_DOCS_BUCKET:
+        return response(500, {"error": "KB_DOCS_BUCKET not configured"})
+
+    body = json.loads(event.get("body") or "{}")
+    key = body.get("key", "")
+
+    if not key:
+        return response(400, {"error": "key is required"})
+
+    # Delete the document and its metadata sidecar
+    objects_to_delete = [{"Key": key}]
+    metadata_key = f"{key}.metadata.json"
+    objects_to_delete.append({"Key": metadata_key})
+
+    s3_client.delete_objects(
+        Bucket=KB_DOCS_BUCKET,
+        Delete={"Objects": objects_to_delete},
+    )
+
+    return response(200, {"message": f"Document '{key}' deleted"})
+
+
+def start_kb_sync(event):
+    """POST /knowledge-bases/sync — start a data source ingestion job."""
+    kb_id, ds_id = _get_kb_config()
+    if not kb_id or not ds_id:
+        return response(500, {"error": "Knowledge base not initialized. Run scripts/setup-agentcore.py to set up the knowledge base."})
+
+    try:
+        resp = bedrock_agent_client.start_ingestion_job(
+            knowledgeBaseId=kb_id,
+            dataSourceId=ds_id,
+        )
+        job = resp.get("ingestionJob", {})
+        return response(200, {
+            "message": "Sync started",
+            "ingestionJobId": job.get("ingestionJobId", ""),
+            "status": job.get("status", ""),
+        })
+    except Exception as e:
+        return response(500, {"error": f"Failed to start sync: {str(e)}"})
+
+
+def get_kb_sync_status(_event):
+    """GET /knowledge-bases/sync — get latest ingestion job status."""
+    kb_id, ds_id = _get_kb_config()
+    if not kb_id or not ds_id:
+        return response(200, {"status": "NOT_INITIALIZED", "jobs": []})
+
+    try:
+        resp = bedrock_agent_client.list_ingestion_jobs(
+            knowledgeBaseId=kb_id,
+            dataSourceId=ds_id,
+            maxResults=5,
+            sortBy={"attribute": "STARTED_AT", "order": "DESCENDING"},
+        )
+        jobs = []
+        for job in resp.get("ingestionJobSummaries", []):
+            jobs.append({
+                "ingestionJobId": job.get("ingestionJobId", ""),
+                "status": job.get("status", ""),
+                "startedAt": job.get("startedAt", "").isoformat() if hasattr(job.get("startedAt", ""), "isoformat") else str(job.get("startedAt", "")),
+                "updatedAt": job.get("updatedAt", "").isoformat() if hasattr(job.get("updatedAt", ""), "isoformat") else str(job.get("updatedAt", "")),
+                "statistics": job.get("statistics", {}),
+            })
+        return response(200, {"status": "OK", "jobs": jobs})
+    except Exception as e:
+        return response(500, {"error": f"Failed to get sync status: {str(e)}"})
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -942,5 +1147,26 @@ def handler(event, context):
         return list_sessions(event)
     if resource == "/sessions/{sessionId}/stop" and method == "POST":
         return stop_session(event)
+
+    # Knowledge Base routes (consolidated — action-based dispatch)
+    if resource == "/knowledge-bases" and method == "GET":
+        action = (event.get("queryStringParameters") or {}).get("action", "status")
+        if action == "documents":
+            return list_kb_documents(event)
+        elif action == "sync-status":
+            return get_kb_sync_status(event)
+        else:
+            return get_kb_status(event)
+    if resource == "/knowledge-bases" and method == "POST":
+        body = json.loads(event.get("body") or "{}")
+        action = body.get("action", "")
+        if action == "upload-url":
+            return get_kb_upload_url(event)
+        elif action == "delete":
+            return delete_kb_document(event)
+        elif action == "sync":
+            return start_kb_sync(event)
+        else:
+            return response(400, {"error": f"Unknown KB action: {action}"})
 
     return response(400, {"error": f"Unknown route: {method} {resource}"})

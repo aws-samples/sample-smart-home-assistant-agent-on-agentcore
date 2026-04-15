@@ -395,6 +395,128 @@ export async function getMemoryRecords(actorId: string): Promise<MemoryRecord[]>
 }
 
 // ---------------------------------------------------------------------------
+// Knowledge Base
+// ---------------------------------------------------------------------------
+
+export interface KBScopeInfo {
+  scope: string;
+  documentCount: number;
+}
+
+export interface KBStatus {
+  initialized: boolean;
+  knowledgeBaseId: string;
+  dataSourceId: string;
+  status: string;
+  scopes: KBScopeInfo[];
+}
+
+export interface KBDocument {
+  name: string;
+  key: string;
+  size: number;
+  lastModified: string;
+}
+
+export interface KBSyncJob {
+  ingestionJobId: string;
+  status: string;
+  startedAt: string;
+  updatedAt: string;
+  statistics: Record<string, any>;
+}
+
+export async function getKBStatus(): Promise<KBStatus> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/knowledge-bases?action=status`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get KB status (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function listKBDocuments(scope: string): Promise<KBDocument[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/knowledge-bases?action=documents&scope=${encodeURIComponent(scope)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list KB documents (${res.status})`);
+  }
+  const data = await res.json();
+  return data.documents || [];
+}
+
+export async function getKBUploadUrl(
+  scope: string,
+  filename: string,
+  contentType: string = 'application/octet-stream'
+): Promise<{ uploadUrl: string; key: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/knowledge-bases`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'upload-url', scope, filename, contentType }),
+  });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get upload URL (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function uploadKBDocument(uploadUrl: string, file: File): Promise<void> {
+  const res = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  });
+  if (!res.ok) {
+    throw new Error(`Upload failed (${res.status})`);
+  }
+}
+
+export async function deleteKBDocument(key: string): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/knowledge-bases`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'delete', key }),
+  });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to delete document (${res.status})`);
+  }
+}
+
+export async function startKBSync(): Promise<{ ingestionJobId: string; status: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/knowledge-bases`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'sync' }),
+  });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to start sync (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function getKBSyncStatus(): Promise<{ status: string; jobs: KBSyncJob[] }> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/knowledge-bases?action=sync-status`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get sync status (${res.status})`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
