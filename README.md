@@ -27,11 +27,18 @@ smarthome-assistant-agent/
 │   ├── skills/              # 备用设备控制 SKILL.md 文件
 │   └── pyproject.toml       # AgentCore 代码打包依赖
 ├── scripts/
-│   ├── setup-agentcore.py   # 创建 Gateway、Lambda Target、Runtime
-│   ├── seed-skills.py       # 将 SKILL.md 文件写入 DynamoDB
-│   └── teardown-agentcore.py
+│   ├── 01-install-deps.sh     # 安装 CDK 依赖 + 为 Lambda 打包 boto3
+│   ├── 02-build-frontends.sh  # 构建 3 个 React 前端
+│   ├── 03-cdk-bootstrap.sh    # CDK 引导（幂等）
+│   ├── 04-cdk-deploy.sh       # 部署 CDK 堆栈（Cognito/IoT/Lambda/KB/S3/CF）
+│   ├── 05-fix-cognito.sh      # 启用 Cognito 自助注册 + 邮箱验证
+│   ├── 06-deploy-agentcore.sh # 部署 AgentCore（Gateway/Target/Runtime/Memory）
+│   ├── 07-seed-skills.sh      # 将内置技能写入 DynamoDB
+│   ├── setup-agentcore.py     # （被 step 6 调用）创建 Gateway、Target、Runtime
+│   ├── seed-skills.py         # （被 step 7 调用）将 SKILL.md 写入 DynamoDB
+│   └── teardown-agentcore.py  # 销毁 AgentCore 资源
 ├── docs/                    # 架构与设计文档
-└── deploy.sh                # 一键部署
+└── deploy.sh                # 一键部署（依次调用上面 7 个 scripts/0*.sh）
 ```
 
 ## 前置条件
@@ -275,17 +282,19 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 ./deploy.sh
 ```
 
-部署脚本执行 8 个步骤：
-1. 安装 CDK 依赖
-2. 构建设备模拟器（React）
-3. 构建聊天机器人（React）
-4. 构建管理控制台（React）
-5. CDK 引导
-6. **CDK 部署** — Cognito、IoT Core、Lambda、DynamoDB、API Gateway、S3 + CloudFront
-7. **修复 Cognito** — 启用自助注册 + 邮箱自动验证
-8. **AgentCore 部署** — Gateway + Lambda Target + Agent Runtime + 写入技能到 DynamoDB
+`deploy.sh` 是一个薄封装，会依次调用 `scripts/0[1-7]-*.sh` 7 个拆分脚本。每个脚本都能独立运行，**脚本开头会打印自己创建了哪些 AWS 资源**，便于调试和只重跑某一步。
 
-部署完成后，脚本会输出三个前端的 URL 和管理员凭证。
+| 步骤 | 脚本 | 部署内容 |
+|------|------|---------|
+| 1 | `scripts/01-install-deps.sh` | 安装 `cdk/` 的 npm 依赖；将最新 `boto3` 打包进 `admin-api`、`user-init`、`kb-query` 三个 Lambda 目录（Lambda 自带的 boto3 过旧，缺少 AgentCore 控制面 API）。 |
+| 2 | `scripts/02-build-frontends.sh` | 构建 `device-simulator`、`chatbot`、`admin-console` 三个 React 应用，产物位于各自的 `build/`。 |
+| 3 | `scripts/03-cdk-bootstrap.sh` | 运行 `cdk bootstrap`（幂等）；创建 `CDKToolkit` 资产桶、ECR 仓库和部署角色。 |
+| 4 | `scripts/04-cdk-deploy.sh` | 部署 **CDK 堆栈**（`SmartHomeAssistantStack`）：Cognito 用户池/身份池/admin 组与默认管理员用户；IoT Core 设备与端点；5 个 Lambda（iot-control、iot-discovery、admin-api、kb-query、user-init）；DynamoDB 表 `smarthome-skills`；S3 桶 `smarthome-skill-files` 与 `smarthome-kb-docs`；OpenSearch Serverless 集合；Bedrock Knowledge Base + S3 数据源；带 Cognito 授权器的 API Gateway；三个前端的 S3 + CloudFront。输出写入 `cdk-outputs.json`。 |
+| 5 | `scripts/05-fix-cognito.sh` | 直接调用 `aws cognito-idp update-user-pool`，补齐 CDK 未可靠传递的两项设置：启用自助注册 + 邮箱自动验证。 |
+| 6 | `scripts/06-deploy-agentcore.sh` | 部署 **AgentCore 堆栈**（由 `agentcore` CLI 管理）：Gateway（CUSTOM_JWT 认证）、指向 iot-control / iot-discovery / kb-query 的 Lambda Target、Runtime（Strands Agent CodeZip）、Memory（语义/摘要/偏好提取策略）、Policy Engine 与每工具的 Cedar permit 策略；初始化企业知识库（AOSS 索引 + Bedrock KB 数据源）；给 Runtime 注入 `SKILLS_TABLE_NAME` 和 `requestHeaderAllowlist: ["Authorization"]`。 |
+| 7 | `scripts/07-seed-skills.sh` | 从 `agent/skills/*/SKILL.md` 读取内置技能，写入 DynamoDB 作为 `__global__` 技能（幂等，可重复运行）。 |
+
+部署完成后，`deploy.sh` 会输出三个前端的 URL 和管理员凭证。
 
 ---
 
@@ -340,6 +349,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
   - 每个工具一个 Cedar `permit` 策略，`principal.id` 匹配用户的 Cognito `sub`
   - Gateway 使用 CUSTOM_JWT 认证；Runtime 通过 `requestHeaderAllowlist: ["Authorization"]` 转发用户 JWT
   - 默认拒绝：未配置工具权限的用户无法调用 gateway 工具
+- **演示入口**：用户表格每行提供 **打开聊天机器人** 与 **打开设备模拟器** 两个按钮，新标签页直达该用户的聊天界面（URL 带 `?username=<email>` 自动预填登录）与对应的设备模拟页，方便管理员现场演示
 
 ### 企业知识库（Knowledge Base Tab）
 - **基于 AWS Bedrock Knowledge Base** 的 RAG 检索增强生成
@@ -412,6 +422,11 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 2. 勾选/取消勾选该用户可使用的 Gateway 工具（可用 **Select All** / **Deselect All** 批量操作）
 3. 点击 **Save Permissions** 保存（Cedar 策略即时生效）
 
+**为用户演示（Demo 入口）：**
+- 在用户列表每一行的 **演示入口** 列，点击 **打开聊天机器人** 或 **打开设备模拟器** 按钮
+- 聊天机器人链接自动携带 `?username=<用户邮箱>`，登录表单会预填该用户名，管理员只需输入密码即可
+- 两个链接均在新标签页打开，方便与管理控制台并排使用
+
 ### 监控会话
 
 1. 进入 **Sessions** Tab 查看所有活跃的运行时会话
@@ -449,41 +464,23 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 ## 分步部署
 
-### 1. 构建前端
+想知道某一步到底做了什么、或者上一次部署中间失败需要从中间重跑？直接调用 `scripts/` 中对应的脚本即可，每个脚本都是独立幂等的，开头会打印它创建的 AWS 资源。推荐顺序：
 
 ```bash
-cd device-simulator && npm install && npm run build && cd ..
-cd chatbot && npm install && npm run build && cd ..
-cd admin-console && npm install && npm run build && cd ..
+source venv/bin/activate          # 让 python/pip 指向 venv
+
+scripts/01-install-deps.sh        # cdk/ npm install + 为 Lambda 打包 boto3
+scripts/02-build-frontends.sh     # 构建三个 React 应用的静态产物
+scripts/03-cdk-bootstrap.sh       # cdk bootstrap（每个账号/区域只需一次）
+scripts/04-cdk-deploy.sh          # 部署 SmartHomeAssistantStack，写 cdk-outputs.json
+scripts/05-fix-cognito.sh         # 启用 Cognito 自助注册 + 邮箱自动验证
+scripts/06-deploy-agentcore.sh    # Gateway + Target + Runtime + Memory + KB 初始化
+scripts/07-seed-skills.sh         # 将 agent/skills/ 下的 SKILL.md 写入 DynamoDB
 ```
 
-### 2. 部署 CDK 堆栈
+每步对应的资源清单见上方快速开始下的表格。部署后只改了前端代码？只重跑 2 + 4；只改了 Agent Python 代码？只重跑 6；只想刷新内置技能？只重跑 7。
 
-```bash
-cd cdk
-npm install
-npx cdk bootstrap  # 每个账号/区域只需一次
-npx cdk deploy --all --require-approval never --outputs-file ../cdk-outputs.json
-```
-
-### 3. 部署 AgentCore
-
-```bash
-source venv/bin/activate
-python3 scripts/setup-agentcore.py
-```
-
-此命令在 `.agentcore-project/` 中创建 `agentcore` CLI 项目，添加 Agent 代码、gateway 和 Lambda target，然后运行 `agentcore deploy -y --verbose`。
-
-### 4. 写入技能
-
-```bash
-python3 scripts/seed-skills.py
-```
-
-从 `agent/skills/` 读取 SKILL.md 文件并作为 `__global__` 技能写入 DynamoDB。
-
-### 5. 添加管理员用户（可选）
+### 添加管理员用户（可选）
 
 CDK 堆栈会创建默认管理员用户。添加更多管理员：
 
@@ -757,11 +754,18 @@ smarthome-assistant-agent/
 │   ├── skills/              # Fallback device control SKILL.md files
 │   └── pyproject.toml       # Dependencies for AgentCore code packaging
 ├── scripts/
-│   ├── setup-agentcore.py   # Creates Gateway, Lambda Target, Runtime
-│   ├── seed-skills.py       # Seeds SKILL.md files to DynamoDB
-│   └── teardown-agentcore.py
+│   ├── 01-install-deps.sh     # CDK npm deps + bundle boto3 into Lambda dirs
+│   ├── 02-build-frontends.sh  # Build the 3 React frontends
+│   ├── 03-cdk-bootstrap.sh    # CDK bootstrap (idempotent)
+│   ├── 04-cdk-deploy.sh       # Deploy CDK stack (Cognito/IoT/Lambda/KB/S3/CF)
+│   ├── 05-fix-cognito.sh      # Enable self-signup + email verification
+│   ├── 06-deploy-agentcore.sh # Deploy AgentCore (Gateway/Target/Runtime/Memory)
+│   ├── 07-seed-skills.sh      # Seed built-in skills into DynamoDB
+│   ├── setup-agentcore.py     # (called by step 6) Creates Gateway, Target, Runtime
+│   ├── seed-skills.py         # (called by step 7) Writes SKILL.md to DynamoDB
+│   └── teardown-agentcore.py  # Destroys AgentCore resources
 ├── docs/                    # Architecture & design documentation
-└── deploy.sh                # One-click deploy
+└── deploy.sh                # One-click wrapper that runs scripts/0[1-7]-*.sh
 ```
 
 ## Prerequisites
@@ -1005,17 +1009,19 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 ./deploy.sh
 ```
 
-The deploy script runs 8 steps:
-1. Install CDK dependencies
-2. Build Device Simulator (React)
-3. Build Chatbot (React)
-4. Build Admin Console (React)
-5. CDK bootstrap
-6. **CDK deploy** — Cognito, IoT Core, Lambda, DynamoDB, API Gateway, S3 + CloudFront
-7. **Fix Cognito** — Enable self-service sign-up + email auto-verification
-8. **AgentCore setup** — Gateway + Lambda Target + Agent Runtime + Seed skills to DynamoDB
+`deploy.sh` is a thin wrapper that runs 7 split scripts under `scripts/0[1-7]-*.sh`, in order. Each split script can be run independently and **prints exactly which AWS resources it creates** at the top — handy for debugging or re-running a single step.
 
-After deployment, the script outputs URLs for all three frontends and admin credentials.
+| Step | Script | What it deploys |
+|------|--------|-----------------|
+| 1 | `scripts/01-install-deps.sh` | `npm install` in `cdk/`; bundle the latest `boto3` into the `admin-api`, `user-init`, and `kb-query` Lambda directories (Lambda's built-in boto3 is too old for AgentCore control-plane APIs). |
+| 2 | `scripts/02-build-frontends.sh` | Build the `device-simulator`, `chatbot`, and `admin-console` React apps into their `build/` directories. |
+| 3 | `scripts/03-cdk-bootstrap.sh` | Run `cdk bootstrap` (idempotent) — provisions the `CDKToolkit` asset bucket, ECR repo, and deploy roles. |
+| 4 | `scripts/04-cdk-deploy.sh` | Deploy the **CDK stack** (`SmartHomeAssistantStack`): Cognito User Pool / Identity Pool / admin group + default admin user; IoT Core Things + endpoint; 5 Lambdas (iot-control, iot-discovery, admin-api, kb-query, user-init); DynamoDB `smarthome-skills`; S3 buckets `smarthome-skill-files` and `smarthome-kb-docs`; OpenSearch Serverless collection; Bedrock Knowledge Base + S3 data source; API Gateway with Cognito authorizer; S3 + CloudFront for all three frontends. Writes `cdk-outputs.json`. |
+| 5 | `scripts/05-fix-cognito.sh` | Call `aws cognito-idp update-user-pool` directly to guarantee self-service sign-up + email auto-verification are enabled (CDK flags for these don't always propagate reliably). |
+| 6 | `scripts/06-deploy-agentcore.sh` | Deploy the **AgentCore stack** (managed by the `agentcore` CLI): Gateway with CUSTOM_JWT auth, Lambda Targets for iot-control / iot-discovery / kb-query, Runtime (Strands agent CodeZip), Memory (semantic / summary / preference strategies), Policy Engine + per-tool Cedar permit policies; initialize the enterprise KB (AOSS index + Bedrock KB data source); patch the Runtime with `SKILLS_TABLE_NAME` and `requestHeaderAllowlist: ["Authorization"]`. |
+| 7 | `scripts/07-seed-skills.sh` | Read `agent/skills/*/SKILL.md` and write them to DynamoDB as `__global__` skills (idempotent — uses PutItem). |
+
+After deployment, `deploy.sh` prints URLs for all three frontends and admin credentials.
 
 ---
 
@@ -1070,6 +1076,7 @@ The Admin Console ("Agent Harness Management") is a separate React app for admin
   - One Cedar `permit` policy per tool, with `principal.id` matching the user's Cognito `sub`
   - Gateway uses CUSTOM_JWT auth; runtime forwards user JWT via `requestHeaderAllowlist: ["Authorization"]`
   - Default deny: users without explicit tool permissions cannot invoke gateway tools
+- **Demo Links column**: each user row has **Open Chatbot** and **Open Devices** buttons that launch the chatbot (with `?username=<email>` so the login form is prefilled) and the device simulator in new tabs, so administrators can run user-specific demos without copying URLs or emails
 
 ### Knowledge Base (Knowledge Base Tab)
 - **RAG (Retrieval-Augmented Generation)** powered by AWS Bedrock Knowledge Base
@@ -1142,6 +1149,11 @@ Log in to the Admin Console with the admin credentials shown in the deploy outpu
 2. Check/uncheck the Gateway tools the user can invoke (use **Select All** / **Deselect All** for bulk operations)
 3. Click **Save Permissions** (Cedar policies take effect immediately)
 
+**Demo links per user:**
+- Each row in the user list has a **Demo** column with **Open Chatbot** and **Open Devices** buttons
+- The chatbot link includes `?username=<email>` so the login form is pre-filled — the admin only needs to enter the password
+- Both links open in new tabs, convenient to run side-by-side with the admin console during a live demo
+
 ### Monitoring Sessions
 
 1. Go to the **Sessions** tab to view all active runtime sessions
@@ -1179,41 +1191,23 @@ Log in to the Admin Console with the admin credentials shown in the deploy outpu
 
 ## Step-by-Step Deployment
 
-### 1. Build frontends
+Want to know exactly what each step does, or re-run just one step after a mid-deploy failure? Call the individual scripts under `scripts/` — each is standalone and idempotent, and prints the AWS resources it creates at the top. Recommended order:
 
 ```bash
-cd device-simulator && npm install && npm run build && cd ..
-cd chatbot && npm install && npm run build && cd ..
-cd admin-console && npm install && npm run build && cd ..
+source venv/bin/activate          # so python/pip use the venv
+
+scripts/01-install-deps.sh        # npm install in cdk/ + bundle boto3 into Lambdas
+scripts/02-build-frontends.sh     # produce static bundles for the 3 React apps
+scripts/03-cdk-bootstrap.sh       # cdk bootstrap (once per account/region)
+scripts/04-cdk-deploy.sh          # deploy SmartHomeAssistantStack, write cdk-outputs.json
+scripts/05-fix-cognito.sh         # enable Cognito self-signup + email verification
+scripts/06-deploy-agentcore.sh    # Gateway + Target + Runtime + Memory + KB init
+scripts/07-seed-skills.sh         # write agent/skills/*/SKILL.md to DynamoDB
 ```
 
-### 2. Deploy CDK stack
+See the per-step resource table above under Quick Start for what each script deploys. Common partial re-runs: changed only frontend code → rerun 2 + 4; changed only agent Python code → rerun 6; changed only built-in skill files → rerun 7.
 
-```bash
-cd cdk
-npm install
-npx cdk bootstrap  # once per account/region
-npx cdk deploy --all --require-approval never --outputs-file ../cdk-outputs.json
-```
-
-### 3. Deploy AgentCore
-
-```bash
-source venv/bin/activate
-python3 scripts/setup-agentcore.py
-```
-
-This creates an `agentcore` CLI project in `.agentcore-project/`, adds our agent code, gateway, and Lambda target, then runs `agentcore deploy -y --verbose`.
-
-### 4. Seed skills
-
-```bash
-python3 scripts/seed-skills.py
-```
-
-Reads the SKILL.md files from `agent/skills/` and writes them to DynamoDB as `__global__` skills.
-
-### 5. Add admin users (optional)
+### Add admin users (optional)
 
 The CDK stack creates a default admin user. To add more:
 

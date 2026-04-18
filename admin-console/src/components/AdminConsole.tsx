@@ -1812,13 +1812,23 @@ const AdminConsole: React.FC = () => {
                       <th>{t('users.colUserId')}</th>
                       <th>{t('users.colStatus')}</th>
                       <th>{t('users.colGroups')}</th>
+                      <th>{t('users.colDemo')}</th>
                       <th>{t('users.colActions')}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {cognitoUsers.map((u) => (
+                    {cognitoUsers.map((u) => {
+                      const cfg = getConfig();
+                      const loginHint = u.email || u.username;
+                      const chatUrl = cfg.chatbotUrl
+                        ? `${cfg.chatbotUrl.replace(/\/$/, '')}/?username=${encodeURIComponent(loginHint)}`
+                        : '';
+                      const simUrl = cfg.deviceSimulatorUrl
+                        ? `${cfg.deviceSimulatorUrl.replace(/\/$/, '')}/?userId=${encodeURIComponent(u.sub)}`
+                        : '';
+                      return (
                       <tr key={u.sub}>
-                        <td className="cell-name">{u.email || u.username}</td>
+                        <td className="cell-name">{loginHint}</td>
                         <td className="cell-tools" title={u.sub}>
                           {u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}
                         </td>
@@ -1848,6 +1858,32 @@ const AdminConsole: React.FC = () => {
                             : '-'}
                         </td>
                         <td className="cell-actions">
+                          {chatUrl ? (
+                            <a
+                              className="btn btn-sm btn-secondary"
+                              href={chatUrl}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              title={t('users.openChatbotTitle')}
+                              style={{ marginRight: 6 }}
+                            >
+                              {t('users.openChatbot')}
+                            </a>
+                          ) : null}
+                          {simUrl ? (
+                            <a
+                              className="btn btn-sm btn-secondary"
+                              href={simUrl}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              title={t('users.openDeviceSimTitle')}
+                            >
+                              {t('users.openDeviceSim')}
+                            </a>
+                          ) : null}
+                          {!chatUrl && !simUrl ? <span className="perm-hint">-</span> : null}
+                        </td>
+                        <td className="cell-actions">
                           <button
                             className="btn btn-sm btn-primary"
                             onClick={() => handleManagePermissions(u)}
@@ -1856,7 +1892,8 @@ const AdminConsole: React.FC = () => {
                           </button>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}

@@ -4,6 +4,8 @@ interface AppConfig {
   adminApiUrl: string;
   agentRuntimeArn: string;
   region: string;
+  chatbotUrl?: string;
+  deviceSimulatorUrl?: string;
 }
 
 export function getConfig(): AppConfig {
@@ -13,5 +15,7 @@ export function getConfig(): AppConfig {
     adminApiUrl: '',
     agentRuntimeArn: '',
     region: 'us-east-1',
+    chatbotUrl: '',
+    deviceSimulatorUrl: '',
   };
 }

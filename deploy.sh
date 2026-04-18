@@ -1,92 +1,68 @@
 #!/bin/bash
 set -e
 
+# ==============================================================================
+# Smart Home Assistant — one-click deploy
+# ------------------------------------------------------------------------------
+# This script is a thin wrapper that runs the 7 split deployment scripts under
+# `scripts/0[1-7]-*.sh` in order. Each split script prints exactly what AWS
+# resources it creates, so you can also run them one at a time for debugging.
+#
+# Steps:
+#   1. scripts/01-install-deps.sh      — CDK deps + bundle boto3 into Lambdas
+#   2. scripts/02-build-frontends.sh   — Build device-simulator / chatbot / admin-console
+#   3. scripts/03-cdk-bootstrap.sh     — CDK bootstrap (idempotent)
+#   4. scripts/04-cdk-deploy.sh        — Cognito, IoT, Lambda, DynamoDB, KB,
+#                                         API Gateway, S3+CloudFront
+#   5. scripts/05-fix-cognito.sh       — Enable self-signup + email verification
+#   6. scripts/06-deploy-agentcore.sh  — Gateway, Targets, Runtime, Memory, KB init
+#   7. scripts/07-seed-skills.sh       — Seed built-in skills to DynamoDB
+# ==============================================================================
+
 echo "========================================="
 echo "Smart Home Assistant - One-Click Deploy"
 echo "========================================="
 
-# Check prerequisites
-command -v node >/dev/null 2>&1 || { echo "Node.js is required. Install from https://nodejs.org/"; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "npm is required."; exit 1; }
-command -v aws >/dev/null 2>&1 || { echo "AWS CLI is required."; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "Python 3 is required."; exit 1; }
+# Prerequisites (checked here so we fail fast before any step starts)
+command -v node      >/dev/null 2>&1 || { echo "Node.js is required. Install from https://nodejs.org/"; exit 1; }
+command -v npm       >/dev/null 2>&1 || { echo "npm is required."; exit 1; }
+command -v aws       >/dev/null 2>&1 || { echo "AWS CLI is required."; exit 1; }
+command -v python3   >/dev/null 2>&1 || { echo "Python 3 is required."; exit 1; }
 command -v agentcore >/dev/null 2>&1 || { echo "agentcore CLI is required. Install: pip install strands-agents-builder"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-west-2}}"
 
-# Use venv if it exists
+# Activate venv once so the split scripts inherit the interpreter
 if [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/venv/bin/activate"
 fi
 
-echo ""
-echo "[1/8] Installing CDK dependencies..."
-cd "$SCRIPT_DIR/cdk"
-npm install
+run_step() {
+    local num="$1"; shift
+    local title="$1"; shift
+    local script="$1"; shift
+    echo ""
+    echo "-----------------------------------------"
+    echo "[$num/7] $title"
+    echo "-----------------------------------------"
+    bash "$SCRIPT_DIR/scripts/$script"
+}
 
-# Bundle latest boto3 in Lambda functions (Lambda runtime's boto3 is too old for AgentCore APIs)
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/admin-api" -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/user-init" -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/kb-query" -q --upgrade 2>/dev/null || true
+run_step 1 "Install CDK deps + bundle boto3 into Lambdas"       "01-install-deps.sh"
+run_step 2 "Build React frontends"                              "02-build-frontends.sh"
+run_step 3 "CDK bootstrap"                                      "03-cdk-bootstrap.sh"
+run_step 4 "Deploy CDK stack (Cognito/IoT/Lambda/KB/S3/CF)"     "04-cdk-deploy.sh"
+run_step 5 "Fix Cognito self-signup + email verification"       "05-fix-cognito.sh"
+run_step 6 "Deploy AgentCore (Gateway/Targets/Runtime/Memory)"  "06-deploy-agentcore.sh"
+run_step 7 "Seed built-in skills to DynamoDB"                   "07-seed-skills.sh"
 
-echo ""
-echo "[2/8] Building Device Simulator..."
-cd "$SCRIPT_DIR/device-simulator"
-npm install
-npm run build
-
-echo ""
-echo "[3/8] Building Chatbot..."
-cd "$SCRIPT_DIR/chatbot"
-npm install
-npm run build
-
-echo ""
-echo "[4/8] Building Admin Console..."
-cd "$SCRIPT_DIR/admin-console"
-npm install
-npm run build
-
-echo ""
-echo "[5/8] Bootstrapping CDK (if needed)..."
-cd "$SCRIPT_DIR/cdk"
-npx cdk bootstrap 2>/dev/null || true
-
-echo ""
-echo "[6/8] Deploying CDK stack (Cognito, IoT, Lambda, DynamoDB, API Gateway, S3, CloudFront)..."
-cd "$SCRIPT_DIR/cdk"
-npx cdk deploy --all --require-approval never --outputs-file "$SCRIPT_DIR/cdk-outputs.json"
-
-echo ""
-echo "[7/8] Fixing Cognito User Pool settings..."
-# CDK selfSignUpEnabled doesn't always propagate correctly — ensure self-sign-up
-# and email auto-verification are enabled
-USER_POOL_ID=$(python3 -c "import json; print(json.load(open('$SCRIPT_DIR/cdk-outputs.json'))['SmartHomeAssistantStack']['UserPoolId'])")
-aws cognito-idp update-user-pool \
-  --user-pool-id "$USER_POOL_ID" \
-  --auto-verified-attributes email \
-  --admin-create-user-config AllowAdminCreateUserOnly=false \
-  --region "$REGION"
-echo "  Cognito: self-sign-up enabled, email auto-verification enabled"
-
-echo ""
-echo "[8/8] Deploying AgentCore (Gateway, Lambda Target, Runtime)..."
-cd "$SCRIPT_DIR"
-python3 "$SCRIPT_DIR/scripts/setup-agentcore.py"
-
-echo ""
-echo "Seeding skills to DynamoDB..."
-python3 "$SCRIPT_DIR/scripts/seed-skills.py"
-
-# Print deployment summary with all URLs and credentials
 echo ""
 echo "========================================="
 echo "  Deployment Complete!"
 echo "========================================="
 echo ""
 
-# Read outputs for summary
 CDK_OUTPUTS="$SCRIPT_DIR/cdk-outputs.json"
 if [ -f "$CDK_OUTPUTS" ]; then
     DEVICE_SIM_URL=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('DeviceSimulatorUrl',''))")

@@ -509,6 +509,8 @@ This approach avoids baking environment-specific values into the webpack bundle,
 - `getCurrentSession()` checks for valid session on app mount
 - Tokens auto-refresh via Cognito SDK's built-in refresh flow
 
+**Login prefill via query param:** `LoginPage` reads `?username=<email>` (or `?email=<email>`) from `window.location.search` on mount and prefills the username field. The Admin Console's Tool Access tab uses this to launch pre-filled chatbot demos for any Cognito user, so administrators only need to enter the password.
+
 ### 7.2 Message Architecture
 
 The chatbot communicates with the AgentCore Runtime via HTTP POST:
@@ -1050,57 +1052,78 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 
 ### 9.2 Deployment Architecture
 
+`deploy.sh` is a thin wrapper that runs 7 split scripts under `scripts/0[1-7]-*.sh` in order. Each split script is independently runnable and prints the AWS resources it creates at the top — handy for debugging or re-running a single step after a partial failure.
+
 ```
-deploy.sh (one-click)
+deploy.sh (one-click wrapper)
     |
-    +---> [1-4] Build frontends (Device Sim, Chatbot, Admin Console)
+    +---> [1/7] scripts/01-install-deps.sh
+    |           npm install in cdk/; bundle latest boto3 into Lambda dirs
+    |           (admin-api, user-init, kb-query) for AgentCore control-plane APIs
     |
-    +---> [5] CDK Bootstrap
+    +---> [2/7] scripts/02-build-frontends.sh
+    |           Build device-simulator, chatbot, admin-console React apps
     |
-    +---> [6] CDK Deploy --all
-    |         CloudFormation: SmartHomeAssistantStack
-    |         -> Cognito, IoT Things, Lambda, S3, CloudFront
-    |         -> DynamoDB (skills table), API Gateway (admin API)
-    |         -> Outputs: UserPoolId, LambdaArn, BucketNames, URLs, AdminApiUrl
+    +---> [3/7] scripts/03-cdk-bootstrap.sh
+    |           cdk bootstrap (idempotent; CDKToolkit stack, asset bucket, ECR)
     |
-    +---> [7] Fix Cognito User Pool settings
-    |         -> Enable self-service sign-up (AllowAdminCreateUserOnly=false)
-    |         -> Enable email auto-verification (auto-verified-attributes=email)
-    |         (CDK selfSignUpEnabled doesn't always propagate correctly)
+    +---> [4/7] scripts/04-cdk-deploy.sh
+    |           cdk deploy --all
+    |           CloudFormation: SmartHomeAssistantStack
+    |           -> Cognito (User Pool, Identity Pool, admin group, admin user)
+    |           -> IoT Things + endpoint
+    |           -> Lambda (iot-control, iot-discovery, admin-api, kb-query, user-init)
+    |           -> DynamoDB smarthome-skills
+    |           -> S3 (smarthome-skill-files, smarthome-kb-docs)
+    |           -> OpenSearch Serverless collection smarthome-kb
+    |           -> Bedrock Knowledge Base + S3 data source (Cohere multilingual)
+    |           -> API Gateway with Cognito authorizer
+    |           -> S3 + CloudFront for each of the 3 frontends
+    |           -> Outputs written to cdk-outputs.json
     |
-    +---> [8] scripts/setup-agentcore.py
-              |
-              +---> [1/8] agentcore create --name smarthome --defaults
-              +---> [2/8] Replace default agent code with agent/
-              |           Patch agentcore.json (entrypoint, JWT auth, env vars)
-              |           Seed aws-targets.json (required for CLI deploy)
-              +---> [3/8] agentcore add memory --name SmartHomeMemory
-              |           --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
-              +---> [4/8] agentcore add gateway (CUSTOM_JWT auth, Cognito)
-              +---> [5/8] agentcore add gateway-target SmartHomeDeviceControl
-              |           (iot-control Lambda + control_device tool schema)
-              +---> [5b/8] agentcore add gateway-target SmartHomeDeviceDiscovery
-              |           (iot-discovery Lambda + discover_devices tool schema)
-              +---> [6/8] agentcore add evaluator
-              +---> [7/8] agentcore add online-eval
-              +---> [8/8] agentcore deploy -y --verbose
-              |         CloudFormation: AgentCore-smarthome-default
-              |         -> Runtime, Gateway, Memory, IAM Role
-              +---> Fetch resource IDs (from CFN stack outputs)
-              +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
-              +---> Patch runtime: requestHeaderAllowlist: ["Authorization"]
-              |     (propagate user JWT to agent for gateway auth)
-              +---> Patch admin Lambda env vars (AGENT_RUNTIME_ARN, SKILL_FILES_BUCKET,
-              |     GATEWAY_ID, COGNITO_USER_POOL_ID)
-              +---> Grant runtime role DynamoDB read access (inline IAM policy)
-              |     (agentcore CLI drops custom env vars during deploy;
-              |      MEMORY_SMARTHOMEMEMORY_ID is set by CLI automatically)
-              +---> Update chatbot config.js in S3
-              +---> Invalidate CloudFront cache
+    +---> [5/7] scripts/05-fix-cognito.sh
+    |           aws cognito-idp update-user-pool
+    |           -> AllowAdminCreateUserOnly=false (self-service sign-up)
+    |           -> auto-verified-attributes=email
+    |           (CDK selfSignUpEnabled doesn't always propagate reliably)
     |
-    +---> scripts/seed-skills.py
-              +---> Read 5 SKILL.md files from agent/skills/
-              +---> Write to DynamoDB as __global__ skills
+    +---> [6/7] scripts/06-deploy-agentcore.sh -> scripts/setup-agentcore.py
+    |           |
+    |           +---> agentcore create --name smarthome --defaults
+    |           +---> Replace default agent code with agent/
+    |           |     Patch agentcore.json (entrypoint, JWT auth, env vars)
+    |           |     Seed aws-targets.json (required for CLI deploy)
+    |           +---> agentcore add memory --name SmartHomeMemory
+    |           |     --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
+    |           +---> agentcore add gateway (CUSTOM_JWT auth, Cognito)
+    |           +---> agentcore add gateway-target SmartHomeDeviceControl
+    |           |     (iot-control Lambda + control_device tool schema)
+    |           +---> agentcore add gateway-target SmartHomeDeviceDiscovery
+    |           |     (iot-discovery Lambda + discover_devices tool schema)
+    |           +---> agentcore add gateway-target SmartHomeKnowledgeBase
+    |           |     (kb-query Lambda + query_knowledge_base tool schema)
+    |           +---> agentcore add evaluator + online-eval
+    |           +---> agentcore deploy -y --verbose
+    |           |     CloudFormation: AgentCore-smarthome-default
+    |           |     -> Runtime, Gateway, Memory, Policy Engine, IAM Role
+    |           +---> Fetch resource IDs (from CFN stack outputs)
+    |           +---> Initialize KB (AOSS index, Bedrock KB, S3 data source,
+    |           |     default __shared__/ + admin@/ folders)
+    |           +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
+    |           +---> Patch runtime: requestHeaderAllowlist: ["Authorization"]
+    |           |     (propagate user JWT to agent for gateway auth)
+    |           +---> Patch admin Lambda env vars (AGENT_RUNTIME_ARN, GATEWAY_ID,
+    |           |     SKILL_FILES_BUCKET, COGNITO_USER_POOL_ID)
+    |           +---> Patch user-init Lambda env vars (GATEWAY_ID, KB_DOCS_BUCKET)
+    |           +---> Grant runtime role DynamoDB + Bedrock Retrieve access
+    |           +---> Update config.js in S3 for device-sim / chatbot / admin console
+    |           |     (admin config.js also injects chatbotUrl + deviceSimulatorUrl
+    |           |      so the Tool Access tab can deep-link per-user demo flows)
+    |           +---> Invalidate CloudFront cache
+    |
+    +---> [7/7] scripts/07-seed-skills.sh -> scripts/seed-skills.py
+                +---> Read SKILL.md files from agent/skills/
+                +---> Write to DynamoDB as __global__ skills (idempotent)
 ```
 
 ### 9.3 Runtime Configuration Injection
@@ -1150,7 +1173,7 @@ admin-console/
 | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor |
 | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
 | **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
-| **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY) |
+| **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY), and **Demo Links** column with one-click deep links to the chatbot (`?username=<email>` for login prefill) and device simulator for each user — optimized for admin-led demos |
 | **Integrations** | Tool source registry — Lambda targets (active), MCP servers, A2A agents, API Gateway (planned) |
 | **Sessions** | Runtime session monitoring with User ID, Session ID, Last Active, and Stop button |
 | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory |
@@ -1167,7 +1190,7 @@ admin-console/
 | Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model |
 | `smarthome-kb-query` Lambda | Gateway target for agent KB retrieval with JWT-based user identity extraction |
 | CloudFront Distribution | HTTPS CDN |
-| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region` |
+| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region`, `chatbotUrl`, `deviceSimulatorUrl` |
 
 ### 9.5 Per-User Tool Permission Management
 
