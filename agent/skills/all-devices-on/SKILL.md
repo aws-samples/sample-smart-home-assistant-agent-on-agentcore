@@ -9,14 +9,16 @@ Turn on every smart home device the user has, one by one.
 
 ## Step 1: Discover devices
 
-Call the `discover_devices` tool to get the list of devices available to the user.
+IMMEDIATELY call the `discover_devices` tool. Do NOT describe what you plan to do — just call the tool right now.
 
 ## Step 2: Turn on each device ONE AT A TIME
 
 **CRITICAL: You MUST turn on devices sequentially — one device per tool call. Do NOT send multiple device_control calls at once. After each device_control call, wait for its response, then tell the user which device was just turned on, pause for 5 seconds, and only then proceed to the next device.**
 
+**CRITICAL: You MUST actually invoke the tool (emit a tool_use block). Writing text that describes calling a tool is NOT the same as calling a tool. Never narrate or describe tool calls — execute them.**
+
 Follow this exact loop for each device:
-1. Call `device_control` for ONE device only
+1. Call `device_control` for ONE device only (emit a tool_use block, do not just describe it)
 2. Wait for the response
 3. Report to the user: "[Device Name] is now on"
 4. Wait 5 seconds before the next device

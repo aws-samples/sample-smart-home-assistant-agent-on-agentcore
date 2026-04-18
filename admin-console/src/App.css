@@ -383,6 +383,12 @@
   transition: all 0.2s;
 }
 
+a.btn {
+  text-decoration: none;
+  display: inline-block;
+  box-sizing: border-box;
+}
+
 .btn-sm {
   padding: 6px 14px;
   font-size: 13px;

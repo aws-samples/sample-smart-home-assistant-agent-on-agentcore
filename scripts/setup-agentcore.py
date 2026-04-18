@@ -729,7 +729,9 @@ def main():
   cognitoClientId: "{outputs['UserPoolClientId']}",
   adminApiUrl: "{admin_api_url}",
   agentRuntimeArn: "{runtime_arn}",
-  region: "{REGION}"
+  region: "{REGION}",
+  chatbotUrl: "{outputs.get('ChatbotUrl', '')}",
+  deviceSimulatorUrl: "{outputs.get('DeviceSimulatorUrl', '')}"
 }};"""
         print("Updating admin console config.js...")
         s3.put_object(Bucket=admin_bucket, Key="config.js",
