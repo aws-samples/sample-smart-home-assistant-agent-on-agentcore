@@ -33,6 +33,15 @@ cdk/lambda/user-init/dateutil/
 cdk/lambda/user-init/*.dist-info/
 cdk/lambda/user-init/bin/
 cdk/lambda/user-init/six.py
+cdk/lambda/kb-query/boto3/
+cdk/lambda/kb-query/botocore/
+cdk/lambda/kb-query/s3transfer/
+cdk/lambda/kb-query/jmespath/
+cdk/lambda/kb-query/urllib3/
+cdk/lambda/kb-query/dateutil/
+cdk/lambda/kb-query/*.dist-info/
+cdk/lambda/kb-query/bin/
+cdk/lambda/kb-query/six.py
 .venv/
 .DS_Store
 venv/
