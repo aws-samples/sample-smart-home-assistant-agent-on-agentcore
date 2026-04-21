@@ -50,6 +50,13 @@ const en: Record<string, string> = {
   'chat.chip.preheatOven': 'Preheat oven to 350\u00b0F',
   'chat.chip.preheatOven.prompt': 'Preheat oven to 350 degrees',
   'chat.sendFailed': 'Failed to send message',
+  'chat.voiceMode.enter': 'Switch to voice mode',
+  'chat.voiceMode.exit': 'Switch to text mode',
+  'chat.voiceMode.connecting': 'Connecting to voice assistant...',
+  'chat.voiceMode.connected': 'Listening. Speak now.',
+  'chat.voiceMode.disconnected': 'Voice session ended.',
+  'chat.voiceMode.micDenied': 'Microphone access denied.',
+  'chat.voiceMode.error': 'Voice session error',
 };
 
 export default en;

@@ -752,6 +752,7 @@ export class SmartHomeStack extends cdk.Stack {
   cognitoUserPoolId: "${userPool.userPoolId}",
   cognitoClientId: "${userPoolClient.userPoolClientId}",
   cognitoDomain: "${userPoolDomain.domainName}.auth.${cdk.Aws.REGION}.amazoncognito.com",
+  cognitoIdentityPoolId: "${identityPool.ref}",
   agentRuntimeArn: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
   region: "${cdk.Aws.REGION}"
 };`;
@@ -853,5 +854,6 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AOSSCollectionEndpoint", { value: aossCollection.attrCollectionEndpoint });
     new cdk.CfnOutput(this, "AOSSCollectionArn", { value: aossCollection.attrArn });
     new cdk.CfnOutput(this, "KBServiceRoleArn", { value: kbServiceRole.roleArn });
+    new cdk.CfnOutput(this, "CognitoAuthRoleArn", { value: authRole.roleArn });
   }
 }

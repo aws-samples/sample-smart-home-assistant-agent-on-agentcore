@@ -26,23 +26,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configure Strands to emit OTEL traces (GenAI semantic conventions).
-# ADOT auto-instrumentation (above) handles exporting these spans to CloudWatch.
 StrandsTelemetry()
 
-# agentcore CLI sets env vars as AGENTCORE_GATEWAY_{GATEWAYNAME}_URL
+# agentcore CLI sets env vars as AGENTCORE_GATEWAY_{GATEWAYNAME}_URL / _ARN
 GATEWAY_URL = os.environ.get("AGENTCORE_GATEWAY_URL", "")
+GATEWAY_ARN = os.environ.get("AGENTCORE_GATEWAY_ARN", "")
 if not GATEWAY_URL:
     for key, val in os.environ.items():
         if key.startswith("AGENTCORE_GATEWAY_") and key.endswith("_URL"):
             GATEWAY_URL = val
-            break
+        elif key.startswith("AGENTCORE_GATEWAY_") and key.endswith("_ARN"):
+            GATEWAY_ARN = val
+
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai.kimi-k2.5")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SKILLS_TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "")
 
 app = BedrockAgentCoreApp()
 
-# DynamoDB resource for skill loading (initialised lazily)
 _dynamodb_resource = None
 
 
@@ -58,7 +59,6 @@ def load_skills_from_dynamodb(actor_id: str) -> list:
     table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
     skills_by_name = {}
 
-    # Global skills first
     resp = table.query(KeyConditionExpression=Key("userId").eq("__global__"))
     for item in resp.get("Items", []):
         allowed_tools = item.get("allowedTools")
@@ -74,7 +74,6 @@ def load_skills_from_dynamodb(actor_id: str) -> list:
             metadata=item.get("metadata") or {},
         )
 
-    # User-specific skills override global by name
     if actor_id and actor_id not in ("default", "__global__"):
         resp = table.query(KeyConditionExpression=Key("userId").eq(actor_id))
         for item in resp.get("Items", []):
@@ -95,10 +94,6 @@ def load_skills_from_dynamodb(actor_id: str) -> list:
 
 
 def load_user_settings(actor_id: str) -> dict:
-    """Load user settings (e.g., modelId) from DynamoDB.
-
-    Checks user-specific settings first, then falls back to __global__.
-    """
     table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
     for uid in [actor_id, "__global__"]:
         if uid in ("default", ""):
@@ -110,7 +105,6 @@ def load_user_settings(actor_id: str) -> dict:
     return {}
 
 
-# Fallback: static skills from filesystem
 _static_skills_plugin = AgentSkills(skills="./skills/")
 
 
@@ -126,7 +120,6 @@ KNOWLEDGE BASE: You have access to an enterprise knowledge base. When users ask 
 
 
 def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
-    """Create a Strands agent with Bedrock model, optional MCP tools, and memory."""
     model = BedrockModel(
         model_id=model_id or MODEL_ID,
         region_name=AWS_REGION,
@@ -153,7 +146,6 @@ def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
 
 
 def get_mcp_tools(mcp_client):
-    """Get all tools from MCP client with pagination."""
     tools = []
     pagination_token = None
     while True:
@@ -166,10 +158,8 @@ def get_mcp_tools(mcp_client):
 
 
 def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None):
-    """Run agent with MCP tools from Gateway if available, with memory persistence."""
     session_manager = get_memory_session_manager(session_id, actor_id)
 
-    # Load skills and user settings from DynamoDB
     skills = None
     user_model_id = None
     if SKILLS_TABLE_NAME:
@@ -186,21 +176,16 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             logger.warning(f"Failed to load user settings: {e}")
 
     if GATEWAY_URL:
-        # Forward user's JWT to the CUSTOM_JWT gateway for per-user policy evaluation.
-        # Requires runtime requestHeaderConfiguration.requestHeaderAllowlist: ["Authorization"]
         gw_headers = {}
         if auth_header:
             gw_headers["Authorization"] = auth_header
-            logger.info(f"Forwarding user JWT to gateway for policy evaluation")
+            logger.info("Forwarding user JWT to gateway for policy evaluation")
         else:
             logger.warning("No Authorization header available — gateway per-user policies won't apply")
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
         with mcp_client:
             mcp_tools = get_mcp_tools(mcp_client)
 
-            # Secure KB tool: replace the MCP query_knowledge_base with a local wrapper
-            # that auto-injects user_id from the verified actor_id (from JWT → Runtime context).
-            # This prevents the LLM from fabricating or omitting the user identity.
             kb_tool_present = any(t.tool_name == "query_knowledge_base" for t in mcp_tools)
             if kb_tool_present:
                 non_kb_tools = [t for t in mcp_tools if t.tool_name != "query_knowledge_base"]
@@ -222,7 +207,6 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                         name="query_knowledge_base",
                         arguments=args,
                     )
-                    # MCPToolResult has .content list; extract text
                     if hasattr(result, 'content') and result.content:
                         texts = [c.text for c in result.content if hasattr(c, 'text')]
                         return "\n".join(texts) if texts else json.dumps(result.content, default=str)
@@ -240,46 +224,93 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
         return str(agent(prompt))
 
 
+def _extract_user_auth(context) -> str | None:
+    """Read the chatbot-supplied idToken from the custom allowlisted header and
+    format it as a Bearer header for downstream gateway MCP calls.
+
+    Header name: X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken.
+    We also keep the legacy Authorization-header path for local-dev invocations
+    where the header is passed directly.
+    """
+    rh = getattr(context, "request_headers", None)
+    if not rh:
+        return None
+    headers = rh
+
+    # Custom header (current prod path under AWS_IAM auth). Search
+    # case-insensitively across whatever case the runtime forwards.
+    lowered = {str(k).lower(): v for k, v in headers.items()} if hasattr(headers, "items") else {}
+    token = lowered.get("x-amzn-bedrock-agentcore-runtime-custom-authtoken")
+    if token:
+        return f"Bearer {token}" if not token.lower().startswith("bearer ") else token
+
+    # Legacy: raw Authorization header (still used in some dev flows).
+    return lowered.get("authorization")
+
+
+def _record_session(actor_id: str, session_id: str) -> None:
+    if not SKILLS_TABLE_NAME:
+        return
+    try:
+        from datetime import datetime, timezone
+        _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
+            "userId": actor_id,
+            "skillName": "__session__",
+            "sessionId": session_id,
+            "lastActiveAt": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.warning(f"Failed to record session: {e}")
+
+
 @app.entrypoint
 def handle_invocation(payload, context):
-    """Handle HTTP POST /invocations requests."""
+    """POST /invocations handler — text path (synchronous request/response)."""
     prompt = payload.get("prompt", payload.get("inputText", ""))
     if not prompt:
         return {"error": "No prompt provided"}
 
-    # Extract session and actor IDs from request context
     session_id = "default"
-    actor_id = "default"
-    if hasattr(context, 'session_id') and context.session_id:
+    if hasattr(context, "session_id") and context.session_id:
         session_id = context.session_id
 
-    # The runtime strips the X-Amzn-Bedrock-AgentCore-Runtime-User-Id header
-    # before forwarding to the agent. Read user ID from the payload instead.
-    actor_id = payload.get("userId", actor_id)
+    actor_id = payload.get("userId", "default")
+
+    # Under AWS_IAM auth on the runtime, the `Authorization` header can't be
+    # passthrough-allowlisted, so the chatbot sends the user's idToken in a
+    # custom allowlisted header instead. We forward it to the CUSTOM_JWT gateway
+    # MCP client as `Bearer <token>` for per-user Cedar policy evaluation.
+    auth_header = _extract_user_auth(context)
+
+    # Warm-up ping sent right after login — proves the runtime + JWT are healthy
+    # without burning an LLM turn.
+    if prompt == "__warmup__":
+        logger.info(f"Warmup invocation: actor_id={actor_id}, session_id={session_id}")
+        return {"status": "warmup_ok"}
 
     logger.info(f"Invocation: actor_id={actor_id}, session_id={session_id}")
-
-    # Record session to DynamoDB for admin visibility
-    if SKILLS_TABLE_NAME:
-        try:
-            from datetime import datetime, timezone
-            _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
-                "userId": actor_id,
-                "skillName": "__session__",
-                "sessionId": session_id,
-                "lastActiveAt": datetime.now(timezone.utc).isoformat(),
-            })
-        except Exception as e:
-            logger.warning(f"Failed to record session: {e}")
-
-    # Extract user's JWT from request headers (propagated via requestHeaderConfiguration)
-    auth_header = None
-    if hasattr(context, 'request_headers') and context.request_headers:
-        auth_header = context.request_headers.get("Authorization") or context.request_headers.get("authorization")
+    _record_session(actor_id, session_id)
 
     response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id, auth_header=auth_header)
     return {"response": response, "status": "success"}
 
 
+@app.websocket
+async def ws_voice(websocket, context):
+    """GET /ws handler — voice mode. Bridges the browser to Nova Sonic."""
+    # Lazy import so the HTTP path doesn't pay for BidiAgent imports at cold start.
+    from voice_session import handle_voice_session
+    await handle_voice_session(
+        websocket,
+        context,
+        gateway_arn=GATEWAY_ARN,
+        region=AWS_REGION,
+    )
+
+
 if __name__ == "__main__":
-    app.run(log_level="info")
+    # Force the 'websockets' ASGI WS implementation. On the managed runtime we
+    # observed uvicorn's default auto-detection picking a no-op WS handler,
+    # causing WebSocket upgrade requests to be rejected with 400 Bad Request
+    # even though the `websockets` library was installed.
+    app.run(log_level="info", ws="websockets")

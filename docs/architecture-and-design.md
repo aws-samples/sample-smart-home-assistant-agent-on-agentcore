@@ -17,6 +17,7 @@
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
 - [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
+- [9.7. Voice Mode (Nova Sonic Bi-directional Streaming)](#97-voice-mode-nova-sonic-bi-directional-streaming)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -233,9 +234,10 @@ Internet
     |
     +---> HTTPS: AgentCore Runtime
     |         https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations
+    |         wss://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/ws
     |         |
-    |         +---> Strands Agent (Kimi K2.5)
-    |         +---> Auth: JWT Bearer token (Cognito User Pool)
+    |         +---> Strands Agent (Kimi K2.5 text path + Nova Sonic voice path)
+    |         +---> Auth: AWS SigV4 (Cognito Identity Pool authenticated role)
     |         +---> CORS: access-control-allow-origin: *
     |
     +---> CloudFront (Admin Console) ---> S3 Bucket (static assets)
@@ -290,19 +292,22 @@ Internet
 |  | - Used by: Device simulator MQTT connection                 |  |
 |  +------------------------------------------------------------+  |
 |                                                                   |
-|  Layer 3: AgentCore Runtime JWT Authorization                    |
+|  Layer 3: AgentCore Runtime AWS_IAM (SigV4) Authorization        |
 |  +------------------------------------------------------------+  |
-|  | - Validates JWT from Cognito User Pool                      |  |
-|  | - Bearer token via Authorization header (HTTP POST)         |  |
-|  | - Protects: /invocations, /ping endpoints                   |  |
+|  | - Browser signs with Cognito Identity Pool authenticated    |  |
+|  |   role credentials (service=bedrock-agentcore)              |  |
+|  | - SigV4 headers on POST /invocations                        |  |
+|  | - SigV4 presigned URL (X-Amz-* in query) on WebSocket /ws   |  |
+|  | - Protects: /invocations, /ping, /ws endpoints              |  |
 |  +------------------------------------------------------------+  |
 |                                                                   |
 |  Layer 4: AgentCore Gateway (CUSTOM_JWT + Policy Engine)          |
 |  +------------------------------------------------------------+  |
-|  | - Auth: CUSTOM_JWT (same Cognito User Pool as runtime)      |  |
-|  | - Runtime propagates user JWT to agent via                  |  |
-|  |   requestHeaderAllowlist: ["Authorization"]                 |  |
-|  | - Agent forwards JWT to gateway MCP client                  |  |
+|  | - Auth: CUSTOM_JWT (same Cognito User Pool)                 |  |
+|  | - Chatbot ships idToken in custom header                    |  |
+|  |   X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken         |  |
+|  |   (allowlisted via requestHeaderAllowlist)                  |  |
+|  | - Agent forwards it as Bearer to gateway MCP client         |  |
 |  | - Policy Engine: Cedar per-user permit policies (ENFORCE)   |  |
 |  |   principal.id from JWT sub claim for per-user control      |  |
 |  +------------------------------------------------------------+  |
@@ -521,12 +526,13 @@ Browser --HTTP POST--> AgentCore Runtime ---> Strands Agent (Kimi K2.5)
 
 **HTTP POST Invocation:**
 - Endpoint: `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations`
-- Authentication: `Authorization: Bearer {jwt_token}` header
-- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}` (fixed per user)
+- Authentication: AWS SigV4 (service `bedrock-agentcore`), signed in the browser with temporary credentials from the Cognito Identity Pool authenticated role
+- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}` (fixed per user; signed into the request)
 - User ID: Passed in the POST body as `userId` (the runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent)
+- Gateway idToken passthrough: `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken: {cognito_idToken}` header, forwarded by the agent as `Bearer` to the CUSTOM_JWT gateway MCP client
 - CORS: Fully supported (`access-control-allow-origin: *`)
 
-**Note:** The AgentCore Runtime does not expose a public WebSocket endpoint for browser connections. The chatbot uses synchronous HTTP POST to `/invocations` instead.
+**WebSocket (voice mode):** See §9.7 for the full flow. Same host, path `/ws`, signed via SigV4 presigned URL; session-id + AuthToken travel as signed query parameters because browsers can't set custom headers on a WebSocket handshake.
 
 #### HTTP Message Protocol
 
@@ -968,7 +974,7 @@ Each user gets a **fixed runtime session ID** derived from their Cognito `sub` (
 
 **Session tracking:** On each invocation, the agent records `{userId, sessionId, lastActiveAt}` to DynamoDB (key: `userId`, `skillName = "__session__"`). The Admin Console reads these records in the Sessions tab.
 
-**Stop session:** The Admin Console calls the AgentCore `StopRuntimeSession` API directly from the browser using the admin's JWT token (the Lambda cannot do this because the runtime uses JWT auth, not SigV4).
+**Stop session:** The Admin Console calls the AgentCore `StopRuntimeSession` API from the browser using the admin's AWS credentials (obtained by exchanging the Cognito idToken for Identity Pool temporary credentials — the same SigV4 flow the chatbot uses for `/invocations` and `/ws`). `scripts/setup-agentcore.py` also invokes this API as a post-deploy step to invalidate any warm sessions so users pick up fresh code immediately instead of waiting for the idle timeout.
 
 ---
 
@@ -1045,7 +1051,7 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - `--outbound-auth` is not applicable for `lambda-function-arn` targets (Lambda targets don't need credential provider config)
 - Agent code must include `pyproject.toml` for the CLI to package it as CodeZip
 - Gateway `authorizerType` cannot be changed after creation — must delete and recreate the CloudFormation stack
-- Gateway auth should be `CUSTOM_JWT` for per-user tool control; the runtime propagates the user's JWT to agent code via `requestHeaderAllowlist: ["Authorization"]` (set in `UpdateAgentRuntime`), and the agent forwards it to the gateway MCP client
+- Gateway auth should be `CUSTOM_JWT` for per-user tool control. The runtime is `AWS_IAM` (SigV4) because CUSTOM_JWT on the Runtime's `/ws` endpoint is not reliable today; the chatbot forwards the idToken in the custom header `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` (allowlisted via `requestHeaderAllowlist` in `UpdateAgentRuntime`), and the agent re-wraps it as `Bearer` on the gateway MCP client. `Authorization` **cannot** be allowlisted under AWS_IAM — `UpdateAgentRuntime` rejects it.
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
 - `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
 - `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
@@ -1234,7 +1240,7 @@ permit(
 };
 ```
 
-**Key requirement for per-user control:** The gateway must use `CUSTOM_JWT` auth (Cognito), and the runtime must propagate the user's JWT to the agent via `requestHeaderAllowlist: ["Authorization"]`. The agent forwards the JWT to the gateway MCP client, enabling Cedar to evaluate `principal.id` from the JWT `sub` claim.
+**Key requirement for per-user control:** The gateway must use `CUSTOM_JWT` auth (Cognito). The runtime is `AWS_IAM` (see §9.7 rationale) so the user's idToken cannot travel as a literal `Authorization` header; instead the chatbot sends it in the custom allowlisted header `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` and the agent re-wraps it as `Bearer` on the gateway MCP client, enabling Cedar to evaluate `principal.id` from the JWT `sub` claim.
 
 **Cedar Schema (discovered via `StartPolicyGeneration`):**
 
@@ -1396,6 +1402,267 @@ The `setup-agentcore.py` script handles one-time KB setup:
 | `POST` | `delete` | Delete document + metadata sidecar |
 | `POST` | `sync` | Start Bedrock KB ingestion job |
 
+### 9.7 Voice Mode (Nova Sonic Bi-directional Streaming)
+
+The chatbot exposes a voice mode that streams the user's microphone audio to
+Amazon Nova Sonic (`amazon.nova-2-sonic-v1:0`) via the AgentCore Runtime's
+`/ws` endpoint and plays the model's reply audio back in the browser.
+
+**Runtime authorizer: AWS_IAM (SigV4).** The CUSTOM_JWT path on `/ws` is
+broken at the runtime's edge (handshake rejected with HTTP 424; confirmed
+identical container accepts locally). SigV4 works reliably, so the browser
+signs both `/invocations` and `/ws` with temporary credentials obtained by
+exchanging the user's Cognito idToken for the authenticated Identity Pool
+role. The text path uses the same signing flow as voice; there is no longer
+a separate JWT Bearer code path.
+
+**Architecture:**
+
+```
+Browser (chatbot, logged-in user)
+    |  1. Cognito User Pool login -> idToken
+    |  2. fromCognitoIdentityPool({ logins: { <userPool>: idToken } })
+    |     -> temporary AWS creds (authenticated role)
+    |
+    |  3. Warmup ping: POST /invocations {"prompt":"__warmup__"}   [SigV4]
+    |
+    |  4. Voice toggle on: getUserMedia -> AudioWorklet (16 kHz Int16 PCM)
+    |     presign wss:// URL with SigV4 (5 min TTL)
+    |     browser WebSocket(url) — credentials in query string
+    v
+AgentCore Runtime /ws  (AWS_IAM)
+    v
+BedrockAgentCoreApp (Starlette-based, uvicorn+websockets)
+    @app.entrypoint  -> handle_invocation(payload, context)
+    @app.websocket   -> voice_session.handle_voice_session(ws, context)
+         1. Wait for {"type":"config", ...}
+         2. Open MCPClient to the AgentCore Gateway with the user's JWT
+            forwarded as Bearer (Cedar policy evaluation).
+         3. List MCP tools, wrap them in a local composite tool
+            (`turn_on_all_devices`, see below), inline one skill body.
+         4. Create Strands BidiAgent(tools=[...], system_prompt=...,
+            model=BidiNovaSonicModel).
+         5. agent.run(inputs=[receive_from_ws], outputs=[send_to_ws])
+            - inbound `bidi_audio_input` frames stream into Nova Sonic
+            - outbound `bidi_audio_stream` PCM frames stream back to the browser
+            - `tool_use_stream` fires Strands' tool dispatcher, which calls
+              the MCP gateway; `tool_result` goes back into the model's turn
+    v
+Nova Sonic (amazon.nova-2-sonic-v1:0) bi-directional streaming
+    v
+MCP Gateway → iot-control Lambda → IoT Core (`smarthome/<device>/command`)
+    v
+Device Simulator (browser) receives MQTT messages, updates UI state
+```
+
+**Per-user gateway auth under AWS_IAM.** `requestHeaderAllowlist: ["Authorization"]`
+is rejected by `UpdateAgentRuntime` when the runtime uses `AWS_IAM`, so the
+chatbot ships the idToken in a **custom allowlisted header**
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` (also passable as a WS
+query parameter per the AgentCore contract). The agent reads it from
+`context.request_headers`, re-wraps as `Authorization: Bearer <token>`, and
+forwards to the CUSTOM_JWT-authed gateway MCP client — exact same Cedar
+evaluation as before.
+
+**IAM.** The CDK's Cognito authenticated role (`CognitoAuthRole`) gets, via
+`setup-agentcore.py`, a scoped inline policy:
+
+```
+bedrock-agentcore:InvokeAgentRuntime
+bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream
+  Resource: arn:aws:bedrock-agentcore:<region>:<acct>:runtime/<id>*
+```
+
+The `/*` wildcard covers endpoint qualifiers (e.g. `/DEFAULT`). No other
+runtime in the account is reachable by the authenticated role.
+
+**Audio formats:**
+
+| Direction | Format | Sample Rate | Source |
+|-----------|--------|-------------|--------|
+| Welcome clip | MP3 | 22050 Hz (Polly `neural`) | Pre-rendered by Polly (`Zhiyu` / `cmn-CN`) during `setup-agentcore.py` step 2, written to `agent/welcome-zh.mp3` **before** `agentcore deploy` so the CLI bakes it into the CodeZip. Agent loads into RAM at module import (`_WELCOME_BYTES`) so the first WS session has the bytes ready with no S3 round-trip. |
+| Client → server | Int16 PCM, mono | 16 kHz | Browser `AudioWorkletNode` downsamples the native device rate |
+| Server → client | Int16 PCM, mono | 16 kHz | Nova Sonic output stream |
+
+**WebSocket message protocol (JSON text frames):**
+
+Client → server (Strands BidiAgent native event types):
+```json
+{"type": "config", "voice": "matthew", "input_sample_rate": 16000,
+ "output_sample_rate": 16000, "model_id": "amazon.nova-2-sonic-v1:0"}
+{"type": "bidi_audio_input", "audio": "<base64 Int16 PCM>",
+ "format": "pcm", "sample_rate": 16000, "channels": 1}
+{"type": "bidi_text_input", "text": "..."}            // optional, text injection
+```
+
+Server → client (Strands BidiAgent emits these verbatim):
+```json
+{"type": "system", "message": "Agent ready."}
+{"type": "bidi_connection_start", "connection_id": "...", "model": "..."}
+{"type": "bidi_audio_stream", "audio": "<base64 pcm>",
+ "format": "pcm", "sample_rate": 16000, "channels": 1}
+{"type": "bidi_transcript_stream", "role": "user"|"assistant",
+ "text": "...", "is_final": true}          // SPECULATIVE|FINAL per generationStage
+{"type": "tool_use_stream", "delta": {"toolUse": {"toolUseId": "...",
+ "name": "SmartHomeDeviceDiscovery___discover_devices", "input": {}}}}
+{"type": "tool_result", "tool_result": {"toolUseId": "...",
+ "status": "success", "content": [{"text": "<JSON result>"}]}}
+{"type": "bidi_usage", "inputTokens": N, "outputTokens": N, "totalTokens": N}
+{"type": "bidi_response_start", "response_id": "..."}
+{"type": "bidi_response_complete"}
+{"type": "bidi_interruption"}
+{"type": "bidi_error", "message": "..."}
+```
+
+Plus a chatbot-specific welcome event (still a valid `bidi_audio_stream`,
+tagged so the browser decodes the payload as MP3 instead of PCM):
+```json
+{"type": "bidi_audio_stream", "is_welcome": true, "format": "mp3",
+ "seq": N, "total": M, "audio": "<base64 mp3 chunk>"}
+```
+
+**Welcome clip delivery — streamed through the BidiAgent pipeline.**
+
+Direct `websocket.send_json(...)` calls from `voice_session.py` issued
+**before** `agent.run(...)` starts reliably reach the browser for small
+event payloads (`system`, `error`) but get dropped by the Runtime's WS
+proxy for audio-sized JSON payloads — observed on several test runs with
+chunks as small as 3 KB. Frames authored by Nova Sonic's internal pipeline
+(`bidi_audio_stream`, `bidi_usage`, …) all pass through normally.
+
+The welcome clip rides the same pipeline that works:
+
+1. `setup-agentcore.py` pre-renders the Polly MP3 into `agent/welcome-zh.mp3`.
+2. `agentcore deploy` packages the MP3 into the CodeZip (no S3 round-trip).
+3. `voice_session.py` loads `_WELCOME_BYTES` once at module import.
+4. On each WS connection, after `_wait_for_config` + `Agent ready.`,
+   `_welcome_stream(websocket)` is started as a concurrent `asyncio.Task`
+   alongside `agent.run(...)`. It chunks the base64 MP3 at 3 KB (aligned to
+   4-char base64 boundaries) and sends each chunk as a
+   `{"type":"bidi_audio_stream","is_welcome":true,"seq":N,"total":M,"audio":...}`
+   frame with a 20 ms pace between frames. Reusing the `bidi_audio_stream`
+   type makes the proxy treat the frames as legitimate model output; the
+   `is_welcome` flag plus `format:"mp3"` tells the browser to decode as MP3
+   (vs the PCM from Nova Sonic).
+5. Browser `VoiceClient.handleServerMessage` collects `is_welcome` chunks by
+   `seq`, concatenates once `total` chunks have arrived, decodes via
+   `AudioContext.decodeAudioData`, and plays via `scheduleBuffer`.
+
+Trade-off accepted: we depend on the Runtime's WS proxy continuing to pass
+`bidi_audio_stream` frames. A future breaking change in the proxy's
+filtering would need us to re-evaluate. The code is commented with this
+reasoning so future maintainers understand why the event type is reused.
+
+**Session auto-invalidation on redeploy.** AgentCore Runtime keeps a session
+container warm for several minutes of idle time. After a `agentcore deploy`
+the fresh CodeZip only reaches new sessions — existing sessions keep
+running the old code until they time out. `setup-agentcore.py` closes this
+gap automatically: after patching the runtime it scans DynamoDB's
+`__session__` records (written by the agent on every invocation via
+`_record_session`) and calls `bedrock-agentcore:StopRuntimeSession` on each.
+Missing/expired sessions return `ResourceNotFoundException` which we ignore
+as already-stopped. The number of invalidated sessions is printed as
+`Stopped N active runtime session(s) so the fresh CodeZip takes effect`.
+
+**Setup-agentcore additions:**
+
+- Renders the welcome clip via Polly (Chinese neural voice `Zhiyu`) into `agent/welcome-zh.mp3` *before* the `agentcore deploy` call so the CLI packages the bytes into the CodeZip.
+- Patches the runtime environment with `NOVA_SONIC_MODEL_ID` (`amazon.nova-2-sonic-v1:0`) and `AGENTCORE_GATEWAY_ARN`.
+- Sets `protocolConfiguration.serverProtocol = "HTTP"` (required for `/ws` routing).
+- Clears `authorizerConfiguration` (→ AWS_IAM) and sets `requestHeaderConfiguration.requestHeaderAllowlist = ["X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken"]` so the agent can read the forwarded idToken.
+- Grants the runtime role `bedrock:InvokeModelWithBidirectionalStream` (no extra S3 permission needed — the welcome MP3 lives in the CodeZip).
+- Grants the Cognito authenticated role `bedrock-agentcore:InvokeAgentRuntime` + `InvokeAgentRuntimeWithWebSocketStream` scoped to `arn:aws:bedrock-agentcore:<region>:<acct>:runtime/<id>*`.
+- Stops all known runtime sessions (scanned from DynamoDB) so the fresh CodeZip is picked up immediately.
+
+**MCP tool wiring (why `tools=[...]` is mandatory).** The Strands text `Agent`
+uses the `AgentSkills` plugin and scans a directory of MCP tools implicitly.
+`BidiAgent` does **not** expose a `plugins=` parameter, and our pinned
+`BidiNovaSonicModel` build does not consume `mcp_gateway_arn=` — that kwarg
+goes into `**kwargs` and is silently ignored. Without an explicit `tools=`
+list, Nova Sonic receives an empty `toolConfiguration` and happily
+hallucinates device lists from its training data. `voice_session.py` opens
+an `MCPClient` against the gateway with the user's JWT, enumerates tools via
+`list_tools_sync`, and passes them straight into
+`BidiAgent(tools=[...])`. The names arrive prefixed by the gateway target
+(`SmartHomeDeviceDiscovery___discover_devices`, etc.) — we reference those
+exact names in the system prompt so Nova Sonic emits matching `toolUse`
+events.
+
+**Skills inlining.** `BidiAgent` can't register `AgentSkills` either, so
+`voice_session.py` calls the text path's `load_skills_from_dynamodb(actor_id)`
+helper and inlines the **operational** skill (`all-devices-on`) into the
+system prompt. Inlining all five SKILL.md bodies blew the prompt up past the
+threshold where Nova Sonic starts ignoring tools, so only the multi-step
+orchestration skill makes the cut. Single-device commands are covered by
+the base prompt's tool-name schema. Tool-name references inside the skill
+markdown (`discover_devices`, `control_device`) are rewritten to their
+MCP-prefixed forms on the way in via `_rewrite_tool_names`.
+
+**Nova Sonic single-tool-per-turn limitation.** Nova Sonic's voice model
+terminates a conversation turn after it speaks the tool result — unlike
+text LLMs (Kimi/Claude/etc.) it does **not** auto-chain follow-up tool
+calls within the same turn. In practice: saying "turn on all devices"
+makes Nova Sonic call `discover_devices` and stop. Telling it via the
+system prompt to "loop over each device and call `control_device`" does
+not work — by the time the skill instruction would apply, the turn is
+already over.
+
+The fix is a server-side composite tool `turn_on_all_devices` defined in
+`voice_session.py._build_turn_on_all_tool`. It's a plain `@tool`-decorated
+Python function that uses the still-live `MCPClient` to:
+
+1. Call `SmartHomeDeviceDiscovery___discover_devices` synchronously.
+2. Parse the JSON device list (shape tolerance in `_extract_devices`).
+3. For each device, call `SmartHomeDeviceControl___control_device` with the
+   `powerOn` template from discovery.
+4. Return a one-sentence summary (`"Turned on 4 devices: LED Matrix, Rice
+   Cooker, Fan, Oven."`) — Nova Sonic reads it and speaks it.
+
+From Nova Sonic's perspective this is exactly one tool call per turn. Per-
+user Cedar policy still applies because all calls go through the same MCP
+client (user's JWT as Bearer). If more multi-step flows are needed later
+(e.g. "start a dinner scene"), wrap them the same way.
+
+**Transcript dedupe (SPECULATIVE vs FINAL).** Nova Sonic emits every
+transcript twice in its `bidi_transcript_stream`: `is_final=false`
+(SPECULATIVE — interim text) then `is_final=true` (FINAL — refined text).
+If the UI appends both the user sees each utterance duplicated. The
+chatbot's `ChatInterface.tsx` tracks a pending message ID per role in a
+`useRef`; the first arriving transcript creates a new bubble, subsequent
+transcripts for the same role (until the final) replace that bubble in
+place, and the final clears the pending slot so the next utterance starts
+fresh. Refs are reset on `stopVoice()`.
+
+**Defensive event serialiser.** BidiAgent can emit non-JSON-serialisable
+objects through the `outputs=[send_output]` callback — most notably
+`BidiModelTimeoutError` when Nova Sonic stalls. `websocket.send_json` raises
+`TypeError` on those, and the original code just logged a warning, so model
+timeouts silently vanished from the UI. The revised `send_output` first
+tries `send_json`; on `TypeError` it falls back to `json.dumps(..., default=str)`
++ `send_text`; as a last resort it emits a synthetic `{"type":"bidi_error",
+"message":"unserialisable <class>..."}` frame so the browser at least
+surfaces the problem in the red status banner.
+
+**Per-user skills.** Voice skills are loaded the same way as text-path
+skills: `load_skills_from_dynamodb(actor_id)` returns global + per-user
+overrides. `actor_id` is the email extracted from the forwarded idToken's
+`email`/`cognito:username`/`sub` claim (decoded inline in
+`voice_session.py` so we don't need to share state with the text path).
+
+**Agent framework: BedrockAgentCoreApp (not FastAPI).** The Starlette-based
+`BedrockAgentCoreApp` handles the runtime's protocol contract natively. The
+`@app.websocket` decorator registers `/ws`; `@app.entrypoint` keeps
+`/invocations`. Both paths share the same ADOT wrapper. Plain FastAPI was
+tested on this branch and does not integrate cleanly with the managed
+runtime's health/protocol handshake — an earlier commit on this branch
+pivoted back to `BedrockAgentCoreApp`.
+
+**Login warmup.** Immediately after successful Cognito login the chatbot
+fires a SigV4-signed POST `/invocations` with `prompt="__warmup__"`. The
+agent short-circuits this to `{"status":"warmup_ok"}` without invoking the
+LLM, spinning up the runtime container so the user's first real message
+doesn't pay the cold-start penalty.
+
 ---
 
 ## 10. API Reference
@@ -1408,12 +1675,13 @@ The AgentCore Runtime exposes three endpoints on port 8080:
 
 Invoke the Strands Agent and get a complete response.
 
-**Authorization:** JWT (Cognito User Pool token)
+**Authorization:** AWS SigV4 (service `bedrock-agentcore`). The chatbot signs with temporary credentials obtained by exchanging the Cognito User Pool idToken for the Identity Pool authenticated role. The idToken is forwarded to the gateway via a custom allowlisted header `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` so per-user Cedar policies still apply.
 
 **Request Body:**
 ```json
 {
-  "prompt": "Turn on the LED matrix to rainbow mode"
+  "prompt": "Turn on the LED matrix to rainbow mode",
+  "userId": "user@example.com"
 }
 ```
 
@@ -1424,6 +1692,12 @@ Invoke the Strands Agent and get a complete response.
   "status": "success"
 }
 ```
+
+Special: `{"prompt": "__warmup__"}` returns `{"status": "warmup_ok"}` without invoking the LLM. The chatbot fires this immediately after login to pre-warm the runtime container.
+
+#### GET /ws — WebSocket (voice mode)
+
+**Authorization:** AWS SigV4 presigned URL. See §9.7 for the full protocol and event types. Voice sessions require the caller's IAM principal to hold `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream` on the runtime ARN (the Cognito authenticated role is granted this by `setup-agentcore.py`).
 
 #### GET /ping
 
@@ -1639,7 +1913,9 @@ Both apps use content-hash filenames for cache busting via CloudFront.
 | **MQTT5** over MQTT 3.1.1 | Better error reporting, message properties, shared subscriptions |
 | **Cognito Identity Pool** for device sim | No login required for device simulation; SigV4 auth for IoT Core |
 | **Cognito User Pool** for chatbot | Standard user management with email verification |
-| **AgentCore Runtime** for agent hosting | Managed hosting with built-in WebSocket support, JWT auth, and session management |
+| **AgentCore Runtime** for agent hosting | Managed hosting with built-in WebSocket support, SigV4/IAM + OAuth auth options, and session management (chatbot uses AWS_IAM so both `/invocations` and `/ws` work through SigV4) |
+| **Amazon Nova Sonic** (`amazon.nova-2-sonic-v1:0`) for voice | Bi-directional speech-to-speech model with Strands `BidiAgent` integration and MCP tool calling in-session |
+| **Cognito Identity Pool (authenticated role)** for chatbot | Exchanges the User Pool idToken for temporary AWS creds so the browser can SigV4-sign Runtime calls; the unauthenticated role keeps its IoT-only scope for the device simulator |
 | **AgentCore Gateway (MCP)** for tool access | Standard MCP protocol for tool discovery and invocation; decouples agent from tool implementation |
 | **Strands Agents SDK** | Python-native agent framework with skill system, MCP client support, and BedrockAgentCoreApp integration |
 | **Kimi K2.5** model (`moonshotai.kimi-k2.5`) | User requirement; available via Bedrock model access |
