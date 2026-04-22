@@ -68,15 +68,17 @@ if [ -f "$CDK_OUTPUTS" ]; then
     DEVICE_SIM_URL=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('DeviceSimulatorUrl',''))")
     CHATBOT_URL=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('ChatbotUrl',''))")
     ADMIN_URL=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('AdminConsoleUrl',''))")
+    SKILL_ERP_URL=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('SkillErpUrl',''))")
     ADMIN_USER=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('AdminUsername',''))")
     ADMIN_PASS=$(python3 -c "import json; print(json.load(open('$CDK_OUTPUTS'))['SmartHomeAssistantStack'].get('AdminPassword',''))")
 
     echo "  Device Simulator:  $DEVICE_SIM_URL"
     echo "  Chatbot:           $CHATBOT_URL"
     echo "  Admin Console:     $ADMIN_URL"
+    echo "  Skill ERP:         $SKILL_ERP_URL"
     echo ""
     echo "  Admin Login:       $ADMIN_USER / $ADMIN_PASS"
     echo ""
-    echo "  Sign up as a new user on the Chatbot, then"
+    echo "  Sign up on the Chatbot (or Skill ERP) as a new user, then"
     echo "  log in to the Admin Console to manage skills."
 fi

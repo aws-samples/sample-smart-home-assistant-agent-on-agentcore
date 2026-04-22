@@ -31,9 +31,17 @@ echo "==> Installing CDK npm dependencies..."
 cd "$SCRIPT_DIR/cdk"
 npm install
 
+# scripts/setup-agentcore.py calls CreateRegistry / CreateRegistryRecord, which
+# require boto3 >= 1.42.93. Older venvs (including the 1.42.82 that still
+# ships in some environments) silently no-op the registry section because
+# hasattr(client, 'create_registry') returns False.
+echo "==> Upgrading boto3 in the active venv..."
+pip install --upgrade boto3 -q 2>/dev/null || true
+
 echo "==> Bundling latest boto3 into Lambda code directories..."
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/admin-api" -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/user-init" -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/kb-query"  -q --upgrade 2>/dev/null || true
+pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/admin-api"     -q --upgrade 2>/dev/null || true
+pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/user-init"     -q --upgrade 2>/dev/null || true
+pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/kb-query"      -q --upgrade 2>/dev/null || true
+pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/skill-erp-api" -q --upgrade 2>/dev/null || true
 
 echo "==> Step 1 complete."

@@ -518,6 +518,56 @@ export async function getKBSyncStatus(): Promise<{ status: string; jobs: KBSyncJ
 }
 
 // ---------------------------------------------------------------------------
+// AgentCore Registry
+// ---------------------------------------------------------------------------
+
+export interface RegistryRecord {
+  recordId: string;
+  name: string;
+  description: string;
+  status: string;
+  recordVersion: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listRegistryRecords(status: string = 'APPROVED'): Promise<RegistryRecord[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?status=${encodeURIComponent(status)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list registry records (${res.status})`);
+  }
+  const data = await res.json();
+  return data.records || [];
+}
+
+export interface ImportRegistryRecordsResult {
+  imported: Array<{ recordId: string; skillName: string; userId: string }>;
+  errors: string[];
+}
+
+export async function importRegistryRecords(
+  recordIds: string[],
+  userId: string
+): Promise<ImportRegistryRecordsResult> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/import`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ recordIds, userId }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to import records (${res.status})`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 

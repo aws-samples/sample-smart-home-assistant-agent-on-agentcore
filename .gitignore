@@ -42,6 +42,15 @@ cdk/lambda/kb-query/dateutil/
 cdk/lambda/kb-query/*.dist-info/
 cdk/lambda/kb-query/bin/
 cdk/lambda/kb-query/six.py
+cdk/lambda/skill-erp-api/boto3/
+cdk/lambda/skill-erp-api/botocore/
+cdk/lambda/skill-erp-api/s3transfer/
+cdk/lambda/skill-erp-api/jmespath/
+cdk/lambda/skill-erp-api/urllib3/
+cdk/lambda/skill-erp-api/dateutil/
+cdk/lambda/skill-erp-api/*.dist-info/
+cdk/lambda/skill-erp-api/bin/
+cdk/lambda/skill-erp-api/six.py
 .venv/
 .DS_Store
 venv/

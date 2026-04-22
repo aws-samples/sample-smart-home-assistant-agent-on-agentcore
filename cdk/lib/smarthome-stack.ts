@@ -711,6 +711,84 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // Lambda - Skill ERP API (user-scoped CRUD for AgentCore Registry records)
+    // ========================
+    const skillErpLambda = new lambda.Function(this, "SkillErpLambda", {
+      functionName: "smarthome-skill-erp-api",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/skill-erp-api")),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        SKILLS_TABLE_NAME: skillsTable.tableName,
+        REGISTRY_ID: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+    skillsTable.grantReadWriteData(skillErpLambda);
+    skillErpLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock-agentcore:CreateRegistryRecord",
+        "bedrock-agentcore:GetRegistryRecord",
+        "bedrock-agentcore:ListRegistryRecords",
+        "bedrock-agentcore:UpdateRegistryRecord",
+        "bedrock-agentcore:DeleteRegistryRecord",
+        "bedrock-agentcore:SubmitRegistryRecordForApproval",
+        "bedrock-agentcore:GetRegistry",
+      ],
+      resources: ["*"],
+    }));
+
+    // API Gateway - Skill ERP API (separate API so admin and end-user surfaces
+    // stay isolated and we can give skill-erp Cognito users their own scope).
+    const skillErpApi = new apigw.RestApi(this, "SkillErpApi", {
+      restApiName: "smarthome-skill-erp-api",
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigw.Cors.ALL_ORIGINS,
+        allowMethods: apigw.Cors.ALL_METHODS,
+        allowHeaders: ["Content-Type", "Authorization"],
+      },
+    });
+    const skillErpAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, "SkillErpAuthorizer", {
+      cognitoUserPools: [userPool],
+    });
+    const skillErpAuthOpts: apigw.MethodOptions = {
+      authorizer: skillErpAuthorizer,
+      authorizationType: apigw.AuthorizationType.COGNITO,
+    };
+    const skillErpIntegration = new apigw.LambdaIntegration(skillErpLambda);
+    const mySkillsResource = skillErpApi.root.addResource("my-skills");
+    mySkillsResource.addMethod("GET", skillErpIntegration, skillErpAuthOpts);
+    mySkillsResource.addMethod("POST", skillErpIntegration, skillErpAuthOpts);
+    const mySkillRecordResource = mySkillsResource.addResource("{recordId}");
+    mySkillRecordResource.addMethod("GET", skillErpIntegration, skillErpAuthOpts);
+    mySkillRecordResource.addMethod("PUT", skillErpIntegration, skillErpAuthOpts);
+    mySkillRecordResource.addMethod("DELETE", skillErpIntegration, skillErpAuthOpts);
+
+    // Grant admin Lambda Registry access (used by Skills tab "Import from Registry")
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock-agentcore:CreateRegistry",
+        "bedrock-agentcore:GetRegistry",
+        "bedrock-agentcore:ListRegistries",
+        "bedrock-agentcore:UpdateRegistry",
+        "bedrock-agentcore:GetRegistryRecord",
+        "bedrock-agentcore:ListRegistryRecords",
+        "bedrock-agentcore:UpdateRegistryRecordStatus",
+      ],
+      resources: ["*"],
+    }));
+    adminLambda.addEnvironment("REGISTRY_ID", "PLACEHOLDER_SET_BY_SETUP_SCRIPT");
+
+    // API Gateway routes for Registry import (admin-only)
+    const registryResource = adminApi.root.addResource("registry");
+    const registryRecordsResource = registryResource.addResource("records");
+    registryRecordsResource.addMethod("GET", adminIntegration, authMethodOptions);
+    const registryImportResource = registryResource.addResource("import");
+    registryImportResource.addMethod("POST", adminIntegration, authMethodOptions);
+
+    // ========================
     // S3 + CloudFront - Admin Console
     // ========================
     const adminBucket = new s3.Bucket(this, "AdminConsoleBucket", {
@@ -731,15 +809,40 @@ export class SmartHomeStack extends cdk.Stack {
       errorResponses: [{ httpStatus: 404, responsePagePath: "/index.html", responseHttpStatus: 200 }],
     });
 
-    // Update Cognito callback URLs with CloudFront
+    // ========================
+    // S3 + CloudFront - Skill ERP (user-facing Registry publisher)
+    // ========================
+    const skillErpBucket = new s3.Bucket(this, "SkillErpBucket", {
+      bucketName: `smarthome-skill-erp-${cdk.Aws.ACCOUNT_ID}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+    const skillErpOAI = new cloudfront.OriginAccessIdentity(this, "SkillErpOAI");
+    skillErpBucket.grantRead(skillErpOAI);
+
+    const skillErpDistribution = new cloudfront.Distribution(this, "SkillErpDistribution", {
+      defaultBehavior: {
+        origin: new origins.S3Origin(skillErpBucket, { originAccessIdentity: skillErpOAI }),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      defaultRootObject: "index.html",
+      errorResponses: [{ httpStatus: 404, responsePagePath: "/index.html", responseHttpStatus: 200 }],
+    });
+
+    // Update Cognito callback URLs with CloudFront (chatbot + skill-erp)
     const cfnClient = userPoolClient.node.defaultChild as cognito.CfnUserPoolClient;
     cfnClient.callbackUrLs = [
       "http://localhost:3000/callback",
+      "http://localhost:3003/callback",
       `https://${chatbotDistribution.distributionDomainName}/callback`,
+      `https://${skillErpDistribution.distributionDomainName}/callback`,
     ];
     cfnClient.logoutUrLs = [
       "http://localhost:3000/",
+      "http://localhost:3003/",
       `https://${chatbotDistribution.distributionDomainName}/`,
+      `https://${skillErpDistribution.distributionDomainName}/`,
     ];
 
     // ========================
@@ -811,6 +914,28 @@ export class SmartHomeStack extends cdk.Stack {
       policy: cr.AwsCustomResourcePolicy.fromSdkCalls({ resources: [`${adminBucket.bucketArn}/*`] }),
     });
 
+    // Skill ERP config.js
+    const skillErpConfig = `window.__CONFIG__ = {
+  cognitoUserPoolId: "${userPool.userPoolId}",
+  cognitoClientId: "${userPoolClient.userPoolClientId}",
+  erpApiUrl: "${skillErpApi.url}",
+  region: "${cdk.Aws.REGION}"
+};`;
+
+    new cr.AwsCustomResource(this, "WriteSkillErpConfig", {
+      onCreate: {
+        service: "S3", action: "putObject",
+        parameters: { Bucket: skillErpBucket.bucketName, Key: "config.js", Body: skillErpConfig, ContentType: "application/javascript" },
+        physicalResourceId: cr.PhysicalResourceId.of("skill-erp-config"),
+      },
+      onUpdate: {
+        service: "S3", action: "putObject",
+        parameters: { Bucket: skillErpBucket.bucketName, Key: "config.js", Body: skillErpConfig, ContentType: "application/javascript" },
+        physicalResourceId: cr.PhysicalResourceId.of("skill-erp-config"),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({ resources: [`${skillErpBucket.bucketArn}/*`] }),
+    });
+
     // ========================
     // Deploy static assets
     // ========================
@@ -832,6 +957,13 @@ export class SmartHomeStack extends cdk.Stack {
       sources: [s3deploy.Source.asset(path.join(__dirname, "../../admin-console/dist"))],
       destinationBucket: adminBucket,
       distribution: adminDistribution,
+      distributionPaths: ["/*"],
+    });
+
+    new s3deploy.BucketDeployment(this, "DeploySkillErp", {
+      sources: [s3deploy.Source.asset(path.join(__dirname, "../../skill-erp/dist"))],
+      destinationBucket: skillErpBucket,
+      distribution: skillErpDistribution,
       distributionPaths: ["/*"],
     });
 
@@ -873,5 +1005,11 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AOSSCollectionArn", { value: aossCollection.attrArn });
     new cdk.CfnOutput(this, "KBServiceRoleArn", { value: kbServiceRole.roleArn });
     new cdk.CfnOutput(this, "CognitoAuthRoleArn", { value: authRole.roleArn });
+    new cdk.CfnOutput(this, "SkillErpBucketName", { value: skillErpBucket.bucketName });
+    new cdk.CfnOutput(this, "SkillErpDistributionId", { value: skillErpDistribution.distributionId });
+    new cdk.CfnOutput(this, "SkillErpUrl", {
+      value: `https://${skillErpDistribution.distributionDomainName}`,
+    });
+    new cdk.CfnOutput(this, "SkillErpApiUrl", { value: skillErpApi.url });
   }
 }

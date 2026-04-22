@@ -2,7 +2,7 @@
 
 > **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、**企业知识库**、外部集成、会话监控、长期记忆查看和质量评估。
 
-基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台提供 8 个管理维度覆盖 Agent 全生命周期。
+基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台提供 8 个管理维度覆盖 Agent 全生命周期。**Skill ERP** 网站（新增）让普通用户可以自助发布技能到 **AgentCore Registry**，审批通过后一键导入到技能目录。
 
 > **实现原理、架构图、协议细节** 请参见 [`docs/architecture-and-design.md`](docs/architecture-and-design.md)。本 README 专注于**部署和使用**。
 
@@ -58,7 +58,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 ./deploy.sh
 ```
 
-部署完成后，`deploy.sh` 会输出三个前端的 URL（设备模拟器、聊天机器人、管理控制台）以及默认管理员账号。
+部署完成后，`deploy.sh` 会输出四个前端的 URL（设备模拟器、聊天机器人、管理控制台、Skill ERP）以及默认管理员账号。
 
 ### 部署内容概览
 
@@ -94,7 +94,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 | 页签 | 能做什么 |
 |------|---------|
-| **Skills** | 创建/编辑/删除技能（支持完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；管理技能目录文件（scripts / references / assets，S3 预签名 URL 上传下载）；全局技能 + 按用户覆盖 |
+| **Skills** | 创建/编辑/删除技能（支持完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；管理技能目录文件（scripts / references / assets，S3 预签名 URL 上传下载）；全局技能 + 按用户覆盖；**从 AgentCore Registry 导入已批准技能**（按全局或用户维度勾选） |
 | **Knowledge Base** | 上传文档到企业知识库（PDF、TXT、MD、DOCX、CSV 等）；一键触发 Bedrock KB 向量化同步；按用户隔离（公共知识 + 用户专属） |
 | **Models** | 设置全局默认 LLM 模型；按用户覆盖模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
 | **Tool Access** | 按用户配置可调用的 Gateway 工具（Cedar 策略）；切换 ENFORCE / LOG_ONLY 模式；**演示入口** 一键打开该用户的聊天机器人（URL 带 `?username=` 预填登录）与设备模拟器 |
@@ -102,6 +102,17 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | **Sessions** | 查看所有活跃运行时会话（用户/会话 ID/最后活跃时间），一键 Stop 终止 |
 | **Memories** | 查看每个用户的长期记忆（事实 + 偏好，来自 AgentCore Memory） |
 | **Quality Evaluation** | 跳转到 AgentCore Evaluator、Bedrock Guardrails 控制台 |
+
+### Skill ERP —— 用户自助发布技能
+
+Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admin` 组成员），每个登录用户只能看到和管理自己创建的技能。
+
+1. 打开部署输出里的 Skill ERP URL
+2. 用自己的 Cognito 账号注册/登录（与聊天机器人共用账户体系）
+3. 点击 "+ 创建技能"，填写名称/描述/指令/允许的工具/许可证/兼容性/元数据（**不支持文件上传** — AgentCore Registry 的 agentSkills 描述符只承载 SKILL.md + 定义 JSON）
+4. 保存后，记录会自动以 `agentSkills` descriptorType 发布到 AgentCore Registry（`SmartHomeSkillsRegistry`），并自动触发 `SubmitRegistryRecordForApproval`
+5. 状态栏会显示 `PENDING / SUBMITTED / APPROVED / REJECTED`，可以随时编辑或删除
+6. 管理员在 **AgentCore Registry 控制台** 审批记录后，可在 **Admin Console → Skills → "Add approved skill from AgentCore Registry"** 将其导入技能目录
 
 ### 添加管理员用户（可选）
 
@@ -162,6 +173,22 @@ window.__CONFIG__ = {
   cognitoClientId: "YOUR_CLIENT_ID",
   adminApiUrl: "YOUR_ADMIN_API_URL",
   agentRuntimeArn: "YOUR_RUNTIME_ARN",
+  region: "us-west-2"
+};
+```
+
+### Skill ERP
+
+```bash
+cd skill-erp && npm install && npm start  # http://localhost:3003
+```
+
+创建 `skill-erp/public/config.js`：
+```javascript
+window.__CONFIG__ = {
+  cognitoUserPoolId: "YOUR_USER_POOL_ID",
+  cognitoClientId: "YOUR_CLIENT_ID",
+  erpApiUrl: "YOUR_SKILL_ERP_API_URL",
   region: "us-west-2"
 };
 ```
@@ -251,6 +278,9 @@ cd cdk && npx cdk destroy --all --force
 - **`Bedrock Model Access Denied`** → Bedrock 控制台申请 Kimi K2.5 + Nova Sonic 访问权限
 - **`@aws-sdk/client-bedrockagentcorecontrol does not exist`** → 正常，AgentCore 资源由 `agentcore` CLI 创建（步骤 6），不由 CDK 直接创建
 - **销毁失败 `Gateway has targets associated`** → 销毁脚本会按顺序处理；手动跑时 `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
+- **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → 账号已经达到 AgentCore Registry 的默认配额（5）。如果该账号已经有名为 `SmartHomeSkillsRegistry` 的 Registry，部署脚本会自动复用；否则需在 AWS Service Quotas 控制台申请提额，或删除不用的 Registry。
+- **`boto3 is too old — missing bedrock-agentcore-control.create_registry`** → venv 中的 boto3 低于 1.42.93。重跑 `scripts/01-install-deps.sh`（会自动升级），或 `pip install --upgrade boto3`。
+- **Skill ERP 新建技能后卡在 DRAFT 状态** → 表示 `SubmitRegistryRecordForApproval` 在记录仍处于 `CREATING` 时被调用。最新 Lambda 会轮询 `GetRegistryRecord` 直到状态脱离 `CREATING` 再提交，更新 Lambda 代码即可（重跑 `scripts/04-cdk-deploy.sh` 或 `aws lambda update-function-code`）。
 
 ### 前端相关
 
@@ -292,7 +322,7 @@ cd cdk && npx cdk destroy --all --force
 
 > **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base**, external integrations, session monitoring, long-term memory viewing, and safety guardrails.
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console provides 8 management dimensions covering the full Agent lifecycle.
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console provides 8 management dimensions covering the full Agent lifecycle. A new **Skill ERP** site lets end users publish their own skills to **AgentCore Registry**; admins can then one-click import any approved record into the skills catalog.
 
 > **Implementation details, architecture diagrams, protocol specs** live in [`docs/architecture-and-design.md`](docs/architecture-and-design.md). This README focuses on **deployment and usage**.
 
@@ -343,7 +373,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 ./deploy.sh
 ```
 
-After deployment, `deploy.sh` prints URLs for all three frontends (device simulator, chatbot, admin console) and the default admin credentials.
+After deployment, `deploy.sh` prints URLs for all four frontends (device simulator, chatbot, admin console, Skill ERP) and the default admin credentials.
 
 ### Deployment Overview
 
@@ -379,7 +409,7 @@ Log in with the admin credentials from deploy output (or add a user to the `admi
 
 | Tab | What you can do |
 |-----|-----------------|
-| **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files (scripts / references / assets via S3 presigned URLs); global skills + per-user overrides |
+| **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files (scripts / references / assets via S3 presigned URLs); global skills + per-user overrides; **import approved records from AgentCore Registry** (select global or per-user scope) |
 | **Knowledge Base** | Upload documents to the enterprise KB (PDF, TXT, MD, DOCX, CSV, ...); one-click Bedrock KB vectorization sync; per-user isolation (shared + user-scoped) |
 | **Models** | Set the global default LLM; override per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
 | **Tool Access** | Configure per-user gateway tool permissions (Cedar policies); toggle ENFORCE / LOG_ONLY; **Demo Links** column to open that user's chatbot (URL prefilled with `?username=`) and device simulator in new tabs |
@@ -387,6 +417,17 @@ Log in with the admin credentials from deploy output (or add a user to the `admi
 | **Sessions** | View active runtime sessions (user / session ID / last active); Stop a session with one click |
 | **Memories** | View each user's long-term memory (facts + preferences, from AgentCore Memory) |
 | **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles |
+
+### Skill ERP — end-user skill publishing
+
+Skill ERP is a self-service skills site for **regular end users** (no `admin` group required). Each signed-in user sees and edits only the records they created.
+
+1. Open the Skill ERP URL from the deploy output
+2. Sign up / sign in with any Cognito account (the same user pool as the chatbot)
+3. Click "+ Create Skill" and fill in name / description / instructions / allowed tools / license / compatibility / metadata (**no file upload** — AgentCore Registry's agentSkills descriptor only carries SKILL.md + definition JSON)
+4. On save, the record is published to AgentCore Registry (`SmartHomeSkillsRegistry`) with `descriptorType=agentSkills` and auto-submitted for approval (`SubmitRegistryRecordForApproval`)
+5. Status column shows `PENDING / SUBMITTED / APPROVED / REJECTED` — you can keep editing or delete at any time
+6. After the curator approves the record in the AgentCore Registry console, an admin can import it into the skills catalog via **Admin Console → Skills → "Add approved skill from AgentCore Registry"**
 
 ### Add Admin Users (Optional)
 
@@ -447,6 +488,22 @@ window.__CONFIG__ = {
   cognitoClientId: "YOUR_CLIENT_ID",
   adminApiUrl: "YOUR_ADMIN_API_URL",
   agentRuntimeArn: "YOUR_RUNTIME_ARN",
+  region: "us-west-2"
+};
+```
+
+### Skill ERP
+
+```bash
+cd skill-erp && npm install && npm start  # http://localhost:3003
+```
+
+Create `skill-erp/public/config.js`:
+```javascript
+window.__CONFIG__ = {
+  cognitoUserPoolId: "YOUR_USER_POOL_ID",
+  cognitoClientId: "YOUR_CLIENT_ID",
+  erpApiUrl: "YOUR_SKILL_ERP_API_URL",
   region: "us-west-2"
 };
 ```
@@ -536,6 +593,9 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 - **`Bedrock Model Access Denied`** → request access to Kimi K2.5 + Nova Sonic in the Bedrock console
 - **`@aws-sdk/client-bedrockagentcorecontrol does not exist`** → expected; AgentCore resources are created by the `agentcore` CLI (step 6), not by CDK directly
 - **Teardown fails `Gateway has targets associated`** → the teardown script handles order; manually: `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
+- **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → the account is at the AgentCore Registry default quota (5). If a registry named `SmartHomeSkillsRegistry` already exists the deploy script reuses it automatically; otherwise request a quota increase in AWS Service Quotas or delete an unused registry.
+- **`boto3 is too old — missing bedrock-agentcore-control.create_registry`** → venv boto3 is older than 1.42.93. Re-run `scripts/01-install-deps.sh` (which upgrades boto3) or `pip install --upgrade boto3`.
+- **Skill ERP records stuck in `DRAFT`** → `SubmitRegistryRecordForApproval` was called while the record was still `CREATING`. The current Lambda polls `GetRegistryRecord` until the record leaves `CREATING` before submitting — just push the latest code (re-run `scripts/04-cdk-deploy.sh` or `aws lambda update-function-code`).
 
 ### Frontend
 

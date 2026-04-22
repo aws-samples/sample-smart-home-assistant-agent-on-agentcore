@@ -27,6 +27,9 @@ import {
   deleteKBDocument,
   startKBSync,
   getKBSyncStatus,
+  listRegistryRecords,
+  importRegistryRecords,
+  RegistryRecord,
   SkillItem,
   SkillInput,
   SkillFile,
@@ -801,6 +804,14 @@ const AdminConsole: React.FC = () => {
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<SkillItem | null>(null);
 
+  // Registry import modal state
+  const [showRegistryModal, setShowRegistryModal] = useState(false);
+  const [registryRecords, setRegistryRecords] = useState<RegistryRecord[]>([]);
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [registrySelections, setRegistrySelections] = useState<Record<string, boolean>>({});
+  const [registryTargetUser, setRegistryTargetUser] = useState<string>('__global__');
+  const [registryImporting, setRegistryImporting] = useState(false);
+
   // User settings (model ID)
   const [modelId, setModelId] = useState('');
   const [savedModelId, setSavedModelId] = useState('');
@@ -1172,6 +1183,55 @@ const AdminConsole: React.FC = () => {
     }
   };
 
+  const handleOpenRegistryModal = async () => {
+    clearMessages();
+    setShowRegistryModal(true);
+    setRegistryLoading(true);
+    setRegistrySelections({});
+    setRegistryTargetUser(selectedUserId);
+    try {
+      const records = await listRegistryRecords('APPROVED');
+      setRegistryRecords(records);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRegistryLoading(false);
+    }
+  };
+
+  const handleRegistryImport = async () => {
+    clearMessages();
+    const selectedIds = Object.entries(registrySelections)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
+    if (selectedIds.length === 0) {
+      setError(t('registry.selectAtLeastOne'));
+      return;
+    }
+    setRegistryImporting(true);
+    try {
+      const result = await importRegistryRecords(selectedIds, registryTargetUser);
+      if (result.errors && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      if (result.imported && result.imported.length > 0) {
+        setSuccess(
+          t('registry.importedMsg')
+            .replace('{n}', String(result.imported.length))
+            .replace('{user}', displayUserId(registryTargetUser))
+        );
+      }
+      setShowRegistryModal(false);
+      setRegistrySelections({});
+      loadSkills();
+      loadUserIds();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRegistryImporting(false);
+    }
+  };
+
   const handleAddUserScope = () => {
     const newUser = prompt(t('skills.promptUserId'));
     if (newUser && newUser.trim()) {
@@ -1258,14 +1318,109 @@ const AdminConsole: React.FC = () => {
             {t('skills.addUser')}
           </button>
         </div>
-        <button className="btn btn-primary" onClick={handleCreate}>
-          {t('skills.createSkill')}
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button className="btn btn-secondary" onClick={handleOpenRegistryModal}>
+            {t('registry.addFromRegistry')}
+          </button>
+          <button className="btn btn-primary" onClick={handleCreate}>
+            {t('skills.createSkill')}
+          </button>
+        </div>
       </div>
 
       {/* Messages */}
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
+
+      {/* Registry import modal */}
+      {showRegistryModal && (
+        <div className="modal-overlay" onClick={() => !registryImporting && setShowRegistryModal(false)}>
+          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+            <h3>{t('registry.modalTitle')}</h3>
+            <p className="modal-hint">{t('registry.modalHint')}</p>
+
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label>{t('registry.targetScope')}</label>
+              <select
+                className="toolbar-select"
+                style={{ width: '100%', maxWidth: 'none' }}
+                value={registryTargetUser}
+                onChange={(e) => setRegistryTargetUser(e.target.value)}
+                disabled={registryImporting}
+              >
+                {userIds.map((id) => (
+                  <option key={id} value={id}>{displayUserId(id)}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="registry-records-list">
+              {registryLoading ? (
+                <div className="loading">{t('registry.loading')}</div>
+              ) : registryRecords.length === 0 ? (
+                <div className="empty-state">
+                  <p>{t('registry.noApproved')}</p>
+                  <p className="empty-hint">{t('registry.noApprovedHint')}</p>
+                </div>
+              ) : (
+                <table className="skills-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '32px' }}></th>
+                      <th>{t('registry.colName')}</th>
+                      <th>{t('registry.colDescription')}</th>
+                      <th>{t('registry.colVersion')}</th>
+                      <th>{t('registry.colUpdated')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {registryRecords.map((r) => (
+                      <tr key={r.recordId}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={!!registrySelections[r.recordId]}
+                            onChange={(e) =>
+                              setRegistrySelections((prev) => ({
+                                ...prev,
+                                [r.recordId]: e.target.checked,
+                              }))
+                            }
+                            disabled={registryImporting}
+                          />
+                        </td>
+                        <td className="cell-name">{r.name}</td>
+                        <td className="cell-desc">{r.description}</td>
+                        <td className="cell-date">{r.recordVersion}</td>
+                        <td className="cell-date">
+                          {r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="btn btn-secondary"
+                onClick={() => setShowRegistryModal(false)}
+                disabled={registryImporting}
+              >
+                {t('skills.cancel')}
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleRegistryImport}
+                disabled={registryImporting || registryLoading || registryRecords.length === 0}
+              >
+                {registryImporting ? t('registry.importing') : t('registry.import')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirmation modal */}
       {deleteTarget && (

@@ -240,6 +240,23 @@ const en: Record<string, string> = {
   'guardrails.cedarPolicy': 'Cedar Policy Engine',
   'guardrails.cedarDesc': 'Per-user tool access control via Cedar policies. Managed in the Tool Access tab. Current mode is displayed and configurable there.',
   'guardrails.goToToolAccess': 'Go to Tool Access',
+
+  // Registry import
+  'registry.addFromRegistry': 'Add approved skill from AgentCore Registry',
+  'registry.modalTitle': 'Import Approved Skills from AgentCore Registry',
+  'registry.modalHint': 'Skills shown here have been approved by the registry curator. Select records and choose a target scope to import them into the skills catalog.',
+  'registry.targetScope': 'Target Scope',
+  'registry.colName': 'Name',
+  'registry.colDescription': 'Description',
+  'registry.colVersion': 'Version',
+  'registry.colUpdated': 'Updated',
+  'registry.import': 'Import Selected',
+  'registry.importing': 'Importing...',
+  'registry.loading': 'Loading approved records...',
+  'registry.noApproved': 'No approved records available.',
+  'registry.noApprovedHint': 'Approve records in the AgentCore Registry console first, then return here.',
+  'registry.selectAtLeastOne': 'Select at least one record to import.',
+  'registry.importedMsg': 'Imported {n} skill(s) into scope {user}.',
 };
 
 export default en;

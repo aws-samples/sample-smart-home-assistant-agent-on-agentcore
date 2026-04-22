@@ -805,6 +805,100 @@ def main():
         except Exception as e:
             print(f"  Warning: Failed to patch KB Gateway target: {e}")
 
+    # --------------------------------------------------------
+    # Create AgentCore Registry for Skill ERP + admin Import feature
+    # --------------------------------------------------------
+    registry_id = ""
+    try:
+        print("\nCreating AgentCore Registry for skill records...")
+        ac_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+        # Fail loud if the local boto3 doesn't know about the Registry API —
+        # otherwise registry creation would silently no-op and the Skill ERP
+        # Lambda would keep REGISTRY_ID="PLACEHOLDER_SET_BY_SETUP_SCRIPT".
+        if not hasattr(ac_control, "create_registry"):
+            raise RuntimeError(
+                "boto3 is too old — missing bedrock-agentcore-control.create_registry. "
+                f"Current version: {boto3.__version__}. "
+                "Run scripts/01-install-deps.sh (which upgrades boto3 in the venv) "
+                "or `pip install --upgrade boto3` and retry."
+            )
+        registry_name = "SmartHomeSkillsRegistry"
+
+        def _find_existing_registry():
+            """Return (id, arn) of an existing registry with our name, or (None, None)."""
+            token = None
+            while True:
+                kwargs = {}
+                if token:
+                    kwargs["nextToken"] = token
+                lst = ac_control.list_registries(**kwargs)
+                for reg in lst.get("registries", []):
+                    if reg.get("name") == registry_name:
+                        arn = reg.get("registryArn", "")
+                        return arn.split("/")[-1] if arn else None, arn
+                token = lst.get("nextToken")
+                if not token:
+                    return None, None
+
+        try:
+            reg_resp = ac_control.create_registry(
+                name=registry_name,
+                description="Registry for skills published from the Skill ERP site",
+                authorizerType="AWS_IAM",
+                approvalConfiguration={"autoApproval": False},
+            )
+            registry_arn = reg_resp.get("registryArn", "")
+            registry_id = registry_arn.split("/")[-1] if registry_arn else ""
+            print(f"  Created registry {registry_name} — id={registry_id}")
+        except ac_control.exceptions.ConflictException:
+            # Already exists — look it up
+            registry_id, registry_arn = _find_existing_registry()
+            if registry_id:
+                print(f"  Found existing registry {registry_name} — id={registry_id}")
+            else:
+                print(f"  Warning: create_registry said Conflict but list_registries did not return {registry_name}")
+        except Exception as e:
+            # ServiceQuotaExceeded or any other create error — if one named
+            # {registry_name} already exists (e.g. because the account hit its
+            # per-account registry quota and a prior deploy created it), use
+            # that instead of failing.
+            existing_id, existing_arn = _find_existing_registry()
+            if existing_id:
+                registry_id = existing_id
+                registry_arn = existing_arn
+                print(f"  create_registry failed ({type(e).__name__}); reusing existing registry {registry_name} — id={registry_id}")
+            else:
+                print(f"  Warning: create_registry failed: {e}")
+
+        # Wait for ACTIVE
+        if registry_id:
+            for _ in range(15):
+                try:
+                    reg_info = ac_control.get_registry(registryId=registry_id)
+                    if reg_info.get("status") == "ACTIVE":
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+
+        # Patch admin + skill-erp Lambdas with REGISTRY_ID env
+        if registry_id:
+            lambda_client = boto3.client("lambda", region_name=REGION)
+            for fn_name in ("smarthome-admin-api", "smarthome-skill-erp-api"):
+                try:
+                    resp_cfg = lambda_client.get_function_configuration(FunctionName=fn_name)
+                    env = resp_cfg.get("Environment", {}).get("Variables", {})
+                    env["REGISTRY_ID"] = registry_id
+                    lambda_client.update_function_configuration(
+                        FunctionName=fn_name,
+                        Environment={"Variables": env},
+                    )
+                    print(f"  Patched {fn_name} with REGISTRY_ID={registry_id}")
+                except Exception as e:
+                    print(f"  Warning: could not patch {fn_name} with REGISTRY_ID: {e}")
+    except Exception as e:
+        print(f"  Warning: Registry setup skipped: {e}")
+
     # Re-write config.js for ALL frontends.
     # CDK BucketDeployment syncs dist/ to S3 and removes files not in the source,
     # which wipes config.js that was written by CDK custom resources.
@@ -856,12 +950,28 @@ def main():
   agentRuntimeArn: "{runtime_arn}",
   region: "{REGION}",
   chatbotUrl: "{outputs.get('ChatbotUrl', '')}",
-  deviceSimulatorUrl: "{outputs.get('DeviceSimulatorUrl', '')}"
+  deviceSimulatorUrl: "{outputs.get('DeviceSimulatorUrl', '')}",
+  skillErpUrl: "{outputs.get('SkillErpUrl', '')}"
 }};"""
         print("Updating admin console config.js...")
         s3.put_object(Bucket=admin_bucket, Key="config.js",
                       Body=admin_config, ContentType="application/javascript")
         _invalidate(outputs.get("AdminConsoleDistributionId", ""))
+
+    # Skill ERP config.js
+    skill_erp_bucket = outputs.get("SkillErpBucketName", "")
+    skill_erp_api_url = outputs.get("SkillErpApiUrl", "")
+    if skill_erp_bucket and skill_erp_api_url:
+        skill_erp_config = f"""window.__CONFIG__ = {{
+  cognitoUserPoolId: "{outputs['UserPoolId']}",
+  cognitoClientId: "{outputs['UserPoolClientId']}",
+  erpApiUrl: "{skill_erp_api_url}",
+  region: "{REGION}"
+}};"""
+        print("Updating skill-erp config.js...")
+        s3.put_object(Bucket=skill_erp_bucket, Key="config.js",
+                      Body=skill_erp_config, ContentType="application/javascript")
+        _invalidate(outputs.get("SkillErpDistributionId", ""))
 
     # Save state for teardown
     state_file = os.path.join(PROJECT_ROOT, "agentcore-state.json")
@@ -870,6 +980,7 @@ def main():
             "gatewayId": gateway_id, "runtimeId": runtime_id,
             "runtimeArn": runtime_arn, "projectDir": project_dir,
             "knowledgeBaseId": kb_id, "dataSourceId": kb_data_source_id,
+            "registryId": registry_id,
         }, f, indent=2)
 
     print("\n" + "=" * 60)
@@ -882,7 +993,11 @@ def main():
     print(f"\n  Device Sim:    {outputs.get('DeviceSimulatorUrl', '')}")
     print(f"  Chatbot:       {outputs.get('ChatbotUrl', '')}")
     print(f"  Admin Console: {outputs.get('AdminConsoleUrl', '')}")
+    print(f"  Skill ERP:     {outputs.get('SkillErpUrl', '')}")
     print(f"  Admin API:     {outputs.get('AdminApiUrl', '')}")
+    print(f"  Skill ERP API: {outputs.get('SkillErpApiUrl', '')}")
+    if registry_id:
+        print(f"  Registry ID:   {registry_id}")
     if outputs.get("AdminUsername"):
         print(f"\n  Admin Login:   {outputs['AdminUsername']} / {outputs.get('AdminPassword', '')}")
 

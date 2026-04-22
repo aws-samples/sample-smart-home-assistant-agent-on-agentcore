@@ -18,6 +18,7 @@
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
 - [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
 - [9.7. Voice Mode (Nova Sonic Bi-directional Streaming)](#97-voice-mode-nova-sonic-bi-directional-streaming)
+- [9.8. Skill ERP & AgentCore Registry](#98-skill-erp--agentcore-registry)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -38,6 +39,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
 | Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, tool access, integrations, sessions, memories, quality evaluation |
+| Skill ERP | React + TypeScript + REST API | End-user skill publishing: authors SKILL.md records, publishes to AgentCore Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + OpenSearch Serverless + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
@@ -1066,11 +1068,12 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 deploy.sh (one-click wrapper)
     |
     +---> [1/7] scripts/01-install-deps.sh
-    |           npm install in cdk/; bundle latest boto3 into Lambda dirs
-    |           (admin-api, user-init, kb-query) for AgentCore control-plane APIs
+    |           npm install in cdk/; upgrade boto3 in the venv (Registry API needs
+    |           >= 1.42.93); bundle latest boto3 into Lambda dirs (admin-api,
+    |           user-init, kb-query, skill-erp-api) for AgentCore control-plane APIs
     |
     +---> [2/7] scripts/02-build-frontends.sh
-    |           Build device-simulator, chatbot, admin-console React apps
+    |           Build device-simulator, chatbot, admin-console, skill-erp React apps
     |
     +---> [3/7] scripts/03-cdk-bootstrap.sh
     |           cdk bootstrap (idempotent; CDKToolkit stack, asset bucket, ECR)
@@ -1178,7 +1181,7 @@ admin-console/
 
 | Tab | Purpose |
 |-----|---------|
-| **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor |
+| **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
 | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
 | **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
 | **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY), and **Demo Links** column with one-click deep links to the chatbot (`?username=<email>` for login prefill) and device simulator for each user — optimized for admin-led demos |
@@ -1680,6 +1683,93 @@ fires a SigV4-signed POST `/invocations` with `prompt="__warmup__"`. The
 agent short-circuits this to `{"status":"warmup_ok"}` without invoking the
 LLM, spinning up the runtime container so the user's first real message
 doesn't pay the cold-start penalty.
+
+### 9.8 Skill ERP & AgentCore Registry
+
+**Goal.** Give regular (non-admin) users a self-service surface to publish
+their own skills, decouple authoring from curation, and let admins pull
+vetted records into the skills catalog without ever opening raw YAML.
+
+**Three moving parts:**
+
+1. **Skill ERP site** (`skill-erp/` React + TypeScript, S3 + CloudFront at
+   port 3003 for local dev). Uses the same Cognito User Pool as the chatbot
+   — any confirmed user can sign in; no admin group required. The UI
+   mirrors the admin console Skills form (name, description, instructions,
+   allowed tools, license, compatibility, key/value metadata) but omits the
+   file manager, because the AgentCore Registry `agentSkills` descriptor
+   only carries SKILL.md + a schemaVersion 0.1.0 definition JSON — it has
+   no provision for script/reference/asset attachments.
+
+2. **`smarthome-skill-erp-api` Lambda + REST API Gateway** with a Cognito
+   JWT authorizer. Routes:
+
+   | Method | Path | Behavior |
+   |--------|------|----------|
+   | GET    | `/my-skills`              | Scan DynamoDB ownership rows (`userId=__erp_owner__`) for the caller's Cognito `sub`, then `GetRegistryRecord` each. Stale ownership rows (record was deleted out-of-band) are cleaned up on the fly. |
+   | POST   | `/my-skills`              | Render SKILL.md from form → `CreateRegistryRecord(descriptorType="agentSkills", …)` → save ownership row → `SubmitRegistryRecordForApproval`. Name collisions fall back to `<name>-<6-hex>` (registry record names must be unique per registry). |
+   | GET    | `/my-skills/{recordId}`   | Owner check + detail fetch (parses SKILL.md frontmatter and `_meta` from definition JSON). |
+   | PUT    | `/my-skills/{recordId}`   | Owner check + merge + `UpdateRegistryRecord` + re-submit for approval. |
+   | DELETE | `/my-skills/{recordId}`   | Owner check + `DeleteRegistryRecord` + remove ownership row. |
+
+3. **Admin Console → Skills → "Add approved skill from AgentCore Registry"**.
+   Opens a modal that calls `GET /registry/records?status=APPROVED` on the
+   admin API (backed by `ListRegistryRecords` filtered by
+   `descriptorType=agentSkills`), lets the admin multi-select records and
+   pick a target scope (`__global__` or any known user), then
+   `POST /registry/import` writes the selected records into DynamoDB as
+   standard skill rows (`importedFromRegistry=<recordId>` for audit).
+
+**Registry creation.** `scripts/setup-agentcore.py` creates a single
+`SmartHomeSkillsRegistry` with `authorizerType=AWS_IAM` and
+`approvalConfiguration.autoApproval=false` so the admin workflow has
+something to curate, then patches both Lambdas with `REGISTRY_ID` env and
+writes the registry id into `agentcore-state.json` for teardown. The
+script is defensive on three edge cases that bit us during initial
+deployment testing:
+  1. **boto3 too old** — the Registry API requires boto3 ≥ 1.42.93.
+     `scripts/01-install-deps.sh` runs `pip install --upgrade boto3` in
+     the venv before any step invokes `setup-agentcore.py`. The setup
+     script also fails loud with a clear error if `create_registry` is
+     still missing, rather than silently leaving
+     `REGISTRY_ID=PLACEHOLDER_SET_BY_SETUP_SCRIPT` in the Lambdas.
+  2. **Account registry quota** — the default per-account quota is 5
+     registries. If `create_registry` fails with
+     `ServiceQuotaExceededException` (or any other error) and a registry
+     named `SmartHomeSkillsRegistry` already exists from a prior deploy,
+     the script reuses that existing registry instead of aborting.
+  3. **Conflict exception** — existing-registry path also covers
+     `ConflictException` when re-running deploys against an account that
+     already has our registry.
+
+**Submit-for-approval race.** `CreateRegistryRecord` returns as soon as
+the create request is accepted, but the record lingers in `CREATING`
+state for ~1s before it becomes submittable. `SubmitRegistryRecordForApproval`
+against a `CREATING` record is silently rejected, so earlier versions of
+this code left new records stuck in `DRAFT` forever. The current create
+path polls `GetRegistryRecord` (≤ 10s) until the record leaves `CREATING`,
+then calls `SubmitRegistryRecordForApproval` — new records land in
+`PENDING_APPROVAL` on first try.
+
+**Ownership model.** The registry's built-in ACL is per-registry, not
+per-record, so we layer ownership on top in DynamoDB. Each create writes
+`{userId: "__erp_owner__", skillName: <recordId>, ownerSub: <caller_sub>}`.
+Every `GET/PUT/DELETE /my-skills/{recordId}` starts with a sub-match check
+against that row. A malicious user who knows another record's id still
+gets `403` because the sub won't match. (An alternative would be to
+encode ownership as a registry tag, but tags aren't covered by the
+Registry IAM schema yet.)
+
+**SKILL.md rendering.** The Lambda serializes form fields into YAML
+frontmatter (`name`, `description`, `allowed_tools`, `x-<metadata-key>`
+for custom KV entries) followed by the instructions body. The
+`skillDefinition` JSON carries `_meta.license` and `_meta.compatibility`
+— they're schema-version 0.1.0 compatible extension points. Import on
+the admin side parses the same frontmatter/JSON back out.
+
+**Teardown.** `scripts/teardown-agentcore.py` lists all records in
+`SmartHomeSkillsRegistry`, deletes each one, then calls `DeleteRegistry` —
+the API rejects deletion of non-empty registries.
 
 ---
 
