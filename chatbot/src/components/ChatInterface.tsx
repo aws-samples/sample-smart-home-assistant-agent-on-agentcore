@@ -13,6 +13,15 @@ interface ChatMessage {
   role: 'user' | 'agent';
   content: string;
   timestamp: Date;
+  // Nova Sonic emits each transcript twice (SPECULATIVE then FINAL). The
+  // bubble starts with `pending: true` so the FINAL pass can replace it in
+  // place by finding the most-recent pending message for the same role.
+  // Keeping this flag on the message (instead of tracking IDs in a ref)
+  // makes the setMessages updater pure — which matters because React 18
+  // StrictMode double-invokes updaters, and impure side effects (like
+  // mutating a ref to a freshly-generated id) caused pending lookups to
+  // miss so the 2nd utterance overwrote the 1st.
+  pending?: boolean;
 }
 
 function generateId(): string {
@@ -32,10 +41,6 @@ const ChatInterface: React.FC = () => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const voiceClientRef = useRef<VoiceClient | null>(null);
   const warmupRef = useRef(false);
-  // Track the pending speculative transcript per role so we can replace it
-  // in-place when the FINAL pass arrives (Nova Sonic emits both). Without
-  // this, each spoken utterance shows up twice in the chat history.
-  const pendingTranscriptRef = useRef<Record<'user' | 'agent', string | null>>({ user: null, agent: null });
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -146,7 +151,6 @@ const ChatInterface: React.FC = () => {
     voiceClientRef.current = null;
     setVoiceActive(false);
     setVoiceStatus('');
-    pendingTranscriptRef.current = { user: null, agent: null };
   }, []);
 
   const startVoice = useCallback(async () => {
@@ -185,19 +189,34 @@ const ChatInterface: React.FC = () => {
         },
         onTranscript: ({ role, text, isFinal }) => {
           const uiRole: 'user' | 'agent' = role === 'user' ? 'user' : 'agent';
-          const pendingId = pendingTranscriptRef.current[uiRole];
           setMessages((prev) => {
-            if (pendingId) {
-              // Replace the speculative bubble with the latest (final or updated speculative) text.
-              return prev.map((m) => (m.id === pendingId ? { ...m, content: text, timestamp: new Date() } : m));
+            // Look for the most-recent still-pending bubble from this role.
+            // Nova Sonic emits a transcript twice (SPECULATIVE + FINAL) for the
+            // assistant so we need to update in place. However, for user
+            // speech the `generationStage` field is often absent, so
+            // `isFinal` stays false and the pending window never closes — the
+            // next utterance would clobber the previous one. Guard against
+            // that by treating the new transcript as a new utterance whenever
+            // the text is NOT an extension of the pending bubble (speculative
+            // refinements share a common prefix; fresh utterances don't).
+            for (let i = prev.length - 1; i >= 0; i--) {
+              const m = prev[i];
+              if (m.role !== uiRole) continue;
+              if (!m.pending) break;
+              const isContinuation = text.startsWith(m.content) || m.content.startsWith(text);
+              if (!isContinuation) break;
+              const next = prev.slice();
+              next[i] = { ...m, content: text, timestamp: new Date(), pending: !isFinal };
+              return next;
             }
-            const id = generateId();
-            pendingTranscriptRef.current[uiRole] = id;
-            return [...prev, { id, role: uiRole, content: text, timestamp: new Date() }];
+            // Appending a new utterance: mark any earlier pending bubbles from
+            // this role as finalized so they can't be retargeted later.
+            const next = prev.map((m) =>
+              m.role === uiRole && m.pending ? { ...m, pending: false } : m,
+            );
+            next.push({ id: generateId(), role: uiRole, content: text, timestamp: new Date(), pending: !isFinal });
+            return next;
           });
-          if (isFinal) {
-            pendingTranscriptRef.current[uiRole] = null;
-          }
         },
       });
       voiceClientRef.current = client;
