@@ -974,6 +974,8 @@ Each user gets a **fixed runtime session ID** derived from their Cognito `sub` (
 
 **Session tracking:** On each invocation, the agent records `{userId, sessionId, lastActiveAt}` to DynamoDB (key: `userId`, `skillName = "__session__"`). The Admin Console reads these records in the Sessions tab.
 
+**Per-session 7-day token usage:** The Sessions tab also shows each session's total token consumption over the last 7 days. AgentCore Runtime exports Strands/ADOT spans to the CloudWatch Logs `aws/spans` log group; each `chat` span (emitted by `strands.telemetry.tracer`) carries both `attributes.session.id` and `attributes.gen_ai.usage.total_tokens`. The admin Lambda runs a CloudWatch Logs Insights query on `GET /sessions` that sums `total_tokens` grouped by `session.id` for the last 7 days and joins the result onto the DynamoDB session rows as `totalTokens7d`. The query is the backing dataset for the CloudWatch "GenAI Observability → Bedrock AgentCore → All sessions" dashboard, so the numbers match what an admin sees in that console view. Permissions: the admin Lambda gets `logs:StartQuery`/`logs:StopQuery` scoped to `log-group:aws/spans:*` plus `logs:GetQueryResults` (required at `*` since GetQueryResults doesn't support resource-level scoping).
+
 **Stop session:** The Admin Console calls the AgentCore `StopRuntimeSession` API from the browser using the admin's AWS credentials (obtained by exchanging the Cognito idToken for Identity Pool temporary credentials — the same SigV4 flow the chatbot uses for `/invocations` and `/ws`). `scripts/setup-agentcore.py` also invokes this API as a post-deploy step to invalidate any warm sessions so users pick up fresh code immediately instead of waiting for the idle timeout.
 
 ---

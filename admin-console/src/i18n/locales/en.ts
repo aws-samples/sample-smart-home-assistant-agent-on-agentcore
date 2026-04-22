@@ -116,6 +116,7 @@ const en: Record<string, string> = {
   'sessions.colUserId': 'User ID',
   'sessions.colSessionId': 'Session ID',
   'sessions.colLastActive': 'Last Active',
+  'sessions.colTokens7d': 'Total Tokens (7d)',
   'sessions.colActions': 'Actions',
   'sessions.stop': 'Stop',
   'sessions.stopRequested': 'Stop requested for session "{id}".',

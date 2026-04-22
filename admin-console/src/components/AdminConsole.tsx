@@ -1645,6 +1645,7 @@ const AdminConsole: React.FC = () => {
                     <th>{t('sessions.colUserId')}</th>
                     <th>{t('sessions.colSessionId')}</th>
                     <th>{t('sessions.colLastActive')}</th>
+                    <th>{t('sessions.colTokens7d')}</th>
                     <th>{t('sessions.colActions')}</th>
                   </tr>
                 </thead>
@@ -1659,6 +1660,11 @@ const AdminConsole: React.FC = () => {
                       </td>
                       <td className="cell-date">
                         {s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '-'}
+                      </td>
+                      <td className="cell-date">
+                        {typeof s.totalTokens7d === 'number'
+                          ? s.totalTokens7d.toLocaleString()
+                          : '-'}
                       </td>
                       <td className="cell-actions">
                         <button

@@ -445,6 +445,24 @@ export class SmartHomeStack extends cdk.Stack {
       resources: ["*"],
     }));
 
+    // Grant admin Lambda CloudWatch Logs Insights access on the aws/spans log
+    // group (AgentCore GenAI spans). Used to aggregate per-session token usage
+    // for the Sessions tab.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "logs:StartQuery",
+        "logs:StopQuery",
+      ],
+      resources: [
+        `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:aws/spans:*`,
+      ],
+    }));
+    // GetQueryResults doesn't support resource-level scoping.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["logs:GetQueryResults"],
+      resources: ["*"],
+    }));
+
     // Grant admin Lambda S3 read for gateway tool schemas (stored in CDK assets bucket)
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ["s3:GetObject"],
