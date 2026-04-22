@@ -615,6 +615,32 @@ a.btn {
   gap: 12px;
 }
 
+.modal-wide {
+  max-width: 900px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-hint {
+  margin: 0 0 8px 0 !important;
+  font-size: 13px !important;
+  color: #8888aa !important;
+}
+
+.registry-records-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 16px 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  max-height: 420px;
+}
+
+.registry-records-list table {
+  width: 100%;
+}
+
 /* --- Form Section Label --- */
 .form-section-label {
   font-size: 12px;

@@ -240,6 +240,23 @@ const zh: Record<string, string> = {
   'guardrails.cedarPolicy': 'Cedar 策略引擎',
   'guardrails.cedarDesc': '通过 Cedar 策略实现按用户的工具访问控制。在工具权限选项卡中管理，当前模式可在该处查看和配置。',
   'guardrails.goToToolAccess': '前往工具权限',
+
+  // Registry import
+  'registry.addFromRegistry': '从 AgentCore Registry 添加已批准技能',
+  'registry.modalTitle': '从 AgentCore Registry 导入已批准的技能',
+  'registry.modalHint': '以下是已通过 Registry 管理员审批的技能。选择记录和目标作用域即可导入到技能目录。',
+  'registry.targetScope': '目标作用域',
+  'registry.colName': '名称',
+  'registry.colDescription': '描述',
+  'registry.colVersion': '版本',
+  'registry.colUpdated': '更新时间',
+  'registry.import': '导入选中项',
+  'registry.importing': '导入中...',
+  'registry.loading': '加载已批准记录...',
+  'registry.noApproved': '暂无已批准的记录。',
+  'registry.noApprovedHint': '请先在 AgentCore Registry 控制台中批准记录，然后回到此处。',
+  'registry.selectAtLeastOne': '请至少选择一条记录以导入。',
+  'registry.importedMsg': '已向作用域 {user} 导入 {n} 个技能。',
 };
 
 export default zh;

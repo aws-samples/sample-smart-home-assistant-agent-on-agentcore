@@ -22,6 +22,7 @@ MEMORY_ID = os.environ.get("MEMORY_ID", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
+REGISTRY_ID = os.environ.get("REGISTRY_ID", "")
 KB_DOCS_BUCKET = os.environ.get("KB_DOCS_BUCKET", "")
 AOSS_ENDPOINT = os.environ.get("AOSS_ENDPOINT", "")
 AOSS_COLLECTION_ARN = os.environ.get("AOSS_COLLECTION_ARN", "")
@@ -1178,6 +1179,156 @@ def get_kb_sync_status(_event):
 
 
 # ---------------------------------------------------------------------------
+# AgentCore Registry — Import approved records into DynamoDB skills
+# ---------------------------------------------------------------------------
+
+def _parse_skill_md(skill_md_text):
+    """Mirror of skill-erp-api parser; returns (description, body, tools, meta)."""
+    if not skill_md_text:
+        return "", "", [], {}
+    lines = skill_md_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "", skill_md_text, [], {}
+    try:
+        end_idx = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        return "", skill_md_text, [], {}
+    frontmatter = lines[1:end_idx]
+    body = "\n".join(lines[end_idx + 1:]).lstrip("\n")
+
+    description = ""
+    allowed_tools = []
+    metadata = {}
+    for raw in frontmatter:
+        if ":" not in raw:
+            continue
+        key, _, value = raw.partition(":")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key == "description":
+            description = value
+        elif key == "allowed_tools":
+            inner = value.strip("[]")
+            allowed_tools = [t.strip() for t in inner.split(",") if t.strip()]
+        elif key.startswith("x-"):
+            metadata[key[2:]] = value
+    return description, body, allowed_tools, metadata
+
+
+def list_registry_records(event):
+    """GET /registry/records?status=APPROVED — list records from the registry."""
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    params = event.get("queryStringParameters") or {}
+    status_filter = params.get("status", "APPROVED")
+
+    records = []
+    token = None
+    try:
+        while True:
+            kwargs = {"registryId": REGISTRY_ID, "maxResults": 50}
+            if status_filter and status_filter != "ALL":
+                kwargs["status"] = status_filter
+            kwargs["descriptorType"] = "AGENT_SKILLS"
+            if token:
+                kwargs["nextToken"] = token
+            resp = agentcore_control.list_registry_records(**kwargs)
+            for r in resp.get("registryRecords", []):
+                records.append({
+                    "recordId": r.get("recordId", ""),
+                    "name": r.get("name", ""),
+                    "description": r.get("description", ""),
+                    "status": r.get("status", ""),
+                    "recordVersion": r.get("recordVersion", ""),
+                    "createdAt": r.get("createdAt").isoformat() if hasattr(r.get("createdAt"), "isoformat") else str(r.get("createdAt", "")),
+                    "updatedAt": r.get("updatedAt").isoformat() if hasattr(r.get("updatedAt"), "isoformat") else str(r.get("updatedAt", "")),
+                })
+            token = resp.get("nextToken")
+            if not token:
+                break
+    except Exception as e:
+        return response(500, {"error": f"Failed to list registry records: {str(e)}"})
+
+    return response(200, {"records": records})
+
+
+def import_registry_records(event):
+    """POST /registry/import  body: {recordIds: [...], userId: "__global__" | <userId>}
+
+    Pulls SKILL.md content from each record, then writes a skill row into
+    DynamoDB (same shape as manual skills created from the Skills tab)."""
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    body = json.loads(event.get("body") or "{}")
+    record_ids = body.get("recordIds", []) or []
+    target_user = body.get("userId", "__global__")
+    if not isinstance(record_ids, list) or not record_ids:
+        return response(400, {"error": "recordIds must be a non-empty list"})
+
+    imported = []
+    errors = []
+    for rid in record_ids:
+        try:
+            r = agentcore_control.get_registry_record(
+                registryId=REGISTRY_ID, recordId=rid
+            )
+            if r.get("status", "") != "APPROVED":
+                errors.append(f"{rid}: skipped — not APPROVED")
+                continue
+            skill_name = r.get("name", "")
+            if not skill_name or not SKILL_NAME_RE.match(skill_name):
+                errors.append(f"{rid}: invalid name '{skill_name}'")
+                continue
+
+            descriptors = r.get("descriptors", {}) or {}
+            agent_skills = descriptors.get("agentSkills", {}) or {}
+            skill_md = (agent_skills.get("skillMd") or {}).get("inlineContent", "")
+            skill_def_raw = (agent_skills.get("skillDefinition") or {}).get("inlineContent", "")
+
+            description_fm, instructions, allowed_tools, metadata = _parse_skill_md(skill_md)
+            description = r.get("description") or description_fm
+
+            license_name = ""
+            compatibility = ""
+            try:
+                sd = json.loads(skill_def_raw) if skill_def_raw else {}
+                meta = sd.get("_meta") or {}
+                license_name = meta.get("license", "") or ""
+                compatibility = meta.get("compatibility", "") or ""
+            except Exception:
+                pass
+
+            ts = now_iso()
+            item = {
+                "userId": target_user,
+                "skillName": skill_name,
+                "description": description or "(imported from registry)",
+                "instructions": instructions or "",
+                "allowedTools": allowed_tools or [],
+                "createdAt": ts,
+                "updatedAt": ts,
+                "importedFromRegistry": rid,
+            }
+            if license_name:
+                item["license"] = license_name
+            if compatibility:
+                item["compatibility"] = compatibility
+            if metadata:
+                item["metadata"] = metadata
+            table.put_item(Item=item)
+            imported.append({"recordId": rid, "skillName": skill_name, "userId": target_user})
+        except Exception as e:
+            errors.append(f"{rid}: {str(e)}")
+
+    return response(200, {
+        "imported": imported,
+        "errors": errors,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -1233,6 +1384,12 @@ def handler(event, context):
         return list_sessions(event)
     if resource == "/sessions/{sessionId}/stop" and method == "POST":
         return stop_session(event)
+
+    # Registry routes
+    if resource == "/registry/records" and method == "GET":
+        return list_registry_records(event)
+    if resource == "/registry/import" and method == "POST":
+        return import_registry_records(event)
 
     # Knowledge Base routes (consolidated — action-based dispatch)
     if resource == "/knowledge-bases" and method == "GET":

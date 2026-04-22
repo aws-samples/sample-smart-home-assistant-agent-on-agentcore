@@ -2,13 +2,14 @@
 set -e
 
 # ==============================================================================
-# Step 2/7: Build the three React frontends
+# Step 2/7: Build the four React frontends
 # ------------------------------------------------------------------------------
 # What this step does:
 #   - Builds `device-simulator/` — simulated IoT device dashboard (MQTT client)
 #   - Builds `chatbot/`          — end-user chat UI (calls AgentCore Runtime)
 #   - Builds `admin-console/`    — Agent Harness Management console
-#   Each produces a static bundle in its `build/` directory. CDK will upload
+#   - Builds `skill-erp/`        — user-facing Skill ERP (publishes to Registry)
+#   Each produces a static bundle in its `dist/` directory. CDK will upload
 #   these bundles to S3 + CloudFront in step 4.
 #
 # What this step DOES NOT do:
@@ -33,6 +34,11 @@ npm run build
 
 echo "==> Building admin-console..."
 cd "$SCRIPT_DIR/admin-console"
+npm install
+npm run build
+
+echo "==> Building skill-erp..."
+cd "$SCRIPT_DIR/skill-erp"
 npm install
 npm run build
 

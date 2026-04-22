@@ -37,6 +37,7 @@ def main():
     project_dir = state.get("projectDir", "")
     gateway_id = state.get("gatewayId", "")
     runtime_id = state.get("runtimeId", "")
+    registry_id = state.get("registryId", "")
 
     # Step 1: Delete the AgentCore CloudFormation stack (owns gateway, targets, runtime, memory)
     # The stack name follows the agentcore CLI convention: AgentCore-{project}-default
@@ -82,6 +83,31 @@ def main():
                 client.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=t["targetId"])
             client.delete_gateway(gatewayIdentifier=gateway_id)
             print("  Gateway deleted.")
+        except Exception as e:
+            print(f"  Skipped (already deleted or not found): {e}")
+
+    if registry_id:
+        print(f"  Deleting registry: {registry_id}")
+        try:
+            # Delete all records first — DeleteRegistry requires an empty registry
+            token = None
+            while True:
+                kwargs = {"registryId": registry_id, "maxResults": 50}
+                if token:
+                    kwargs["nextToken"] = token
+                resp = client.list_registry_records(**kwargs)
+                for r in resp.get("registryRecords", []):
+                    try:
+                        client.delete_registry_record(
+                            registryId=registry_id, recordId=r["recordId"]
+                        )
+                    except Exception as e:
+                        print(f"    Skipped record {r.get('recordId', '')}: {e}")
+                token = resp.get("nextToken")
+                if not token:
+                    break
+            client.delete_registry(registryId=registry_id)
+            print("  Registry deleted.")
         except Exception as e:
             print(f"  Skipped (already deleted or not found): {e}")
 
