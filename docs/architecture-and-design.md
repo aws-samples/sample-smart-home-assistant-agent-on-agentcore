@@ -1626,14 +1626,30 @@ client (user's JWT as Bearer). If more multi-step flows are needed later
 (e.g. "start a dinner scene"), wrap them the same way.
 
 **Transcript dedupe (SPECULATIVE vs FINAL).** Nova Sonic emits every
-transcript twice in its `bidi_transcript_stream`: `is_final=false`
-(SPECULATIVE — interim text) then `is_final=true` (FINAL — refined text).
-If the UI appends both the user sees each utterance duplicated. The
-chatbot's `ChatInterface.tsx` tracks a pending message ID per role in a
-`useRef`; the first arriving transcript creates a new bubble, subsequent
-transcripts for the same role (until the final) replace that bubble in
-place, and the final clears the pending slot so the next utterance starts
-fresh. Refs are reset on `stopVoice()`.
+assistant transcript twice in its `bidi_transcript_stream`:
+`is_final=false` (SPECULATIVE — interim text) then `is_final=true` (FINAL
+— refined text). Naively appending both makes each utterance appear
+twice. The chatbot's `ChatInterface.tsx` tags every bubble with a
+`pending: boolean` flag *stored on the message itself*, not in a ref:
+the initial speculative frame creates a bubble with `pending=true`, the
+refining frame(s) find the most-recent pending bubble for that role and
+replace its content in place, and `is_final=true` clears the pending
+flag so subsequent utterances start fresh bubbles. A ref-based pointer
+(previous design) didn't survive React 18's StrictMode double-invoked
+setState — the functional updater ran twice while the ref was mutated
+only once, producing stale lookups. Keeping state on the bubble makes
+the reducer pure.
+
+There's a user-speech complication: Nova Sonic often omits
+`generationStage` for user transcripts, so `isFinal` stays `false` and
+the pending window never formally closes. Without extra logic, the next
+user utterance would overwrite the previous one. The reducer defends
+against that by only treating the new frame as a continuation of the
+pending bubble when the two texts share a prefix (`text.startsWith(m.content)
+|| m.content.startsWith(text)`) — SPECULATIVE refinements are always
+prefix-extensions of the same utterance; fresh utterances aren't. A
+non-prefix match finalizes all lingering pending bubbles and starts a
+new one.
 
 **Defensive event serialiser.** BidiAgent can emit non-JSON-serialisable
 objects through the `outputs=[send_output]` callback — most notably
