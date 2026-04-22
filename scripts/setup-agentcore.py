@@ -86,6 +86,30 @@ def main():
     # Step 2: Replace default agent code with our SmartHome agent
     # --------------------------------------------------------
     print("\n[2/8] Injecting SmartHome agent code...")
+
+    # Pre-render the voice-mode welcome clip with Polly and drop it into the
+    # agent directory BEFORE we copy into the CodeZip source. Baking the MP3
+    # into the container means the first WebSocket connection doesn't pay an
+    # S3 GetObject round-trip — the agent can stream it out as soon as the
+    # handshake completes.
+    welcome_local_path = os.path.join(agent_code_src, "welcome-zh.mp3")
+    try:
+        print("  Rendering Polly welcome audio into agent/welcome-zh.mp3 ...")
+        polly = boto3.client("polly", region_name=REGION)
+        tts = polly.synthesize_speech(
+            Text="欢迎使用智能家居设备助手",
+            OutputFormat="mp3",
+            VoiceId="Zhiyu",
+            LanguageCode="cmn-CN",
+            Engine="neural",
+        )
+        audio_bytes = tts["AudioStream"].read()
+        with open(welcome_local_path, "wb") as f:
+            f.write(audio_bytes)
+        print(f"    Wrote {len(audio_bytes)} bytes to {welcome_local_path}")
+    except Exception as e:
+        print(f"    Warning: Polly render failed — {e}. Voice mode will skip the welcome clip.")
+
     default_app = os.path.join(project_dir, "app", "smarthome")
     if os.path.exists(default_app):
         shutil.rmtree(default_app)
@@ -99,13 +123,13 @@ def main():
     if config.get("runtimes"):
         rt = config["runtimes"][0]
         rt["entrypoint"] = "agent.py"
-        rt["authorizerType"] = "CUSTOM_JWT"
-        rt["authorizerConfiguration"] = {
-            "customJwtAuthorizer": {
-                "discoveryUrl": discovery_url,
-                "allowedAudience": [client_id],
-            }
-        }
+        # Runtime uses AWS_IAM (SigV4) — browser signs with Identity Pool
+        # credentials. See plan.log for the CUSTOM_JWT-on-/ws regression that
+        # forced this choice. The gateway still uses CUSTOM_JWT for per-user
+        # Cedar policy; the chatbot passes its idToken in a custom header and
+        # the agent forwards it to the gateway MCP client.
+        rt.pop("authorizerType", None)
+        rt.pop("authorizerConfiguration", None)
         rt["environmentVariables"] = {
             "MODEL_ID": "moonshotai.kimi-k2.5",
             "AWS_REGION": REGION,
@@ -312,6 +336,10 @@ def main():
             runtime_id = val
         elif "RuntimeArnOutput" in key:
             runtime_arn = val
+    gateway_arn = (
+        f"arn:aws:bedrock-agentcore:{REGION}:{account_id}:gateway/{gateway_id}"
+        if gateway_id else ""
+    )
 
     # --------------------------------------------------------
     # Post-deploy: Initialize Bedrock Knowledge Base
@@ -500,6 +528,9 @@ def main():
     else:
         print("\nSkipping KB initialization (missing AOSS/KB infrastructure outputs)")
 
+    # Welcome audio is baked directly into the CodeZip (see step 2); no S3
+    # upload is needed, and no runtime GetObject round-trip at connect time.
+
     # Patch runtime env vars (agentcore CLI drops custom env vars during deploy)
     if runtime_id:
         print("Patching runtime environment variables...")
@@ -511,43 +542,108 @@ def main():
         # Add skills table name for dynamic skill loading from DynamoDB
         skills_table = outputs.get("SkillsTableName", "smarthome-skills")
         existing_env["SKILLS_TABLE_NAME"] = skills_table
+        # Voice-mode env vars: Nova Sonic model + gateway ARN (welcome clip is
+        # baked into the CodeZip, so no S3 path env var is needed).
+        existing_env["NOVA_SONIC_MODEL_ID"] = "amazon.nova-2-sonic-v1:0"
+        if gateway_arn:
+            existing_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
+        # Runtime auth mode: AWS_IAM (SigV4). The CUSTOM_JWT path on the
+        # runtime's /ws endpoint is broken upstream — the edge rejects WebSocket
+        # upgrades with HTTP 424. SigV4 works, so the browser signs with
+        # temporary credentials from the Cognito Identity Pool (authenticated
+        # role). Per-user Cedar gateway policies still work because the chatbot
+        # passes the idToken in a custom allowlisted header
+        # (X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken), which the
+        # agent forwards as Bearer to the gateway MCP client.
         update_kwargs = dict(
             agentRuntimeId=runtime_id,
             agentRuntimeArtifact=rt_info["agentRuntimeArtifact"],
             roleArn=rt_info["roleArn"],
             networkConfiguration=rt_info["networkConfiguration"],
             environmentVariables=existing_env,
-            # Propagate Authorization header to agent code so it can forward
-            # the user's JWT to the CUSTOM_JWT gateway for per-user policy evaluation.
+            # Explicit HTTP protocol — required for the runtime's edge to route
+            # WebSocket upgrades on /ws through to the container. Without this,
+            # upgrade requests are rejected at the runtime proxy with a 424.
+            protocolConfiguration={"serverProtocol": "HTTP"},
+            # Under AWS_IAM auth the `Authorization` header can't be allowlisted
+            # (API validation rejects it). The chatbot instead passes the user's
+            # Cognito idToken in a custom `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken`
+            # header/query-param; the agent forwards it as Bearer to the gateway MCP client.
             requestHeaderConfiguration={
-                "requestHeaderAllowlist": ["Authorization"],
+                "requestHeaderAllowlist": [
+                    "X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken",
+                ],
             },
         )
-        if rt_info.get("authorizerConfiguration"):
-            update_kwargs["authorizerConfiguration"] = rt_info["authorizerConfiguration"]
         ac.update_agent_runtime(**update_kwargs)
         print(f"  Patched MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME={skills_table}")
-        print(f"  Enabled Authorization header propagation to agent code")
+        print(f"  Runtime set to AWS_IAM auth (SigV4) for /invocations + /ws")
+
+        # Stop all known user runtime sessions so the fresh CodeZip takes
+        # effect immediately. Without this, existing sessions keep serving
+        # stale agent.py / voice_session.py code until they idle-timeout
+        # (observed up to several minutes of drift after a redeploy).
+        # Session IDs are tracked in DynamoDB under skillName="__session__"
+        # by the agent itself on every invocation (agent.py:_record_session).
+        try:
+            dataplane = boto3.client("bedrock-agentcore", region_name=REGION)
+            ddb = boto3.resource("dynamodb", region_name=REGION)
+            table = ddb.Table(skills_table)
+            session_items = table.scan(
+                FilterExpression="skillName = :s",
+                ExpressionAttributeValues={":s": "__session__"},
+                ProjectionExpression="sessionId",
+            ).get("Items", [])
+            stopped = 0
+            for item in session_items:
+                sid = item.get("sessionId")
+                if not sid:
+                    continue
+                try:
+                    dataplane.stop_runtime_session(
+                        agentRuntimeArn=runtime_arn,
+                        runtimeSessionId=sid,
+                    )
+                    stopped += 1
+                except dataplane.exceptions.ResourceNotFoundException:
+                    pass  # already terminated / idle-expired
+                except Exception as e:
+                    print(f"    Warning: could not stop session {sid}: {e}")
+            print(f"  Stopped {stopped} active runtime session(s) so the fresh CodeZip takes effect")
+        except Exception as e:
+            print(f"  Warning: session invalidation skipped: {e}")
 
         # Grant runtime role DynamoDB read access for skills table
         role_arn = rt_info.get("roleArn", "")
         if role_arn:
             role_name = role_arn.split("/")[-1]
             iam_client = boto3.client("iam", region_name=REGION)
+            policy_statements = [
+                {
+                    "Effect": "Allow",
+                    "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
+                    "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                },
+                {
+                    "Effect": "Allow",
+                    "Action": ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"],
+                    "Resource": "*",
+                },
+                {
+                    # Nova Sonic bi-directional streaming for the /ws voice session.
+                    "Effect": "Allow",
+                    "Action": [
+                        "bedrock:InvokeModelWithBidirectionalStream",
+                        "bedrock:InvokeModelWithResponseStream",
+                        "bedrock:InvokeModel",
+                    ],
+                    "Resource": "*",
+                },
+            ]
+            # (No S3 permission needed — welcome clip is bundled into CodeZip.)
             policy_doc = json.dumps({
                 "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
-                        "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Action": ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"],
-                        "Resource": "*",
-                    },
-                ],
+                "Statement": policy_statements,
             })
             try:
                 iam_client.put_role_policy(
@@ -558,6 +654,34 @@ def main():
                 print(f"  Granted DynamoDB read access to role {role_name}")
             except Exception as e:
                 print(f"  Warning: Failed to attach DynamoDB policy: {e}")
+
+    # Grant the Cognito authenticated role permission to invoke the runtime.
+    # Browser calls /invocations (SigV4) and /ws (SigV4 presigned URL) using
+    # credentials from the Cognito Identity Pool's authenticated role.
+    cognito_auth_role_arn = outputs.get("CognitoAuthRoleArn", "")
+    if runtime_arn and cognito_auth_role_arn:
+        cognito_auth_role_name = cognito_auth_role_arn.split("/")[-1]
+        try:
+            iam_client = boto3.client("iam", region_name=REGION)
+            iam_client.put_role_policy(
+                RoleName=cognito_auth_role_name,
+                PolicyName="AgentCoreRuntimeInvoke",
+                PolicyDocument=json.dumps({
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": [
+                            "bedrock-agentcore:InvokeAgentRuntime",
+                            "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                        ],
+                        # Wildcard covers endpoint qualifiers (e.g. /DEFAULT).
+                        "Resource": [runtime_arn, f"{runtime_arn}/*"],
+                    }],
+                }),
+            )
+            print(f"  Granted runtime-invoke to Cognito auth role {cognito_auth_role_name}")
+        except Exception as e:
+            print(f"  Warning: Failed to grant runtime-invoke to auth role: {e}")
 
     # Patch admin Lambda with runtime ARN (needed for stop-runtime-session)
     if runtime_arn:
@@ -713,6 +837,7 @@ def main():
   cognitoUserPoolId: "{outputs['UserPoolId']}",
   cognitoClientId: "{outputs['UserPoolClientId']}",
   cognitoDomain: "{outputs['CognitoDomain']}",
+  cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
   agentRuntimeArn: "{runtime_arn}",
   region: "{REGION}"
 }};"""

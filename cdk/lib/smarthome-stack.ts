@@ -445,6 +445,24 @@ export class SmartHomeStack extends cdk.Stack {
       resources: ["*"],
     }));
 
+    // Grant admin Lambda CloudWatch Logs Insights access on the aws/spans log
+    // group (AgentCore GenAI spans). Used to aggregate per-session token usage
+    // for the Sessions tab.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "logs:StartQuery",
+        "logs:StopQuery",
+      ],
+      resources: [
+        `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:aws/spans:*`,
+      ],
+    }));
+    // GetQueryResults doesn't support resource-level scoping.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["logs:GetQueryResults"],
+      resources: ["*"],
+    }));
+
     // Grant admin Lambda S3 read for gateway tool schemas (stored in CDK assets bucket)
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ["s3:GetObject"],
@@ -752,6 +770,7 @@ export class SmartHomeStack extends cdk.Stack {
   cognitoUserPoolId: "${userPool.userPoolId}",
   cognitoClientId: "${userPoolClient.userPoolClientId}",
   cognitoDomain: "${userPoolDomain.domainName}.auth.${cdk.Aws.REGION}.amazoncognito.com",
+  cognitoIdentityPoolId: "${identityPool.ref}",
   agentRuntimeArn: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
   region: "${cdk.Aws.REGION}"
 };`;
@@ -853,5 +872,6 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AOSSCollectionEndpoint", { value: aossCollection.attrCollectionEndpoint });
     new cdk.CfnOutput(this, "AOSSCollectionArn", { value: aossCollection.attrArn });
     new cdk.CfnOutput(this, "KBServiceRoleArn", { value: kbServiceRole.roleArn });
+    new cdk.CfnOutput(this, "CognitoAuthRoleArn", { value: authRole.roleArn });
   }
 }

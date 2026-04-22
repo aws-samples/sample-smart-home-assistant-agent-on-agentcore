@@ -36,6 +36,11 @@ agentcore_client = boto3.client("bedrock-agentcore", region_name=REGION)
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
 cognito_client = boto3.client("cognito-idp", region_name=REGION)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=REGION)
+logs_client = boto3.client("logs", region_name=REGION)
+
+# AgentCore emits GenAI spans to this log group with session.id +
+# gen_ai.usage.total_tokens attributes on each LLM call span.
+SPANS_LOG_GROUP = "aws/spans"
 
 ALLOWED_FILE_DIRS = {"scripts", "references", "assets"}
 
@@ -262,8 +267,84 @@ def update_settings(event):
     return response(200, {"message": f"Settings updated for '{user_id}'", "modelId": model_id})
 
 
+def _fetch_token_totals_7d():
+    """Query CloudWatch Logs Insights over the last 7 days for the sum of
+    gen_ai.usage.total_tokens per session.id.
+
+    AgentCore Runtime exports Strands/ADOT spans to the `aws/spans` log group.
+    Each `chat` span carries both `attributes.session.id` and
+    `attributes.gen_ai.usage.total_tokens` — summing the latter grouped by the
+    former yields per-session token consumption shown in the CloudWatch
+    GenAI Observability dashboard.
+
+    Returns: dict {sessionId: int}. On failure (e.g. query timeout, permission
+    issue) returns {} so the sessions list still renders without token data.
+    """
+    end_time = int(time.time())
+    start_time = end_time - 7 * 24 * 3600
+    query = (
+        'filter scope.name = "strands.telemetry.tracer"\n'
+        '| filter ispresent(attributes.gen_ai.usage.total_tokens)\n'
+        '| stats sum(attributes.gen_ai.usage.total_tokens) as totalTokens '
+        'by attributes.session.id as sessionId\n'
+        '| limit 10000'
+    )
+    try:
+        start = logs_client.start_query(
+            logGroupName=SPANS_LOG_GROUP,
+            startTime=start_time,
+            endTime=end_time,
+            queryString=query,
+        )
+        query_id = start["queryId"]
+    except logs_client.exceptions.ResourceNotFoundException:
+        logger.info("aws/spans log group not found; returning empty token totals")
+        return {}
+    except Exception as e:
+        logger.warning("Logs Insights start_query failed: %s", e)
+        return {}
+
+    # Poll for up to ~20s — Lambda timeout is 30s and the rest of list_sessions
+    # is fast, so we can afford to wait.
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            res = logs_client.get_query_results(queryId=query_id)
+        except Exception as e:
+            logger.warning("Logs Insights get_query_results failed: %s", e)
+            return {}
+        status = res.get("status", "")
+        if status in ("Complete", "Failed", "Cancelled", "Timeout"):
+            if status != "Complete":
+                logger.warning("Logs Insights query ended with status=%s", status)
+                return {}
+            break
+        time.sleep(0.5)
+    else:
+        logger.warning("Logs Insights query %s timed out client-side", query_id)
+        try:
+            logs_client.stop_query(queryId=query_id)
+        except Exception:
+            pass
+        return {}
+
+    totals = {}
+    for row in res.get("results", []):
+        record = {field["field"]: field["value"] for field in row}
+        session_id = record.get("sessionId") or record.get("attributes.session.id", "")
+        raw = record.get("totalTokens", "0")
+        if not session_id:
+            continue
+        try:
+            totals[session_id] = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return totals
+
+
 def list_sessions(_event):
-    """GET /sessions — list all user sessions from DynamoDB."""
+    """GET /sessions — list all user sessions from DynamoDB, enriched with
+    past-7-day token totals pulled from CloudWatch Logs Insights."""
     resp = table.scan(
         FilterExpression="skillName = :sk",
         ExpressionAttributeValues={":sk": "__session__"},
@@ -276,6 +357,11 @@ def list_sessions(_event):
             "lastActiveAt": item.get("lastActiveAt", ""),
         })
     sessions.sort(key=lambda s: s.get("lastActiveAt", ""), reverse=True)
+
+    token_totals = _fetch_token_totals_7d()
+    for s in sessions:
+        s["totalTokens7d"] = token_totals.get(s["sessionId"], 0)
+
     return response(200, {"sessions": sessions})
 
 

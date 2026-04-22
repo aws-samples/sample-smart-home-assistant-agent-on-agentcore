@@ -130,3 +130,42 @@ export async function getIdToken(): Promise<string> {
   const tokens = await getCurrentSession();
   return tokens.idToken;
 }
+
+// ---------------------------------------------------------------------------
+// Cognito Identity Pool credentials (federated from the User Pool session).
+// Used for SigV4-signing /invocations and /ws calls to the AgentCore Runtime.
+// ---------------------------------------------------------------------------
+import { fromCognitoIdentityPool } from '@aws-sdk/credential-providers';
+import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from '@aws-sdk/types';
+
+let cachedProvider: AwsCredentialIdentityProvider | null = null;
+let providerIdToken: string = '';
+
+/**
+ * Returns a cached credential provider that resolves to temporary AWS creds
+ * for the currently logged-in user (authenticated Cognito role).
+ * Rebuilt if the idToken changes (e.g. after refresh).
+ */
+function getCredentialProvider(idToken: string): AwsCredentialIdentityProvider {
+  if (cachedProvider && providerIdToken === idToken) return cachedProvider;
+  const config = getConfig();
+  const providerName = `cognito-idp.${config.region}.amazonaws.com/${config.cognitoUserPoolId}`;
+  cachedProvider = fromCognitoIdentityPool({
+    clientConfig: { region: config.region },
+    identityPoolId: config.cognitoIdentityPoolId,
+    logins: { [providerName]: idToken },
+  });
+  providerIdToken = idToken;
+  return cachedProvider;
+}
+
+/**
+ * Resolves authenticated AWS credentials for the current user.
+ * The SDK handles caching + refresh under the hood via the provider closure,
+ * but we also invalidate the cached provider whenever the idToken changes.
+ */
+export async function getAwsCredentials(): Promise<AwsCredentialIdentity> {
+  const idToken = await getIdToken();
+  const provider = getCredentialProvider(idToken);
+  return provider();
+}

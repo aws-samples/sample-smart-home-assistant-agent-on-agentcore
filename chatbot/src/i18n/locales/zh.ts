@@ -50,6 +50,13 @@ const zh: Record<string, string> = {
   'chat.chip.preheatOven': '预热烤箱到180\u00b0C',
   'chat.chip.preheatOven.prompt': '预热烤箱到180摄氏度',
   'chat.sendFailed': '消息发送失败',
+  'chat.voiceMode.enter': '切换到语音模式',
+  'chat.voiceMode.exit': '切换到文本模式',
+  'chat.voiceMode.connecting': '正在连接语音助手...',
+  'chat.voiceMode.connected': '正在聆听，请开口说话。',
+  'chat.voiceMode.disconnected': '语音会话已结束。',
+  'chat.voiceMode.micDenied': '麦克风权限被拒绝。',
+  'chat.voiceMode.error': '语音会话出错',
 };
 
 export default zh;

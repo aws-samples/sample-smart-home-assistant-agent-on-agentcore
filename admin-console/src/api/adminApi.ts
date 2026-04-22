@@ -168,6 +168,7 @@ export interface SessionInfo {
   userId: string;
   sessionId: string;
   lastActiveAt: string;
+  totalTokens7d?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -521,24 +522,17 @@ export async function getKBSyncStatus(): Promise<{ status: string; jobs: KBSyncJ
 // ---------------------------------------------------------------------------
 
 export async function stopSession(sessionId: string): Promise<void> {
-  // Call AgentCore Runtime StopRuntimeSession API directly with JWT
-  // (Lambda can't do this because the runtime uses JWT auth, not SigV4)
-  const token = await getIdToken();
-  const config = getConfig();
-  const encodedArn = encodeURIComponent(config.agentRuntimeArn);
-  const url = `https://bedrock-agentcore.${config.region}.amazonaws.com/runtimes/${encodedArn}/stopruntimesession`;
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
-    },
-    body: JSON.stringify({}),
-  });
+  // The runtime uses AWS_IAM (SigV4) auth now (see docs §9.7), so calling
+  // StopRuntimeSession directly from the browser with a Bearer JWT fails with
+  // 403 "Authorization method mismatch". Route through the admin Lambda
+  // instead — it already has bedrock-agentcore:StopRuntimeSession granted.
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/stop`,
+    { method: 'POST', headers },
+  );
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Failed to stop session (${res.status}): ${body}`);
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to stop session (${res.status})`);
   }
 }

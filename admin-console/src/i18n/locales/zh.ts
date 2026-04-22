@@ -116,6 +116,7 @@ const zh: Record<string, string> = {
   'sessions.colUserId': '用户 ID',
   'sessions.colSessionId': '会话 ID',
   'sessions.colLastActive': '最近活跃',
+  'sessions.colTokens7d': '近 7 天 Token 消耗',
   'sessions.colActions': '操作',
   'sessions.stop': '停止',
   'sessions.stopRequested': '已请求停止会话 "{id}"。',
