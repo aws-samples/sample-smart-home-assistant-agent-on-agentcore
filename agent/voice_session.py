@@ -267,6 +267,18 @@ async def handle_voice_session(
     except Exception as e:
         logger.warning(f"Voice WS: skill loading failed: {e}")
 
+    # Resolve voice system prompt override (per-user → global → hardcoded default).
+    # Same DynamoDB resolution as the text path, stored under skillName="__prompt_voice__".
+    base_voice_prompt = VOICE_SYSTEM_PROMPT
+    try:
+        from agent import load_system_prompt
+        override = load_system_prompt(actor_id, "voice")
+        if override:
+            base_voice_prompt = override
+            logger.info(f"Voice WS: using per-user/global voice prompt override for actor={actor_id}")
+    except Exception as e:
+        logger.warning(f"Voice WS: voice prompt override load failed, using default: {e}")
+
     # Extract the forwarded idToken from the request context so we can pass it
     # as Bearer to the CUSTOM_JWT gateway (same flow as the text path).
     gw_headers = {}
@@ -328,7 +340,7 @@ async def handle_voice_session(
                     tools_list.append(_build_turn_on_all_tool(mcp_client))
                 tool_names = [getattr(t, "tool_name", "?") for t in tools_list]
                 logger.info(f"Voice WS: loaded {len(tools_list)} tools for BidiAgent: {tool_names}")
-                effective_prompt = VOICE_SYSTEM_PROMPT + "".join(skill_blocks)
+                effective_prompt = base_voice_prompt + "".join(skill_blocks)
                 agent = BidiAgent(
                     model=model,
                     tools=tools_list,
@@ -344,7 +356,7 @@ async def handle_voice_session(
                 await _drive_agent(agent)
         else:
             logger.warning("Voice WS: no GATEWAY_URL — running without MCP tools")
-            effective_prompt = VOICE_SYSTEM_PROMPT + "".join(skill_blocks)
+            effective_prompt = base_voice_prompt + "".join(skill_blocks)
             agent = BidiAgent(
                 model=model,
                 tools=[],

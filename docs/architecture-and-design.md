@@ -13,6 +13,7 @@
 - [8.7. Skill Management](#87-skill-management)
 - [8.8. Per-User Model Selection](#88-per-user-model-selection)
 - [8.9. Fixed Session ID and Session Tracking](#89-fixed-session-id-and-session-tracking)
+- [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
@@ -38,7 +39,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
 | AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
-| Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, tool access, integrations, sessions, memories, quality evaluation |
+| Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation |
 | Skill ERP | React + TypeScript + REST API | End-user skill publishing: authors SKILL.md records, publishes to AgentCore Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + OpenSearch Serverless + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
@@ -751,11 +752,19 @@ The following diagram shows the complete lifecycle of a single user request as i
                     |   9. Discover tools via MCP     |
                     |      (list_tools_sync with      |
                     |       pagination)               |
-                    |  10. Create Strands Agent with:  |
+                    |  9a. Load system prompt from    |
+                    |      DynamoDB (per-user +      |
+                    |      __global__ rows, joined    |
+                    |      with "\n\n"; §8.10) —     |
+                    |      fall back to hardcoded    |
+                    |      SYSTEM_PROMPT if both     |
+                    |      rows are empty.           |
+                    |  10. Create Strands Agent with: |
                     |      - BedrockModel (Kimi K2.5) |
                     |      - MCP tools                |
                     |      - Skills plugin            |
                     |      - Session manager          |
+                    |      - Resolved system_prompt   |
                     +---------------+---------------+
                                     |
                                     v
@@ -838,6 +847,7 @@ The following diagram shows the complete lifecycle of a single user request as i
 - Step 15 (memory storage) is asynchronous — the response is returned before extraction strategies complete
 - The MCP client connection is scoped to a single invocation (`with mcp_client:` context manager)
 - Skills are loaded dynamically from DynamoDB per invocation (global + user-specific), with filesystem fallback
+- The system prompt is also loaded per invocation (global + per-user rows joined with `"\n\n"`), so admin edits take effect on the next request without a runtime redeploy — see [§8.10](#810-agent-system-prompts-text--voice)
 
 ### 8.7 Skill Management
 
@@ -918,11 +928,11 @@ S3: smarthome-skill-files-{accountId}
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/skills?userId=` | List skills for a user scope |
+| `GET` | `/skills?userId=` | List skills for a user scope. With `&promptBundle=1` returns the Agent Prompt bundle (text + voice) instead — see [§8.10](#810-agent-system-prompts-text--voice). |
 | `POST` | `/skills` | Create a new skill (all spec fields) |
-| `GET` | `/skills/{userId}/{skillName}` | Get a single skill |
-| `PUT` | `/skills/{userId}/{skillName}` | Update a skill (all spec fields) |
-| `DELETE` | `/skills/{userId}/{skillName}` | Delete a skill (cascade-deletes S3 files) |
+| `GET` | `/skills/{userId}/{skillName}` | Get a single skill (or prompt record when `skillName` matches `__prompt_text__` / `__prompt_voice__`) |
+| `PUT` | `/skills/{userId}/{skillName}` | Update a skill, or upsert a prompt override when `skillName` starts with `__prompt_` |
+| `DELETE` | `/skills/{userId}/{skillName}` | Delete a skill (cascade-deletes S3 files), or remove a prompt override when `skillName` starts with `__prompt_` |
 | `GET` | `/skills/users` | List distinct user scopes |
 | `GET` | `/skills/{userId}/{skillName}/files` | List files in a skill directory |
 | `POST` | `/skills/{userId}/{skillName}/files/upload-url` | Get presigned S3 upload URL |
@@ -979,6 +989,52 @@ Each user gets a **fixed runtime session ID** derived from their Cognito `sub` (
 **Per-session 7-day token usage:** The Sessions tab also shows each session's total token consumption over the last 7 days. AgentCore Runtime exports Strands/ADOT spans to the CloudWatch Logs `aws/spans` log group; each `chat` span (emitted by `strands.telemetry.tracer`) carries both `attributes.session.id` and `attributes.gen_ai.usage.total_tokens`. The admin Lambda runs a CloudWatch Logs Insights query on `GET /sessions` that sums `total_tokens` grouped by `session.id` for the last 7 days and joins the result onto the DynamoDB session rows as `totalTokens7d`. The query is the backing dataset for the CloudWatch "GenAI Observability → Bedrock AgentCore → All sessions" dashboard, so the numbers match what an admin sees in that console view. Permissions: the admin Lambda gets `logs:StartQuery`/`logs:StopQuery` scoped to `log-group:aws/spans:*` plus `logs:GetQueryResults` (required at `*` since GetQueryResults doesn't support resource-level scoping).
 
 **Stop session:** The Admin Console calls the AgentCore `StopRuntimeSession` API from the browser using the admin's AWS credentials (obtained by exchanging the Cognito idToken for Identity Pool temporary credentials — the same SigV4 flow the chatbot uses for `/invocations` and `/ws`). `scripts/setup-agentcore.py` also invokes this API as a post-deploy step to invalidate any warm sessions so users pick up fresh code immediately instead of waiting for the idle timeout.
+
+### 8.10 Agent System Prompts (Text & Voice)
+
+Administrators can override the system prompts used by both the **text agent** (Strands on HTTP `/invocations`) and the **voice agent** (BidiAgent on WebSocket `/ws`) from the Admin Console's **Agent Prompt** tab, without redeploying the runtime image.
+
+**Two independent records, additive at runtime.** The global prompt and per-user prompt are stored as two separate DynamoDB rows and the agent concatenates them at invocation time:
+
+```
+effective_system_prompt = global_body + "\n\n" + user_body
+```
+
+Any empty part is omitted from the join. When both rows are empty, the agent falls back to the hardcoded `SYSTEM_PROMPT` / `VOICE_SYSTEM_PROMPT` constant shipped in the container image. This keeps shared guardrails in one editable place (Global) while letting per-user personalization be a short addendum rather than a full duplicate.
+
+**Storage format** (reuses the existing `smarthome-skills` table):
+
+| userId | skillName | Fields |
+|--------|-----------|--------|
+| `__global__` or `{cognito-email}` | `__prompt_text__` | `promptBody`, `updatedAt`, `updatedBy` |
+| `__global__` or `{cognito-email}` | `__prompt_voice__` | `promptBody`, `updatedAt`, `updatedBy` |
+
+`updatedBy` captures the admin's email from the Cognito JWT on each save, surfaced as the "Last edited by …" line in the UI.
+
+**Agent runtime resolution** (`agent/agent.py:load_system_prompt`):
+
+1. Read `(userId=actor_id, __prompt_{type}__)` — returns `""` if row missing.
+2. Read `(userId=__global__, __prompt_{type}__)` — returns `""` if row missing.
+3. Concatenate non-empty parts with `"\n\n"`. If both empty, return `None` → caller uses hardcoded constant.
+
+The text agent calls this inside `invoke_agent()` on every request; the voice agent calls it inside `handle_voice_session()` after decoding the JWT `actor_id`. Both paths silently fall back to the hardcoded constant on DynamoDB errors (`logger.warning` + default) — a broken prompt-load must never break the invocation.
+
+**Why the voice prompt has to stay editable separately.** The voice prompt isn't a stripped-down copy of the text one — it uses the MCP-gateway-prefixed tool names (e.g., `SmartHomeDeviceDiscovery___discover_devices`) that Nova Sonic needs to emit in `toolUse` events, plus voice-specific tone rules ("one short spoken sentence, no Markdown"). Forcing admins to edit them together would make it easy to break voice by assuming the text prompt's shorthand tool names still work.
+
+**Admin UI.** At Global scope the tab shows two side-by-side editors (Text / Voice). At per-user scope each editor splits into three rows: a read-only Global base view, an editable per-user addendum, and a collapsible "Effective Prompt Preview" that concatenates them the same way the agent does. Badges indicate the state (`Built-in Default`, `Custom Global`, `No User Override`, `User Override`), and the reset button is labelled `Revert to Default` at global scope or `Remove Override` at per-user scope, so the semantic difference between "wipe everyone's custom prompt" and "drop this user's addendum" is never ambiguous.
+
+**Transport (no new API Gateway methods).** The admin API carries prompts on the **existing** `/skills` routes to stay under the admin Lambda's 20 KB resource-policy cap (one extra method costs ~400 bytes × 2 stages). Requests are dispatched to prompt handlers when `skillName` starts with the reserved `__prompt_` prefix:
+
+| Method | Path | Behavior when skillName matches `__prompt_*__` |
+|--------|------|------------------------------------------------|
+| `GET` | `/skills?userId={scope}&promptBundle=1` | Returns `{text: PromptRecord, voice: PromptRecord, userId}` where each record = `{body, updatedAt, updatedBy, isOverride, globalBody, builtinDefault}`. `globalBody` is always populated (at user scope it's the read-only context; at global scope it equals `body`). |
+| `PUT` | `/skills/{userId}/__prompt_text__` | Upsert the text prompt override; rejects empty or >16 KB bodies. |
+| `PUT` | `/skills/{userId}/__prompt_voice__` | Same, for voice. |
+| `DELETE` | `/skills/{userId}/__prompt_{type}__` | Remove the override; agent falls back to the next resolution level on the next invocation. |
+
+**Defaults mirror.** The Lambda ships a local `agent_prompt_defaults.py` that duplicates the two hardcoded constants from `agent/agent.py` and `agent/voice_session.py`. The duplication is intentional: the admin Lambda and the agent runtime live in separate packages, and making the tab render "what the agent will use when no override exists" without a round-trip to the runtime is worth the copy. The module carries a short comment flagging that the constants must be updated in the same commit as the agent-side source of truth.
+
+**Evo integration stub.** Each editor card renders a disabled "Optimization Suggestions (AgentCore Evo)" block. AgentCore Evo does not yet exist in this codebase; the card is a visual placeholder so future work can wire up an optimization endpoint without a tab-layout change.
 
 ---
 
@@ -1165,7 +1221,7 @@ admin-console/
 │   ├── api/
 │   │   └── adminApi.ts      # REST client for admin API (skills, models, tool access, knowledge base, memories, sessions)
 │   └── components/
-│       └── AdminConsole.tsx  # 8-tab harness management (skills, knowledge base, models, tool access, integrations, sessions, memories, quality evaluation)
+│       └── AdminConsole.tsx  # 9-tab harness management (skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation)
 ├── public/
 │   ├── index.html           # HTML template with config.js loader
 │   └── config.js            # Runtime config placeholder (overwritten by CDK)
@@ -1177,13 +1233,14 @@ admin-console/
 **Key Features:**
 
 - **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see an "Access Denied" page.
-- **Eight tabs** for comprehensive agent harness management:
+- **Nine tabs** for comprehensive agent harness management:
 
 | Tab | Purpose |
 |-----|---------|
 | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
 | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
 | **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
+| **Agent Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
 | **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY), and **Demo Links** column with one-click deep links to the chatbot (`?username=<email>` for login prefill) and device simulator for each user — optimized for admin-led demos |
 | **Integrations** | Tool source registry — Lambda targets (active), MCP servers, A2A agents, API Gateway (planned) |
 | **Sessions** | Runtime session monitoring with User ID, Session ID, Last Active, and Stop button |
@@ -1602,6 +1659,16 @@ orchestration skill makes the cut. Single-device commands are covered by
 the base prompt's tool-name schema. Tool-name references inside the skill
 markdown (`discover_devices`, `control_device`) are rewritten to their
 MCP-prefixed forms on the way in via `_rewrite_tool_names`.
+
+**Dynamic voice prompt override.** The base voice prompt (`VOICE_SYSTEM_PROMPT`)
+is editable per-user and globally from the Admin Console's Agent Prompt tab —
+see [§8.10](#810-agent-system-prompts-text--voice). `handle_voice_session`
+calls `load_system_prompt(actor_id, "voice")` after resolving `actor_id` from
+the JWT; the returned string (global + user addendum, joined with `"\n\n"`)
+replaces the hardcoded constant as the base before the `all-devices-on` skill
+block is appended. If the override load fails, the hardcoded constant is used
+and a warning is logged — a broken DynamoDB read must not break the voice
+session.
 
 **Nova Sonic single-tool-per-turn limitation.** Nova Sonic's voice model
 terminates a conversation turn after it speaks the tool result — unlike
