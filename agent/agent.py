@@ -105,6 +105,39 @@ def load_user_settings(actor_id: str) -> dict:
     return {}
 
 
+def load_system_prompt(actor_id: str, agent_type: str) -> str | None:
+    """Resolve the active system prompt for this user/agent from DynamoDB.
+
+    Additive resolution: the global record and the per-user record are
+    concatenated ("global\\n\\nuser"), each record being independently
+    editable in the admin console. Global typically holds shared guardrails;
+    the per-user record is an addendum with user-specific personalization.
+
+    agent_type ∈ {"text", "voice"}. Sort keys are `__prompt_text__` /
+    `__prompt_voice__`. Returns the concatenation when at least one record
+    exists; None when both are empty (callers then fall back to the hardcoded
+    constant in agent.py / voice_session.py).
+    """
+    if not SKILLS_TABLE_NAME:
+        return None
+    sk = f"__prompt_{agent_type}__"
+    table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
+
+    def _read(uid: str) -> str:
+        if uid in ("default", ""):
+            return ""
+        resp = table.get_item(Key={"userId": uid, "skillName": sk})
+        item = resp.get("Item")
+        body = item.get("promptBody") if item else None
+        return body.strip() if isinstance(body, str) else ""
+
+    global_body = _read("__global__")
+    user_body = _read(actor_id) if actor_id != "__global__" else ""
+
+    parts = [p for p in (global_body, user_body) if p]
+    return "\n\n".join(parts) if parts else None
+
+
 _static_skills_plugin = AgentSkills(skills="./skills/")
 
 
@@ -119,7 +152,7 @@ IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use
 KNOWLEDGE BASE: You have access to an enterprise knowledge base. When users ask questions that may relate to company documents, product manuals, troubleshooting guides, or internal knowledge, use the query_knowledge_base tool to retrieve relevant information. Cite the source document when presenting information from the knowledge base."""
 
 
-def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
+def create_agent(tools=None, session_manager=None, skills=None, model_id=None, system_prompt=None):
     model = BedrockModel(
         model_id=model_id or MODEL_ID,
         region_name=AWS_REGION,
@@ -133,7 +166,7 @@ def create_agent(tools=None, session_manager=None, skills=None, model_id=None):
 
     agent_kwargs = dict(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt or SYSTEM_PROMPT,
         plugins=[skills_plugin],
     )
 
@@ -162,6 +195,7 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
 
     skills = None
     user_model_id = None
+    user_system_prompt = None
     if SKILLS_TABLE_NAME:
         try:
             skills = load_skills_from_dynamodb(actor_id)
@@ -174,6 +208,12 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                 logger.info(f"Using per-user model: {user_model_id} for actor {actor_id}")
         except Exception as e:
             logger.warning(f"Failed to load user settings: {e}")
+        try:
+            user_system_prompt = load_system_prompt(actor_id, "text")
+            if user_system_prompt:
+                logger.info(f"Using per-user/global text system prompt override for actor {actor_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load system prompt override, using default: {e}")
 
     if GATEWAY_URL:
         gw_headers = {}
@@ -217,10 +257,10 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             else:
                 all_tools = mcp_tools
 
-            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id)
+            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)
             return str(agent(prompt))
     else:
-        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id)
+        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)
         return str(agent(prompt))
 
 

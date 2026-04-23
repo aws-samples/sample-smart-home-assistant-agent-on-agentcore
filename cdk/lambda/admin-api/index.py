@@ -12,6 +12,8 @@ from urllib.parse import unquote
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from agent_prompt_defaults import DEFAULTS as PROMPT_DEFAULTS
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -79,9 +81,20 @@ def now_iso():
 # ---------------------------------------------------------------------------
 
 def list_skills(event):
-    """GET /skills?userId=__global__"""
+    """GET /skills?userId=__global__
+
+    When called with `?promptBundle=1`, returns the agent-prompt bundle
+    `{userId, text, voice}` instead of the skill list — lets the Agent Prompt
+    tab fetch both prompts in one call without adding a new API Gateway route
+    (the admin Lambda's resource-policy is at the 20 KB cap).
+    """
     params = event.get("queryStringParameters") or {}
     user_id = params.get("userId", "__global__")
+
+    if params.get("promptBundle") == "1":
+        out = {agent_type: _read_prompt_record(user_id, agent_type) for agent_type in PROMPT_AGENT_TYPES}
+        out["userId"] = user_id
+        return response(200, out)
 
     resp = table.query(KeyConditionExpression=Key("userId").eq(user_id))
     items = resp.get("Items", [])
@@ -266,6 +279,153 @@ def update_settings(event):
         "updatedAt": ts,
     })
     return response(200, {"message": f"Settings updated for '{user_id}'", "modelId": model_id})
+
+
+# ---------------------------------------------------------------------------
+# Agent System Prompts
+# ---------------------------------------------------------------------------
+
+PROMPT_AGENT_TYPES = ("text", "voice")
+PROMPT_MAX_LEN = 16 * 1024  # 16 KB ceiling to avoid accidentally saving a doc
+
+
+def _prompt_sk(agent_type: str) -> str:
+    return f"__prompt_{agent_type}__"
+
+
+def _read_prompt_record(user_id: str, agent_type: str) -> dict:
+    """Return the editable record at `user_id` scope plus the read-only global
+    context, for one (user, agent) pair.
+
+    Fields:
+      body            str — saved override at requested scope; "" if none
+      updatedAt       str — timestamp of that saved override (empty if none)
+      updatedBy       str — email of admin who last saved (empty if none)
+      isOverride      bool — true iff body above came from a saved row
+      globalBody      str — current body saved at __global__ scope (empty
+                            if no global override). At user scope the UI
+                            shows this read-only as additive context.
+      builtinDefault  str — hardcoded default shipped with agent image. Used
+                            by the Global editor's "Revert to Default" flow.
+
+    Semantics match the agent runtime's additive `load_system_prompt`:
+    final prompt = global_body + "\\n\\n" + user_body (any empty part omitted),
+    with the built-in default used only when both are empty.
+    """
+    sk = _prompt_sk(agent_type)
+
+    def _read(uid: str) -> dict:
+        resp = table.get_item(Key={"userId": uid, "skillName": sk})
+        item = resp.get("Item") or {}
+        body = item.get("promptBody", "")
+        return {
+            "body": body if isinstance(body, str) else "",
+            "updatedAt": item.get("updatedAt", ""),
+            "updatedBy": item.get("updatedBy", ""),
+            "isOverride": isinstance(body, str) and bool(body.strip()),
+        }
+
+    scope_rec = _read(user_id)
+    # Always surface the current global body — at global scope it equals
+    # scope_rec.body; at user scope it's read-only context shown above the
+    # user's addendum editor.
+    global_rec = scope_rec if user_id == "__global__" else _read("__global__")
+
+    return {
+        "body": scope_rec["body"],
+        "updatedAt": scope_rec["updatedAt"],
+        "updatedBy": scope_rec["updatedBy"],
+        "isOverride": scope_rec["isOverride"],
+        "globalBody": global_rec["body"],
+        "builtinDefault": PROMPT_DEFAULTS.get(agent_type, ""),
+    }
+
+
+def _agent_type_from_sk(skill_name: str) -> str:
+    """Extract agentType from reserved sort key `__prompt_<agentType>__`."""
+    if skill_name.startswith("__prompt_") and skill_name.endswith("__"):
+        return skill_name[len("__prompt_"):-2]
+    return ""
+
+
+def get_prompt_record(event):
+    """GET /skills/{userId}/__prompt_{agentType}__ — single prompt record.
+
+    Dispatched from the existing /skills/{userId}/{skillName} GET handler when
+    `skillName` matches the reserved prompt sort key. Returns the prompt
+    record shape ({body, updatedAt, updatedBy, isDefault}) rather than the
+    full skill shape.
+    """
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    skill_name = path_params.get("skillName", "")
+    agent_type = _agent_type_from_sk(skill_name)
+    if agent_type not in PROMPT_AGENT_TYPES:
+        return response(400, {"error": f"agentType must be one of {list(PROMPT_AGENT_TYPES)}"})
+    rec = _read_prompt_record(user_id, agent_type)
+    rec["userId"] = user_id
+    rec["agentType"] = agent_type
+    return response(200, rec)
+
+
+def save_prompt_record(event):
+    """POST /skills or PUT /skills/{userId}/{skillName} — upsert prompt override.
+
+    Dispatched from the existing skills POST/PUT handlers when `skillName`
+    matches the reserved prompt sort key. Body: {userId?, skillName?,
+    promptBody}. Validates length (≤16 KB) and non-empty.
+    """
+    body_obj = json.loads(event.get("body") or "{}")
+    path_params = event.get("pathParameters") or {}
+
+    user_id = body_obj.get("userId") or unquote(path_params.get("userId", ""))
+    skill_name = body_obj.get("skillName") or path_params.get("skillName", "")
+    agent_type = _agent_type_from_sk(skill_name)
+    prompt_body = body_obj.get("promptBody", "")
+
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    if agent_type not in PROMPT_AGENT_TYPES:
+        return response(400, {"error": f"agentType must be one of {list(PROMPT_AGENT_TYPES)}"})
+    if not isinstance(prompt_body, str) or not prompt_body.strip():
+        return response(400, {"error": "promptBody is required and must be non-empty"})
+    if len(prompt_body) > PROMPT_MAX_LEN:
+        return response(400, {"error": f"promptBody exceeds {PROMPT_MAX_LEN} character limit"})
+
+    # Capture who made the change — the admin's email from their Cognito claims.
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+    updated_by = claims.get("email") or claims.get("cognito:username") or claims.get("sub", "")
+
+    ts = now_iso()
+    table.put_item(Item={
+        "userId": user_id,
+        "skillName": _prompt_sk(agent_type),
+        "promptBody": prompt_body,
+        "updatedAt": ts,
+        "updatedBy": updated_by,
+    })
+    return response(200, {
+        "message": f"{agent_type} prompt saved for '{user_id}'",
+        "updatedAt": ts,
+        "updatedBy": updated_by,
+    })
+
+
+def delete_prompt_record(event):
+    """DELETE /skills/{userId}/{skillName} — remove prompt override.
+
+    Dispatched from the existing skills DELETE handler when `skillName`
+    matches the reserved prompt sort key. The agent will fall back to
+    __global__ or the hardcoded default on its next invocation.
+    """
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    skill_name = path_params.get("skillName", "")
+    agent_type = _agent_type_from_sk(skill_name)
+    if agent_type not in PROMPT_AGENT_TYPES:
+        return response(400, {"error": f"agentType must be one of {list(PROMPT_AGENT_TYPES)}"})
+    table.delete_item(Key={"userId": user_id, "skillName": _prompt_sk(agent_type)})
+    return response(200, {"message": f"{agent_type} prompt override removed for '{user_id}'"})
 
 
 def _fetch_token_totals_7d():
@@ -1355,18 +1515,33 @@ def handler(event, context):
     if resource == "/users/{userId}/permissions" and method == "PUT":
         return update_user_permissions(event)
 
-    # Skill routes
+    # Skill routes — also carry agent-prompt traffic on the {userId}/{skillName}
+    # variant when skillName matches the reserved `__prompt_*__` sort key, so
+    # the Agent Prompt tab doesn't need new API Gateway methods (the admin
+    # Lambda's resource policy is already near the 20 KB cap).
     if resource == "/skills" and method == "GET":
         return list_skills(event)
     if resource == "/skills" and method == "POST":
+        body_obj = json.loads(event.get("body") or "{}")
+        if str(body_obj.get("skillName", "")).startswith("__prompt_"):
+            return save_prompt_record(event)
         return create_skill(event)
     if resource == "/skills/users" and method == "GET":
         return list_users(event)
     if resource == "/skills/{userId}/{skillName}" and method == "GET":
+        sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk.startswith("__prompt_"):
+            return get_prompt_record(event)
         return get_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "PUT":
+        sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk.startswith("__prompt_"):
+            return save_prompt_record(event)
         return update_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "DELETE":
+        sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk.startswith("__prompt_"):
+            return delete_prompt_record(event)
         return delete_skill(event)
     if resource == "/skills/{userId}/{skillName}/files" and method == "GET":
         return list_skill_files(event)
@@ -1380,6 +1555,7 @@ def handler(event, context):
         return get_settings(event)
     if resource == "/settings/{userId}" and method == "PUT":
         return update_settings(event)
+
     if resource == "/sessions" and method == "GET":
         return list_sessions(event)
     if resource == "/sessions/{sessionId}/stop" and method == "POST":

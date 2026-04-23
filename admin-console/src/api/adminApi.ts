@@ -172,6 +172,90 @@ export interface SessionInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Agent System Prompts (text / voice)
+// ---------------------------------------------------------------------------
+
+export type AgentType = 'text' | 'voice';
+
+export interface PromptRecord {
+  // Saved row at the requested scope — "" when the scope has no override.
+  body: string;
+  updatedAt: string;
+  updatedBy: string;
+  // true iff `body` came from a persisted DynamoDB row (vs. empty default).
+  isOverride: boolean;
+  // Current Global-scope body. At Global scope equals `body`; at per-user
+  // scope the UI displays it read-only as additive context.
+  globalBody: string;
+  // Hardcoded default shipped with the agent image. The Global editor's
+  // "Revert to Default" button resets the textarea to this.
+  builtinDefault: string;
+}
+
+export interface AgentPromptsResponse {
+  userId: string;
+  text: PromptRecord;
+  voice: PromptRecord;
+}
+
+// Prompts are stored in the same DynamoDB skills table under reserved sort
+// keys (`__prompt_text__` / `__prompt_voice__`) and served through the
+// existing /skills endpoints to avoid adding Lambda resource-policy entries
+// (admin Lambda's policy is already at the 20 KB cap).
+
+const promptSk = (agentType: AgentType) => `__prompt_${agentType}__`;
+
+export async function getAgentPrompts(userId: string): Promise<AgentPromptsResponse> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills?userId=${encodeURIComponent(userId)}&promptBundle=1`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to load prompts (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function saveAgentPrompt(
+  userId: string,
+  agentType: AgentType,
+  promptBody: string
+): Promise<void> {
+  const headers = await authHeaders();
+  // Use PUT on the specific path so the Lambda receives both userId and
+  // skillName in pathParameters — simpler routing than POST /skills.
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${promptSk(agentType)}`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ promptBody }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to save prompt (${res.status})`);
+  }
+}
+
+export async function deleteAgentPrompt(
+  userId: string,
+  agentType: AgentType
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${promptSk(agentType)}`,
+    { method: 'DELETE', headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to delete prompt override (${res.status})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Cognito Users & Tool Permissions
 // ---------------------------------------------------------------------------
 

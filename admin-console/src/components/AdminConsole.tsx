@@ -29,6 +29,9 @@ import {
   getKBSyncStatus,
   listRegistryRecords,
   importRegistryRecords,
+  getAgentPrompts,
+  saveAgentPrompt,
+  deleteAgentPrompt,
   RegistryRecord,
   SkillItem,
   SkillInput,
@@ -40,6 +43,9 @@ import {
   KBDocument,
   KBScopeInfo,
   KBSyncJob,
+  AgentPromptsResponse,
+  AgentType,
+  PromptRecord,
 } from '../api/adminApi';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
@@ -298,6 +304,428 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
           </table>
         )}
       </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Agent Prompt Tab — standalone component
+// ---------------------------------------------------------------------------
+interface AgentPromptTabProps {
+  error: string;
+  success: string;
+  clearMessages: () => void;
+  setError: (msg: string) => void;
+  setSuccess: (msg: string) => void;
+  cognitoUsers: CognitoUserInfo[];
+}
+
+interface PromptEditorCardProps {
+  agentType: AgentType;
+  title: string;
+  hint: string;
+  scope: string;
+  record: PromptRecord;
+  draft: string;
+  onChangeDraft: (value: string) => void;
+  onSave: () => void;
+  onDiscard: () => void;
+  onReset: () => void;
+  saving: boolean;
+}
+
+const PROMPT_TEXTAREA_STYLE: React.CSSProperties = {
+  width: '100%',
+  fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+  fontSize: '13px',
+  lineHeight: '1.5',
+  padding: '12px',
+  background: '#151515',
+  color: '#eaeaea',
+  border: '1px solid #2a2a2a',
+  borderRadius: '4px',
+  resize: 'vertical',
+  boxSizing: 'border-box',
+};
+
+const PromptEditorCard: React.FC<PromptEditorCardProps> = ({
+  agentType,
+  title,
+  hint,
+  scope,
+  record,
+  draft,
+  onChangeDraft,
+  onSave,
+  onDiscard,
+  onReset,
+  saving,
+}) => {
+  const { t } = useI18n();
+  const isGlobalScope = scope === '__global__';
+  // "Dirty" = draft differs from the effective *starting* state admins were
+  // shown. At global scope with no override that starting state is the
+  // built-in default (so typing default verbatim shouldn't count as dirty);
+  // otherwise it's the saved body.
+  const startingState = isGlobalScope && !record.isOverride
+    ? record.builtinDefault
+    : record.body;
+  const dirty = draft !== startingState;
+
+  // Effective prompt the agent will see: global_body + "\n\n" + user_body
+  // (any empty part omitted). At Global scope, `draft` is the editable global
+  // body. At User scope, `draft` is only the user addendum — the read-only
+  // global context is shown above it.
+  const effectiveGlobal = isGlobalScope ? draft.trim() : record.globalBody.trim();
+  const effectiveUser = isGlobalScope ? '' : draft.trim();
+  const effectiveParts = [effectiveGlobal, effectiveUser].filter(Boolean);
+  const effectivePrompt = effectiveParts.length
+    ? effectiveParts.join('\n\n')
+    : record.builtinDefault;
+
+  const badge = isGlobalScope
+    ? record.isOverride
+      ? <span className="badge badge-active">{t('prompts.badgeGlobalCustom')}</span>
+      : <span className="badge badge-inactive">{t('prompts.badgeGlobalDefault')}</span>
+    : record.isOverride
+      ? <span className="badge badge-active">{t('prompts.badgeUserSet')}</span>
+      : <span className="badge badge-inactive">{t('prompts.badgeUserEmpty')}</span>;
+
+  return (
+    <div
+      className="settings-panel"
+      style={{
+        flex: '1 1 0',
+        minWidth: '320px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '10px',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+        <h3 style={{ color: '#fff', margin: 0, fontSize: '16px' }}>{title}</h3>
+        {badge}
+      </div>
+      <p className="settings-hint" style={{ margin: 0 }}>{hint}</p>
+
+      {/* At user scope, show the Global body as read-only context above the editor. */}
+      {!isGlobalScope && (
+        <div>
+          <label
+            style={{
+              display: 'block',
+              color: '#ccc',
+              fontSize: '12px',
+              fontWeight: 600,
+              marginBottom: '4px',
+            }}
+          >
+            {t('prompts.globalBaseLabel')}
+          </label>
+          <p className="settings-hint" style={{ margin: '0 0 6px 0', fontSize: '11px' }}>
+            {t('prompts.globalBaseHint')}
+          </p>
+          <textarea
+            value={record.globalBody || t('prompts.globalBaseEmpty')}
+            readOnly
+            spellCheck={false}
+            style={{
+              ...PROMPT_TEXTAREA_STYLE,
+              minHeight: '120px',
+              opacity: 0.7,
+              fontStyle: record.globalBody ? 'normal' : 'italic',
+            }}
+          />
+        </div>
+      )}
+
+      {/* Main editor: at Global scope edits the global body; at user scope edits the addendum. */}
+      <div>
+        {!isGlobalScope && (
+          <>
+            <label
+              style={{
+                display: 'block',
+                color: '#eaeaea',
+                fontSize: '12px',
+                fontWeight: 600,
+                marginBottom: '4px',
+              }}
+            >
+              {t('prompts.userAddendumLabel')}
+            </label>
+            <p className="settings-hint" style={{ margin: '0 0 6px 0', fontSize: '11px' }}>
+              {t('prompts.userAddendumHint')}
+            </p>
+          </>
+        )}
+        <textarea
+          value={draft}
+          onChange={(e) => onChangeDraft(e.target.value)}
+          spellCheck={false}
+          style={{
+            ...PROMPT_TEXTAREA_STYLE,
+            minHeight: isGlobalScope
+              ? agentType === 'voice' ? '220px' : '340px'
+              : agentType === 'voice' ? '140px' : '180px',
+          }}
+        />
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={onSave}
+          disabled={!dirty || saving || !draft.trim()}
+        >
+          {saving ? t('app.loading') : t('prompts.save')}
+        </button>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={onDiscard}
+          disabled={!dirty}
+        >
+          {t('prompts.revert')}
+        </button>
+        {record.isOverride && (
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={onReset}
+            disabled={saving}
+          >
+            {isGlobalScope ? t('prompts.revertToDefault') : t('prompts.removeOverride')}
+          </button>
+        )}
+        {record.updatedAt && record.isOverride && (
+          <span className="settings-hint" style={{ marginLeft: 'auto', fontSize: '12px' }}>
+            {t('prompts.lastEdited')} {new Date(record.updatedAt).toLocaleString()}
+            {record.updatedBy ? ` · ${t('prompts.lastEditedBy')} ${record.updatedBy}` : ''}
+          </span>
+        )}
+      </div>
+
+      {/* Effective prompt preview (collapsible). Only worth showing at user
+          scope where the admin can't see the concatenation in the main editor. */}
+      {!isGlobalScope && (
+        <details>
+          <summary
+            style={{
+              cursor: 'pointer',
+              color: '#ccc',
+              fontSize: '12px',
+              fontWeight: 600,
+              padding: '4px 0',
+            }}
+          >
+            {t('prompts.effectivePreview')}
+          </summary>
+          <pre
+            style={{
+              ...PROMPT_TEXTAREA_STYLE,
+              minHeight: '140px',
+              maxHeight: '300px',
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              marginTop: '6px',
+              color: '#9db4c2',
+            }}
+          >
+            {effectivePrompt}
+          </pre>
+        </details>
+      )}
+
+      <div
+        style={{
+          marginTop: '8px',
+          border: '1px dashed #3a3a3a',
+          borderRadius: '4px',
+          padding: '12px',
+          background: '#121212',
+          opacity: 0.6,
+        }}
+        aria-disabled
+      >
+        <div style={{ color: '#aaa', fontSize: '13px', fontWeight: 600, marginBottom: '6px' }}>
+          {t('prompts.evoCardTitle')}
+        </div>
+        <div style={{ color: '#888', fontSize: '12px', lineHeight: '1.5' }}>
+          {t('prompts.evoCardComingSoon')}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AgentPromptTab: React.FC<AgentPromptTabProps> = ({
+  error,
+  success,
+  clearMessages,
+  setError,
+  setSuccess,
+  cognitoUsers,
+}) => {
+  const { t } = useI18n();
+  const [selectedScope, setSelectedScope] = useState<string>('__global__');
+  const [prompts, setPrompts] = useState<AgentPromptsResponse | null>(null);
+  const [textDraft, setTextDraft] = useState('');
+  const [voiceDraft, setVoiceDraft] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState<AgentType | null>(null);
+
+  const scopeLabel = useCallback((scope: string): string => {
+    if (scope === '__global__') return t('prompts.globalScope');
+    const match = cognitoUsers.find(
+      (u) => u.email === scope || u.username === scope || u.sub === scope
+    );
+    return match?.email || match?.username || scope;
+  }, [cognitoUsers, t]);
+
+  const load = useCallback(async (scope: string) => {
+    setLoading(true);
+    try {
+      const data = await getAgentPrompts(scope);
+      setPrompts(data);
+      // At Global scope, when no override exists yet, seed the editor with
+      // the built-in default so admins have a starting point rather than an
+      // empty textarea. At user scope, draft = the user's addendum ("" is
+      // the expected starting state for a fresh user).
+      const seed = (r: PromptRecord) =>
+        scope === '__global__'
+          ? (r.isOverride ? r.body : r.builtinDefault)
+          : r.body;
+      setTextDraft(seed(data.text));
+      setVoiceDraft(seed(data.voice));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [setError]);
+
+  useEffect(() => { load(selectedScope); }, [load, selectedScope]);
+
+  const agentLabel = (agentType: AgentType) =>
+    agentType === 'text' ? t('prompts.textAgent') : t('prompts.voiceAgent');
+
+  const handleSave = async (agentType: AgentType) => {
+    clearMessages();
+    const draft = agentType === 'text' ? textDraft : voiceDraft;
+    if (!draft.trim()) return;
+    setSaving(agentType);
+    try {
+      await saveAgentPrompt(selectedScope, agentType, draft);
+      setSuccess(
+        t('prompts.saveSuccess')
+          .replace('{agent}', agentLabel(agentType))
+          .replace('{scope}', scopeLabel(selectedScope))
+      );
+      await load(selectedScope);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const handleRevertDraft = (agentType: AgentType) => {
+    if (!prompts) return;
+    const r = agentType === 'text' ? prompts.text : prompts.voice;
+    const seed = selectedScope === '__global__'
+      ? (r.isOverride ? r.body : r.builtinDefault)
+      : r.body;
+    if (agentType === 'text') setTextDraft(seed);
+    else setVoiceDraft(seed);
+  };
+
+  const handleReset = async (agentType: AgentType) => {
+    // At Global scope this reverts to the built-in default;
+    // at user scope it removes the user's addendum (Global still applies).
+    const confirmMsg = selectedScope === '__global__'
+      ? t('prompts.confirmRevertGlobal')
+      : t('prompts.confirmRemoveUser');
+    if (!window.confirm(confirmMsg)) return;
+    clearMessages();
+    setSaving(agentType);
+    try {
+      await deleteAgentPrompt(selectedScope, agentType);
+      setSuccess(
+        t('prompts.revertSuccess')
+          .replace('{agent}', agentLabel(agentType))
+          .replace('{scope}', scopeLabel(selectedScope))
+      );
+      await load(selectedScope);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const scopeOptions: string[] = [
+    '__global__',
+    ...cognitoUsers
+      .map((u) => u.email || u.username)
+      .filter((s): s is string => !!s),
+  ];
+
+  return (
+    <div className="prompts-section">
+      {error && <div className="alert alert-error">{error}</div>}
+      {success && <div className="alert alert-success">{success}</div>}
+
+      <div className="settings-panel" style={{ marginBottom: '16px' }}>
+        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>{t('prompts.title')}</h3>
+        <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>{t('prompts.desc')}</p>
+        <div className="settings-row">
+          <label className="toolbar-label">{t('prompts.userScope')}</label>
+          <select
+            className="settings-select"
+            value={selectedScope}
+            onChange={(e) => setSelectedScope(e.target.value)}
+          >
+            {scopeOptions.map((scope) => (
+              <option key={scope} value={scope}>
+                {scopeLabel(scope)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {loading || !prompts ? (
+        <div className="loading">{t('prompts.loading')}</div>
+      ) : (
+        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+          <PromptEditorCard
+            agentType="text"
+            title={t('prompts.textAgent')}
+            hint={t('prompts.textAgentHint')}
+            scope={selectedScope}
+            record={prompts.text}
+            draft={textDraft}
+            onChangeDraft={setTextDraft}
+            onSave={() => handleSave('text')}
+            onDiscard={() => handleRevertDraft('text')}
+            onReset={() => handleReset('text')}
+            saving={saving === 'text'}
+          />
+          <PromptEditorCard
+            agentType="voice"
+            title={t('prompts.voiceAgent')}
+            hint={t('prompts.voiceAgentHint')}
+            scope={selectedScope}
+            record={prompts.voice}
+            draft={voiceDraft}
+            onChangeDraft={setVoiceDraft}
+            onSave={() => handleSave('voice')}
+            onDiscard={() => handleRevertDraft('voice')}
+            onReset={() => handleReset('voice')}
+            saving={saving === 'voice'}
+          />
+        </div>
+      )}
     </div>
   );
 };
@@ -817,7 +1245,7 @@ const AdminConsole: React.FC = () => {
   const [savedModelId, setSavedModelId] = useState('');
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'skills' | 'knowledgeBase' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails'>('skills');
+  const [activeTab, setActiveTab] = useState<'skills' | 'knowledgeBase' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails' | 'agentPrompts'>('skills');
 
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -1264,6 +1692,12 @@ const AdminConsole: React.FC = () => {
           onClick={() => setActiveTab('models')}
         >
           {t('tab.models')}
+        </button>
+        <button
+          className={`tab ${activeTab === 'agentPrompts' ? 'tab-active' : ''}`}
+          onClick={() => setActiveTab('agentPrompts')}
+        >
+          {t('tab.agentPrompts')}
         </button>
         <button
           className={`tab ${activeTab === 'users' ? 'tab-active' : ''}`}
@@ -1767,6 +2201,18 @@ const AdminConsole: React.FC = () => {
           clearMessages={clearMessages}
           setError={setError}
           setSuccess={setSuccess}
+        />
+      )}
+
+      {/* Agent Prompt Tab */}
+      {activeTab === 'agentPrompts' && (
+        <AgentPromptTab
+          error={error}
+          success={success}
+          clearMessages={clearMessages}
+          setError={setError}
+          setSuccess={setSuccess}
+          cognitoUsers={cognitoUsers}
         />
       )}
 

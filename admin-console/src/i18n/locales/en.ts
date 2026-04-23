@@ -26,6 +26,7 @@ const en: Record<string, string> = {
   'tab.sessions': 'Sessions',
   'tab.memories': 'Memories',
   'tab.guardrails': 'Quality Evaluation',
+  'tab.agentPrompts': 'Agent Prompt',
 
   // Skills tab
   'skills.userScope': 'User Scope:',
@@ -257,6 +258,39 @@ const en: Record<string, string> = {
   'registry.noApprovedHint': 'Approve records in the AgentCore Registry console first, then return here.',
   'registry.selectAtLeastOne': 'Select at least one record to import.',
   'registry.importedMsg': 'Imported {n} skill(s) into scope {user}.',
+
+  // Agent Prompt tab
+  'prompts.title': 'Agent System Prompts',
+  'prompts.desc': 'The global prompt and per-user prompt are independent. The agent concatenates them (global first, then user-specific) as the effective system prompt. Global typically holds shared guardrails; per-user holds personalization.',
+  'prompts.userScope': 'User Scope:',
+  'prompts.globalScope': 'Global (all users)',
+  'prompts.textAgent': 'Text Agent',
+  'prompts.voiceAgent': 'Voice Agent',
+  'prompts.textAgentHint': 'Used for HTTP chatbot invocations (Strands text agent).',
+  'prompts.voiceAgentHint': 'Used for Nova Sonic voice sessions. Keep responses short and spoken; tool names must match the MCP gateway (target___toolName).',
+  'prompts.badgeGlobalCustom': 'Custom Global',
+  'prompts.badgeGlobalDefault': 'Built-in Default',
+  'prompts.badgeUserSet': 'User Override',
+  'prompts.badgeUserEmpty': 'No User Override',
+  'prompts.globalBaseLabel': 'Global Base (read-only at user scope)',
+  'prompts.globalBaseHint': 'This is the Global prompt applied to all users. Switch scope to "Global (all users)" to edit.',
+  'prompts.globalBaseEmpty': '(Global is using the built-in default. Switch to Global scope to replace it.)',
+  'prompts.userAddendumLabel': 'User-Specific Addendum',
+  'prompts.userAddendumHint': 'Appended after the Global prompt for this user only. Leave empty to apply Global only.',
+  'prompts.effectivePreview': 'Effective Prompt Preview (what the agent actually sees)',
+  'prompts.save': 'Save',
+  'prompts.revert': 'Discard Edits',
+  'prompts.revertToDefault': 'Revert to Default',
+  'prompts.removeOverride': 'Remove Override',
+  'prompts.confirmRevertGlobal': 'Reset the Global prompt? All users will fall back to the built-in default shipped with the agent.',
+  'prompts.confirmRemoveUser': 'Remove this user\'s addendum? Only the Global prompt will apply for this user on the next invocation.',
+  'prompts.lastEdited': 'Last edited:',
+  'prompts.lastEditedBy': 'by',
+  'prompts.loading': 'Loading prompts...',
+  'prompts.saveSuccess': '{agent} prompt saved for {scope}.',
+  'prompts.revertSuccess': '{agent} prompt override removed for {scope}.',
+  'prompts.evoCardTitle': 'Optimization Suggestions (AgentCore Evo)',
+  'prompts.evoCardComingSoon': 'Coming soon — AgentCore Evo will analyze this prompt against recent sessions and suggest improvements.',
 };
 
 export default en;

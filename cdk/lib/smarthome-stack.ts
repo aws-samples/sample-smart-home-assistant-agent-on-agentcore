@@ -421,6 +421,14 @@ export class SmartHomeStack extends cdk.Stack {
     settingsResource.addMethod("GET", adminIntegration, authMethodOptions);
     settingsResource.addMethod("PUT", adminIntegration, authMethodOptions);
 
+    // NOTE: Per-user & global system prompt overrides for text / voice agents
+    // are stored in the existing skills DynamoDB table under reserved sort
+    // keys (skillName = "__prompt_text__" / "__prompt_voice__") and served
+    // through the EXISTING /skills routes — no new API Gateway methods were
+    // added here because the admin Lambda's resource-policy is at the 20 KB
+    // cap. The Lambda recognises the reserved sort keys in list/get/put/delete
+    // paths and enforces the 16 KB promptBody limit in-line.
+
     // /sessions
     const sessionsResource = adminApi.root.addResource("sessions");
     sessionsResource.addMethod("GET", adminIntegration, authMethodOptions);

@@ -26,6 +26,7 @@ const zh: Record<string, string> = {
   'tab.sessions': '会话',
   'tab.memories': '记忆',
   'tab.guardrails': '质量评估',
+  'tab.agentPrompts': '智能体提示词',
 
   // Skills tab
   'skills.userScope': '用户范围：',
@@ -257,6 +258,39 @@ const zh: Record<string, string> = {
   'registry.noApprovedHint': '请先在 AgentCore Registry 控制台中批准记录，然后回到此处。',
   'registry.selectAtLeastOne': '请至少选择一条记录以导入。',
   'registry.importedMsg': '已向作用域 {user} 导入 {n} 个技能。',
+
+  // Agent Prompt tab
+  'prompts.title': '智能体系统提示词',
+  'prompts.desc': '全局提示词和单独用户提示词相互独立。智能体会将两者拼接（全局在前、用户在后）作为实际的系统提示词。全局通常放共享约束；用户部分放个性化内容。',
+  'prompts.userScope': '用户范围：',
+  'prompts.globalScope': '全局（所有用户）',
+  'prompts.textAgent': '文字智能体',
+  'prompts.voiceAgent': '语音智能体',
+  'prompts.textAgentHint': '用于 HTTP 聊天机器人调用（Strands 文字智能体）。',
+  'prompts.voiceAgentHint': '用于 Nova Sonic 语音会话。需保持简短、口语化；工具名必须与 MCP 网关一致（target___toolName）。',
+  'prompts.badgeGlobalCustom': '自定义全局',
+  'prompts.badgeGlobalDefault': '内置默认',
+  'prompts.badgeUserSet': '用户覆盖',
+  'prompts.badgeUserEmpty': '未设置用户覆盖',
+  'prompts.globalBaseLabel': '全局基础提示词（用户范围下只读）',
+  'prompts.globalBaseHint': '这是应用于所有用户的全局提示词。切换到"全局（所有用户）"范围以编辑。',
+  'prompts.globalBaseEmpty': '（全局正在使用内置默认值。切换到全局范围以替换。）',
+  'prompts.userAddendumLabel': '用户专属附加提示词',
+  'prompts.userAddendumHint': '仅对此用户，拼接在全局提示词之后。留空则只应用全局提示词。',
+  'prompts.effectivePreview': '实际生效的提示词预览（智能体真正看到的内容）',
+  'prompts.save': '保存',
+  'prompts.revert': '放弃编辑',
+  'prompts.revertToDefault': '恢复为默认',
+  'prompts.removeOverride': '移除覆盖',
+  'prompts.confirmRevertGlobal': '确定要重置全局提示词？所有用户将回退到智能体内置的默认值。',
+  'prompts.confirmRemoveUser': '确定要移除此用户的附加提示词？下次调用时该用户只会应用全局提示词。',
+  'prompts.lastEdited': '最近编辑：',
+  'prompts.lastEditedBy': '由',
+  'prompts.loading': '加载提示词中...',
+  'prompts.saveSuccess': '{scope} 的{agent}提示词已保存。',
+  'prompts.revertSuccess': '{scope} 的{agent}提示词覆盖已移除。',
+  'prompts.evoCardTitle': '优化建议（AgentCore Evo）',
+  'prompts.evoCardComingSoon': '即将推出 — AgentCore Evo 将基于近期会话分析此提示词并给出优化建议。',
 };
 
 export default zh;
