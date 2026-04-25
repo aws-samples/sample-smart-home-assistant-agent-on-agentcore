@@ -22,6 +22,12 @@ interface ChatMessage {
   // mutating a ref to a freshly-generated id) caused pending lookups to
   // miss so the 2nd utterance overwrote the 1st.
   pending?: boolean;
+  // Nova Sonic `completionId` — stable across SPECULATIVE + FINAL content
+  // blocks of the same utterance, so the reducer merges the two passes into
+  // one bubble. Distinct utterances get distinct completionIds and render as
+  // separate bubbles. (contentId would NOT work: Nova Sonic assigns
+  // different contentIds to the SPEC and FINAL blocks of one reply.)
+  completionId?: string;
 }
 
 function generateId(): string {
@@ -41,6 +47,11 @@ const ChatInterface: React.FC = () => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const voiceClientRef = useRef<VoiceClient | null>(null);
   const warmupRef = useRef(false);
+  // Pre-signed voice WS URL cached from the post-login warmup. Saves the
+  // SigV4 presign + Identity Pool creds fetch (~200-400ms) on the first
+  // voice button tap. AgentCore presigned URLs are valid for 5 min; we
+  // expire ours at 4 min to be safe.
+  const presignedWsRef = useRef<{ url: string; expiresAt: number } | null>(null);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -50,28 +61,72 @@ const ChatInterface: React.FC = () => {
     scrollToBottom();
   }, [messages, isTyping, scrollToBottom]);
 
-  // Warm up the AgentCore Runtime immediately after login so the first real
-  // message doesn't pay a cold-start penalty. The agent short-circuits the
-  // "__warmup__" prompt without invoking the LLM.
+  // Prefetch the AudioWorklet JS so the first tap on the voice button doesn't
+  // block on a CloudFront round-trip. We don't call getUserMedia here because
+  // it would trigger the mic permission prompt before the user asks for voice.
+  useEffect(() => {
+    fetch('/pcm-recorder-processor.js').catch(() => {
+      // Best-effort prefetch; ignore network errors.
+    });
+  }, []);
+
+  // Warm up BOTH AgentCore Runtimes (text + voice) immediately after login.
+  // Share one idToken + creds fetch across both requests, then fire them in
+  // parallel. Each runtime's agent short-circuits "__warmup__" without invoking
+  // the LLM, so the cost is ~50ms per request but it heats the Python process
+  // (imports, boto3 clients, DynamoDB connection pool).
   useEffect(() => {
     if (warmupRef.current) return;
     warmupRef.current = true;
     (async () => {
       try {
         const config = getConfig();
-        const token = await getIdToken();
-        const creds = await getAwsCredentials();
+        const [token, creds] = await Promise.all([getIdToken(), getAwsCredentials()]);
         const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
         const userId = decoded.email || decoded['cognito:username'] || decoded.sub;
         const sessionId = `user-session-${decoded.sub}`;
-        await signedInvocationsFetch({
-          agentRuntimeArn: config.agentRuntimeArn,
-          region: config.region,
-          credentials: creds,
-          sessionId,
-          body: { prompt: '__warmup__', userId },
-          extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
-        });
+
+        const targets = [config.agentRuntimeArn];
+        // Voice runtime is a separate ARN; fall back to text ARN if the deploy
+        // hasn't been run post-split yet (transition safety).
+        if (config.voiceAgentRuntimeArn && config.voiceAgentRuntimeArn !== config.agentRuntimeArn) {
+          targets.push(config.voiceAgentRuntimeArn);
+        }
+
+        await Promise.allSettled(targets.map((arn) =>
+          signedInvocationsFetch({
+            agentRuntimeArn: arn,
+            region: config.region,
+            credentials: creds,
+            sessionId,
+            body: { prompt: '__warmup__', userId },
+            extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
+          })
+        ));
+
+        // Pre-presign the voice WS URL with the same creds we already have
+        // in scope. The presigned URL is signed for 5 min; cache with a 4-min
+        // TTL so stale-but-unexpired URLs never hit the runtime. startVoice
+        // will re-presign if the cached entry has aged past the TTL.
+        const voiceArn = config.voiceAgentRuntimeArn || config.agentRuntimeArn;
+        if (voiceArn) {
+          try {
+            const wsUrl = await presignWsUrl({
+              agentRuntimeArn: voiceArn,
+              region: config.region,
+              credentials: creds,
+              sessionId,
+              expiresSeconds: 300,
+              extraQueryParams: { [CUSTOM_AUTH_HEADER]: token },
+            });
+            presignedWsRef.current = {
+              url: wsUrl,
+              expiresAt: Date.now() + 4 * 60 * 1000,
+            };
+          } catch {
+            // Presign prefetch is best-effort; startVoice will retry.
+          }
+        }
       } catch {
         // Warmup is best-effort; ignore failures.
       }
@@ -163,18 +218,34 @@ const ChatInterface: React.FC = () => {
       const decoded = jwtDecode<{ sub: string }>(token);
       const sessionId = `user-session-${decoded.sub}`;
 
-      // The AuthToken flows as a query-string allowlisted custom header
-      // per AgentCore WS docs so the agent can forward it to the MCP gateway.
-      const wsUrl = await presignWsUrl({
-        agentRuntimeArn: config.agentRuntimeArn,
-        region: config.region,
-        credentials: creds,
-        sessionId,
-        expiresSeconds: 300,
-        extraQueryParams: {
-          [CUSTOM_AUTH_HEADER]: token,
-        },
-      });
+      // Voice lives on its own AgentCore Runtime post-split. Fall back to the
+      // text runtime ARN if voiceAgentRuntimeArn is empty (transitional state
+      // while config.js catches up after a deploy).
+      const voiceArn = config.voiceAgentRuntimeArn || config.agentRuntimeArn;
+      // Reuse the WS URL pre-signed during login warmup when it's still
+      // fresh. Saves ~200-400ms of SigV4 signing + Identity Pool creds work
+      // on the first voice-button tap.
+      let wsUrl: string;
+      const cached = presignedWsRef.current;
+      if (cached && cached.expiresAt > Date.now()) {
+        wsUrl = cached.url;
+        // Invalidate after one use — a presigned WS URL can only be consumed
+        // once; subsequent taps need a fresh signature.
+        presignedWsRef.current = null;
+      } else {
+        // The AuthToken flows as a query-string allowlisted custom header
+        // per AgentCore WS docs so the agent can forward it to the MCP gateway.
+        wsUrl = await presignWsUrl({
+          agentRuntimeArn: voiceArn,
+          region: config.region,
+          credentials: creds,
+          sessionId,
+          expiresSeconds: 300,
+          extraQueryParams: {
+            [CUSTOM_AUTH_HEADER]: token,
+          },
+        });
+      }
 
       const client = new VoiceClient({
         wsUrl,
@@ -187,30 +258,72 @@ const ChatInterface: React.FC = () => {
             stopVoice();
           }
         },
-        onTranscript: ({ role, text, isFinal }) => {
+        onTranscript: ({ role, text, isFinal, completionId }) => {
           const uiRole: 'user' | 'agent' = role === 'user' ? 'user' : 'agent';
           setMessages((prev) => {
-            // Look for the most-recent still-pending bubble from this role.
-            // Nova Sonic emits a transcript twice (SPECULATIVE + FINAL) for the
-            // assistant so we need to update in place. However, for user
-            // speech the `generationStage` field is often absent, so
-            // `isFinal` stays false and the pending window never closes — the
-            // next utterance would clobber the previous one. Guard against
-            // that by treating the new transcript as a new utterance whenever
-            // the text is NOT an extension of the pending bubble (speculative
-            // refinements share a common prefix; fresh utterances don't).
+            // Primary dedup path: Nova Sonic gives the same `completionId`
+            // for both the SPECULATIVE and FINAL content blocks of one reply.
+            // Merge by (role, completionId). Distinct utterances get distinct
+            // completionIds and render as separate bubbles.
+            if (completionId) {
+              const idx = prev.findIndex((m) => m.completionId === completionId && m.role === uiRole);
+              if (idx >= 0) {
+                const prevMsg = prev[idx];
+                // Never regress: once a FINAL (pending=false) has landed for
+                // this completion, ignore any later SPECULATIVE that Nova
+                // might still emit (shouldn't happen per the protocol, but
+                // defend against out-of-order frames).
+                if (!prevMsg.pending && !isFinal) {
+                  return prev;
+                }
+                const next = prev.slice();
+                next[idx] = {
+                  ...prevMsg,
+                  content: text,
+                  timestamp: new Date(),
+                  pending: !isFinal,
+                };
+                return next;
+              }
+              // First time seeing this completionId — finalize older pending
+              // bubbles from this role so stale SPECULATIVE fragments can't
+              // be retargeted by later no-id events.
+              const next = prev.map((m) =>
+                m.role === uiRole && m.pending ? { ...m, pending: false } : m,
+              );
+              next.push({
+                id: generateId(),
+                role: uiRole,
+                content: text,
+                timestamp: new Date(),
+                pending: !isFinal,
+                completionId,
+              });
+              return next;
+            }
+
+            // Fallback (older agent builds that don't stamp completionId):
+            // prefix-match against the most-recent same-role bubble.
+            // Keeps the reducer backwards-compatible during rollout.
             for (let i = prev.length - 1; i >= 0; i--) {
               const m = prev[i];
               if (m.role !== uiRole) continue;
-              if (!m.pending) break;
-              const isContinuation = text.startsWith(m.content) || m.content.startsWith(text);
-              if (!isContinuation) break;
-              const next = prev.slice();
-              next[i] = { ...m, content: text, timestamp: new Date(), pending: !isFinal };
-              return next;
+              if (m.completionId) {
+                // Adjacent bubble already has an id — this no-id event is
+                // something else; stop scanning.
+                break;
+              }
+              const isContinuation =
+                text === m.content ||
+                text.startsWith(m.content) ||
+                m.content.startsWith(text);
+              if (m.pending && isContinuation) {
+                const next = prev.slice();
+                next[i] = { ...m, content: text, timestamp: new Date(), pending: !isFinal };
+                return next;
+              }
+              break;
             }
-            // Appending a new utterance: mark any earlier pending bubbles from
-            // this role as finalized so they can't be retargeted later.
             const next = prev.map((m) =>
               m.role === uiRole && m.pending ? { ...m, pending: false } : m,
             );

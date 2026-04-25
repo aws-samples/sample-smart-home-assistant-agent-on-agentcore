@@ -169,6 +169,10 @@ export interface SessionInfo {
   sessionId: string;
   lastActiveAt: string;
   totalTokens7d?: number;
+  // Which runtime the session lives on — the admin Lambda derives this from
+  // the DynamoDB sort key (`__session_text__` vs `__session_voice__`) so the
+  // stop-session call targets the correct runtime ARN.
+  kind?: 'text' | 'voice';
 }
 
 // ---------------------------------------------------------------------------
@@ -655,14 +659,20 @@ export async function importRegistryRecords(
 // Sessions
 // ---------------------------------------------------------------------------
 
-export async function stopSession(sessionId: string): Promise<void> {
+export async function stopSession(sessionId: string, kind?: 'text' | 'voice'): Promise<void> {
   // The runtime uses AWS_IAM (SigV4) auth now (see docs §9.7), so calling
   // StopRuntimeSession directly from the browser with a Bearer JWT fails with
   // 403 "Authorization method mismatch". Route through the admin Lambda
   // instead — it already has bedrock-agentcore:StopRuntimeSession granted.
+  //
+  // `kind` selects which runtime ARN to target. Text and voice sessions share
+  // the same sessionId (chatbot derives it from the Cognito sub) but live on
+  // separate runtimes, so the caller must say which one to stop. Defaults to
+  // text for backwards-compat if omitted.
   const headers = await authHeaders();
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : '';
   const res = await fetch(
-    `${getBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/stop`,
+    `${getBaseUrl()}/sessions/${encodeURIComponent(sessionId)}/stop${qs}`,
     { method: 'POST', headers },
   );
   if (!res.ok) {

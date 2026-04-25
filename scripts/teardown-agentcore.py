@@ -37,6 +37,7 @@ def main():
     project_dir = state.get("projectDir", "")
     gateway_id = state.get("gatewayId", "")
     runtime_id = state.get("runtimeId", "")
+    voice_runtime_id = state.get("voiceRuntimeId", "")
     registry_id = state.get("registryId", "")
 
     # Step 1: Delete the AgentCore CloudFormation stack (owns gateway, targets, runtime, memory)
@@ -49,29 +50,40 @@ def main():
         project_name = os.path.basename(project_dir)
         stack_name = f"AgentCore-{project_name}-default"
 
+    # Delete both text and voice stacks (voice is skipped if the state predates
+    # the voice-runtime split).
+    stack_names = []
     if stack_name:
-        print(f"\n[1/3] Deleting CloudFormation stack: {stack_name}")
-        try:
-            cf.describe_stacks(StackName=stack_name)
-            run(f"aws cloudformation delete-stack --stack-name {stack_name}")
-            print("  Waiting for stack deletion...")
-            run(f"aws cloudformation wait stack-delete-complete --stack-name {stack_name}")
-            print("  Stack deleted.")
-        except cf.exceptions.ClientError:
-            print("  Stack not found, skipping.")
+        stack_names.append(stack_name)
+    if voice_runtime_id:
+        stack_names.append("AgentCore-smarthomevoice-default")
+
+    if stack_names:
+        print(f"\n[1/3] Deleting CloudFormation stack(s): {', '.join(stack_names)}")
+        for sn in stack_names:
+            try:
+                cf.describe_stacks(StackName=sn)
+                run(f"aws cloudformation delete-stack --stack-name {sn}")
+                print(f"  Waiting for {sn} deletion...")
+                run(f"aws cloudformation wait stack-delete-complete --stack-name {sn}")
+                print(f"  {sn} deleted.")
+            except cf.exceptions.ClientError:
+                print(f"  {sn} not found, skipping.")
 
     # Step 2: Clean up specific resources by ID (safety net if stack delete missed them)
     print(f"\n[2/3] Cleaning up tracked resources...")
     client = boto3.client("bedrock-agentcore-control", region_name=REGION)
 
-    if runtime_id:
-        print(f"  Deleting runtime: {runtime_id}")
+    for rt_id, label in ((runtime_id, "text"), (voice_runtime_id, "voice")):
+        if not rt_id:
+            continue
+        print(f"  Deleting {label} runtime: {rt_id}")
         try:
-            eps = client.list_agent_runtime_endpoints(agentRuntimeId=runtime_id).get("agentRuntimeEndpoints", [])
+            eps = client.list_agent_runtime_endpoints(agentRuntimeId=rt_id).get("agentRuntimeEndpoints", [])
             for ep in eps:
-                client.delete_agent_runtime_endpoint(agentRuntimeId=runtime_id, agentRuntimeEndpointId=ep["agentRuntimeEndpointId"])
-            client.delete_agent_runtime(agentRuntimeId=runtime_id)
-            print("  Runtime deleted.")
+                client.delete_agent_runtime_endpoint(agentRuntimeId=rt_id, agentRuntimeEndpointId=ep["agentRuntimeEndpointId"])
+            client.delete_agent_runtime(agentRuntimeId=rt_id)
+            print(f"  {label.capitalize()} runtime deleted.")
         except Exception as e:
             print(f"  Skipped (already deleted or not found): {e}")
 

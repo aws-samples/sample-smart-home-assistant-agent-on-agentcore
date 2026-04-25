@@ -1363,10 +1363,10 @@ const AdminConsole: React.FC = () => {
     }
   };
 
-  const handleStopSession = async (sessionId: string) => {
+  const handleStopSession = async (sessionId: string, kind?: 'text' | 'voice') => {
     clearMessages();
     try {
-      await stopSession(sessionId);
+      await stopSession(sessionId, kind);
       setSuccess(t('sessions.stopRequested').replace('{id}', sessionId));
       loadSessions();
     } catch (err: any) {
@@ -2244,6 +2244,7 @@ const AdminConsole: React.FC = () => {
                 <thead>
                   <tr>
                     <th>{t('sessions.colUserId')}</th>
+                    <th>{t('sessions.colKind')}</th>
                     <th>{t('sessions.colSessionId')}</th>
                     <th>{t('sessions.colLastActive')}</th>
                     <th>{t('sessions.colTokens7d')}</th>
@@ -2252,9 +2253,16 @@ const AdminConsole: React.FC = () => {
                 </thead>
                 <tbody>
                   {sessions.map((s) => (
-                    <tr key={s.sessionId}>
+                    // SessionId alone isn't unique — the same user's text and
+                    // voice sessions share a sessionId (derived from the JWT
+                    // sub in the chatbot) but land on different runtimes.
+                    // Compose a key that includes kind to keep React keys stable.
+                    <tr key={`${s.kind || 'text'}:${s.sessionId}`}>
                       <td className="cell-name" title={s.userId}>
                         {s.userId.length > 24 ? s.userId.slice(0, 24) + '...' : s.userId}
+                      </td>
+                      <td className="cell-tools">
+                        {s.kind === 'voice' ? t('sessions.kindVoice') : t('sessions.kindText')}
                       </td>
                       <td className="cell-tools" title={s.sessionId}>
                         {s.sessionId.length > 36 ? s.sessionId.slice(0, 36) + '...' : s.sessionId}
@@ -2270,7 +2278,7 @@ const AdminConsole: React.FC = () => {
                       <td className="cell-actions">
                         <button
                           className="btn btn-sm btn-danger"
-                          onClick={() => handleStopSession(s.sessionId)}
+                          onClick={() => handleStopSession(s.sessionId, s.kind)}
                         >
                           {t('sessions.stop')}
                         </button>

@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { signIn, signUp, confirmSignUp, AuthTokens } from './CognitoAuth';
 import { useI18n } from '../i18n';
+import { getConfig } from '../config';
 
 interface LoginPageProps {
   onAuthenticated: (tokens: AuthTokens) => void;
@@ -27,6 +28,26 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { t, language, setLanguage } = useI18n();
+
+  // Preconnect to the AgentCore Runtime endpoint while the user types their
+  // password so the TLS handshake for the post-login warmup + the voice WS
+  // presign is already paid by the time we need it.
+  useEffect(() => {
+    try {
+      const region = getConfig().region;
+      const href = `https://bedrock-agentcore.${region}.amazonaws.com`;
+      const link = document.createElement('link');
+      link.rel = 'preconnect';
+      link.href = href;
+      link.crossOrigin = 'anonymous';
+      document.head.appendChild(link);
+      return () => {
+        document.head.removeChild(link);
+      };
+    } catch {
+      // Non-critical hint; ignore failures.
+    }
+  }, []);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();

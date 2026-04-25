@@ -20,12 +20,23 @@ type TranscriptEvent = {
   role: 'user' | 'assistant';
   text: string;
   /**
-   * Nova Sonic emits a transcript twice per utterance: a SPECULATIVE pass
-   * then a FINAL pass (`generationStage` in the raw event, exposed as
-   * `is_final` on `bidi_transcript_stream`). The UI should replace the
-   * speculative message with the final one rather than appending both.
+   * Whether this is the FINAL or SPECULATIVE pass of the utterance. FINAL
+   * should replace SPECULATIVE in the UI rather than append alongside it.
    */
   isFinal: boolean;
+  /**
+   * Nova Sonic's `completionId` — stable across SPECULATIVE and FINAL content
+   * blocks for the same reply. This is the correct dedup key: the two blocks
+   * have different `contentId`s but share `completionId`.
+   */
+  completionId?: string;
+  /**
+   * Nova Sonic's `contentStart.contentId`. Differs between SPEC and FINAL
+   * blocks of the same utterance; kept for debugging / fallback only.
+   */
+  contentId?: string;
+  /** "SPECULATIVE" | "FINAL" — raw stage string from the model. */
+  generationStage?: string;
 };
 
 export interface VoiceClientOptions {
@@ -180,7 +191,10 @@ export class VoiceClient {
       const role = msg.role === 'user' ? 'user' : 'assistant';
       const text = msg.text || (typeof msg.delta === 'string' ? msg.delta : msg.delta?.text) || '';
       const isFinal = Boolean(msg.is_final ?? msg.isFinal);
-      if (text) this.opts.onTranscript?.({ role, text, isFinal });
+      const contentId: string | undefined = typeof msg.contentId === 'string' ? msg.contentId : undefined;
+      const completionId: string | undefined = typeof msg.completionId === 'string' ? msg.completionId : undefined;
+      const generationStage: string | undefined = typeof msg.generationStage === 'string' ? msg.generationStage : undefined;
+      if (text) this.opts.onTranscript?.({ role, text, isFinal, contentId, completionId, generationStage });
     } else if (t === 'error') {
       this.opts.onStatus?.({ kind: 'error', message: msg.message || 'Agent error' });
     }

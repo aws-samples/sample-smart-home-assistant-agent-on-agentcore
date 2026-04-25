@@ -20,6 +20,7 @@ logger.setLevel(logging.INFO)
 TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "smarthome-skills")
 SKILL_FILES_BUCKET = os.environ.get("SKILL_FILES_BUCKET", "")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
+VOICE_RUNTIME_ARN = os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
 MEMORY_ID = os.environ.get("MEMORY_ID", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
@@ -506,16 +507,24 @@ def _fetch_token_totals_7d():
 def list_sessions(_event):
     """GET /sessions — list all user sessions from DynamoDB, enriched with
     past-7-day token totals pulled from CloudWatch Logs Insights."""
+    # Voice runtime writes __session_voice__, text runtime writes __session_text__.
+    # Both are surfaced in the admin Sessions list; a "kind" field lets the UI /
+    # future stop-session logic target the correct runtime ARN.
     resp = table.scan(
-        FilterExpression="skillName = :sk",
-        ExpressionAttributeValues={":sk": "__session__"},
+        FilterExpression="skillName = :sk_text OR skillName = :sk_voice",
+        ExpressionAttributeValues={
+            ":sk_text": "__session_text__",
+            ":sk_voice": "__session_voice__",
+        },
     )
     sessions = []
     for item in resp.get("Items", []):
+        sk = item.get("skillName", "")
         sessions.append({
             "userId": item["userId"],
             "sessionId": item.get("sessionId", ""),
             "lastActiveAt": item.get("lastActiveAt", ""),
+            "kind": "voice" if sk == "__session_voice__" else "text",
         })
     sessions.sort(key=lambda s: s.get("lastActiveAt", ""), reverse=True)
 
@@ -527,25 +536,79 @@ def list_sessions(_event):
 
 
 def stop_session(event):
-    """POST /sessions/{sessionId}/stop — stop an AgentCore runtime session."""
+    """POST /sessions/{sessionId}/stop?kind=text|voice — stop an AgentCore runtime session.
+
+    Text and voice sessions share the same sessionId (chatbot derives it from
+    the Cognito sub) but live on separate runtimes. The caller must supply
+    `kind` in the query string so we know which runtime ARN to target.
+    Defaults to text for backwards-compat if omitted.
+    """
     path_params = event.get("pathParameters") or {}
     session_id = path_params.get("sessionId", "")
+    qs = event.get("queryStringParameters") or {}
+    kind = (qs.get("kind") or "text").lower()
 
     if not session_id:
         return response(400, {"error": "sessionId is required"})
-    if not RUNTIME_ARN:
-        return response(500, {"error": "AGENT_RUNTIME_ARN not configured"})
+    if kind not in ("text", "voice"):
+        return response(400, {"error": "kind must be 'text' or 'voice'"})
 
+    target_arn = VOICE_RUNTIME_ARN if kind == "voice" else RUNTIME_ARN
+    if not target_arn:
+        env_key = "VOICE_AGENT_RUNTIME_ARN" if kind == "voice" else "AGENT_RUNTIME_ARN"
+        return response(500, {"error": f"{env_key} not configured"})
+
+    stopped_ok = False
+    not_found = False
+    err_msg = ""
     try:
         agentcore_client.stop_runtime_session(
             runtimeSessionId=session_id,
-            agentRuntimeArn=RUNTIME_ARN,
+            agentRuntimeArn=target_arn,
         )
-        return response(200, {"message": f"Session '{session_id}' stop requested"})
+        stopped_ok = True
     except agentcore_client.exceptions.ResourceNotFoundException:
-        return response(404, {"error": f"Session '{session_id}' not found"})
+        not_found = True
     except Exception as e:
-        return response(500, {"error": f"Failed to stop session: {str(e)}"})
+        err_msg = str(e)
+
+    if err_msg:
+        return response(500, {"error": f"Failed to stop session: {err_msg}"})
+
+    # Always clean up the DynamoDB record — whether the runtime session was
+    # active (stopped_ok) or had already idle-expired (not_found). Stale
+    # records would otherwise linger in the admin list until the chatbot
+    # writes a new one on the user's next invocation.
+    uid = _resolve_user_for_session(session_id, kind)
+    if uid:
+        try:
+            table.delete_item(Key={"userId": uid, "skillName": f"__session_{kind}__"})
+        except Exception as e:
+            logger.warning(f"stop_session: record delete skipped: {e}")
+
+    if stopped_ok:
+        return response(200, {"message": f"Session '{session_id}' ({kind}) stop requested"})
+    return response(200, {"message": f"Session '{session_id}' ({kind}) already stopped; record cleared"})
+
+
+def _resolve_user_for_session(session_id: str, kind: str) -> str:
+    """Look up the userId of the matching session record so stop can delete it.
+
+    Returns "" if not found — delete_item will then be a harmless no-op.
+    """
+    try:
+        scan_resp = table.scan(
+            FilterExpression="sessionId = :sid AND skillName = :sk",
+            ExpressionAttributeValues={
+                ":sid": session_id,
+                ":sk": f"__session_{kind}__",
+            },
+            ProjectionExpression="userId",
+        )
+        items = scan_resp.get("Items", [])
+        return items[0].get("userId", "") if items else ""
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
