@@ -5,10 +5,14 @@ import logging
 # ADOT auto-instrumentation: programmatic equivalent of `opentelemetry-instrument python agent.py`.
 # Must run before any other imports so ADOT can patch libraries (botocore, requests, etc.).
 # On AgentCore managed runtime, ADOT exports spans to CloudWatch automatically.
-os.environ.setdefault("OTEL_PYTHON_DISTRO", "aws_distro")
-os.environ.setdefault("OTEL_PYTHON_CONFIGURATOR", "aws_configurator")
-from opentelemetry.instrumentation.auto_instrumentation import sitecustomize  # noqa: E402
-sitecustomize.initialize()
+# Gated by DISABLE_ADOT=1 so the voice runtime (which imports this module for
+# its DynamoDB helpers) can opt out — see docs/superpowers/specs/2026-04-23-voice-agent-split-design.md.
+_ADOT_DISABLED = os.environ.get("DISABLE_ADOT") == "1"
+if not _ADOT_DISABLED:
+    os.environ.setdefault("OTEL_PYTHON_DISTRO", "aws_distro")
+    os.environ.setdefault("OTEL_PYTHON_CONFIGURATOR", "aws_configurator")
+    from opentelemetry.instrumentation.auto_instrumentation import sitecustomize  # noqa: E402
+    sitecustomize.initialize()
 
 from strands import Agent, AgentSkills  # noqa: E402
 from strands.vended_plugins.skills import Skill  # noqa: E402
@@ -26,7 +30,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configure Strands to emit OTEL traces (GenAI semantic conventions).
-StrandsTelemetry()
+# Gated by DISABLE_ADOT=1 so voice runtime can opt out (its sessions are long
+# streams where per-event spans give little triage value).
+if not _ADOT_DISABLED:
+    StrandsTelemetry()
 
 # agentcore CLI sets env vars as AGENTCORE_GATEWAY_{GATEWAYNAME}_URL / _ARN
 GATEWAY_URL = os.environ.get("AGENTCORE_GATEWAY_URL", "")
@@ -295,7 +302,7 @@ def _record_session(actor_id: str, session_id: str) -> None:
         from datetime import datetime, timezone
         _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
             "userId": actor_id,
-            "skillName": "__session__",
+            "skillName": "__session_text__",
             "sessionId": session_id,
             "lastActiveAt": datetime.now(timezone.utc).isoformat(),
         })
@@ -333,19 +340,6 @@ def handle_invocation(payload, context):
 
     response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id, auth_header=auth_header)
     return {"response": response, "status": "success"}
-
-
-@app.websocket
-async def ws_voice(websocket, context):
-    """GET /ws handler — voice mode. Bridges the browser to Nova Sonic."""
-    # Lazy import so the HTTP path doesn't pay for BidiAgent imports at cold start.
-    from voice_session import handle_voice_session
-    await handle_voice_session(
-        websocket,
-        context,
-        gateway_arn=GATEWAY_ARN,
-        region=AWS_REGION,
-    )
 
 
 if __name__ == "__main__":

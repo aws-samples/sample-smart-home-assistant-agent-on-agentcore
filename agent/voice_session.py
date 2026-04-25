@@ -28,9 +28,89 @@ import base64
 import logging
 import asyncio
 import traceback
+from datetime import datetime, timezone
 from typing import Optional
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
+
+# Shared helpers from the text-runtime module. Safe to import at module level
+# now that voice runs under its own entrypoint (voice_agent.py), so `agent`
+# won't cause recursive or duplicate runtime wiring. agent.py's ADOT block is
+# DISABLE_ADOT-gated (voice_agent.py sets that env var before this module
+# loads).
+from agent import (  # noqa: E402
+    SKILLS_TABLE_NAME,
+    _get_dynamodb,
+    load_skills_from_dynamodb,
+    load_system_prompt,
+)
+
+# Module-level imports for Strands' BidiAgent stack. Safe because voice_session
+# is only loaded in the voice runtime container, which eager-imports these in
+# voice_agent.py already — importing them here again is free and lets us
+# define a model subclass at module load time.
+from strands.experimental.bidi.agent import BidiAgent
+from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel
+from strands.tools.mcp.mcp_client import MCPClient
+from mcp.client.streamable_http import streamablehttp_client
+
+
+class _TranscriptIdTaggingModel(BidiNovaSonicModel):
+    """Tag `BidiTranscriptStreamEvent` with Nova Sonic's `completionId` and
+    `generationStage` so the browser can deduplicate SPECULATIVE + FINAL.
+
+    Nova Sonic emits each assistant utterance twice: first a SPECULATIVE
+    content block, then a FINAL content block. Each block has its *own*
+    `contentId`, so contentId alone can't merge them — but both blocks share
+    the surrounding `completionId` (set on `completionStart`, cleared on
+    `completionEnd`).
+
+    The browser reducer keys on `(role, completionId, generationStage)`:
+      - SPECULATIVE and FINAL of the same utterance share completionId and
+        role, so the FINAL replaces the SPECULATIVE bubble.
+      - A distinct utterance starts a new completion and gets its own
+        completionId, so it renders as a separate bubble.
+
+    Strands' `BidiNovaSonicModel` already tracks `_current_completion_id` and
+    `_generation_stage` as instance state — we just surface them on the
+    transcript event that Strands emits.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._current_text_content_id: str | None = None
+        logger.info("Voice WS: using _TranscriptIdTaggingModel (completionId/generationStage stamping active)")
+
+    def _convert_nova_event(self, nova_event):
+        # Cache the current TEXT contentId for completeness/debug. The browser
+        # dedup key is completionId (see class docstring) — contentId differs
+        # between SPECULATIVE and FINAL blocks so it cannot be the dedup key.
+        if "contentStart" in nova_event:
+            content_data = nova_event["contentStart"]
+            if content_data.get("type") == "TEXT":
+                self._current_text_content_id = content_data.get("contentId")
+
+        result = super()._convert_nova_event(nova_event)
+
+        # BidiTranscriptStreamEvent is a dict subclass; stamp completionId and
+        # generationStage on it so the browser can correlate SPEC/FINAL pairs.
+        try:
+            if result is not None and hasattr(result, "get") and result.get("type") == "bidi_transcript_stream":
+                if self._current_completion_id:
+                    result["completionId"] = self._current_completion_id
+                # _generation_stage is "SPECULATIVE" or "FINAL" (set on
+                # contentStart). It's the string Nova Sonic sends verbatim.
+                if getattr(self, "_generation_stage", None):
+                    result["generationStage"] = self._generation_stage
+                if self._current_text_content_id:
+                    result["contentId"] = self._current_text_content_id
+        except Exception:
+            pass
+
+        if "contentEnd" in nova_event:
+            self._current_text_content_id = None
+
+        return result
 
 logger = logging.getLogger(__name__)
 
@@ -91,19 +171,45 @@ VOICE_SYSTEM_PROMPT = (
 )
 
 
-# Read the bundled welcome clip at module import, not per-request. The MP3 is
-# baked into the CodeZip alongside agent.py (see scripts/setup-agentcore.py,
-# step 2 — Polly renders it into the agent directory before the CLI packages).
-# Loading here means the first WebSocket connection has the bytes ready in
-# RAM from the moment the process is warm.
+# Welcome clip is env-gated so we can measure real BidiAgent initialization
+# latency (the welcome audio otherwise masks it by giving the user something
+# to hear during startup). Set VOICE_WELCOME_ENABLED=1 to re-enable; the
+# chatbot's connection-banner status already covers the "is it alive?"
+# affordance, making audio greeting non-essential.
+_WELCOME_ENABLED = os.environ.get("VOICE_WELCOME_ENABLED", "0") == "1"
 _WELCOME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome-zh.mp3")
-try:
-    with open(_WELCOME_PATH, "rb") as _f:
-        _WELCOME_BYTES: Optional[bytes] = _f.read()
-    logger.info(f"Preloaded welcome audio: {len(_WELCOME_BYTES)} bytes from {_WELCOME_PATH}")
-except FileNotFoundError:
-    _WELCOME_BYTES = None
-    logger.warning(f"Welcome audio not found at {_WELCOME_PATH}; voice mode will skip the greeting")
+_WELCOME_BYTES: Optional[bytes] = None
+if _WELCOME_ENABLED:
+    # Read the bundled welcome clip at module import, not per-request. The MP3
+    # is baked into the CodeZip alongside agent.py (see scripts/setup-agentcore.py
+    # step 2 — Polly renders it into the agent directory before the CLI
+    # packages). Loading here means the first WebSocket connection has the
+    # bytes ready in RAM from the moment the process is warm.
+    try:
+        with open(_WELCOME_PATH, "rb") as _f:
+            _WELCOME_BYTES = _f.read()
+        logger.info(f"Preloaded welcome audio: {len(_WELCOME_BYTES)} bytes from {_WELCOME_PATH}")
+    except FileNotFoundError:
+        logger.warning(f"Welcome audio not found at {_WELCOME_PATH}; voice mode will skip the greeting")
+else:
+    logger.info("Welcome clip disabled (VOICE_WELCOME_ENABLED != '1')")
+
+
+def _record_voice_session(actor_id: str, session_id: str) -> None:
+    """Mirror agent._record_session for voice sessions, writing under a
+    distinct sort key so setup-agentcore.py can invalidate them against the
+    voice-runtime ARN (different from the text runtime's ARN)."""
+    if not SKILLS_TABLE_NAME:
+        return
+    try:
+        _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
+            "userId": actor_id,
+            "skillName": "__session_voice__",
+            "sessionId": session_id,
+            "lastActiveAt": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.warning(f"Failed to record voice session: {e}")
 
 
 def _extract_devices(mcp_response):
@@ -213,19 +319,9 @@ async def handle_voice_session(
     if config is None:
         return
 
-    # Lazy-import so the HTTP path doesn't pay for BidiAgent deps at startup.
-    try:
-        from strands.experimental.bidi.agent import BidiAgent
-        from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel
-        from strands.tools.mcp.mcp_client import MCPClient
-        from mcp.client.streamable_http import streamablehttp_client
-    except ImportError as e:
-        logger.error(f"strands bidi extras not installed: {e}")
-        await websocket.send_json({
-            "type": "error",
-            "message": "Voice mode not available on this server.",
-        })
-        return
+    # BidiAgent / BidiNovaSonicModel / MCPClient are module-level imports now
+    # (voice_agent.py eager-imports them for warmup; importing here too is
+    # free after that).
 
     # Load skills (same DynamoDB-backed loader the text path uses). BidiAgent
     # doesn't support the AgentSkills plugin API, so we inline the skill
@@ -247,40 +343,13 @@ async def handle_voice_session(
             except Exception as e:
                 logger.warning(f"Could not parse idToken claims for skill loading: {e}")
 
-    # Voice context: load only the "all-devices-on" skill (the multi-step
-    # orchestration case that actually needs explicit instructions). Inlining
-    # all 5 skill bodies was making the system prompt big enough that Nova
-    # Sonic started ignoring the tool schema and hallucinating. Single-step
-    # device control is already covered by the base prompt's tool names.
-    skill_blocks: list[str] = []
-    try:
-        from agent import load_skills_from_dynamodb, SKILLS_TABLE_NAME
-        if SKILLS_TABLE_NAME:
-            for skill in load_skills_from_dynamodb(actor_id):
-                if skill.name != "all-devices-on":
-                    continue
-                body = _rewrite_tool_names(skill.instructions or "")
-                if body.strip():
-                    skill_blocks.append(f"\n\n### When the user asks to 'turn on all devices':\n{body.strip()}")
-                break
-            logger.info(f"Voice WS: inlined {len(skill_blocks)} skill(s) for actor={actor_id}")
-    except Exception as e:
-        logger.warning(f"Voice WS: skill loading failed: {e}")
-
-    # Resolve voice system prompt override (per-user → global → hardcoded default).
-    # Same DynamoDB resolution as the text path, stored under skillName="__prompt_voice__".
-    base_voice_prompt = VOICE_SYSTEM_PROMPT
-    try:
-        from agent import load_system_prompt
-        override = load_system_prompt(actor_id, "voice")
-        if override:
-            base_voice_prompt = override
-            logger.info(f"Voice WS: using per-user/global voice prompt override for actor={actor_id}")
-    except Exception as e:
-        logger.warning(f"Voice WS: voice prompt override load failed, using default: {e}")
+    # Record this voice session under __session_voice__ so redeploy-time session
+    # invalidation can target the voice-runtime ARN (different from text).
+    _record_voice_session(actor_id, session_id)
 
     # Extract the forwarded idToken from the request context so we can pass it
-    # as Bearer to the CUSTOM_JWT gateway (same flow as the text path).
+    # as Bearer to the CUSTOM_JWT gateway (same flow as the text path). We do
+    # this first because it's cheap and the MCPClient below needs gw_headers.
     gw_headers = {}
     rh = getattr(context, "request_headers", None)
     if rh:
@@ -292,12 +361,68 @@ async def handle_voice_session(
         else:
             logger.warning("Voice WS: no user token — gateway per-user policies won't apply")
 
+    # Parallelize the three IO-bound startup tasks that have no mutual
+    # dependency:
+    #   (1) DynamoDB skills query (per-user + global)
+    #   (2) DynamoDB voice-prompt override (per-user + global, 2 GetItem calls)
+    #   (3) MCP list_tools_sync (network round-trip to the gateway, paginated)
+    # Sequential baseline was ~1s; running them concurrent cuts it to the
+    # slowest single call (usually MCP at ~400-600ms).
+    #
+    # For (3) we also need the MCPClient open — but we can't close/reopen
+    # across the session (MCPClient holds the gateway SSE stream), so the
+    # list_tools work happens inside a spun-up MCPClient that stays open for
+    # the rest of the session. Enter the context synchronously and keep it
+    # alive via a nested coroutine below.
+    skill_blocks: list[str] = []
+    base_voice_prompt = VOICE_SYSTEM_PROMPT
+
+    def _load_skill_blocks() -> list[str]:
+        """Voice context: load only the 'all-devices-on' skill (the multi-step
+        orchestration case). Inlining all 5 skill bodies made the prompt big
+        enough that Nova Sonic started hallucinating. Single-device commands
+        are already covered by the base prompt's tool names.
+        """
+        blocks: list[str] = []
+        try:
+            if SKILLS_TABLE_NAME:
+                for skill in load_skills_from_dynamodb(actor_id):
+                    if skill.name != "all-devices-on":
+                        continue
+                    body = _rewrite_tool_names(skill.instructions or "")
+                    if body.strip():
+                        blocks.append(f"\n\n### When the user asks to 'turn on all devices':\n{body.strip()}")
+                    break
+        except Exception as e:
+            logger.warning(f"Voice WS: skill loading failed: {e}")
+        return blocks
+
+    def _load_prompt_override() -> Optional[str]:
+        try:
+            return load_system_prompt(actor_id, "voice")
+        except Exception as e:
+            logger.warning(f"Voice WS: voice prompt override load failed, using default: {e}")
+            return None
+
+    # Kick off DDB reads in worker threads so they run in parallel with MCP.
+    skill_task = asyncio.create_task(asyncio.to_thread(_load_skill_blocks))
+    prompt_task = asyncio.create_task(asyncio.to_thread(_load_prompt_override))
+
     # Open MCP gateway and list tools. The tools list is what lets the BidiAgent
     # actually invoke `discover_devices`, `control_device`, etc — without this
     # Nova Sonic has no idea the tools exist and will hallucinate device lists
-    # from its training data. `mcp_gateway_arn` on the model alone does NOT
-    # wire the tools into Strands' execution path.
-    model = BidiNovaSonicModel(
+    # from its training data.
+    #
+    # Do NOT pass `mcp_gateway_arn=[...]` here. Older Strands silently ignored
+    # it, but current builds honor it and register the gateway using the
+    # runtime's execution-role IAM credentials. That parallel path conflicts
+    # with our explicit `BidiAgent(tools=...)` pipeline: Nova Sonic invokes via
+    # the model's internal path, and the result never reaches Strands' tool
+    # dispatcher — so the WS never emits `bidi_tool_result` and Nova Sonic
+    # hangs waiting for a toolResult that will never arrive. We keep a single
+    # source of truth: the MCPClient below (with the user JWT as Bearer),
+    # feeding tools via BidiAgent(tools=).
+    model = _TranscriptIdTaggingModel(
         region=region,
         model_id=config["model_id"],
         provider_config={
@@ -307,7 +432,6 @@ async def handle_voice_session(
                 "voice": config["voice"],
             }
         },
-        mcp_gateway_arn=[gateway_arn] if gateway_arn else None,
     )
 
     mcp_client = None
@@ -315,21 +439,42 @@ async def handle_voice_session(
     if GATEWAY_URL:
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
 
+    def _load_tools_sync() -> list:
+        """Enter MCPClient and paginate list_tools. Sync helper so we can call
+        it via asyncio.to_thread for concurrent execution with the DDB reads.
+        Caller must re-enter the context later (MCPClient's background thread
+        persists across with-blocks; re-entering is cheap)."""
+        # The MCPClient context has already been entered below; this runs
+        # within that live session.
+        tools = []
+        pagination_token = None
+        while True:
+            result = mcp_client.list_tools_sync(pagination_token=pagination_token)
+            tools.extend(result)
+            if result.pagination_token is None:
+                break
+            pagination_token = result.pagination_token
+        return list(tools)
+
     async def _run_with_tools():
-        nonlocal tools_list
+        nonlocal tools_list, skill_blocks, base_voice_prompt
         if mcp_client is not None:
             # MCPClient is a sync context manager; enter it once for the full
-            # voice session so the background pumps stay alive.
+            # voice session so the background pumps stay alive. list_tools is
+            # dispatched to a worker thread so it runs concurrently with the
+            # DDB reads we kicked off above.
             with mcp_client:
-                tools = []
-                pagination_token = None
-                while True:
-                    result = mcp_client.list_tools_sync(pagination_token=pagination_token)
-                    tools.extend(result)
-                    if result.pagination_token is None:
-                        break
-                    pagination_token = result.pagination_token
+                tools_task = asyncio.create_task(asyncio.to_thread(_load_tools_sync))
+                skills_result, prompt_result, tools = await asyncio.gather(
+                    skill_task, prompt_task, tools_task,
+                )
+                skill_blocks = skills_result
+                if prompt_result:
+                    base_voice_prompt = prompt_result
+                    logger.info(f"Voice WS: using per-user/global voice prompt override for actor={actor_id}")
+                logger.info(f"Voice WS: inlined {len(skill_blocks)} skill(s) for actor={actor_id}")
                 tools_list = list(tools)
+
                 # Composite tool: Nova Sonic's voice model doesn't auto-chain
                 # tool calls the way text LLMs do — it typically makes one
                 # tool call, reads the result, then ends the turn. So
@@ -356,6 +501,11 @@ async def handle_voice_session(
                 await _drive_agent(agent)
         else:
             logger.warning("Voice WS: no GATEWAY_URL — running without MCP tools")
+            # Still need to await the DDB tasks so their exceptions surface.
+            skills_result, prompt_result = await asyncio.gather(skill_task, prompt_task)
+            skill_blocks = skills_result
+            if prompt_result:
+                base_voice_prompt = prompt_result
             effective_prompt = base_voice_prompt + "".join(skill_blocks)
             agent = BidiAgent(
                 model=model,
@@ -400,6 +550,13 @@ async def handle_voice_session(
                 et = event.get("type") if hasattr(event, "get") else None
                 if et in ("tool_use_stream", "bidi_tool_use", "tool_use", "bidi_tool_result"):
                     logger.info(f"Voice WS: tool event {et}: {str(event)[:300]}")
+                elif et == "bidi_transcript_stream":
+                    logger.info(
+                        "Voice WS: transcript role=%s stage=%s is_final=%s completionId=%s contentId=%s text=%s",
+                        event.get("role"), event.get("generationStage"),
+                        event.get("is_final"), event.get("completionId"),
+                        event.get("contentId"), (event.get("text") or "")[:80],
+                    )
             except Exception:
                 pass
             try:
@@ -427,11 +584,16 @@ async def handle_voice_session(
             except Exception as e:
                 logger.warning(f"send_output fallback failed: {e}")
 
-        welcome_task = asyncio.create_task(_welcome_stream(websocket))
+        welcome_task = (
+            asyncio.create_task(_welcome_stream(websocket))
+            if _WELCOME_ENABLED and _WELCOME_BYTES
+            else None
+        )
         try:
             await agent.run(inputs=[handle_input], outputs=[send_output])
         finally:
-            welcome_task.cancel()
+            if welcome_task is not None:
+                welcome_task.cancel()
 
     async def _welcome_stream(ws: WebSocket):
         """Emit the preloaded welcome clip once the BidiAgent pipeline is live.

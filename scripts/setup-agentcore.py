@@ -583,15 +583,16 @@ def main():
         # effect immediately. Without this, existing sessions keep serving
         # stale agent.py / voice_session.py code until they idle-timeout
         # (observed up to several minutes of drift after a redeploy).
-        # Session IDs are tracked in DynamoDB under skillName="__session__"
-        # by the agent itself on every invocation (agent.py:_record_session).
+        # Text-runtime session IDs are tracked in DynamoDB under
+        # skillName="__session_text__" (voice uses "__session_voice__" in a
+        # later block). Agent writes via agent.py:_record_session.
         try:
             dataplane = boto3.client("bedrock-agentcore", region_name=REGION)
             ddb = boto3.resource("dynamodb", region_name=REGION)
             table = ddb.Table(skills_table)
             session_items = table.scan(
                 FilterExpression="skillName = :s",
-                ExpressionAttributeValues={":s": "__session__"},
+                ExpressionAttributeValues={":s": "__session_text__"},
                 ProjectionExpression="sessionId",
             ).get("Items", [])
             stopped = 0
@@ -655,12 +656,200 @@ def main():
             except Exception as e:
                 print(f"  Warning: Failed to attach DynamoDB policy: {e}")
 
-    # Grant the Cognito authenticated role permission to invoke the runtime.
-    # Browser calls /invocations (SigV4) and /ws (SigV4 presigned URL) using
-    # credentials from the Cognito Identity Pool's authenticated role.
+    # --------------------------------------------------------
+    # Voice runtime: separate AgentCore Runtime for /ws (Nova Sonic BidiAgent)
+    # --------------------------------------------------------
+    # Rationale: keeping voice on its own runtime lets the login-time warmup
+    # predictably heat the strands.bidi import chain and lets voice and text
+    # scale/redeploy independently. See
+    # docs/superpowers/specs/2026-04-23-voice-agent-split-design.md.
+    voice_runtime_id = ""
+    voice_runtime_arn = ""
+    # Ensure shared state is defined even if text runtime_id was falsy.
+    if "ac" not in dir():
+        ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
+    if "existing_env" not in dir():
+        existing_env = {}
+    if "skills_table" not in dir():
+        skills_table = outputs.get("SkillsTableName", "smarthome-skills")
+    try:
+        print("\n" + "=" * 60)
+        print("  Creating voice runtime (smarthomevoice)...")
+        print("=" * 60)
+
+        voice_project_parent = os.path.join(AGENTCORE_DIR, "voice-workdir")
+        if os.path.exists(voice_project_parent):
+            shutil.rmtree(voice_project_parent)
+        os.makedirs(voice_project_parent)
+
+        r = run("agentcore create --name smarthomevoice --defaults", cwd=voice_project_parent)
+        if r.returncode != 0:
+            raise Exception("agentcore create smarthomevoice failed")
+        voice_project_dir = os.path.join(voice_project_parent, "smarthomevoice")
+
+        # Replace default agent code with our agent/ directory — same source as
+        # text runtime but with voice_agent.py as entrypoint (see single-package
+        # two-entrypoint layout).
+        voice_default_app = os.path.join(voice_project_dir, "app", "smarthomevoice")
+        if os.path.exists(voice_default_app):
+            shutil.rmtree(voice_default_app)
+        shutil.copytree(agent_code_src, voice_default_app)
+
+        # Patch agentcore.json: entrypoint, env vars, AWS_IAM auth (/ws needs it)
+        voice_config_file = os.path.join(voice_project_dir, "agentcore", "agentcore.json")
+        with open(voice_config_file) as vf:
+            voice_config = json.load(vf)
+        if voice_config.get("runtimes"):
+            vrt = voice_config["runtimes"][0]
+            vrt["entrypoint"] = "voice_agent.py"
+            vrt.pop("authorizerType", None)
+            vrt.pop("authorizerConfiguration", None)
+            vrt["environmentVariables"] = {
+                "AWS_REGION": REGION,
+                "DISABLE_ADOT": "1",
+            }
+        with open(voice_config_file, "w") as vf:
+            json.dump(voice_config, vf, indent=2)
+
+        voice_targets_file = os.path.join(voice_project_dir, "agentcore", "aws-targets.json")
+        with open(voice_targets_file, "w") as vf:
+            json.dump([{"name": "default", "region": REGION, "account": account_id}], vf, indent=2)
+
+        print("\n  Deploying smarthomevoice runtime...")
+        r = run("agentcore deploy -y --verbose", cwd=voice_project_dir)
+        if r.returncode != 0:
+            raise Exception("agentcore deploy smarthomevoice failed")
+
+        # Fetch voice runtime IDs from its CFN stack
+        voice_ac_stack = "AgentCore-smarthomevoice-default"
+        voice_ac_resp = cf.describe_stacks(StackName=voice_ac_stack)
+        voice_ac_outputs = {o["OutputKey"]: o["OutputValue"]
+                            for o in voice_ac_resp["Stacks"][0].get("Outputs", [])}
+        for key, val in voice_ac_outputs.items():
+            if "RuntimeIdOutput" in key:
+                voice_runtime_id = val
+            elif "RuntimeArnOutput" in key:
+                voice_runtime_arn = val
+
+        # Patch voice runtime env vars + auth + IAM, same pattern as text runtime
+        if voice_runtime_id:
+            print(f"  Patching voice runtime environment (id={voice_runtime_id})...")
+            v_rt_info = ac.get_agent_runtime(agentRuntimeId=voice_runtime_id)
+            voice_env = v_rt_info.get("environmentVariables", {})
+            voice_env["AWS_REGION"] = REGION
+            voice_env["DISABLE_ADOT"] = "1"
+            voice_env["SKILLS_TABLE_NAME"] = skills_table
+            voice_env["NOVA_SONIC_MODEL_ID"] = "amazon.nova-2-sonic-v1:0"
+            if gateway_arn:
+                voice_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
+            # Propagate AGENTCORE_GATEWAY_*_URL from text runtime env (added by
+            # the agentcore CLI automatically during text deploy).
+            for k, v in existing_env.items():
+                if k.startswith("AGENTCORE_GATEWAY_") and k.endswith("_URL"):
+                    voice_env[k] = v
+
+            ac.update_agent_runtime(
+                agentRuntimeId=voice_runtime_id,
+                agentRuntimeArtifact=v_rt_info["agentRuntimeArtifact"],
+                roleArn=v_rt_info["roleArn"],
+                networkConfiguration=v_rt_info["networkConfiguration"],
+                environmentVariables=voice_env,
+                protocolConfiguration={"serverProtocol": "HTTP"},
+                requestHeaderConfiguration={
+                    "requestHeaderAllowlist": [
+                        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken",
+                    ],
+                },
+            )
+            print("  Voice runtime set to AWS_IAM + HTTP protocol + custom auth header allowlist")
+
+            # Stop any active voice sessions so the fresh CodeZip takes effect.
+            # Voice sessions are tracked under skillName=__session_voice__.
+            try:
+                v_dataplane = boto3.client("bedrock-agentcore", region_name=REGION)
+                v_table = boto3.resource("dynamodb", region_name=REGION).Table(skills_table)
+                v_sessions = v_table.scan(
+                    FilterExpression="skillName = :s",
+                    ExpressionAttributeValues={":s": "__session_voice__"},
+                    ProjectionExpression="sessionId",
+                ).get("Items", [])
+                v_stopped = 0
+                for item in v_sessions:
+                    sid = item.get("sessionId")
+                    if not sid:
+                        continue
+                    try:
+                        v_dataplane.stop_runtime_session(
+                            agentRuntimeArn=voice_runtime_arn,
+                            runtimeSessionId=sid,
+                        )
+                        v_stopped += 1
+                    except v_dataplane.exceptions.ResourceNotFoundException:
+                        pass
+                    except Exception as e:
+                        print(f"    Warning: could not stop voice session {sid}: {e}")
+                print(f"  Stopped {v_stopped} active voice runtime session(s)")
+            except Exception as e:
+                print(f"  Warning: voice session invalidation skipped: {e}")
+
+            # Voice runtime role: DynamoDB read + Nova Sonic bidi invoke
+            v_role_arn = v_rt_info.get("roleArn", "")
+            if v_role_arn:
+                v_role_name = v_role_arn.split("/")[-1]
+                v_policy_doc = json.dumps({
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
+                            "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "bedrock:InvokeModelWithBidirectionalStream",
+                                "bedrock:InvokeModelWithResponseStream",
+                                "bedrock:InvokeModel",
+                            ],
+                            "Resource": "*",
+                        },
+                        {
+                            # ListFoundationModels is called by voice_agent.py's
+                            # __warmup__ handler to preheat the Bedrock client
+                            # (endpoint resolution + creds + TLS). Cheap and
+                            # read-only; scoped to the control plane.
+                            "Effect": "Allow",
+                            "Action": ["bedrock:ListFoundationModels"],
+                            "Resource": "*",
+                        },
+                    ],
+                })
+                try:
+                    iam_client = boto3.client("iam", region_name=REGION)
+                    iam_client.put_role_policy(
+                        RoleName=v_role_name,
+                        PolicyName="VoiceRuntimeAccess",
+                        PolicyDocument=v_policy_doc,
+                    )
+                    print(f"  Granted DynamoDB + Bedrock bidi to voice role {v_role_name}")
+                except Exception as e:
+                    print(f"  Warning: Failed to attach voice runtime policy: {e}")
+
+        print(f"  Voice runtime ready — ID={voice_runtime_id} ARN={voice_runtime_arn}")
+    except Exception as e:
+        print(f"  Warning: voice runtime setup failed: {e}")
+        import traceback as _tb
+        _tb.print_exc()
+
+    # Grant the Cognito authenticated role permission to invoke both runtimes.
+    # Browser calls /invocations (SigV4) on text ARN and /ws (SigV4 presigned URL)
+    # on voice ARN using credentials from the Cognito Identity Pool authenticated role.
     cognito_auth_role_arn = outputs.get("CognitoAuthRoleArn", "")
     if runtime_arn and cognito_auth_role_arn:
         cognito_auth_role_name = cognito_auth_role_arn.split("/")[-1]
+        invoke_resources = [runtime_arn, f"{runtime_arn}/*"]
+        if voice_runtime_arn:
+            invoke_resources.extend([voice_runtime_arn, f"{voice_runtime_arn}/*"])
         try:
             iam_client = boto3.client("iam", region_name=REGION)
             iam_client.put_role_policy(
@@ -675,11 +864,11 @@ def main():
                             "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
                         ],
                         # Wildcard covers endpoint qualifiers (e.g. /DEFAULT).
-                        "Resource": [runtime_arn, f"{runtime_arn}/*"],
+                        "Resource": invoke_resources,
                     }],
                 }),
             )
-            print(f"  Granted runtime-invoke to Cognito auth role {cognito_auth_role_name}")
+            print(f"  Granted runtime-invoke on {len(invoke_resources) // 2} runtime(s) to Cognito auth role {cognito_auth_role_name}")
         except Exception as e:
             print(f"  Warning: Failed to grant runtime-invoke to auth role: {e}")
 
@@ -696,6 +885,7 @@ def main():
             admin_env = {
                 "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
                 "AGENT_RUNTIME_ARN": runtime_arn,
+                "VOICE_AGENT_RUNTIME_ARN": voice_runtime_arn,
                 "AWS_REGION_OVERRIDE": REGION,
                 "COGNITO_USER_POOL_ID": outputs.get("UserPoolId", ""),
                 "GATEWAY_ID": gateway_id,
@@ -933,6 +1123,7 @@ def main():
   cognitoDomain: "{outputs['CognitoDomain']}",
   cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
   agentRuntimeArn: "{runtime_arn}",
+  voiceAgentRuntimeArn: "{voice_runtime_arn}",
   region: "{REGION}"
 }};"""
         print("Updating chatbot config.js...")
@@ -979,6 +1170,8 @@ def main():
         json.dump({
             "gatewayId": gateway_id, "runtimeId": runtime_id,
             "runtimeArn": runtime_arn, "projectDir": project_dir,
+            "voiceRuntimeId": voice_runtime_id,
+            "voiceRuntimeArn": voice_runtime_arn,
             "knowledgeBaseId": kb_id, "dataSourceId": kb_data_source_id,
             "registryId": registry_id,
         }, f, indent=2)
@@ -990,6 +1183,9 @@ def main():
     print(f"  Gateway URL:   {gateway_url}")
     print(f"  Runtime ID:    {runtime_id}")
     print(f"  Runtime ARN:   {runtime_arn}")
+    if voice_runtime_id:
+        print(f"  Voice Runtime ID:  {voice_runtime_id}")
+        print(f"  Voice Runtime ARN: {voice_runtime_arn}")
     print(f"\n  Device Sim:    {outputs.get('DeviceSimulatorUrl', '')}")
     print(f"  Chatbot:       {outputs.get('ChatbotUrl', '')}")
     print(f"  Admin Console: {outputs.get('AdminConsoleUrl', '')}")

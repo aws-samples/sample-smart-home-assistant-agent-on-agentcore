@@ -37,7 +37,8 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 |-----------|-----------|---------|
 | Device Simulator | React + TypeScript + MQTT | Visual simulation of 4 smart home devices |
 | Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
-| AI Agent | Strands Agent on AgentCore Runtime (Kimi-2.5) | Understands intent and orchestrates device commands |
+| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5) | Text chat via `POST /invocations` |
+| AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws` |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
 | Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation |
 | Skill ERP | React + TypeScript + REST API | End-user skill publishing: authors SKILL.md records, publishes to AgentCore Registry for curator approval |
@@ -984,7 +985,7 @@ Each user gets a **fixed runtime session ID** derived from their Cognito `sub` (
 
 **User identification:** The AgentCore Runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent process. To work around this, the chatbot passes the user's email in the POST body as `userId`, and the agent reads it from `payload.get("userId")`.
 
-**Session tracking:** On each invocation, the agent records `{userId, sessionId, lastActiveAt}` to DynamoDB (key: `userId`, `skillName = "__session__"`). The Admin Console reads these records in the Sessions tab.
+**Session tracking:** On each invocation, the agent records `{userId, sessionId, lastActiveAt}` to DynamoDB. After the voice-runtime split (see [§9.7](#97-voice-mode-nova-sonic-bi-directional-streaming)) the records are split by sort key: `skillName = "__session_text__"` for the text runtime and `"__session_voice__"` for the voice runtime. The Admin Console's Sessions tab reads both keys and renders a `Kind` column so each row can be stopped against the right runtime ARN (admin-api `POST /sessions/{id}/stop?kind=text|voice`).
 
 **Per-session 7-day token usage:** The Sessions tab also shows each session's total token consumption over the last 7 days. AgentCore Runtime exports Strands/ADOT spans to the CloudWatch Logs `aws/spans` log group; each `chat` span (emitted by `strands.telemetry.tracer`) carries both `attributes.session.id` and `attributes.gen_ai.usage.total_tokens`. The admin Lambda runs a CloudWatch Logs Insights query on `GET /sessions` that sums `total_tokens` grouped by `session.id` for the last 7 days and joins the result onto the DynamoDB session rows as `totalTokens7d`. The query is the backing dataset for the CloudWatch "GenAI Observability → Bedrock AgentCore → All sessions" dashboard, so the numbers match what an admin sees in that console view. Permissions: the admin Lambda gets `logs:StartQuery`/`logs:StopQuery` scoped to `log-group:aws/spans:*` plus `logs:GetQueryResults` (required at `*` since GetQueryResults doesn't support resource-level scoping).
 
@@ -1243,7 +1244,7 @@ admin-console/
 | **Agent Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
 | **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY), and **Demo Links** column with one-click deep links to the chatbot (`?username=<email>` for login prefill) and device simulator for each user — optimized for admin-led demos |
 | **Integrations** | Tool source registry — Lambda targets (active), MCP servers, A2A agents, API Gateway (planned) |
-| **Sessions** | Runtime session monitoring with User ID, Session ID, Last Active, and Stop button |
+| **Sessions** | Runtime session monitoring with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` to the admin API so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears from the list immediately |
 | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory |
 | **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles, and Cedar Policy Engine settings |
 
@@ -1467,8 +1468,39 @@ The `setup-agentcore.py` script handles one-time KB setup:
 ### 9.7 Voice Mode (Nova Sonic Bi-directional Streaming)
 
 The chatbot exposes a voice mode that streams the user's microphone audio to
-Amazon Nova Sonic (`amazon.nova-2-sonic-v1:0`) via the AgentCore Runtime's
+Amazon Nova Sonic (`amazon.nova-2-sonic-v1:0`) via a dedicated AgentCore Runtime's
 `/ws` endpoint and plays the model's reply audio back in the browser.
+
+**Two runtimes, one agent codebase.** Voice runs on `smarthomevoice`, a second
+AgentCore Runtime dedicated to the `/ws` path; text chat continues on the
+original `smarthome` runtime's `/invocations`. Both runtimes package the same
+`agent/` directory but use different entrypoints (`agent.py` for text,
+`voice_agent.py` for voice) and share DynamoDB helpers via a plain module
+import. Motivation, tradeoffs, and per-runtime configuration matrix live in
+`docs/superpowers/specs/2026-04-23-voice-agent-split-design.md` — the short
+version is: the login-time warmup ping now reliably heats the `strands.bidi`
+import chain on the voice container, and the two runtimes can scale / redeploy
+independently.
+
+**ADOT on text only.** The voice runtime sets `DISABLE_ADOT=1` in its
+environment, which gates the `agent.py` module-level
+`sitecustomize.initialize()` + `StrandsTelemetry()` calls. Voice sessions are
+long streams where per-event spans offer little triage value; skipping ADOT
+saves 100-300ms of voice cold-start cost.
+
+**Session key split.** The text runtime writes `skillName="__session_text__"`
+in DynamoDB; the voice path writes `__session_voice__`. Redeploy-time session
+invalidation (`setup-agentcore.py`) and admin stop-session both use the key
+to pick the correct runtime ARN.
+
+**Login warmup fans out to both runtimes.** The chatbot fetches Cognito /
+Identity Pool creds once, then issues two parallel SigV4-signed
+`POST /invocations {"prompt":"__warmup__"}` requests — one per runtime ARN.
+Each runtime short-circuits the warmup without invoking its LLM, so the cost
+is ~50ms per request but heats the Python process (imports, boto3 clients).
+`voice_agent.py` additionally does module-level eager imports of
+`strands.experimental.bidi.*` and `MCPClient` so the warmup request itself
+triggers the heavy import chain.
 
 **Runtime authorizer: AWS_IAM (SigV4).** The CUSTOM_JWT path on `/ws` is
 broken at the runtime's edge (handshake rejected with HTTP 424; confirmed
@@ -1583,48 +1615,53 @@ tagged so the browser decodes the payload as MP3 instead of PCM):
  "seq": N, "total": M, "audio": "<base64 mp3 chunk>"}
 ```
 
-**Welcome clip delivery — streamed through the BidiAgent pipeline.**
+**Welcome clip delivery — env-gated, default OFF.**
 
-Direct `websocket.send_json(...)` calls from `voice_session.py` issued
-**before** `agent.run(...)` starts reliably reach the browser for small
-event payloads (`system`, `error`) but get dropped by the Runtime's WS
-proxy for audio-sized JSON payloads — observed on several test runs with
-chunks as small as 3 KB. Frames authored by Nova Sonic's internal pipeline
-(`bidi_audio_stream`, `bidi_usage`, …) all pass through normally.
+The welcome clip ("欢迎使用智能家居设备助手", Polly `Zhiyu`) can mask the
+BidiAgent initialization latency from users, but it also masks it from us
+when measuring real startup time. It is therefore disabled by default and
+re-enabled by setting `VOICE_WELCOME_ENABLED=1` on the voice runtime.
 
-The welcome clip rides the same pipeline that works:
+The chatbot's `connection-banner` already provides the "is it alive?"
+affordance (Connecting / Connected), so the audio greeting is UX-redundant
+in most conditions.
+
+When enabled, delivery uses the MP3 packaged in the CodeZip:
 
 1. `setup-agentcore.py` pre-renders the Polly MP3 into `agent/welcome-zh.mp3`.
 2. `agentcore deploy` packages the MP3 into the CodeZip (no S3 round-trip).
-3. `voice_session.py` loads `_WELCOME_BYTES` once at module import.
-4. On each WS connection, after `_wait_for_config` + `Agent ready.`,
-   `_welcome_stream(websocket)` is started as a concurrent `asyncio.Task`
-   alongside `agent.run(...)`. It chunks the base64 MP3 at 3 KB (aligned to
-   4-char base64 boundaries) and sends each chunk as a
+3. `voice_session.py` loads `_WELCOME_BYTES` at module import only when
+   `VOICE_WELCOME_ENABLED=1`.
+4. On each WS connection, after `_wait_for_config`, `_welcome_stream` runs
+   concurrently with `agent.run(...)`. It chunks the base64 MP3 at 3 KB
+   (aligned to 4-char base64 boundaries) and sends each chunk as a
    `{"type":"bidi_audio_stream","is_welcome":true,"seq":N,"total":M,"audio":...}`
-   frame with a 20 ms pace between frames. Reusing the `bidi_audio_stream`
-   type makes the proxy treat the frames as legitimate model output; the
-   `is_welcome` flag plus `format:"mp3"` tells the browser to decode as MP3
-   (vs the PCM from Nova Sonic).
+   frame with a 20 ms pace. Reusing the `bidi_audio_stream` type makes the
+   runtime's WS proxy treat the frames as legitimate model output — direct
+   `websocket.send_json` for audio-sized payloads was observed to be dropped
+   by the proxy prior to `agent.run` starting its pumps. The `is_welcome`
+   flag plus `format:"mp3"` tells the browser to decode as MP3.
 5. Browser `VoiceClient.handleServerMessage` collects `is_welcome` chunks by
    `seq`, concatenates once `total` chunks have arrived, decodes via
    `AudioContext.decodeAudioData`, and plays via `scheduleBuffer`.
 
-Trade-off accepted: we depend on the Runtime's WS proxy continuing to pass
-`bidi_audio_stream` frames. A future breaking change in the proxy's
-filtering would need us to re-evaluate. The code is commented with this
-reasoning so future maintainers understand why the event type is reused.
+Trade-off: we depend on the runtime's WS proxy continuing to pass
+`bidi_audio_stream` frames unchanged. A future proxy change could force us
+to re-evaluate the workaround.
 
 **Session auto-invalidation on redeploy.** AgentCore Runtime keeps a session
 container warm for several minutes of idle time. After a `agentcore deploy`
 the fresh CodeZip only reaches new sessions — existing sessions keep
 running the old code until they time out. `setup-agentcore.py` closes this
-gap automatically: after patching the runtime it scans DynamoDB's
-`__session__` records (written by the agent on every invocation via
-`_record_session`) and calls `bedrock-agentcore:StopRuntimeSession` on each.
-Missing/expired sessions return `ResourceNotFoundException` which we ignore
-as already-stopped. The number of invalidated sessions is printed as
-`Stopped N active runtime session(s) so the fresh CodeZip takes effect`.
+gap automatically: after patching each runtime it scans DynamoDB's session
+records and calls `bedrock-agentcore:StopRuntimeSession` on each. Sessions
+are tracked under two sort keys after the voice split:
+`__session_text__` (written by `agent._record_session`) and
+`__session_voice__` (written by `voice_session._record_voice_session`). The
+script scans each key separately and routes the stop call to the matching
+runtime ARN — calling `StopRuntimeSession` on the wrong ARN returns
+`ResourceNotFoundException`. Admin-API's `POST /sessions/{id}/stop?kind=…`
+uses the same key → ARN mapping (see [§9.4](#94-admin-console-design)).
 
 **Setup-agentcore additions:**
 
@@ -1636,19 +1673,27 @@ as already-stopped. The number of invalidated sessions is printed as
 - Grants the Cognito authenticated role `bedrock-agentcore:InvokeAgentRuntime` + `InvokeAgentRuntimeWithWebSocketStream` scoped to `arn:aws:bedrock-agentcore:<region>:<acct>:runtime/<id>*`.
 - Stops all known runtime sessions (scanned from DynamoDB) so the fresh CodeZip is picked up immediately.
 
-**MCP tool wiring (why `tools=[...]` is mandatory).** The Strands text `Agent`
-uses the `AgentSkills` plugin and scans a directory of MCP tools implicitly.
-`BidiAgent` does **not** expose a `plugins=` parameter, and our pinned
-`BidiNovaSonicModel` build does not consume `mcp_gateway_arn=` — that kwarg
-goes into `**kwargs` and is silently ignored. Without an explicit `tools=`
-list, Nova Sonic receives an empty `toolConfiguration` and happily
-hallucinates device lists from its training data. `voice_session.py` opens
-an `MCPClient` against the gateway with the user's JWT, enumerates tools via
-`list_tools_sync`, and passes them straight into
-`BidiAgent(tools=[...])`. The names arrive prefixed by the gateway target
-(`SmartHomeDeviceDiscovery___discover_devices`, etc.) — we reference those
-exact names in the system prompt so Nova Sonic emits matching `toolUse`
-events.
+**MCP tool wiring (why `tools=[...]` is mandatory and `mcp_gateway_arn=` is
+actively harmful).** The Strands text `Agent` uses the `AgentSkills` plugin
+and scans a directory of MCP tools implicitly. `BidiAgent` does **not**
+expose a `plugins=` parameter. Without an explicit `tools=` list, Nova Sonic
+receives an empty `toolConfiguration` and hallucinates device lists from its
+training data. `voice_session.py` opens an `MCPClient` against the gateway
+with the user's JWT, enumerates tools via `list_tools_sync`, and passes
+them straight into `BidiAgent(tools=[...])`. Names arrive prefixed by the
+gateway target (`SmartHomeDeviceDiscovery___discover_devices`, etc.) — the
+system prompt references those exact names so Nova Sonic emits matching
+`toolUse` events.
+
+**Do NOT pass `mcp_gateway_arn=[...]` to `BidiNovaSonicModel`.** Older
+Strands builds silently ignored the kwarg; current builds honor it and
+register the gateway using the runtime's execution-role IAM credentials.
+That parallel path conflicts with our explicit `BidiAgent(tools=...)`
+pipeline: Nova Sonic invokes via the model's internal path, and the result
+never reaches Strands' tool dispatcher — so the WS never emits
+`bidi_tool_result` and Nova Sonic hangs waiting for a toolResult that will
+never arrive. Keep a single source of truth: the MCPClient with the user
+JWT as Bearer, feeding tools via `BidiAgent(tools=)`.
 
 **Skills inlining.** `BidiAgent` can't register `AgentSkills` either, so
 `voice_session.py` calls the text path's `load_skills_from_dynamodb(actor_id)`
@@ -1695,31 +1740,41 @@ user Cedar policy still applies because all calls go through the same MCP
 client (user's JWT as Bearer). If more multi-step flows are needed later
 (e.g. "start a dinner scene"), wrap them the same way.
 
-**Transcript dedupe (SPECULATIVE vs FINAL).** Nova Sonic emits every
-assistant transcript twice in its `bidi_transcript_stream`:
-`is_final=false` (SPECULATIVE — interim text) then `is_final=true` (FINAL
-— refined text). Naively appending both makes each utterance appear
-twice. The chatbot's `ChatInterface.tsx` tags every bubble with a
-`pending: boolean` flag *stored on the message itself*, not in a ref:
-the initial speculative frame creates a bubble with `pending=true`, the
-refining frame(s) find the most-recent pending bubble for that role and
-replace its content in place, and `is_final=true` clears the pending
-flag so subsequent utterances start fresh bubbles. A ref-based pointer
-(previous design) didn't survive React 18's StrictMode double-invoked
-setState — the functional updater ran twice while the ref was mutated
-only once, producing stale lookups. Keeping state on the bubble makes
-the reducer pure.
+**Transcript dedupe — keyed by `completionId`.** Nova Sonic emits every
+assistant transcript as **two distinct content blocks**: a SPECULATIVE
+block (interim text) followed by a FINAL block (refined text). Per the
+Nova Sonic event schema, each block has its own `contentStart` with a
+unique `contentId`, but the two blocks share the enclosing `completionId`
+that's set by `completionStart`. Prefix-based heuristics were unreliable
+(Nova re-emits the same FINAL text on tool-result turns, producing false
+negatives) and `contentId` alone can't merge the two blocks of one
+utterance (they have different ids). The correct dedup key is
+**`completionId`**: SPECULATIVE and FINAL of the same reply share it,
+distinct utterances get distinct completionIds.
 
-There's a user-speech complication: Nova Sonic often omits
-`generationStage` for user transcripts, so `isFinal` stays `false` and
-the pending window never formally closes. Without extra logic, the next
-user utterance would overwrite the previous one. The reducer defends
-against that by only treating the new frame as a continuation of the
-pending bubble when the two texts share a prefix (`text.startsWith(m.content)
-|| m.content.startsWith(text)`) — SPECULATIVE refinements are always
-prefix-extensions of the same utterance; fresh utterances aren't. A
-non-prefix match finalizes all lingering pending bubbles and starts a
-new one.
+The voice agent ships a small `BidiNovaSonicModel` subclass —
+`_TranscriptIdTaggingModel` in `voice_session.py` — that tracks
+`completionStart.completionId` and `contentStart.contentId` in the
+parent class's instance state and stamps both onto each
+`BidiTranscriptStreamEvent` before Strands forwards it. The browser's
+`ChatInterface.tsx` reducer keys on `(role, completionId)`:
+
+- First sighting of a `completionId` → new bubble with `pending = !isFinal`.
+- Repeat sighting of the same `completionId` → replace content in place
+  and update `pending` from `isFinal`. Never regress a FINAL bubble back
+  to pending even if a stray SPECULATIVE arrives late.
+- Missing `completionId` (legacy agent builds) → fall back to the earlier
+  prefix-match path so old deployments still render correctly during
+  rollout.
+
+React-reducer purity matters here: pending state lives on the message
+object itself (not a ref) so React 18 StrictMode's double-invoked
+setState produces identical results.
+
+User-speech transcripts: Nova Sonic sometimes omits `generationStage`
+for user transcripts — the dedup still works because `completionId` is
+present on `completionStart` regardless of stage, and the reducer treats
+a new user `completionId` as a fresh utterance.
 
 **Defensive event serialiser.** BidiAgent can emit non-JSON-serialisable
 objects through the `outputs=[send_output]` callback — most notably
@@ -1745,11 +1800,75 @@ tested on this branch and does not integrate cleanly with the managed
 runtime's health/protocol handshake — an earlier commit on this branch
 pivoted back to `BedrockAgentCoreApp`.
 
-**Login warmup.** Immediately after successful Cognito login the chatbot
-fires a SigV4-signed POST `/invocations` with `prompt="__warmup__"`. The
-agent short-circuits this to `{"status":"warmup_ok"}` without invoking the
-LLM, spinning up the runtime container so the user's first real message
-doesn't pay the cold-start penalty.
+**Startup-latency budget.** End-to-end "click voice button →
+`Agent ready.`" time measured against the deployed voice runtime
+(us-west-2, both cold and warm containers):
+
+| Phase | Time | Controlled by |
+|---|---|---|
+| Browser → AgentCore WS handshake | **~6 s** | AgentCore edge proxy (fixed) |
+| `connection accepted` → `nova sonic connection established` | **~800 ms** | our code |
+| &nbsp;&nbsp;↳ eager imports (strands.bidi, MCPClient) | paid during `__warmup__`, not here |
+| &nbsp;&nbsp;↳ JWT decode + voice-session record | ~5 ms |
+| &nbsp;&nbsp;↳ parallel: DDB skill query ∥ DDB prompt query ∥ MCP `list_tools` | max(~400 ms) |
+| &nbsp;&nbsp;↳ `BidiAgent` construction | ~30 ms |
+| &nbsp;&nbsp;↳ `BidiNovaSonicModel` connect | ~50 ms |
+
+So ~7 s total on a warm container, ~7.5 s cold. The **WS handshake itself
+dominates** — the `ws.connect()` call spends 6 s inside the AgentCore
+managed WS proxy before our agent's `handle_voice_session` even runs. All
+of our optimizations target the 800 ms server-side budget, which is now
+close to optimal without more invasive restructuring.
+
+**Login warmup fires in parallel to both runtimes.** `ChatInterface.tsx`
+fetches a single idToken + Identity-Pool-creds pair, then issues two
+`Promise.all` `POST /invocations {"prompt":"__warmup__"}` requests — one
+per runtime ARN. Each runtime short-circuits to `{"status":"warmup_ok"}`
+without invoking its LLM; the point is to warm the Python process
+(imports, boto3 client pool, TLS to Bedrock). `voice_agent.py` additionally
+does module-level eager imports of `strands.experimental.bidi.*` +
+`MCPClient` so the warmup request itself triggers the heavy import chain,
+and the warmup handler calls `_preheat_boto3_clients()` which forces DDB
++ Bedrock endpoint resolution + TLS handshake + IAM creds fetch.
+
+**Per-session IO is parallelized.** `voice_session.handle_voice_session`
+launches three IO tasks concurrently via `asyncio.to_thread`:
+
+1. `load_skills_from_dynamodb(actor_id)` — DDB Query for per-user + global skills.
+2. `load_system_prompt(actor_id, "voice")` — two DDB GetItems for prompt overrides.
+3. `mcp_client.list_tools_sync` (paginated) — MCP RPC over HTTPS to the gateway.
+
+Previously these were sequential (~1 s). Now the slowest single task
+(usually MCP at ~400 ms) sets the floor.
+
+**WS URL pre-presign.** After the login warmup completes, `ChatInterface`
+also presigns the voice WS URL with the same creds it already has in
+scope and caches the result in a ref with a 4-minute TTL. The first tap
+of the voice button skips the SigV4 presign + Identity-Pool-creds dance
+(~200-400 ms saved). The cache is one-shot: presigned WS URLs can only be
+consumed once, so subsequent taps re-presign on demand.
+
+**TLS preconnect on the login page.** `LoginPage.tsx` injects a
+`<link rel="preconnect" href="https://bedrock-agentcore.<region>.amazonaws.com">`
+while the user is still typing credentials, so the TLS handshake to the
+runtime endpoint is complete by the time the warmup requests fire.
+
+**AudioWorklet prefetch.** `ChatInterface.tsx` fetches
+`/pcm-recorder-processor.js` on mount to warm the browser HTTP cache
+without triggering the mic permission prompt; the first tap on the voice
+button no longer pays a CloudFront round-trip to download the worklet.
+
+**Remaining opportunities (not implemented).**
+- **Pre-open the WebSocket silently** during login warmup (just complete
+  the handshake, don't send `config` until user taps voice). Would mask
+  the 6 s proxy handshake from UX. Trade-off: one long-lived WS per
+  logged-in user + idle-timeout bookkeeping.
+- **MCP tool list cache** would require decoupling Strands tool objects
+  from specific MCPClient instances (tools are bound to their live MCP
+  connection today). Low ROI while list_tools is already parallelized
+  off the critical path.
+- **Bedrock control-plane warmup** via provisioned concurrency is not
+  exposed by AgentCore Runtime at time of writing.
 
 ### 9.8 Skill ERP & AgentCore Registry
 
