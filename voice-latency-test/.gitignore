@@ -1,0 +1,5 @@
+node_modules/
+test-results/
+package-lock.json
+results/*.jsonl
+results/*.md

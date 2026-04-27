@@ -250,6 +250,27 @@ curl -X POST http://localhost:8080/invocations \
 
 ---
 
+## Voice Agent 启动延迟测试
+
+项目根目录的 `voice-latency-test/` 是一个**自包含**的 Playwright 测试方案，用于测量 Voice Agent 从点击按钮到听到首帧回应的延迟。`deploy.sh` 完成后直接可用，不需要额外配置——脚本会自动从 `cdk-outputs.json` + `agentcore-state.json` 读取 Chatbot URL、Voice Runtime ARN 和 region。
+
+两种测试模式：
+
+| 模式 | 模拟场景 | 单轮 | 100 轮 |
+|---|---|---:|---:|
+| `run-session-cold.sh` | 老用户回来点语音（测服务端 Python worker 冷启动）| ~18 s | ~30 min |
+| `run-fresh-login.sh` | 新用户登录后立即点语音（测端到端用户旅程 + 前端优化）| ~60 s | ~100 min |
+
+```bash
+cd voice-latency-test
+npm install && npx playwright install chromium    # 仅首次
+./run-session-cold.sh                              # 或 ./run-fresh-login.sh
+```
+
+输出写入 `voice-latency-test/results/`（原始 JSONL + 聚合 markdown 报告）。详细协议、两种模式的完整对比、以及已实施的 16 项延迟优化清单见 `voice-latency-test/README.md` 和 `voice-latency-test/test-modes.md`。
+
+---
+
 ## 销毁资源
 
 **顺序很重要：** AgentCore 资源必须在 CDK 堆栈之前销毁。

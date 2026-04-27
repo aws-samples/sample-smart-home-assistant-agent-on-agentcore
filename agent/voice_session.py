@@ -27,6 +27,7 @@ import json
 import base64
 import logging
 import asyncio
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Optional
@@ -306,6 +307,30 @@ async def handle_voice_session(
     await websocket.accept()
     session_id = getattr(context, "session_id", None) or "default"
     logger.info(f"Voice WS: connection accepted (session={session_id})")
+    # Diagnostic: dump what the runtime exposes on `context` so we can trace
+    # header-availability regressions (gateway 401s).
+    try:
+        ctx_attrs = [a for a in dir(context) if not a.startswith("_")]
+        logger.info(f"Voice WS: context attrs={ctx_attrs}")
+        rh_dbg = getattr(context, "request_headers", None)
+        if rh_dbg is None:
+            logger.warning("Voice WS: context.request_headers is None")
+        else:
+            try:
+                keys = list(rh_dbg.keys()) if hasattr(rh_dbg, "keys") else list(rh_dbg)
+                logger.info(f"Voice WS: header keys={keys}")
+            except Exception as e:
+                logger.warning(f"Voice WS: header-enum failed: {e}")
+    except Exception as e:
+        logger.warning(f"Voice WS: context inspect failed: {e}")
+
+    # Latency probe sentinel: send a `ready` frame immediately so probes can
+    # separate WS-handshake time from server-side init time. The frontend
+    # ignores unknown message types, so this is safe for regular clients.
+    try:
+        await websocket.send_json({"type": "ready", "ts_ms": int(time.time() * 1000)})
+    except Exception:
+        pass
 
     # Wait for the client's initial config event BEFORE pushing welcome audio.
     # Empirically the runtime's WS proxy buffers/drops server-sent frames if
