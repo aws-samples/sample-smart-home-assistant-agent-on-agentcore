@@ -46,6 +46,163 @@ def run(cmd, cwd=None):
     return r
 
 
+def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dynamo_table):
+    """Idempotently seed 3 demo A2A records + ownership rows. Prints progress."""
+    import json as _json
+    import time as _time
+    import uuid as _uuid
+
+    if not registry_id:
+        print("  [a2a-seed] registry_id empty; skipping")
+        return
+
+    demos = [
+        {
+            "name": "energy-optimization-agent",
+            "description": "Recommends schedules and modes to reduce smart-home energy use.",
+            "endpoint": "https://example.com/a2a/energy-optimization-agent",
+            "version": "1.0.0",
+            "provider": {"organization": "SmartHome Demo", "url": "https://example.com/smarthome-demo"},
+            "capabilities": {"streaming": True, "pushNotifications": True, "stateTransitionHistory": False},
+            "authentication": {"schemes": ["none"]},
+            "tags": ["energy", "demo", "smarthome"],
+            "skills": [
+                {"id": "analyze-usage", "name": "Analyze Usage",
+                 "description": "Summarises device runtime and energy draw over a time window.",
+                 "examples": ["Summarise last week's fan usage",
+                              "Which device consumed the most power yesterday?"]},
+                {"id": "suggest-schedule", "name": "Suggest Schedule",
+                 "description": "Proposes a daily schedule that meets comfort targets at lowest cost.",
+                 "examples": ["Build me an energy-efficient schedule for weekdays"]},
+            ],
+        },
+        {
+            "name": "home-security-agent",
+            "description": "Evaluates camera/door-sensor events and escalates alerts when needed.",
+            "endpoint": "https://example.com/a2a/home-security-agent",
+            "version": "1.0.0",
+            "provider": {"organization": "SmartHome Demo", "url": "https://example.com/smarthome-demo"},
+            "capabilities": {"streaming": False, "pushNotifications": True, "stateTransitionHistory": True},
+            "authentication": {"schemes": ["none"]},
+            "tags": ["security", "demo", "smarthome"],
+            "skills": [
+                {"id": "assess-event", "name": "Assess Event",
+                 "description": "Scores an incoming sensor event for urgency.",
+                 "examples": ["Rate this motion event at 02:14 from the front door"]},
+                {"id": "draft-notification", "name": "Draft Notification",
+                 "description": "Writes a human-readable alert for the homeowner.",
+                 "examples": ["Draft an alert for the assessed event above"]},
+            ],
+        },
+        {
+            "name": "appliance-maintenance-agent",
+            "description": "Predicts appliance maintenance windows from usage patterns.",
+            "endpoint": "https://example.com/a2a/appliance-maintenance-agent",
+            "version": "1.0.0",
+            "provider": {"organization": "SmartHome Demo", "url": "https://example.com/smarthome-demo"},
+            "capabilities": {"streaming": False, "pushNotifications": False, "stateTransitionHistory": False},
+            "authentication": {"schemes": ["none"]},
+            "tags": ["maintenance", "demo", "smarthome"],
+            "skills": [
+                {"id": "predict-maintenance", "name": "Predict Maintenance",
+                 "description": "Estimates the next maintenance date for an appliance.",
+                 "examples": ["When should I service the oven?"]},
+                {"id": "explain-reason", "name": "Explain Reason",
+                 "description": "Explains the factors driving the prediction.",
+                 "examples": ["Why does the oven need servicing?"]},
+            ],
+        },
+    ]
+
+    def _build_card_definition(form):
+        # AgentCore Registry requires the card's protocolVersion + default IO modes.
+        return _json.dumps({
+            "protocolVersion": "0.3.0",
+            "name": form["name"],
+            "description": form["description"],
+            "url": form["endpoint"],
+            "version": form["version"],
+            "provider": form["provider"],
+            "capabilities": {k: bool(form["capabilities"].get(k))
+                              for k in ("streaming", "pushNotifications", "stateTransitionHistory")},
+            "authentication": form["authentication"],
+            "defaultInputModes": ["text"],
+            "defaultOutputModes": ["text"],
+            "skills": [
+                {**s, "tags": s.get("tags", [])}
+                for s in form["skills"]
+            ],
+            "tags": form["tags"],
+        })
+
+    for demo in demos:
+        try:
+            resp = ac_control.create_registry_record(
+                registryId=registry_id,
+                name=demo["name"],
+                description=demo["description"],
+                descriptorType="A2A",
+                descriptors={
+                    "a2a": {
+                        # Wrapper has no schemaVersion — the A2A protocolVersion
+                        # lives inside the card JSON itself (build_card_definition).
+                        "agentCard": {
+                            "inlineContent": _build_card_definition(demo),
+                        },
+                    }
+                },
+                recordVersion="0.1.0",
+                clientToken=str(_uuid.uuid4()),
+            )
+        except ac_control.exceptions.ConflictException:
+            print(f"  [a2a-seed] {demo['name']} already exists — skip")
+            continue
+        except Exception as e:
+            print(f"  [a2a-seed] {demo['name']}: create failed — {e}")
+            continue
+
+        record_arn = resp.get("recordArn", "")
+        record_id = record_arn.split("/")[-1] if record_arn else ""
+        if not record_id:
+            print(f"  [a2a-seed] {demo['name']}: could not extract recordId from arn {record_arn!r}")
+            continue
+
+        # Ownership row under the deploy-time admin user's sub.
+        try:
+            dynamo_table.put_item(Item={
+                "userId": "__erp_owner__",
+                "skillName": f"a2a:{record_id}",
+                "recordType": "a2a",
+                "ownerSub": admin_sub or "deploy-time-admin",
+                "ownerEmail": admin_email or "",
+                "createdAt": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                "updatedAt": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            })
+        except Exception as e:
+            print(f"  [a2a-seed] {demo['name']}: ownership-row write failed — {e}")
+
+        # Poll out of CREATING, then submit for approval.
+        deadline = _time.time() + 10
+        while _time.time() < deadline:
+            try:
+                s = ac_control.get_registry_record(
+                    registryId=registry_id, recordId=record_id
+                ).get("status")
+                if s != "CREATING":
+                    break
+            except Exception:
+                pass
+            _time.sleep(0.5)
+
+        try:
+            ac_control.submit_registry_record_for_approval(
+                registryId=registry_id, recordId=record_id
+            )
+            print(f"  [a2a-seed] {demo['name']}: created + submitted ({record_id})")
+        except Exception as e:
+            print(f"  [a2a-seed] {demo['name']}: submit-for-approval failed — {e}")
+
+
 def main():
     print("=" * 60)
     print("  AgentCore Setup (Gateway + Lambda Target + Runtime + Observability + Eval)")
@@ -1086,6 +1243,48 @@ def main():
                     print(f"  Patched {fn_name} with REGISTRY_ID={registry_id}")
                 except Exception as e:
                     print(f"  Warning: could not patch {fn_name} with REGISTRY_ID: {e}")
+
+        # Seed 3 demo A2A agent records so the Integration Registry tab has
+        # content to show after admins approve them in the Registry console.
+        try:
+            admin_sub_for_seed = ""
+            admin_email_for_seed = ""
+            try:
+                cog = boto3.client("cognito-idp", region_name=REGION)
+                # Username can be the email (default in this stack) or "admin";
+                # try the email form first, then fall back.
+                u = None
+                for candidate in ("admin@smarthome.local", "admin"):
+                    try:
+                        u = cog.admin_get_user(
+                            UserPoolId=outputs["UserPoolId"], Username=candidate
+                        )
+                        break
+                    except cog.exceptions.UserNotFoundException:
+                        continue
+                if u is not None:
+                    admin_sub_for_seed = next(
+                        (a["Value"] for a in u["UserAttributes"] if a["Name"] == "sub"),
+                        "",
+                    )
+                    admin_email_for_seed = next(
+                        (a["Value"] for a in u["UserAttributes"] if a["Name"] == "email"),
+                        "admin@smarthome.local",
+                    )
+                else:
+                    admin_email_for_seed = "admin@smarthome.local"
+                    print("  [a2a-seed] admin Cognito user not found; ownership rows will use default email")
+            except Exception as e:
+                print(f"  [a2a-seed] could not read admin user attributes: {e}")
+
+            dynamo_res = boto3.resource("dynamodb", region_name=REGION)
+            skills_table = dynamo_res.Table("smarthome-skills")
+            _seed_demo_a2a_records(
+                ac_control, registry_id, admin_sub_for_seed, admin_email_for_seed, skills_table
+            )
+            print("  NOTE: approve the 3 A2A records in the AgentCore Registry console to see them in Admin → Integration Registry → A2A Agents.")
+        except Exception as e:
+            print(f"  [a2a-seed] unexpected failure (non-fatal): {e}")
     except Exception as e:
         print(f"  Warning: Registry setup skipped: {e}")
 

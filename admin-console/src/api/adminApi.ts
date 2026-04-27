@@ -680,3 +680,49 @@ export async function stopSession(sessionId: string, kind?: 'text' | 'voice'): P
     throw new Error(body.error || `Failed to stop session (${res.status})`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// A2A Agents (Integration Registry)
+// ---------------------------------------------------------------------------
+
+export interface A2AAgentCard {
+  name: string;
+  description: string;
+  url: string;
+  version: string;
+  provider?: { organization?: string };
+  capabilities: {
+    streaming?: boolean;
+    pushNotifications?: boolean;
+    stateTransitionHistory?: boolean;
+  };
+  authentication: { schemes: string[] };
+  skills: Array<{ id: string; name: string; description: string; examples: string[] }>;
+  tags: string[];
+}
+
+export interface A2AAgentRecord {
+  recordId: string;
+  name: string;
+  description: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  card: A2AAgentCard;
+  publishedBy: string;
+}
+
+export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
+  const headers = await authHeaders();
+  // Reuses /registry/records?action=a2a-list — consolidated on a single API
+  // Gateway resource to stay under the admin Lambda's 20KB policy cap.
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=a2a-list`, {
+    headers,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list A2A agents (${res.status})`);
+  }
+  const data = await res.json();
+  return data.records || [];
+}

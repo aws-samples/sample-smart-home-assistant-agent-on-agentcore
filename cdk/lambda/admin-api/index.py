@@ -1552,6 +1552,106 @@ def import_registry_records(event):
 
 
 # ---------------------------------------------------------------------------
+# A2A Agents (Integration Registry admin view — read only)
+# ---------------------------------------------------------------------------
+
+def _a2a_iso(ts):
+    if not ts:
+        return ""
+    if hasattr(ts, "isoformat"):
+        return ts.isoformat()
+    return str(ts)
+
+
+def _scan_a2a_ownership_map():
+    """Return {recordId: {sub, email}} from all a2a ownership rows. One scan."""
+    owner_map = {}
+    from boto3.dynamodb.conditions import Attr
+    scan_params = {
+        "FilterExpression": Attr("userId").eq("__erp_owner__") & Attr("recordType").eq("a2a"),
+    }
+    while True:
+        resp = table.scan(**scan_params)
+        for item in resp.get("Items", []):
+            sk = item.get("skillName", "")
+            if sk.startswith("a2a:"):
+                rid = sk[len("a2a:"):]
+                owner_map[rid] = {
+                    "sub": item.get("ownerSub", ""),
+                    "email": item.get("ownerEmail", ""),
+                }
+        if "LastEvaluatedKey" not in resp:
+            break
+        scan_params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return owner_map
+
+
+def list_a2a_agents(_event):
+    """GET /registry/a2a-agents — list approved A2A records with publishedBy enrichment."""
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    records = []
+    token = None
+    try:
+        while True:
+            kwargs = {
+                "registryId": REGISTRY_ID,
+                "maxResults": 50,
+                "descriptorType": "A2A",
+                "status": "APPROVED",
+            }
+            if token:
+                kwargs["nextToken"] = token
+            resp = agentcore_control.list_registry_records(**kwargs)
+            for r in resp.get("registryRecords", []):
+                records.append(r)
+            token = resp.get("nextToken")
+            if not token:
+                break
+    except Exception as e:
+        return response(500, {"error": f"Failed to list A2A records: {str(e)}"})
+
+    owner_map = {}
+    try:
+        owner_map = _scan_a2a_ownership_map()
+    except Exception as e:
+        logger.warning("Failed to build A2A ownership map: %s", e)
+
+    result = []
+    for r in records:
+        rid = r.get("recordId", "")
+        try:
+            detail = agentcore_control.get_registry_record(
+                registryId=REGISTRY_ID, recordId=rid
+            )
+            descriptors = detail.get("descriptors", {}) or {}
+            a2a = descriptors.get("a2a", {}) or {}
+            card_raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+            try:
+                card = json.loads(card_raw) if card_raw else {}
+            except Exception:
+                card = {}
+        except Exception as e:
+            logger.warning("GetRegistryRecord failed for %s: %s", rid, e)
+            continue  # skip unreadable records
+
+        owner = owner_map.get(rid, {})
+        result.append({
+            "recordId": rid,
+            "name": r.get("name", ""),
+            "description": r.get("description", ""),
+            "status": r.get("status", ""),
+            "createdAt": _a2a_iso(r.get("createdAt")),
+            "updatedAt": _a2a_iso(r.get("updatedAt")),
+            "card": card,
+            "publishedBy": owner.get("email") or owner.get("sub") or "",
+        })
+
+    return response(200, {"records": result})
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -1626,6 +1726,11 @@ def handler(event, context):
 
     # Registry routes
     if resource == "/registry/records" and method == "GET":
+        # Consolidated dispatch — adding more resources here would push the
+        # admin Lambda's resource policy past the 20KB cap.
+        action = (event.get("queryStringParameters") or {}).get("action", "")
+        if action == "a2a-list":
+            return list_a2a_agents(event)
         return list_registry_records(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

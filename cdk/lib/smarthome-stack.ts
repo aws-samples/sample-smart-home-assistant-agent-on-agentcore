@@ -774,6 +774,14 @@ export class SmartHomeStack extends cdk.Stack {
     mySkillRecordResource.addMethod("PUT", skillErpIntegration, skillErpAuthOpts);
     mySkillRecordResource.addMethod("DELETE", skillErpIntegration, skillErpAuthOpts);
 
+    const myA2aResource = skillErpApi.root.addResource("my-a2a-agents");
+    myA2aResource.addMethod("GET", skillErpIntegration, skillErpAuthOpts);
+    myA2aResource.addMethod("POST", skillErpIntegration, skillErpAuthOpts);
+    const myA2aRecordResource = myA2aResource.addResource("{recordId}");
+    myA2aRecordResource.addMethod("GET", skillErpIntegration, skillErpAuthOpts);
+    myA2aRecordResource.addMethod("PUT", skillErpIntegration, skillErpAuthOpts);
+    myA2aRecordResource.addMethod("DELETE", skillErpIntegration, skillErpAuthOpts);
+
     // Grant admin Lambda Registry access (used by Skills tab "Import from Registry")
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
@@ -795,6 +803,9 @@ export class SmartHomeStack extends cdk.Stack {
     registryRecordsResource.addMethod("GET", adminIntegration, authMethodOptions);
     const registryImportResource = registryResource.addResource("import");
     registryImportResource.addMethod("POST", adminIntegration, authMethodOptions);
+    // A2A agents listing reuses the existing /registry/records GET with an
+    // ?action=a2a-list query param — adding a new resource would exceed the
+    // admin Lambda's 20KB resource-policy cap.
 
     // ========================
     // S3 + CloudFront - Admin Console

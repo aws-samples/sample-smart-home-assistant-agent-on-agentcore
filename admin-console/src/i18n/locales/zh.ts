@@ -22,7 +22,7 @@ const zh: Record<string, string> = {
   'tab.knowledgeBase': '企业知识库',
   'tab.models': '模型',
   'tab.toolAccess': '工具权限',
-  'tab.integrations': '集成',
+  'tab.integrations': '集成注册中心',
   'tab.sessions': '会话',
   'tab.memories': '记忆',
   'tab.guardrails': '质量评估',
@@ -294,6 +294,39 @@ const zh: Record<string, string> = {
   'prompts.revertSuccess': '{scope} 的{agent}提示词覆盖已移除。',
   'prompts.evoCardTitle': '优化建议（AgentCore Evo）',
   'prompts.evoCardComingSoon': '即将推出 — AgentCore Evo 将基于近期会话分析此提示词并给出优化建议。',
+
+  'form.close': '关闭',
+
+  'integrations.sub.overview': '概览',
+  'integrations.sub.a2a': 'A2A 代理',
+  'integrations.sub.mcp': 'MCP 服务器',
+  'integrations.sub.apiGw': 'API 网关',
+  'integrations.comingSoon': '敬请期待',
+
+  'integrations.a2a.title': '已批准 A2A 代理',
+  'integrations.a2a.refresh': '刷新',
+  'integrations.a2a.view': '查看',
+  'integrations.a2a.empty': '尚无已批准的 A2A 代理。',
+  'integrations.a2a.emptyHint': '用户可通过 Skill ERP → A2A 代理 标签页发布，管理员在 AgentCore Registry 控制台中审批。',
+  'integrations.a2a.col.name': '名称',
+  'integrations.a2a.col.description': '描述',
+  'integrations.a2a.col.endpoint': '端点',
+  'integrations.a2a.col.auth': '鉴权',
+  'integrations.a2a.col.tags': '标签',
+  'integrations.a2a.col.publishedBy': '发布者',
+  'integrations.a2a.col.lastUpdated': '最后更新',
+  'integrations.a2a.col.actions': '操作',
+
+  'integrations.a2a.drawer.endpoint': '端点',
+  'integrations.a2a.drawer.version': '版本',
+  'integrations.a2a.drawer.provider': '提供方',
+  'integrations.a2a.drawer.auth': '鉴权',
+  'integrations.a2a.drawer.capabilities': '能力',
+  'integrations.a2a.drawer.tags': '标签',
+  'integrations.a2a.drawer.skills': '技能',
+  'integrations.a2a.drawer.recordId': '记录 ID',
+  'integrations.a2a.drawer.createdAt': '创建时间',
+  'integrations.a2a.drawer.updatedAt': '更新时间',
 };
 
 export default zh;

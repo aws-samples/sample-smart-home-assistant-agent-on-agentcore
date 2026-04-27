@@ -22,7 +22,7 @@ const en: Record<string, string> = {
   'tab.knowledgeBase': 'Knowledge Base',
   'tab.models': 'Models',
   'tab.toolAccess': 'Tool Access',
-  'tab.integrations': 'Integrations',
+  'tab.integrations': 'Integration Registry',
   'tab.sessions': 'Sessions',
   'tab.memories': 'Memories',
   'tab.guardrails': 'Quality Evaluation',
@@ -294,6 +294,39 @@ const en: Record<string, string> = {
   'prompts.revertSuccess': '{agent} prompt override removed for {scope}.',
   'prompts.evoCardTitle': 'Optimization Suggestions (AgentCore Evo)',
   'prompts.evoCardComingSoon': 'Coming soon — AgentCore Evo will analyze this prompt against recent sessions and suggest improvements.',
+
+  'form.close': 'Close',
+
+  'integrations.sub.overview': 'Overview',
+  'integrations.sub.a2a': 'A2A Agents',
+  'integrations.sub.mcp': 'MCP Servers',
+  'integrations.sub.apiGw': 'API Gateway',
+  'integrations.comingSoon': 'Coming soon',
+
+  'integrations.a2a.title': 'Approved A2A Agents',
+  'integrations.a2a.refresh': 'Refresh',
+  'integrations.a2a.view': 'View',
+  'integrations.a2a.empty': 'No approved A2A agents yet.',
+  'integrations.a2a.emptyHint': 'Users can publish via Skill ERP → A2A Agents tab; admins approve in the AgentCore Registry console.',
+  'integrations.a2a.col.name': 'Name',
+  'integrations.a2a.col.description': 'Description',
+  'integrations.a2a.col.endpoint': 'Endpoint',
+  'integrations.a2a.col.auth': 'Auth',
+  'integrations.a2a.col.tags': 'Tags',
+  'integrations.a2a.col.publishedBy': 'Published By',
+  'integrations.a2a.col.lastUpdated': 'Last Updated',
+  'integrations.a2a.col.actions': 'Actions',
+
+  'integrations.a2a.drawer.endpoint': 'Endpoint',
+  'integrations.a2a.drawer.version': 'Version',
+  'integrations.a2a.drawer.provider': 'Provider',
+  'integrations.a2a.drawer.auth': 'Authentication',
+  'integrations.a2a.drawer.capabilities': 'Capabilities',
+  'integrations.a2a.drawer.tags': 'Tags',
+  'integrations.a2a.drawer.skills': 'Skills',
+  'integrations.a2a.drawer.recordId': 'Record ID',
+  'integrations.a2a.drawer.createdAt': 'Created',
+  'integrations.a2a.drawer.updatedAt': 'Updated',
 };
 
 export default en;
