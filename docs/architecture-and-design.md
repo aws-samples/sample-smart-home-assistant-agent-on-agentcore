@@ -1115,6 +1115,7 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - Gateway auth should be `CUSTOM_JWT` for per-user tool control. The runtime is `AWS_IAM` (SigV4) because CUSTOM_JWT on the Runtime's `/ws` endpoint is not reliable today; the chatbot forwards the idToken in the custom header `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` (allowlisted via `requestHeaderAllowlist` in `UpdateAgentRuntime`), and the agent re-wraps it as `Bearer` on the gateway MCP client. `Authorization` **cannot** be allowlisted under AWS_IAM — `UpdateAgentRuntime` rejects it.
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
 - `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
+- **`requestHeaderConfiguration` round-trip pitfall.** `get_agent_runtime` returns the allowlist as the top-level field `requestHeaderAllowlist`, but `update_agent_runtime` expects it nested under `requestHeaderConfiguration={"requestHeaderAllowlist": [...]}`. A naïve round-trip that re-passes the top-level value **silently drops the allowlist**, which strips the custom auth header at the edge proxy → the agent sees `context.request_headers = None` → MCP gateway returns 401. Any helper that calls `UpdateAgentRuntime` (latency-probe nonce bumper, `enable-welcome.py`, session redeploy helpers) must read from either location and always wrap back into the nested form. See `voice-latency-test/force-cold.py` + `enable-welcome.py` for the correct pattern.
 - `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
 
 ### 9.2 Deployment Architecture
@@ -1800,25 +1801,63 @@ tested on this branch and does not integrate cleanly with the managed
 runtime's health/protocol handshake — an earlier commit on this branch
 pivoted back to `BedrockAgentCoreApp`.
 
-**Startup-latency budget.** End-to-end "click voice button →
-`Agent ready.`" time measured against the deployed voice runtime
-(us-west-2, both cold and warm containers):
+**Startup-latency budget.** Measured against the deployed voice runtime
+with the Playwright harness in `voice-latency-test/` (Tokyo /
+ap-northeast-1, N=100, 2026-04-26). The solution folder has one-click
+runners, raw JSONL data, and aggregate markdown reports — see
+`voice-latency-test/README.md` and `voice-latency-test/test-modes.md` for
+protocol details and how to reproduce.
 
-| Phase | Time | Controlled by |
-|---|---|---|
-| Browser → AgentCore WS handshake | **~6 s** | AgentCore edge proxy (fixed) |
-| `connection accepted` → `nova sonic connection established` | **~800 ms** | our code |
-| &nbsp;&nbsp;↳ eager imports (strands.bidi, MCPClient) | paid during `__warmup__`, not here |
-| &nbsp;&nbsp;↳ JWT decode + voice-session record | ~5 ms |
-| &nbsp;&nbsp;↳ parallel: DDB skill query ∥ DDB prompt query ∥ MCP `list_tools` | max(~400 ms) |
-| &nbsp;&nbsp;↳ `BidiAgent` construction | ~30 ms |
-| &nbsp;&nbsp;↳ `BidiNovaSonicModel` connect | ~50 ms |
+Two scenarios, each measured independently:
 
-So ~7 s total on a warm container, ~7.5 s cold. The **WS handshake itself
-dominates** — the `ws.connect()` call spends 6 s inside the AgentCore
-managed WS proxy before our agent's `handle_voice_session` even runs. All
-of our optimizations target the 800 ms server-side budget, which is now
-close to optimal without more invasive restructuring.
+*Session-cold* — long-lived login, loop of `stop_session → click voice`
+each round. Models an already-logged-in user who comes back after idle:
+
+| Phase | P50 |
+|---|---|
+| Click → `new WebSocket` | 101 ms |
+| **WS handshake (TCP + TLS + 101)** | **5707 ms** ← AgentCore runs Python import chain for the fresh session here |
+| 101 → server `ready` sentinel | 612 ms |
+| 101 → first welcome audio chunk | 843 ms |
+| **Click → first audio** | **6647 ms** |
+
+*Fresh-login* — per-round: `stop_session + UpdateRuntime + fresh browser
+context + Cognito login + click voice`. Models a new user opening the
+chatbot for the first time:
+
+| Phase | P50 |
+|---|---|
+| Cognito login + React render | 985 ms |
+| Text warmup POST | 143 ms |
+| **Voice warmup POST (cold)** | **5938 ms** |
+| Click → `new WebSocket` | 107 ms |
+| WS handshake | 325 ms |
+| 101 → server `ready` sentinel | 408 ms |
+| 101 → first welcome audio chunk | 638 ms |
+| **Click → first audio** | **1066 ms** |
+| Login → first audio | 7925 ms |
+
+**Why the 5.4-second gap on WS handshake.** Earlier measurements
+attributed this to the AgentCore edge proxy. The true explanation, exposed
+by the two-scenario test, is the **runtime's per-session Python worker
+cold start**: ~5.7 seconds of container + interpreter + import + boto3
+init. In session-cold this cost lives on the WS handshake (no prior
+warmup). In fresh-login the cost has already been paid during the parallel
+`__warmup__` POST triggered immediately after Cognito sign-in — by the
+time the user clicks the voice button, the pool has a warm worker ready
+and the handshake collapses to TCP + TLS + 101.
+
+The **5.5-second improvement** from session-cold to fresh-login (6647 ms
+→ 1066 ms) is the net win from the frontend parallel-warmup optimization.
+Infrastructure cold-start cost didn't actually shrink — it just got moved
+behind the login that the user was already sitting through.
+
+**Remaining optimization ceiling.** The Python worker cold start itself
+(~5.7 s) is an AgentCore-managed cost we can't drive down from app code.
+To keep latency below today's 1.1 s P50 at the user's perceived click →
+audio point, warmup needs to reliably fire **before** the click —
+i.e. the current post-login fan-out must keep working. See `voice-latency-test/`
+for the harness to re-validate this after any chatbot or runtime change.
 
 **Login warmup fires in parallel to both runtimes.** `ChatInterface.tsx`
 fetches a single idToken + Identity-Pool-creds pair, then issues two
