@@ -81,6 +81,48 @@ const zh: Record<string, string> = {
   'form.deleted': '已删除',
 
   'common.loading': '加载中...',
+
+  'erp.tab.skills': '技能',
+  'erp.tab.a2a': 'A2A 代理',
+
+  'erp.a2a.list.title': '我的 A2A 代理',
+  'erp.a2a.list.hint': '每条记录会作为 A2A_AGENT 描述符发布到 AgentCore Registry，等待管理员审批。',
+  'erp.a2a.list.create': '+ 创建 A2A 代理',
+  'erp.a2a.list.colEndpoint': '端点',
+  'erp.a2a.list.empty': '您还没有创建任何 A2A 代理。',
+  'erp.a2a.list.emptyHint': '点击"+ 创建 A2A 代理"发布第一份代理卡片。',
+
+  'erp.a2a.form.createTitle': '创建 A2A 代理',
+  'erp.a2a.form.editTitle': '编辑 A2A 代理',
+  'erp.a2a.form.name': '代理名称',
+  'erp.a2a.form.nameHint': '小写字母、数字、连字符，1–63 字符。创建后不可修改。',
+  'erp.a2a.form.description': '描述',
+  'erp.a2a.form.endpoint': '端点 URL',
+  'erp.a2a.form.version': '版本',
+  'erp.a2a.form.provider': '提供方',
+  'erp.a2a.form.auth': '鉴权方式',
+  'erp.a2a.form.capabilities': '能力',
+  'erp.a2a.form.tags': '标签（逗号分隔）',
+  'erp.a2a.form.tagsHint': '可选标签，便于消费方检索。',
+  'erp.a2a.form.skillsSection': '技能',
+  'erp.a2a.form.skillId': '技能 ID',
+  'erp.a2a.form.skillName': '技能名称',
+  'erp.a2a.form.skillDescription': '技能描述',
+  'erp.a2a.form.skillExamples': '示例',
+  'erp.a2a.form.skillExamplesHint': '多条示例用"|"分隔。',
+  'erp.a2a.form.addSkill': '+ 添加技能',
+  'erp.a2a.form.removeSkill': '删除技能',
+  'erp.a2a.form.saved': '已保存。',
+  'erp.a2a.form.savedSubmitted': '已保存并提交 Registry 审批。',
+  'erp.a2a.form.deleted': '已删除',
+
+  'erp.a2a.validation.name': '代理名称不合法（小写字母、数字、连字符，必须以字母开头）。',
+  'erp.a2a.validation.description': '描述为必填项。',
+  'erp.a2a.validation.endpoint': '端点必须是 http(s) URL。',
+  'erp.a2a.validation.version': '版本为必填项。',
+  'erp.a2a.validation.skills': '至少需要一个技能。',
+  'erp.a2a.validation.skillId': '技能 ID 不合法（小写字母、数字、连字符）。',
+  'erp.a2a.validation.skillName': '技能名称为必填项。',
 };
 
 export default zh;

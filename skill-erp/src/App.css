@@ -592,3 +592,47 @@
   justify-content: flex-end;
   gap: 10px;
 }
+
+/* ---- Tab bar (Skills | A2A Agents) ---- */
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid #2a2a2a;
+  margin-bottom: 16px;
+}
+.tab-bar .tab {
+  background: transparent;
+  border: none;
+  color: #aaa;
+  padding: 10px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.tab-bar .tab-active {
+  color: #4a9eff;
+  border-bottom-color: #4a9eff;
+}
+.tab-bar .tab:hover {
+  color: #eee;
+}
+
+/* ---- A2A form extras ---- */
+.capability-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.capability-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #ddd;
+  font-size: 13px;
+}
+.a2a-skill-block {
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+}

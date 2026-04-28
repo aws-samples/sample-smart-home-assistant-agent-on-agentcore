@@ -36,7 +36,7 @@
 | CloudFormation / CDK / S3 / CloudFront / Lambda / DynamoDB | 基础资源 |
 | Cognito / Cognito Identity | 用户身份、Identity Pool 临时凭证 |
 | IoT Core | 设备端点 + Thing |
-| Bedrock / OpenSearch Serverless | 知识库向量化 + 检索；Nova Sonic 双向流式推理 |
+| Bedrock / S3 Vectors | 知识库向量化 + 检索；Nova Sonic 双向流式推理 |
 | Bedrock AgentCore | Gateway、Runtime、Memory、Policy Engine |
 | Polly | 预渲染语音欢迎语 |
 | IAM / STS / Logs / API Gateway | 角色、身份、日志、管理 API |
@@ -90,16 +90,17 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 ### 管理控制台 —— Agent Harness Management
 
-使用部署输出中的管理员凭证登录（或在 Cognito 控制台把现有用户加到 `admin` 组）。8 个管理页签：
+使用部署输出中的管理员凭证登录（或在 Cognito 控制台把现有用户加到 `admin` 组）。9 个管理页签：
 
 | 页签 | 能做什么 |
 |------|---------|
 | **Skills** | 创建/编辑/删除技能（支持完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；管理技能目录文件（scripts / references / assets，S3 预签名 URL 上传下载）；全局技能 + 按用户覆盖；**从 AgentCore Registry 导入已批准技能**（按全局或用户维度勾选） |
 | **Knowledge Base** | 上传文档到企业知识库（PDF、TXT、MD、DOCX、CSV 等）；一键触发 Bedrock KB 向量化同步；按用户隔离（公共知识 + 用户专属） |
 | **Models** | 设置全局默认 LLM 模型；按用户覆盖模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
+| **Agent Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时做叠加拼接 |
 | **Tool Access** | 按用户配置可调用的 Gateway 工具（Cedar 策略）；切换 ENFORCE / LOG_ONLY 模式；**演示入口** 一键打开该用户的聊天机器人（URL 带 `?username=` 预填登录）与设备模拟器 |
-| **Integrations** | 显示当前工具集成类型与未来路线图 |
-| **Sessions** | 查看所有活跃运行时会话（用户/会话 ID/最后活跃时间），一键 Stop 终止 |
+| **Integration Registry** | 工具集成概览 + 从 AgentCore Registry 读取已批准的 **A2A Agent** 记录（A2A 子页签显示名称/端点/能力/发布者等详情） |
+| **Sessions** | 查看所有活跃运行时会话（用户/会话 ID/最后活跃时间）、一键 Stop 终止、以及 **Remote Shell** 按钮（在 Runtime 容器中远程执行 shell 命令，stdout/stderr 流式回传，类似 SSH 调试工具） |
 | **Memories** | 查看每个用户的长期记忆（事实 + 偏好，来自 AgentCore Memory） |
 | **Quality Evaluation** | 跳转到 AgentCore Evaluator、Bedrock Guardrails 控制台 |
 
@@ -236,15 +237,15 @@ curl -X POST http://localhost:8080/invocations \
 | **长期记忆** | AgentCore Memory | ~$20 | ~$200 | ~$2,000 |
 | **知识库检索** | Bedrock KB (Retrieve) | ~$10 | ~$100 | ~$1,000 |
 | **向量嵌入** | Bedrock (Cohere Embed) | ~$2 | ~$2 | ~$2 |
-| **向量存储** | OpenSearch Serverless | ~$350 | ~$350 | ~$700 |
+| **向量存储** | S3 Vectors | <$1 | ~$5 | ~$50 |
 | **设备控制 / 管理 API / 其他 Lambda** | Lambda + API Gateway | ~$5 | ~$40 | ~$400 |
 | **用户认证** | Cognito（前 50K MAU 免费） | $0 | ~$250 | ~$4,500 |
 | **前端托管 / 数据存储** | S3 + CloudFront + DynamoDB | ~$10 | ~$70 | ~$600 |
 | **质量评估** | AgentCore Evaluator | ~$10 | ~$100 | ~$1,000 |
-| | **月度总计** | **~$707** | **~$4,112** | **~$40,202** |
-| | **每用户每月** | **~$0.071** | **~$0.041** | **~$0.040** |
+| | **月度总计** | **~$358** | **~$3,767** | **~$39,552** |
+| | **每用户每月** | **~$0.036** | **~$0.038** | **~$0.040** |
 
-**Serverless 成本优势**：无运维、无空闲成本、线性扩展、规模经济递减。最大固定成本是 OpenSearch Serverless（最低 ~$350/月，适合中大型部署）。
+**Serverless 成本优势**：无运维、无空闲成本、线性扩展、规模经济递减。**S3 Vectors** 是按向量计费的纯 Serverless 服务，1 万 DAU 场景下每月不到 $1；之前的方案使用 OpenSearch Serverless 有 ~$350/月 的底价。
 
 > 以上为估算值，实际成本取决于具体使用模式。建议使用 [AWS Pricing Calculator](https://calculator.aws/) 精确计算。
 
@@ -341,9 +342,9 @@ cd cdk && npx cdk destroy --all --force
 
 # English Version
 
-> **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base**, external integrations, session monitoring, long-term memory viewing, and safety guardrails.
+> **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base (on S3 Vectors)**, **Integration Registry (A2A agents)**, session monitoring (with **Remote Shell** debug console), long-term memory viewing, and safety guardrails.
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console provides 8 management dimensions covering the full Agent lifecycle. A new **Skill ERP** site lets end users publish their own skills to **AgentCore Registry**; admins can then one-click import any approved record into the skills catalog.
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console provides 9 management dimensions covering the full Agent lifecycle, including a **Remote Shell** per-session debug console. A new **Skill ERP** site lets end users publish their own skills and A2A agents to **AgentCore Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the new **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
 
 > **Implementation details, architecture diagrams, protocol specs** live in [`docs/architecture-and-design.md`](docs/architecture-and-design.md). This README focuses on **deployment and usage**.
 
@@ -372,7 +373,7 @@ The IAM user/role running `deploy.sh` needs permissions for (full list + minimal
 | CloudFormation / CDK / S3 / CloudFront / Lambda / DynamoDB | Core infrastructure |
 | Cognito / Cognito Identity | User auth, Identity Pool temporary credentials |
 | IoT Core | Endpoint + Things |
-| Bedrock / OpenSearch Serverless | KB vectorization + retrieval; Nova Sonic bi-directional streaming |
+| Bedrock / S3 Vectors | KB vectorization + retrieval; Nova Sonic bi-directional streaming |
 | Bedrock AgentCore | Gateway, Runtime, Memory, Policy Engine |
 | Polly | Pre-render voice welcome clip |
 | IAM / STS / Logs / API Gateway | Roles, identity, logging, admin API |
@@ -426,16 +427,17 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 
 ### Admin Console — Agent Harness Management
 
-Log in with the admin credentials from deploy output (or add a user to the `admin` Cognito group). Eight tabs:
+Log in with the admin credentials from deploy output (or add a user to the `admin` Cognito group). Nine tabs:
 
 | Tab | What you can do |
 |-----|-----------------|
 | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files (scripts / references / assets via S3 presigned URLs); global skills + per-user overrides; **import approved records from AgentCore Registry** (select global or per-user scope) |
 | **Knowledge Base** | Upload documents to the enterprise KB (PDF, TXT, MD, DOCX, CSV, ...); one-click Bedrock KB vectorization sync; per-user isolation (shared + user-scoped) |
 | **Models** | Set the global default LLM; override per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
+| **Agent Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
 | **Tool Access** | Configure per-user gateway tool permissions (Cedar policies); toggle ENFORCE / LOG_ONLY; **Demo Links** column to open that user's chatbot (URL prefilled with `?username=`) and device simulator in new tabs |
-| **Integrations** | Current tool integration types + future roadmap |
-| **Sessions** | View active runtime sessions (user / session ID / last active); Stop a session with one click |
+| **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: lists approved A2A records from AgentCore Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card (skills, examples, tags) |
+| **Sessions** | View active runtime sessions (user / session ID / last active); Stop a session with one click; **Remote Shell** button opens a modal that runs a shell command inside the runtime container (text or voice) and streams stdout/stderr back live — admin-only SSH-style debug console |
 | **Memories** | View each user's long-term memory (facts + preferences, from AgentCore Memory) |
 | **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles |
 
@@ -572,15 +574,15 @@ Fully AWS Serverless, pay-per-use. Estimates below are for 10K / 100K / 1M Daily
 | **Long-term Memory** | AgentCore Memory | ~$20 | ~$200 | ~$2,000 |
 | **KB Retrieval** | Bedrock KB (Retrieve) | ~$10 | ~$100 | ~$1,000 |
 | **Vector Embedding** | Bedrock (Cohere Embed) | ~$2 | ~$2 | ~$2 |
-| **Vector Store** | OpenSearch Serverless | ~$350 | ~$350 | ~$700 |
+| **Vector Store** | S3 Vectors | <$1 | ~$5 | ~$50 |
 | **Device control / Admin API / other Lambda** | Lambda + API Gateway | ~$5 | ~$40 | ~$400 |
 | **Authentication** | Cognito (first 50K MAU free) | $0 | ~$250 | ~$4,500 |
 | **Frontend hosting / Data storage** | S3 + CloudFront + DynamoDB | ~$10 | ~$70 | ~$600 |
 | **Quality Evaluation** | AgentCore Evaluator | ~$10 | ~$100 | ~$1,000 |
-| | **Monthly Total** | **~$707** | **~$4,112** | **~$40,202** |
-| | **Per User / Month** | **~$0.071** | **~$0.041** | **~$0.040** |
+| | **Monthly Total** | **~$358** | **~$3,767** | **~$39,552** |
+| | **Per User / Month** | **~$0.036** | **~$0.038** | **~$0.040** |
 
-**Serverless advantages**: zero ops, zero idle cost, linear scaling, decreasing per-user cost at scale. The largest fixed cost is OpenSearch Serverless (~$350/month minimum — suitable for medium-to-large deployments).
+**Serverless advantages**: zero ops, zero idle cost, linear scaling, decreasing per-user cost at scale. **S3 Vectors** is fully pay-per-vector with no floor; at 10K DAU the vector store costs under $1/month. The previous setup used OpenSearch Serverless (~$350/month minimum).
 
 > These are estimates. Use the [AWS Pricing Calculator](https://calculator.aws/) for precise numbers.
 

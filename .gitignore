@@ -67,3 +67,13 @@ agent/welcome-zh.mp3
 
 # Latency testing sandbox — independent clone + ap-northeast-1 deployment
 test-deployments/
+
+# Local test harness (unit + e2e) — kept out of git per project convention
+e2e-a2a/
+pytest.ini
+.pytest_cache/
+cdk/lambda/*/tests/
+admin-console/scripts/
+.playwright-mcp/
+
+docs/superpowers/

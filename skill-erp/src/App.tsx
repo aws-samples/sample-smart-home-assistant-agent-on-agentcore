@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import LoginPage from './auth/LoginPage';
 import SkillManager from './components/SkillManager';
+import TabBar, { ErpTab } from './components/TabBar';
+import A2AAgentsTab from './components/A2AAgentsTab';
 import { getCurrentSession, signOut, getCurrentUserEmail, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
 import './App.css';
@@ -9,6 +11,7 @@ const App: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [email, setEmail] = useState('');
+  const [activeTab, setActiveTab] = useState<ErpTab>('skills');
   const { t, language, setLanguage } = useI18n();
 
   useEffect(() => {
@@ -79,7 +82,8 @@ const App: React.FC = () => {
         </div>
       </header>
       <main className="app-main">
-        <SkillManager />
+        <TabBar active={activeTab} onChange={setActiveTab} />
+        {activeTab === 'skills' ? <SkillManager /> : <A2AAgentsTab />}
       </main>
     </div>
   );

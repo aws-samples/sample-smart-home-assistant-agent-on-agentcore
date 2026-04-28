@@ -24,6 +24,13 @@ from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
+from a2a_helpers import (
+    A2A_NAME_RE,
+    build_card_definition,
+    parse_card_definition,
+    validate_form as validate_a2a_form,
+)
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -39,6 +46,20 @@ agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION
 SKILL_NAME_RE = re.compile(r"^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$")
 
 OWNERSHIP_USER_PREFIX = "__erp_owner__"  # DynamoDB partition key for owner rows
+
+A2A_SK_PREFIX = "a2a:"  # Sort-key prefix for A2A ownership rows
+
+
+def _a2a_owner_key(record_id):
+    return {"userId": OWNERSHIP_USER_PREFIX, "skillName": f"{A2A_SK_PREFIX}{record_id}"}
+
+
+def _iso_or_empty(ts):
+    if not ts:
+        return ""
+    if hasattr(ts, "isoformat"):
+        return ts.isoformat()
+    return str(ts)
 
 
 def response(status_code, body):
@@ -202,6 +223,61 @@ def _iso(ts):
 
 
 # ---------------------------------------------------------------------------
+# Shared create/submit helpers (reused by Skills and A2A routes)
+# ---------------------------------------------------------------------------
+
+def _create_record_with_collision_fallback(
+    name, descriptor_type, descriptors, description, record_version="0.1.0", max_attempts=3
+):
+    """Call CreateRegistryRecord; on ConflictException retry with a 6-hex suffix.
+
+    Returns (recordArn, final_name). Raises ValueError if all attempts collide.
+    """
+    attempt_name = name
+    for attempt in range(max_attempts):
+        try:
+            resp = agentcore_control.create_registry_record(
+                registryId=REGISTRY_ID,
+                name=attempt_name,
+                description=description,
+                descriptorType=descriptor_type,
+                descriptors=descriptors,
+                recordVersion=record_version,
+                clientToken=str(uuid.uuid4()),
+            )
+            return resp.get("recordArn", ""), attempt_name
+        except agentcore_control.exceptions.ConflictException:
+            attempt_name = f"{name}-{uuid.uuid4().hex[:6]}"
+            continue
+    raise ValueError("record name collision after retries")
+
+
+def _poll_until_out_of_creating(record_id, timeout_seconds=10):
+    """Poll GetRegistryRecord until status leaves CREATING or timeout. Best-effort."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            rec = agentcore_control.get_registry_record(
+                registryId=REGISTRY_ID, recordId=record_id
+            )
+            if rec.get("status") != "CREATING":
+                return
+        except Exception as e:
+            logger.info("GetRegistryRecord during wait returned: %s", e)
+        time.sleep(0.5)
+
+
+def _submit_for_approval(record_id):
+    """Submit record for curator approval. Errors logged, not raised."""
+    try:
+        agentcore_control.submit_registry_record_for_approval(
+            registryId=REGISTRY_ID, recordId=record_id
+        )
+    except Exception as e:
+        logger.warning("Submit-for-approval failed for %s: %s", record_id, e)
+
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
@@ -304,61 +380,35 @@ def create_my_record(event):
 
     # Record names must be unique within a registry. Suffix with a short random
     # hash on collision so two users can pick the same skill name.
-    attempt_name = skill_name
-    for attempt in range(3):
-        try:
-            create_resp = agentcore_control.create_registry_record(
-                registryId=REGISTRY_ID,
-                name=attempt_name,
-                description=description,
-                descriptorType="AGENT_SKILLS",
-                descriptors={
-                    "agentSkills": {
-                        "skillMd": {"inlineContent": skill_md},
-                        "skillDefinition": {
-                            "schemaVersion": "0.1.0",
-                            "inlineContent": skill_def,
-                        },
-                    }
-                },
-                recordVersion="0.1.0",
-                clientToken=str(uuid.uuid4()),
-            )
-            break
-        except agentcore_control.exceptions.ConflictException:
-            attempt_name = f"{skill_name}-{uuid.uuid4().hex[:6]}"
-            continue
-    else:
+    descriptors = {
+        "agentSkills": {
+            "skillMd": {"inlineContent": skill_md},
+            "skillDefinition": {
+                "schemaVersion": "0.1.0",
+                "inlineContent": skill_def,
+            },
+        }
+    }
+    try:
+        record_arn, attempt_name = _create_record_with_collision_fallback(
+            name=skill_name,
+            descriptor_type="AGENT_SKILLS",
+            descriptors=descriptors,
+            description=description,
+        )
+    except ValueError:
         return response(409, {"error": "Record name collision; please retry"})
 
-    record_arn = create_resp.get("recordArn", "")
     record_id = _extract_record_id_from_arn(record_arn)
 
     # Save ownership row
     table.put_item(Item=_record_to_owner_row(record_id, caller_sub))
 
     # Auto-submit for approval so the admin sees it in the pending queue.
-    # SubmitRegistryRecordForApproval rejects records that are still in
-    # CREATING state with a ConflictException that boto3 surfaces silently;
-    # the record then lingers in DRAFT forever. Poll GetRegistryRecord until
-    # the record leaves CREATING (usually <1s) before submitting.
-    for _ in range(20):  # up to ~10s total
-        try:
-            rec = agentcore_control.get_registry_record(
-                registryId=REGISTRY_ID, recordId=record_id
-            )
-            if rec.get("status") != "CREATING":
-                break
-        except Exception as e:
-            logger.info("GetRegistryRecord during wait returned: %s", e)
-        time.sleep(0.5)
-
-    try:
-        agentcore_control.submit_registry_record_for_approval(
-            registryId=REGISTRY_ID, recordId=record_id
-        )
-    except Exception as e:
-        logger.warning("Submit-for-approval failed for %s: %s", record_id, e)
+    # Poll GetRegistryRecord until the record leaves CREATING (usually <1s)
+    # before submitting, otherwise SubmitRegistryRecordForApproval fails silently.
+    _poll_until_out_of_creating(record_id)
+    _submit_for_approval(record_id)
 
     return response(201, {
         "recordId": record_id,
@@ -430,12 +480,7 @@ def update_my_record(event):
     )
 
     # Re-submit for approval (any edit resets the curator flow)
-    try:
-        agentcore_control.submit_registry_record_for_approval(
-            registryId=REGISTRY_ID, recordId=record_id
-        )
-    except Exception as e:
-        logger.info("Re-submit-for-approval returned: %s", e)
+    _submit_for_approval(record_id)
 
     return response(200, {"message": f"Record '{record_id}' updated", "recordId": record_id})
 
@@ -470,6 +515,204 @@ def delete_my_record(event):
 
 
 # ---------------------------------------------------------------------------
+# A2A handlers
+# ---------------------------------------------------------------------------
+
+def _a2a_fetch_detail(record_id):
+    r = agentcore_control.get_registry_record(registryId=REGISTRY_ID, recordId=record_id)
+    descriptors = r.get("descriptors", {}) or {}
+    a2a = descriptors.get("a2a", {}) or {}
+    card_def_raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+    form = parse_card_definition(card_def_raw)
+    return {
+        "recordId": r.get("recordId", ""),
+        "name": r.get("name", "") or form.get("name", ""),
+        "description": r.get("description", "") or form.get("description", ""),
+        "status": r.get("status", ""),
+        "createdAt": _iso_or_empty(r.get("createdAt")),
+        "updatedAt": _iso_or_empty(r.get("updatedAt")),
+        "card": form,
+    }
+
+
+def list_my_a2a(event):
+    caller_sub, _ = get_caller(event)
+    if not caller_sub:
+        return response(401, {"error": "Unauthorized"})
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    my_record_ids = []
+    scan_params = {
+        "FilterExpression": (
+            Attr("userId").eq(OWNERSHIP_USER_PREFIX)
+            & Attr("ownerSub").eq(caller_sub)
+            & Attr("recordType").eq("a2a")
+        ),
+    }
+    while True:
+        resp = table.scan(**scan_params)
+        for item in resp.get("Items", []):
+            sk = item.get("skillName", "")
+            if sk.startswith(A2A_SK_PREFIX):
+                my_record_ids.append(sk[len(A2A_SK_PREFIX):])
+        if "LastEvaluatedKey" not in resp:
+            break
+        scan_params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    records = []
+    for rid in my_record_ids:
+        try:
+            records.append(_a2a_fetch_detail(rid))
+        except agentcore_control.exceptions.ResourceNotFoundException:
+            try:
+                table.delete_item(Key=_a2a_owner_key(rid))
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("Failed to load A2A record %s: %s", rid, e)
+
+    records.sort(key=lambda r: r.get("updatedAt", ""), reverse=True)
+    return response(200, {"records": records})
+
+
+def create_my_a2a(event):
+    caller_sub, caller_email = get_caller(event)
+    if not caller_sub:
+        return response(401, {"error": "Unauthorized"})
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    form = json.loads(event.get("body") or "{}")
+    ok, err = validate_a2a_form(form)
+    if not ok:
+        return response(400, {"error": err})
+
+    descriptors = {
+        "a2a": {
+            # Wrapper has no schemaVersion — the card's protocolVersion
+            # (from build_card_definition) is what AgentCore validates.
+            "agentCard": {
+                "inlineContent": build_card_definition(form),
+            },
+        }
+    }
+    try:
+        record_arn, attempt_name = _create_record_with_collision_fallback(
+            name=form["name"],
+            descriptor_type="A2A",
+            descriptors=descriptors,
+            description=form["description"],
+        )
+    except ValueError:
+        return response(409, {"error": "Record name collision; please retry"})
+
+    record_id = _extract_record_id_from_arn(record_arn)
+
+    table.put_item(Item={
+        **_a2a_owner_key(record_id),
+        "recordType": "a2a",
+        "ownerSub": caller_sub,
+        "ownerEmail": caller_email,
+        "createdAt": now_iso(),
+        "updatedAt": now_iso(),
+    })
+
+    _poll_until_out_of_creating(record_id)
+    _submit_for_approval(record_id)
+
+    return response(201, {
+        "recordId": record_id,
+        "recordArn": record_arn,
+        "name": attempt_name,
+    })
+
+
+def update_my_a2a(event):
+    caller_sub, caller_email = get_caller(event)
+    if not caller_sub:
+        return response(401, {"error": "Unauthorized"})
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    record_id = path_params.get("recordId", "")
+    if not record_id:
+        return response(400, {"error": "recordId is required"})
+
+    owner_row = table.get_item(Key=_a2a_owner_key(record_id)).get("Item") or {}
+    if owner_row.get("ownerSub") != caller_sub:
+        return response(403, {"error": "You do not own this record"})
+
+    form = json.loads(event.get("body") or "{}")
+    ok, err = validate_a2a_form(form)
+    if not ok:
+        return response(400, {"error": err})
+
+    try:
+        existing = agentcore_control.get_registry_record(
+            registryId=REGISTRY_ID, recordId=record_id
+        )
+    except agentcore_control.exceptions.ResourceNotFoundException:
+        return response(404, {"error": f"Record '{record_id}' not found"})
+
+    # Force the form's name to match the existing record — the Registry does not
+    # allow renaming records, and the UI disables the name field on edit.
+    form["name"] = existing.get("name", form.get("name", ""))
+
+    agentcore_control.update_registry_record(
+        registryId=REGISTRY_ID,
+        recordId=record_id,
+        description={"optionalValue": form["description"]},
+        descriptors={
+            "optionalValue": {
+                "a2a": {
+                    "agentCard": {
+                        "inlineContent": build_card_definition(form),
+                    },
+                }
+            }
+        },
+    )
+    table.update_item(
+        Key=_a2a_owner_key(record_id),
+        UpdateExpression="SET updatedAt = :t, ownerEmail = :e",
+        ExpressionAttributeValues={":t": now_iso(), ":e": caller_email},
+    )
+    _submit_for_approval(record_id)
+    return response(200, {"message": f"A2A record '{record_id}' updated", "recordId": record_id})
+
+
+def delete_my_a2a(event):
+    caller_sub, _ = get_caller(event)
+    if not caller_sub:
+        return response(401, {"error": "Unauthorized"})
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    record_id = path_params.get("recordId", "")
+    if not record_id:
+        return response(400, {"error": "recordId is required"})
+
+    owner_row = table.get_item(Key=_a2a_owner_key(record_id)).get("Item") or {}
+    if owner_row.get("ownerSub") != caller_sub:
+        return response(403, {"error": "You do not own this record"})
+
+    try:
+        agentcore_control.delete_registry_record(
+            registryId=REGISTRY_ID, recordId=record_id
+        )
+    except agentcore_control.exceptions.ResourceNotFoundException:
+        pass
+    except Exception as e:
+        return response(500, {"error": f"Failed to delete record: {str(e)}"})
+
+    table.delete_item(Key=_a2a_owner_key(record_id))
+    return response(200, {"message": f"A2A record '{record_id}' deleted"})
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -490,6 +733,28 @@ def handler(event, context):
             return update_my_record(event)
         if resource == "/my-skills/{recordId}" and method == "DELETE":
             return delete_my_record(event)
+        if resource == "/my-a2a-agents" and method == "GET":
+            return list_my_a2a(event)
+        if resource == "/my-a2a-agents" and method == "POST":
+            return create_my_a2a(event)
+        if resource == "/my-a2a-agents/{recordId}" and method == "GET":
+            # Single-record GET: same shape as list item
+            path_params = event.get("pathParameters") or {}
+            record_id = path_params.get("recordId", "")
+            caller_sub, _ = get_caller(event)
+            if not caller_sub:
+                return response(401, {"error": "Unauthorized"})
+            owner_row = table.get_item(Key=_a2a_owner_key(record_id)).get("Item") or {}
+            if owner_row.get("ownerSub") != caller_sub:
+                return response(403, {"error": "You do not own this record"})
+            try:
+                return response(200, _a2a_fetch_detail(record_id))
+            except agentcore_control.exceptions.ResourceNotFoundException:
+                return response(404, {"error": "not found"})
+        if resource == "/my-a2a-agents/{recordId}" and method == "PUT":
+            return update_my_a2a(event)
+        if resource == "/my-a2a-agents/{recordId}" and method == "DELETE":
+            return delete_my_a2a(event)
     except Exception as e:
         logger.exception("Unhandled error")
         return response(500, {"error": f"{type(e).__name__}: {str(e)}"})

@@ -20,6 +20,8 @@
 - [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
 - [9.7. Voice Mode (Nova Sonic Bi-directional Streaming)](#97-voice-mode-nova-sonic-bi-directional-streaming)
 - [9.8. Skill ERP & AgentCore Registry](#98-skill-erp--agentcore-registry)
+- [9.9. Integration Registry & A2A Agents](#99-integration-registry--a2a-agents)
+- [9.10. Remote Shell Commands per Session](#910-remote-shell-commands-per-session)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -42,7 +44,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
 | Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation |
 | Skill ERP | React + TypeScript + REST API | End-user skill publishing: authors SKILL.md records, publishes to AgentCore Registry for curator approval |
-| Enterprise Knowledge Base | Bedrock KB + OpenSearch Serverless + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering |
+| Enterprise Knowledge Base | Bedrock KB + **S3 Vectors** + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering. Vector store is the pay-per-vector S3 Vectors service (no fixed monthly floor). |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
 ---
@@ -1144,7 +1146,7 @@ deploy.sh (one-click wrapper)
     |           -> Lambda (iot-control, iot-discovery, admin-api, kb-query, user-init)
     |           -> DynamoDB smarthome-skills
     |           -> S3 (smarthome-skill-files, smarthome-kb-docs)
-    |           -> OpenSearch Serverless collection smarthome-kb
+    |           (S3 Vector bucket + index created later in step 6 by setup-agentcore.py)
     |           -> Bedrock Knowledge Base + S3 data source (Cohere multilingual)
     |           -> API Gateway with Cognito authorizer
     |           -> S3 + CloudFront for each of the 3 frontends
@@ -1176,7 +1178,7 @@ deploy.sh (one-click wrapper)
     |           |     CloudFormation: AgentCore-smarthome-default
     |           |     -> Runtime, Gateway, Memory, Policy Engine, IAM Role
     |           +---> Fetch resource IDs (from CFN stack outputs)
-    |           +---> Initialize KB (AOSS index, Bedrock KB, S3 data source,
+    |           +---> Initialize KB (S3 Vector bucket + index, Bedrock KB, S3 data source,
     |           |     default __shared__/ + admin@/ folders)
     |           +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
     |           +---> Patch runtime: requestHeaderAllowlist: ["Authorization"]
@@ -1244,8 +1246,8 @@ admin-console/
 | **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
 | **Agent Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
 | **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY), and **Demo Links** column with one-click deep links to the chatbot (`?username=<email>` for login prefill) and device simulator for each user — optimized for admin-led demos |
-| **Integrations** | Tool source registry — Lambda targets (active), MCP servers, A2A agents, API Gateway (planned) |
-| **Sessions** | Runtime session monitoring with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` to the admin API so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears from the list immediately |
+| **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AgentCore Registry with publisher info; details drawer shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.10. |
+| **Sessions** | Runtime session monitoring with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), **Remote Shell** button, and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` to the admin API so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears from the list immediately. Remote Shell opens a modal that streams shell commands into the runtime container via `InvokeAgentRuntimeCommand` (see §9.11). |
 | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory |
 | **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles, and Cedar Policy Engine settings |
 
@@ -1256,11 +1258,11 @@ admin-console/
 | `smarthome-admin-console-{accountId}` S3 Bucket | Static assets |
 | `smarthome-skill-files-{accountId}` S3 Bucket | Skill directory files (scripts, references, assets) with CORS |
 | `smarthome-kb-docs-{accountId}` S3 Bucket | Knowledge base documents organized by scope prefix (`__shared__/`, `user@email/`) |
-| `smarthome-kb` OpenSearch Serverless Collection | Vector store for KB document embeddings (VECTORSEARCH type) |
-| Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model |
+| `smarthome-kb-vectors-{accountId}` S3 Vector bucket + `smarthome-kb-index` | Vector store for KB document embeddings (S3 Vectors, created imperatively by `setup-agentcore.py` — no CDK L1 construct exists yet) |
+| Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model, `storageConfiguration.type=S3_VECTORS` |
 | `smarthome-kb-query` Lambda | Gateway target for agent KB retrieval with JWT-based user identity extraction |
 | CloudFront Distribution | HTTPS CDN |
-| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `region`, `chatbotUrl`, `deviceSimulatorUrl` |
+| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `voiceAgentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `cognitoIdentityPoolId`, `region`, `chatbotUrl`, `deviceSimulatorUrl`, `skillErpUrl` |
 
 ### 9.5 Per-User Tool Permission Management
 
@@ -1368,15 +1370,25 @@ Admin Console                          Agent (Chatbot)
        │                                    │
        │ StartIngestionJob                  │ filter: scope=__shared__ OR scope=user_email
        v                                    v
-┌──────────────────┐              ┌──────────────────┐
-│  Bedrock KB      │              │  OpenSearch       │
-│  (SmartHome      │──────────────│  Serverless       │
-│   EnterpriseKB)  │  knn_vector  │  (smarthome-kb)   │
-└──────────────────┘              └──────────────────┘
-       │
+┌──────────────────┐              ┌──────────────────────┐
+│  Bedrock KB      │              │  S3 Vectors          │
+│  (SmartHome      │──────────────│  bucket:             │
+│   EnterpriseKB)  │  PutVectors  │   smarthome-kb-      │
+│  storage:        │  QueryVectors│   vectors-{acct}     │
+│  S3_VECTORS      │              │  index:              │
+└──────────────────┘              │   smarthome-kb-index │
+       │                          │   (1024 dims, cosine)│
+       │                          └──────────────────────┘
        │ cohere.embed-multilingual-v3
        │ (1024 dimensions, Chinese/English)
 ```
+
+**Vector store: S3 Vectors** (serverless, pay-per-vector).
+The KB was previously backed by OpenSearch Serverless, which carried a ~$350/month floor.
+AWS's S3 Vectors service stores float32 vectors directly in a dedicated S3 bucket
+type, exposing `PutVectors` / `QueryVectors` APIs that Bedrock calls on behalf
+of the KB during ingestion and retrieval. There is no fixed cost — billing is
+per vector stored and per query.
 
 **Per-User Document Isolation:**
 
@@ -1438,22 +1450,32 @@ Identity chain: **Cognito JWT → AgentCore Runtime (verified `userId`) → `act
 | Resource | Purpose |
 |----------|---------|
 | `smarthome-kb-docs-{accountId}` S3 Bucket | Document storage with CORS for presigned URL uploads |
-| `smarthome-kb` AOSS Collection (VECTORSEARCH) | Vector embeddings store |
-| AOSS Encryption/Network/Data Access Policies | Collection security |
-| `KBServiceRole` IAM Role | Bedrock KB service role (S3 read + AOSS access + Bedrock InvokeModel) |
+| `KBServiceRole` IAM Role | Bedrock KB service role (S3 read + `s3vectors:*` + Bedrock InvokeModel) |
 | `smarthome-kb-query` Lambda | MCP tool target for agent KB retrieval |
+
+The S3 Vector bucket + index are **not** CDK resources — no L1 construct
+exists for `s3vectors` yet. They are created imperatively by
+`setup-agentcore.py` (idempotent `create_vector_bucket` + `create_index`).
 
 **Setup Script Initialization:**
 
 The `setup-agentcore.py` script handles one-time KB setup:
-1. Adds deployer's IAM identity to AOSS data access policy
-2. Creates AOSS vector index (`smarthome-kb-index`) via `opensearch-py`
-3. Creates Bedrock Knowledge Base with AOSS storage configuration
-4. Creates S3 data source pointing to the KB docs bucket
-5. Stores KB config in DynamoDB
-6. Creates default S3 folders (`__shared__/`, `admin@smarthome.local/`)
-7. Registers `kb-query` Lambda as an AgentCore Gateway target
-8. Post-deploy: patches Gateway target with inline tool schema (includes `user_id` parameter) to bypass S3 schema caching
+1. Creates S3 Vector bucket `smarthome-kb-vectors-{accountId}` via
+   `s3vectors.create_vector_bucket` (idempotent).
+2. Creates the vector index `smarthome-kb-index` (dimension 1024 for
+   Cohere multilingual v3, `distanceMetric=cosine`, `dataType=float32`).
+3. Creates Bedrock Knowledge Base with `storageConfiguration.type=S3_VECTORS`
+   and `s3VectorsConfiguration.indexArn` pointing at the index above. If a
+   KB named `SmartHomeEnterpriseKB` already exists under a different storage
+   type (e.g. a prior AOSS-backed deploy), the script flips the data source's
+   `dataDeletionPolicy` to `RETAIN`, deletes the old KB, waits for removal,
+   then recreates it on S3 Vectors.
+4. Creates S3 data source pointing to the KB docs bucket.
+5. Stores KB config in DynamoDB.
+6. Creates default S3 folders (`__shared__/`, `admin@smarthome.local/`).
+7. Registers `kb-query` Lambda as an AgentCore Gateway target.
+8. Post-deploy: patches Gateway target with inline tool schema (includes
+   `user_id` parameter) to bypass S3 schema caching.
 
 **Admin API Endpoints (consolidated under `GET/POST /knowledge-bases`):**
 
@@ -1995,6 +2017,127 @@ the admin side parses the same frontmatter/JSON back out.
 **Teardown.** `scripts/teardown-agentcore.py` lists all records in
 `SmartHomeSkillsRegistry`, deletes each one, then calls `DeleteRegistry` —
 the API rejects deletion of non-empty registries.
+
+### 9.9 Integration Registry & A2A Agents
+
+The Admin Console's **Integration Registry** tab (renamed from
+"Integrations") surfaces external tool integrations. It has four sub-tabs:
+
+| Sub-tab | Status |
+|---|---|
+| Overview | Active — a 4-row status table (Lambda Targets / MCP Servers / API Gateway / A2A Agents). Lambda Targets and A2A Agents are marked "active"; MCP Servers and API Gateway show "planned". |
+| A2A Agents | Active — lists approved A2A records from AgentCore Registry with publisher info and a details drawer. See below. |
+| MCP Servers | Disabled placeholder ("Coming soon"). |
+| API Gateway | Disabled placeholder ("Coming soon"). |
+
+**A2A records live in the same registry as skills.** `SmartHomeSkillsRegistry`
+accepts both `AGENT_SKILLS` and `A2A` descriptor types. Skill ERP gains a
+second tab "A2A Agents" for end-user publishing, and the Admin Console reads
+the `A2A` records for display only (no import-to-DynamoDB in this release).
+
+**A2A data model.** Each A2A record stores a canonical A2A **AgentCard**
+as a JSON blob under `descriptors.a2a.agentCard.inlineContent`. The card's
+`protocolVersion` field (required by the AgentCore Registry validator, tested
+at `"0.3.0"`) and a `provider` object with both `organization` and `url`
+fields are mandatory. Form fields (name / description / endpoint / version /
+auth scheme / capabilities / tags / sub-skills + examples) are rendered into
+the AgentCard JSON by `cdk/lambda/skill-erp-api/a2a_helpers.py`.
+
+**Ownership.** The existing `__erp_owner__` partition in the skills
+DynamoDB table holds both skill and A2A ownership rows. A `recordType` field
+(`"a2a"` or `"skill"`) disambiguates, and the sort key is prefixed `a2a:` for
+A2A rows so it can never collide with a skill recordId.
+
+**API routes (Skill ERP Lambda).** Parallel to `/my-skills`:
+`GET/POST/PUT/DELETE /my-a2a-agents[/{recordId}]`.
+
+**Admin API route.** To stay under the admin Lambda's 20 KB resource-policy
+cap, the A2A listing is consolidated onto the existing `/registry/records`
+resource as a query-param dispatch: `GET /registry/records?action=a2a-list`
+returns approved A2A records enriched with `publishedBy` from the
+ownership-row scan.
+
+**Deploy-time seed.** `setup-agentcore.py` idempotently seeds three demo
+records after the registry is ensured to exist:
+`energy-optimization-agent`, `home-security-agent`,
+`appliance-maintenance-agent`. Each is created, ownership-rowed under the
+deploy-time admin user, and submitted for approval. Approval itself is
+manual (no control-plane approve API) — admins click Approve in the
+AgentCore Registry console to make them appear in the admin A2A Agents
+sub-tab.
+
+### 9.10 Remote Shell Commands per Session
+
+Every row in the Admin Console's Sessions tab carries a **Remote Shell**
+button that opens a modal running a shell command inside the targeted
+AgentCore Runtime container and streaming stdout/stderr back live —
+functionally an SSH-style debug console for the `smarthome` and
+`smarthomevoice` runtimes.
+
+**Browser talks to AgentCore directly.** The modal calls
+`bedrock-agentcore:InvokeAgentRuntimeCommand` via
+`@aws-sdk/client-bedrock-agentcore` using temporary credentials from the
+Cognito authenticated Identity Pool (the same role used for
+`/invocations` and `/ws`). The response is an HTTP/2 event stream; the
+browser consumes it as an async iterable. Zero Lambda, zero API Gateway —
+the feature is purely frontend-plus-IAM.
+
+**Architecture:**
+
+```
+Admin Console (browser, logged in as admin)
+    │  1. Cognito authenticated-role creds (cached)
+    │  2. lazy import @aws-sdk/client-bedrock-agentcore
+    │  3. BedrockAgentCoreClient.send(
+    │       InvokeAgentRuntimeCommandCommand({
+    │         agentRuntimeArn, runtimeSessionId,
+    │         body: { command, timeout }}))
+    │     SigV4-signed HTTP/2,
+    │     accept: application/vnd.amazon.eventstream
+    v
+AgentCore Runtime (smarthome or smarthomevoice)
+    spawns the command in the running container,
+    streams chunk.contentStart → contentDelta {stdout|stderr}
+    → contentStop {exitCode, status}. Non-blocking to active
+    agent invocations on the same session.
+    │
+    v
+Browser (ShellModal + AnsiOutput)
+    for await (const evt of resp.stream) {...}
+    Append-only terminal pane (60vh, ANSI color subset,
+    stderr in red, 5 MB accumulation cap). Stop button
+    fires AbortController.abort().
+```
+
+**IAM.** `bedrock-agentcore:InvokeAgentRuntimeCommand` is appended to the
+existing Cognito authenticated-role grant in `setup-agentcore.py`
+(alongside `InvokeAgentRuntime` and `InvokeAgentRuntimeWithWebSocketStream`).
+
+**Security caveat — acknowledged.** The permission lives on the shared
+Cognito authenticated role, which every logged-in user carries. The
+admin-only check is currently client-side (React route gate + button
+visibility in the admin-only Sessions tab). A follow-up spec will split the
+Identity Pool into role-mapped groups so that `InvokeAgentRuntimeCommand`
+and other admin-only actions live on an `admin`-group role.
+
+**Input contracts.**
+- `command` must be 1 byte to 64 KB.
+- `timeout` must be 1 to 3600 seconds (default 300).
+- `runtimeSessionId` must be at least 33 characters (the Sessions tab
+  already uses Cognito `sub` UUIDs = 36 chars).
+
+**UX details.**
+- Runtime selector (Text/Voice) defaults to the clicked row's `kind`
+  but is overridable so admins can debug the voice container from a text
+  session's row.
+- Output pane renders a limited ANSI subset: reset, bold, 30-37 / 90-97
+  foreground colors. Unknown sequences (cursor moves, 256-color, etc.) are
+  stripped silently. Stderr chunks carry a red CSS class.
+- Modal-local command history (last 20 commands, deduped, most-recent-
+  first) resets on close. Copy button strips ANSI and writes the plain
+  text to clipboard.
+- The SDK module (~100 KB minified) is lazy-imported on modal open so it
+  never loads for admins who don't use the feature.
 
 ---
 

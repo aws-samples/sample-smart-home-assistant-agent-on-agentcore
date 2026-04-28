@@ -29,6 +29,8 @@ import {
   getKBSyncStatus,
   listRegistryRecords,
   importRegistryRecords,
+  listA2aAgents,
+  A2AAgentRecord,
   getAgentPrompts,
   saveAgentPrompt,
   deleteAgentPrompt,
@@ -49,6 +51,7 @@ import {
 } from '../api/adminApi';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
+import ShellModal, { ShellTarget } from './ShellModal';
 
 // Skill name validation (matches Strands SDK pattern)
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
@@ -1250,6 +1253,14 @@ const AdminConsole: React.FC = () => {
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [shellTarget, setShellTarget] = useState<ShellTarget | null>(null);
+
+  // Integration Registry
+  const [integrationsSubTab, setIntegrationsSubTab] = useState<'overview' | 'a2a'>('overview');
+  const [a2aAgents, setA2aAgents] = useState<A2AAgentRecord[]>([]);
+  const [a2aLoading, setA2aLoading] = useState(false);
+  const [a2aError, setA2aError] = useState<string>('');
+  const [a2aDrawer, setA2aDrawer] = useState<A2AAgentRecord | null>(null);
 
   // Users tab
   const [cognitoUsers, setCognitoUsers] = useState<CognitoUserInfo[]>([]);
@@ -1496,6 +1507,17 @@ const AdminConsole: React.FC = () => {
       loadSettings();
     }
   }, [activeTab, loadSessions, loadCognitoUsers, loadUserIds, loadSettings]);
+
+  useEffect(() => {
+    if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
+      setA2aLoading(true);
+      setA2aError('');
+      listA2aAgents()
+        .then(setA2aAgents)
+        .catch((err: any) => setA2aError(err.message))
+        .finally(() => setA2aLoading(false));
+    }
+  }, [activeTab, integrationsSubTab]);
 
   const clearMessages = () => {
     setError('');
@@ -2277,6 +2299,17 @@ const AdminConsole: React.FC = () => {
                       </td>
                       <td className="cell-actions">
                         <button
+                          className="btn btn-sm btn-secondary"
+                          onClick={() => setShellTarget({
+                            userId: s.userId,
+                            sessionId: s.sessionId,
+                            kind: s.kind ?? 'text',
+                          })}
+                          style={{ marginRight: 6 }}
+                        >
+                          {t('sessions.shell')}
+                        </button>
+                        <button
                           className="btn btn-sm btn-danger"
                           onClick={() => handleStopSession(s.sessionId, s.kind)}
                         >
@@ -2289,6 +2322,9 @@ const AdminConsole: React.FC = () => {
               </table>
             )}
           </div>
+          {shellTarget && (
+            <ShellModal target={shellTarget} onClose={() => setShellTarget(null)} />
+          )}
         </div>
       )}
 
@@ -2517,56 +2553,222 @@ const AdminConsole: React.FC = () => {
         </div>
       )}
 
-      {/* Integrations Tab */}
+      {/* Integration Registry Tab */}
       {activeTab === 'integrations' && (
         <div className="integrations-section">
-          <div className="settings-panel" style={{ marginBottom: '16px' }}>
-            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>{t('integrations.title')}</h3>
-            <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
-              {t('integrations.desc')}
-            </p>
+          <div className="sub-tab-bar">
+            <button
+              className={`sub-tab ${integrationsSubTab === 'overview' ? 'sub-tab-active' : ''}`}
+              onClick={() => setIntegrationsSubTab('overview')}
+            >
+              {t('integrations.sub.overview')}
+            </button>
+            <button
+              className={`sub-tab ${integrationsSubTab === 'a2a' ? 'sub-tab-active' : ''}`}
+              onClick={() => setIntegrationsSubTab('a2a')}
+            >
+              {t('integrations.sub.a2a')}
+            </button>
+            <button className="sub-tab sub-tab-disabled" disabled>
+              {t('integrations.sub.mcp')} · {t('integrations.comingSoon')}
+            </button>
+            <button className="sub-tab sub-tab-disabled" disabled>
+              {t('integrations.sub.apiGw')} · {t('integrations.comingSoon')}
+            </button>
           </div>
 
-          <div className="skills-table-container">
-            <table className="skills-table">
-              <thead>
-                <tr>
-                  <th>{t('integrations.colType')}</th>
-                  <th>{t('integrations.colDescription')}</th>
-                  <th>{t('integrations.colStatus')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td className="cell-name">{t('integrations.lambdaTargets')}</td>
-                  <td className="cell-desc">{t('integrations.lambdaDesc')}</td>
-                  <td><span className="badge badge-active">{t('integrations.active')}</span></td>
-                </tr>
-                <tr>
-                  <td className="cell-name">{t('integrations.mcpServers')}</td>
-                  <td className="cell-desc">{t('integrations.mcpDesc')}</td>
-                  <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
-                </tr>
-                <tr>
-                  <td className="cell-name">{t('integrations.a2aAgents')}</td>
-                  <td className="cell-desc">{t('integrations.a2aDesc')}</td>
-                  <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
-                </tr>
-                <tr>
-                  <td className="cell-name">{t('integrations.apiGateway')}</td>
-                  <td className="cell-desc">{t('integrations.apiDesc')}</td>
-                  <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          {integrationsSubTab === 'overview' && (
+            <div>
+              <div className="settings-panel" style={{ marginBottom: '16px' }}>
+                <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>{t('integrations.title')}</h3>
+                <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
+                  {t('integrations.desc')}
+                </p>
+              </div>
 
-          <div className="settings-panel" style={{ marginTop: '16px' }}>
-            <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>{t('integrations.roadmap')}</h3>
-            <p className="settings-hint" style={{ margin: 0, lineHeight: '1.6' }}>
-              {t('integrations.roadmapDesc')}
-            </p>
-          </div>
+              <div className="skills-table-container">
+                <table className="skills-table">
+                  <thead>
+                    <tr>
+                      <th>{t('integrations.colType')}</th>
+                      <th>{t('integrations.colDescription')}</th>
+                      <th>{t('integrations.colStatus')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="cell-name">{t('integrations.lambdaTargets')}</td>
+                      <td className="cell-desc">{t('integrations.lambdaDesc')}</td>
+                      <td><span className="badge badge-active">{t('integrations.active')}</span></td>
+                    </tr>
+                    <tr>
+                      <td className="cell-name">{t('integrations.mcpServers')}</td>
+                      <td className="cell-desc">{t('integrations.mcpDesc')}</td>
+                      <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
+                    </tr>
+                    <tr>
+                      <td className="cell-name">{t('integrations.a2aAgents')}</td>
+                      <td className="cell-desc">{t('integrations.a2aDesc')}</td>
+                      <td><span className="badge badge-active">{t('integrations.active')}</span></td>
+                    </tr>
+                    <tr>
+                      <td className="cell-name">{t('integrations.apiGateway')}</td>
+                      <td className="cell-desc">{t('integrations.apiDesc')}</td>
+                      <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="settings-panel" style={{ marginTop: '16px' }}>
+                <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>{t('integrations.roadmap')}</h3>
+                <p className="settings-hint" style={{ margin: 0, lineHeight: '1.6' }}>
+                  {t('integrations.roadmapDesc')}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {integrationsSubTab === 'a2a' && (
+            <div>
+              <div className="toolbar">
+                <div className="toolbar-left">
+                  <span className="toolbar-label">
+                    {t('integrations.a2a.title')} ({a2aAgents.length})
+                  </span>
+                </div>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => {
+                    setA2aLoading(true);
+                    setA2aError('');
+                    listA2aAgents()
+                      .then(setA2aAgents)
+                      .catch((err: any) => setA2aError(err.message))
+                      .finally(() => setA2aLoading(false));
+                  }}
+                >
+                  {t('integrations.a2a.refresh')}
+                </button>
+              </div>
+              {a2aError && <div className="alert alert-error">{a2aError}</div>}
+
+              {a2aLoading ? (
+                <div className="loading">{t('common.loading')}</div>
+              ) : a2aAgents.length === 0 ? (
+                <div className="empty-state">
+                  <p>{t('integrations.a2a.empty')}</p>
+                  <p className="empty-hint">{t('integrations.a2a.emptyHint')}</p>
+                </div>
+              ) : (
+                <table className="skills-table">
+                  <thead>
+                    <tr>
+                      <th>{t('integrations.a2a.col.name')}</th>
+                      <th>{t('integrations.a2a.col.description')}</th>
+                      <th>{t('integrations.a2a.col.endpoint')}</th>
+                      <th>{t('integrations.a2a.col.auth')}</th>
+                      <th>{t('integrations.a2a.col.tags')}</th>
+                      <th>{t('integrations.a2a.col.publishedBy')}</th>
+                      <th>{t('integrations.a2a.col.lastUpdated')}</th>
+                      <th>{t('integrations.a2a.col.actions')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {a2aAgents.map((r) => {
+                      const tags = r.card.tags || [];
+                      const visible = tags.slice(0, 3);
+                      const overflow = tags.length - visible.length;
+                      const authScheme = (r.card.authentication?.schemes || ['none'])[0];
+                      return (
+                        <tr key={r.recordId}>
+                          <td className="cell-name">{r.name}</td>
+                          <td className="cell-desc">{r.description}</td>
+                          <td className="cell-desc" title={r.card.url}>
+                            {r.card.url && r.card.url.length > 48 ? r.card.url.slice(0, 48) + '…' : r.card.url}
+                          </td>
+                          <td className="cell-desc">{authScheme}</td>
+                          <td className="cell-desc">
+                            {visible.map((tg) => (
+                              <span key={tg} className="badge badge-inactive" style={{ marginRight: 4 }}>{tg}</span>
+                            ))}
+                            {overflow > 0 && <span className="badge">+{overflow}</span>}
+                          </td>
+                          <td className="cell-desc">{r.publishedBy || '—'}</td>
+                          <td className="cell-date">
+                            {r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'}
+                          </td>
+                          <td className="cell-actions">
+                            <button
+                              className="btn btn-sm btn-secondary"
+                              onClick={() => setA2aDrawer(r)}
+                            >
+                              {t('integrations.a2a.view')}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+
+              {a2aDrawer && (
+                <div className="drawer-overlay" onClick={() => setA2aDrawer(null)}>
+                  <div className="drawer" onClick={(e) => e.stopPropagation()}>
+                    <div className="drawer-header">
+                      <h3>{a2aDrawer.name}</h3>
+                      <button className="btn btn-sm btn-secondary" onClick={() => setA2aDrawer(null)}>
+                        {t('form.close')}
+                      </button>
+                    </div>
+                    <div className="drawer-body">
+                      <p>{a2aDrawer.description}</p>
+                      <dl className="drawer-fields">
+                        <dt>{t('integrations.a2a.drawer.endpoint')}</dt>
+                        <dd>{a2aDrawer.card.url}</dd>
+                        <dt>{t('integrations.a2a.drawer.version')}</dt>
+                        <dd>{a2aDrawer.card.version}</dd>
+                        <dt>{t('integrations.a2a.drawer.provider')}</dt>
+                        <dd>{a2aDrawer.card.provider?.organization || '—'}</dd>
+                        <dt>{t('integrations.a2a.drawer.auth')}</dt>
+                        <dd>{(a2aDrawer.card.authentication?.schemes || []).join(', ') || 'none'}</dd>
+                        <dt>{t('integrations.a2a.drawer.capabilities')}</dt>
+                        <dd>
+                          {(['streaming', 'pushNotifications', 'stateTransitionHistory'] as const)
+                            .filter((k) => a2aDrawer.card.capabilities?.[k])
+                            .join(', ') || '—'}
+                        </dd>
+                        <dt>{t('integrations.a2a.drawer.tags')}</dt>
+                        <dd>{(a2aDrawer.card.tags || []).join(', ') || '—'}</dd>
+                        <dt>{t('integrations.a2a.drawer.skills')}</dt>
+                        <dd>
+                          <ul className="drawer-skills">
+                            {(a2aDrawer.card.skills || []).map((s) => (
+                              <li key={s.id}>
+                                <strong>{s.id}</strong> — {s.name}: {s.description}
+                                {s.examples && s.examples.length > 0 && (
+                                  <ul>
+                                    {s.examples.map((ex, i) => <li key={i}><em>{ex}</em></li>)}
+                                  </ul>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </dd>
+                        <dt>{t('integrations.a2a.drawer.recordId')}</dt>
+                        <dd><code>{a2aDrawer.recordId}</code></dd>
+                        <dt>{t('integrations.a2a.drawer.createdAt')}</dt>
+                        <dd>{a2aDrawer.createdAt ? new Date(a2aDrawer.createdAt).toLocaleString() : '-'}</dd>
+                        <dt>{t('integrations.a2a.drawer.updatedAt')}</dt>
+                        <dd>{a2aDrawer.updatedAt ? new Date(a2aDrawer.updatedAt).toLocaleString() : '-'}</dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

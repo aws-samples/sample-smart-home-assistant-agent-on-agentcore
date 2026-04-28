@@ -81,6 +81,48 @@ const en: Record<string, string> = {
   'form.deleted': 'Deleted',
 
   'common.loading': 'Loading...',
+
+  'erp.tab.skills': 'Skills',
+  'erp.tab.a2a': 'A2A Agents',
+
+  'erp.a2a.list.title': 'My A2A Agents',
+  'erp.a2a.list.hint': 'Each record you publish goes to AgentCore Registry as an A2A_AGENT descriptor for admin approval.',
+  'erp.a2a.list.create': '+ Create A2A Agent',
+  'erp.a2a.list.colEndpoint': 'Endpoint',
+  'erp.a2a.list.empty': 'You have not created any A2A agents yet.',
+  'erp.a2a.list.emptyHint': 'Click "+ Create A2A Agent" to publish your first agent card.',
+
+  'erp.a2a.form.createTitle': 'Create A2A Agent',
+  'erp.a2a.form.editTitle': 'Edit A2A Agent',
+  'erp.a2a.form.name': 'Agent Name',
+  'erp.a2a.form.nameHint': 'Lowercase letters, digits, hyphens. 1–63 chars. Cannot be changed after creation.',
+  'erp.a2a.form.description': 'Description',
+  'erp.a2a.form.endpoint': 'Endpoint URL',
+  'erp.a2a.form.version': 'Version',
+  'erp.a2a.form.provider': 'Provider',
+  'erp.a2a.form.auth': 'Authentication',
+  'erp.a2a.form.capabilities': 'Capabilities',
+  'erp.a2a.form.tags': 'Tags (comma separated)',
+  'erp.a2a.form.tagsHint': 'Optional labels to help consumers find this agent.',
+  'erp.a2a.form.skillsSection': 'Skills',
+  'erp.a2a.form.skillId': 'Skill ID',
+  'erp.a2a.form.skillName': 'Skill Name',
+  'erp.a2a.form.skillDescription': 'Skill Description',
+  'erp.a2a.form.skillExamples': 'Examples',
+  'erp.a2a.form.skillExamplesHint': 'Separate multiple examples with "|".',
+  'erp.a2a.form.addSkill': '+ Add Skill',
+  'erp.a2a.form.removeSkill': 'Remove Skill',
+  'erp.a2a.form.saved': 'Saved.',
+  'erp.a2a.form.savedSubmitted': 'Saved and submitted to Registry for approval.',
+  'erp.a2a.form.deleted': 'Deleted',
+
+  'erp.a2a.validation.name': 'Invalid agent name (a-z, 0-9, hyphens; must start with a letter).',
+  'erp.a2a.validation.description': 'Description is required.',
+  'erp.a2a.validation.endpoint': 'Endpoint must be an http(s) URL.',
+  'erp.a2a.validation.version': 'Version is required.',
+  'erp.a2a.validation.skills': 'At least one skill is required.',
+  'erp.a2a.validation.skillId': 'Skill ID is invalid (a-z, 0-9, hyphens).',
+  'erp.a2a.validation.skillName': 'Skill name is required.',
 };
 
 export default en;
