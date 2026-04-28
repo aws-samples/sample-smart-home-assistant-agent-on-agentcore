@@ -51,6 +51,7 @@ import {
 } from '../api/adminApi';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
+import ShellModal, { ShellTarget } from './ShellModal';
 
 // Skill name validation (matches Strands SDK pattern)
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
@@ -1252,6 +1253,7 @@ const AdminConsole: React.FC = () => {
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [shellTarget, setShellTarget] = useState<ShellTarget | null>(null);
 
   // Integration Registry
   const [integrationsSubTab, setIntegrationsSubTab] = useState<'overview' | 'a2a'>('overview');
@@ -2297,6 +2299,17 @@ const AdminConsole: React.FC = () => {
                       </td>
                       <td className="cell-actions">
                         <button
+                          className="btn btn-sm btn-secondary"
+                          onClick={() => setShellTarget({
+                            userId: s.userId,
+                            sessionId: s.sessionId,
+                            kind: s.kind ?? 'text',
+                          })}
+                          style={{ marginRight: 6 }}
+                        >
+                          {t('sessions.shell')}
+                        </button>
+                        <button
                           className="btn btn-sm btn-danger"
                           onClick={() => handleStopSession(s.sessionId, s.kind)}
                         >
@@ -2309,6 +2322,9 @@ const AdminConsole: React.FC = () => {
               </table>
             )}
           </div>
+          {shellTarget && (
+            <ShellModal target={shellTarget} onClose={() => setShellTarget(null)} />
+          )}
         </div>
       )}
 

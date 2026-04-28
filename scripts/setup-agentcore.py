@@ -1019,6 +1019,7 @@ def main():
                         "Action": [
                             "bedrock-agentcore:InvokeAgentRuntime",
                             "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                            "bedrock-agentcore:InvokeAgentRuntimeCommand",
                         ],
                         # Wildcard covers endpoint qualifiers (e.g. /DEFAULT).
                         "Resource": invoke_resources,
@@ -1336,8 +1337,10 @@ def main():
         admin_config = f"""window.__CONFIG__ = {{
   cognitoUserPoolId: "{outputs['UserPoolId']}",
   cognitoClientId: "{outputs['UserPoolClientId']}",
+  cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
   adminApiUrl: "{admin_api_url}",
   agentRuntimeArn: "{runtime_arn}",
+  voiceAgentRuntimeArn: "{voice_runtime_arn}",
   region: "{REGION}",
   chatbotUrl: "{outputs.get('ChatbotUrl', '')}",
   deviceSimulatorUrl: "{outputs.get('DeviceSimulatorUrl', '')}",

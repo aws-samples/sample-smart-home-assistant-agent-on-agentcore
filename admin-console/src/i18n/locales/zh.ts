@@ -327,6 +327,38 @@ const zh: Record<string, string> = {
   'integrations.a2a.drawer.recordId': '记录 ID',
   'integrations.a2a.drawer.createdAt': '创建时间',
   'integrations.a2a.drawer.updatedAt': '更新时间',
+
+  'sessions.shell': '远程 Shell',
+
+  'shell.title': '远程 Shell — {sessionId}',
+  'shell.close': '关闭',
+  'shell.fieldRuntime': '运行时',
+  'shell.fieldRuntimeText': '文字代理',
+  'shell.fieldRuntimeVoice': '语音代理',
+  'shell.fieldSession': '会话 ID',
+  'shell.fieldCommand': '命令',
+  'shell.byteCounter': '{bytes} / {max} 字节',
+  'shell.fieldTimeout': '超时',
+  'shell.historyLabel': '历史',
+  'shell.historyEmpty': '（无）',
+  'shell.run': '运行',
+  'shell.stop': '停止',
+  'shell.copy': '复制',
+  'shell.exitLine': '退出：code {code} · {status} · {ms} ms',
+  'shell.aborted': '[用户已中止]',
+  'shell.truncated': '[… 已截断 {kb} KB …]',
+
+  'shell.validation.empty': '命令不能为空。',
+  'shell.validation.tooLarge': '命令超过 64 KB 上限。',
+  'shell.validation.timeout': '超时必须在 1 到 3600 秒之间。',
+  'shell.validation.sessionIdTooShort': '会话 ID 至少需要 33 个字符。',
+
+  'shell.error.connecting': '连接中…',
+  'shell.error.validation': '输入校验失败。',
+  'shell.error.accessDenied': 'Runtime 拒绝了该命令。请确认管理员组身份并重新执行 deploy 步骤 6。',
+  'shell.error.notFound': 'Runtime 会话已不存在。请刷新 Sessions 页签。',
+  'shell.error.throttled': 'AgentCore 正在节流，请稍后重试。',
+  'shell.error.runtime': 'Runtime 客户端错误：',
 };
 
 export default zh;

@@ -327,6 +327,38 @@ const en: Record<string, string> = {
   'integrations.a2a.drawer.recordId': 'Record ID',
   'integrations.a2a.drawer.createdAt': 'Created',
   'integrations.a2a.drawer.updatedAt': 'Updated',
+
+  'sessions.shell': 'Remote Shell',
+
+  'shell.title': 'Remote Shell — {sessionId}',
+  'shell.close': 'Close',
+  'shell.fieldRuntime': 'Runtime',
+  'shell.fieldRuntimeText': 'Text agent',
+  'shell.fieldRuntimeVoice': 'Voice agent',
+  'shell.fieldSession': 'Session ID',
+  'shell.fieldCommand': 'Command',
+  'shell.byteCounter': '{bytes} / {max} bytes',
+  'shell.fieldTimeout': 'Timeout',
+  'shell.historyLabel': 'History',
+  'shell.historyEmpty': '(empty)',
+  'shell.run': 'Run',
+  'shell.stop': 'Stop',
+  'shell.copy': 'Copy',
+  'shell.exitLine': 'Exit: code {code} · {status} · {ms} ms',
+  'shell.aborted': '[aborted by user]',
+  'shell.truncated': '[… {kb} KB truncated …]',
+
+  'shell.validation.empty': 'Command is required.',
+  'shell.validation.tooLarge': 'Command exceeds the 64 KB limit.',
+  'shell.validation.timeout': 'Timeout must be between 1 and 3600 seconds.',
+  'shell.validation.sessionIdTooShort': 'Session ID must be at least 33 characters.',
+
+  'shell.error.connecting': 'Connecting…',
+  'shell.error.validation': 'Validation failed.',
+  'shell.error.accessDenied': 'Runtime rejected the command. Confirm admin group membership and that deploy step 6 was run.',
+  'shell.error.notFound': 'Runtime session no longer exists. Refresh the Sessions tab.',
+  'shell.error.throttled': 'AgentCore is throttling. Try again in a moment.',
+  'shell.error.runtime': 'Runtime client error:',
 };
 
 export default en;
