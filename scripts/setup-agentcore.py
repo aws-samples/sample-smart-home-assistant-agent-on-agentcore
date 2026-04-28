@@ -216,8 +216,6 @@ def main():
     lambda_arn = outputs["IoTControlLambdaArn"]
     discovery_lambda_arn = outputs["IoTDiscoveryLambdaArn"]
     kb_query_lambda_arn = outputs.get("KBQueryLambdaArn", "")
-    aoss_endpoint = outputs.get("AOSSCollectionEndpoint", "")
-    aoss_collection_arn = outputs.get("AOSSCollectionArn", "")
     kb_service_role_arn = outputs.get("KBServiceRoleArn", "")
     kb_docs_bucket = outputs.get("KBDocsBucketName", "")
     discovery_url = f"https://cognito-idp.{REGION}.amazonaws.com/{user_pool_id}/.well-known/openid-configuration"
@@ -503,98 +501,54 @@ def main():
     # --------------------------------------------------------
     kb_id = ""
     kb_data_source_id = ""
-    if aoss_endpoint and aoss_collection_arn and kb_service_role_arn and kb_docs_bucket:
-        print("\nInitializing Bedrock Knowledge Base...")
+    if kb_service_role_arn and kb_docs_bucket:
+        print("\nInitializing Bedrock Knowledge Base (S3 Vectors)...")
 
-        # Step A: Ensure caller's IAM identity is in AOSS data access policy
-        print("  Ensuring AOSS data access for current IAM identity...")
-        caller_arn = boto3.client("sts", region_name=REGION).get_caller_identity()["Arn"]
-        aoss_client = boto3.client("opensearchserverless", region_name=REGION)
-        try:
-            policy_resp = aoss_client.get_access_policy(name="smarthome-kb-data", type="data")
-            policy_detail = policy_resp["accessPolicyDetail"]
-            policy_doc = policy_detail["policy"]
-            # Add caller ARN if not already a principal
-            principals = policy_doc[0].get("Principal", [])
-            if caller_arn not in principals:
-                principals.append(caller_arn)
-                policy_doc[0]["Principal"] = principals
-                aoss_client.update_access_policy(
-                    name="smarthome-kb-data",
-                    type="data",
-                    policyVersion=policy_detail["policyVersion"],
-                    policy=json.dumps(policy_doc),
-                )
-                print(f"  Added {caller_arn} to AOSS data access policy")
-                print("  Waiting 30s for AOSS policy propagation...")
-                time.sleep(30)
-            else:
-                print(f"  IAM identity already in AOSS data access policy")
-        except Exception as e:
-            print(f"  Warning: Could not update AOSS data access policy: {e}")
-            print("  Will attempt index creation anyway...")
-
-        # Step B: Create AOSS vector index using opensearch-py
-        print("  Creating AOSS vector index...")
-        endpoint = aoss_endpoint if aoss_endpoint.startswith("https://") else f"https://{aoss_endpoint}"
-        host = endpoint.replace("https://", "")
+        account_id = get_account_id()
+        vector_bucket_name = f"smarthome-kb-vectors-{account_id}"
         index_name = "smarthome-kb-index"
+        s3v = boto3.client("s3vectors", region_name=REGION)
 
-        # Install opensearch-py if needed
+        # Step A: Create the S3 Vector bucket (idempotent).
         try:
-            from opensearchpy import OpenSearch, RequestsHttpConnection
-            from requests_aws4auth import AWS4Auth
-        except ImportError:
-            import subprocess as _sp
-            _sp.run([sys.executable, "-m", "pip", "install", "-q", "opensearch-py", "requests-aws4auth"], check=True)
-            from opensearchpy import OpenSearch, RequestsHttpConnection
-            from requests_aws4auth import AWS4Auth
-
-        session = boto3.Session(region_name=REGION)
-        credentials = session.get_credentials().get_frozen_credentials()
-        awsauth = AWS4Auth(
-            credentials.access_key, credentials.secret_key, REGION, "aoss",
-            session_token=credentials.token,
-        )
-        os_client = OpenSearch(
-            hosts=[{"host": host, "port": 443}],
-            http_auth=awsauth,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=30,
-        )
-
-        index_body = {
-            "settings": {"index": {"knn": True, "knn.algo_param.ef_search": 512}},
-            "mappings": {
-                "properties": {
-                    "bedrock-knowledge-base-default-vector": {
-                        "type": "knn_vector", "dimension": 1024,
-                        "method": {"engine": "faiss", "space_type": "l2", "name": "hnsw",
-                                   "parameters": {"ef_construction": 512, "m": 16}},
-                    },
-                    "AMAZON_BEDROCK_TEXT_CHUNK": {"type": "text"},
-                    "AMAZON_BEDROCK_METADATA": {"type": "text"},
-                }
-            },
-        }
-
-        try:
-            os_client.indices.create(index=index_name, body=index_body)
-            print("  AOSS index created successfully")
+            s3v.create_vector_bucket(vectorBucketName=vector_bucket_name)
+            print(f"  Created S3 vector bucket {vector_bucket_name}")
+        except s3v.exceptions.ConflictException:
+            print(f"  S3 vector bucket {vector_bucket_name} already exists")
         except Exception as e:
-            if "resource_already_exists_exception" in str(e):
-                print("  AOSS index already exists")
-            else:
-                raise Exception(f"Failed to create AOSS index: {e}")
+            print(f"  Warning: create_vector_bucket: {e}")
 
-        # Step B: Create Bedrock Knowledge Base
+        vector_bucket_arn = f"arn:aws:s3vectors:{REGION}:{account_id}:bucket/{vector_bucket_name}"
+
+        # Step B: Create the vector index (idempotent).
+        # Cohere multilingual v3 = 1024 dims, cosine is the common choice for
+        # semantic text retrieval.
+        try:
+            s3v.create_index(
+                vectorBucketName=vector_bucket_name,
+                indexName=index_name,
+                dataType="float32",
+                dimension=1024,
+                distanceMetric="cosine",
+            )
+            print(f"  Created S3 vector index {index_name}")
+        except s3v.exceptions.ConflictException:
+            print(f"  S3 vector index {index_name} already exists")
+        except Exception as e:
+            print(f"  Warning: create_index: {e}")
+
+        index_arn = f"{vector_bucket_arn}/index/{index_name}"
+
+        # Step C: Create (or look up) the Bedrock Knowledge Base. We always
+        # try to create first; if one already exists under this name we reuse
+        # it, but if that KB points at AOSS (leftover from a prior deploy) we
+        # delete it so the new S3 Vectors-backed KB can take its name.
         print("  Creating Bedrock Knowledge Base...")
         bedrock_agent = boto3.client("bedrock-agent", region_name=REGION)
         embedding_model_arn = f"arn:aws:bedrock:{REGION}::foundation-model/cohere.embed-multilingual-v3"
-        try:
-            kb_resp = bedrock_agent.create_knowledge_base(
+
+        def _create_kb():
+            return bedrock_agent.create_knowledge_base(
                 name="SmartHomeEnterpriseKB",
                 description="Enterprise knowledge base for smart home assistant",
                 roleArn=kb_service_role_arn,
@@ -605,32 +559,24 @@ def main():
                     },
                 },
                 storageConfiguration={
-                    "type": "OPENSEARCH_SERVERLESS",
-                    "opensearchServerlessConfiguration": {
-                        "collectionArn": aoss_collection_arn,
-                        "vectorIndexName": index_name,
-                        "fieldMapping": {
-                            "vectorField": "bedrock-knowledge-base-default-vector",
-                            "textField": "AMAZON_BEDROCK_TEXT_CHUNK",
-                            "metadataField": "AMAZON_BEDROCK_METADATA",
-                        },
+                    "type": "S3_VECTORS",
+                    "s3VectorsConfiguration": {
+                        # Pass indexArn; indexName is mutually exclusive with it.
+                        "indexArn": index_arn,
                     },
                 },
             )
-            kb_id = kb_resp["knowledgeBase"]["knowledgeBaseId"]
-            print(f"  Knowledge Base created: {kb_id}")
 
-            # Wait for ACTIVE
+        def _wait_active_and_create_ds(new_kb_id):
+            """Wait for KB ACTIVE, create the S3 data source, store DDB config."""
             for _ in range(30):
-                kb = bedrock_agent.get_knowledge_base(knowledgeBaseId=kb_id)
+                kb = bedrock_agent.get_knowledge_base(knowledgeBaseId=new_kb_id)
                 if kb["knowledgeBase"]["status"] == "ACTIVE":
                     break
                 time.sleep(2)
-
-            # Step C: Create S3 data source
             print("  Creating S3 data source...")
             ds_resp = bedrock_agent.create_data_source(
-                knowledgeBaseId=kb_id,
+                knowledgeBaseId=new_kb_id,
                 name="SmartHomeKBDocuments",
                 dataSourceConfiguration={
                     "type": "S3",
@@ -639,10 +585,8 @@ def main():
                     },
                 },
             )
-            kb_data_source_id = ds_resp["dataSource"]["dataSourceId"]
-            print(f"  Data source created: {kb_data_source_id}")
-
-            # Store KB config in DynamoDB
+            ds_id = ds_resp["dataSource"]["dataSourceId"]
+            print(f"  Data source created: {ds_id}")
             skills_table = outputs.get("SkillsTableName", "smarthome-skills")
             ddb = boto3.resource("dynamodb", region_name=REGION)
             ddb_table = ddb.Table(skills_table)
@@ -650,26 +594,82 @@ def main():
             ddb_table.put_item(Item={
                 "userId": "__kb_config__",
                 "skillName": "__default__",
-                "knowledgeBaseId": kb_id,
-                "dataSourceId": kb_data_source_id,
+                "knowledgeBaseId": new_kb_id,
+                "dataSourceId": ds_id,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
                 "updatedAt": datetime.now(timezone.utc).isoformat(),
             })
             print("  KB config stored in DynamoDB")
+            return ds_id
+
+        try:
+            kb_resp = _create_kb()
+            kb_id = kb_resp["knowledgeBase"]["knowledgeBaseId"]
+            print(f"  Knowledge Base created: {kb_id}")
+            kb_data_source_id = _wait_active_and_create_ds(kb_id)
 
         except bedrock_agent.exceptions.ConflictException:
             print("  Knowledge Base already exists, looking up existing...")
             list_resp = bedrock_agent.list_knowledge_bases(maxResults=100)
+            existing_id = ""
             for kb_summary in list_resp.get("knowledgeBaseSummaries", []):
                 if kb_summary.get("name") == "SmartHomeEnterpriseKB":
-                    kb_id = kb_summary["knowledgeBaseId"]
-                    # Get data source
+                    existing_id = kb_summary["knowledgeBaseId"]
+                    break
+            if existing_id:
+                detail = bedrock_agent.get_knowledge_base(knowledgeBaseId=existing_id)
+                storage_type = (detail.get("knowledgeBase", {}).get("storageConfiguration") or {}).get("type", "")
+                if storage_type == "S3_VECTORS":
+                    kb_id = existing_id
                     ds_list = bedrock_agent.list_data_sources(knowledgeBaseId=kb_id, maxResults=10)
                     for ds in ds_list.get("dataSourceSummaries", []):
                         kb_data_source_id = ds["dataSourceId"]
                         break
-                    print(f"  Found existing KB: {kb_id}, DS: {kb_data_source_id}")
-                    break
+                    print(f"  Reusing existing S3_VECTORS KB: {kb_id}, DS: {kb_data_source_id}")
+                else:
+                    # KB still points at old storage (e.g. AOSS). Delete and recreate.
+                    #
+                    # Gotcha: if the CDK stack already tore down the AOSS
+                    # collection, the KB's delete will fail with "Unable to
+                    # delete data from vector store" because Bedrock tries to
+                    # purge vectors that no longer exist. The fix is to flip
+                    # the data source's dataDeletionPolicy to RETAIN before
+                    # deleting so Bedrock skips the vector purge.
+                    print(f"  Existing KB {existing_id} uses {storage_type!r}; deleting so S3_VECTORS KB can take its name...")
+                    try:
+                        ds_list = bedrock_agent.list_data_sources(knowledgeBaseId=existing_id, maxResults=10)
+                        for ds in ds_list.get("dataSourceSummaries", []):
+                            ds_detail = bedrock_agent.get_data_source(
+                                knowledgeBaseId=existing_id, dataSourceId=ds["dataSourceId"]
+                            )
+                            try:
+                                bedrock_agent.update_data_source(
+                                    knowledgeBaseId=existing_id,
+                                    dataSourceId=ds["dataSourceId"],
+                                    name=ds_detail["dataSource"]["name"],
+                                    dataSourceConfiguration=ds_detail["dataSource"]["dataSourceConfiguration"],
+                                    dataDeletionPolicy="RETAIN",
+                                )
+                            except Exception as e:
+                                print(f"    update_data_source RETAIN failed (non-fatal): {e}")
+                            bedrock_agent.delete_data_source(
+                                knowledgeBaseId=existing_id, dataSourceId=ds["dataSourceId"]
+                            )
+                        bedrock_agent.delete_knowledge_base(knowledgeBaseId=existing_id)
+                        # Wait for delete (up to 60s). Bedrock delete is async.
+                        for _ in range(30):
+                            try:
+                                bedrock_agent.get_knowledge_base(knowledgeBaseId=existing_id)
+                                time.sleep(2)
+                            except bedrock_agent.exceptions.ResourceNotFoundException:
+                                break
+                        # Retry create — the name is freed once delete completes.
+                        kb_resp = _create_kb()
+                        kb_id = kb_resp["knowledgeBase"]["knowledgeBaseId"]
+                        print(f"  Knowledge Base re-created on S3_VECTORS: {kb_id}")
+                        kb_data_source_id = _wait_active_and_create_ds(kb_id)
+                    except Exception as e:
+                        print(f"  Warning: could not migrate existing KB: {e}")
         except Exception as e:
             print(f"  Warning: Failed to create Knowledge Base: {e}")
         # Create default KB folders (__shared__ + admin user)
@@ -683,7 +683,7 @@ def main():
         print(f"  Created __shared__/ and admin@smarthome.local/ in s3://{kb_docs_bucket}")
 
     else:
-        print("\nSkipping KB initialization (missing AOSS/KB infrastructure outputs)")
+        print("\nSkipping KB initialization (missing KB infrastructure outputs)")
 
     # Welcome audio is baked directly into the CodeZip (see step 2); no S3
     # upload is needed, and no runtime GetObject round-trip at connect time.
@@ -1056,10 +1056,6 @@ def main():
             # KB-related env vars
             if kb_docs_bucket:
                 admin_env["KB_DOCS_BUCKET"] = kb_docs_bucket
-            if aoss_endpoint:
-                admin_env["AOSS_ENDPOINT"] = aoss_endpoint
-            if aoss_collection_arn:
-                admin_env["AOSS_COLLECTION_ARN"] = aoss_collection_arn
             if kb_service_role_arn:
                 admin_env["KB_SERVICE_ROLE_ARN"] = kb_service_role_arn
             if kb_id:

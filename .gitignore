@@ -76,5 +76,4 @@ cdk/lambda/*/tests/
 admin-console/scripts/
 .playwright-mcp/
 
-# Internal brainstorm/spec/plan docs — kept local, not pushed to remote
 docs/superpowers/

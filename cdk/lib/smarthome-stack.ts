@@ -11,7 +11,6 @@ import * as cr from "aws-cdk-lib/custom-resources";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
-import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import { Construct } from "constructs";
 import * as path from "path";
 
@@ -524,8 +523,13 @@ export class SmartHomeStack extends cdk.Stack {
     }));
 
     // ========================
-    // Knowledge Base Infrastructure (AOSS + S3 + Bedrock KB support)
+    // Knowledge Base Infrastructure (S3 Vectors + S3 docs + Bedrock KB)
     // ========================
+    //
+    // Vector storage moved from OpenSearch Serverless → S3 Vectors. AOSS has a
+    // ~$350/month floor; S3 Vectors is pay-per-vector serverless. The S3 vector
+    // bucket + index are created imperatively by setup-agentcore.py (no L1 CDK
+    // construct for s3vectors exists yet).
 
     // S3 bucket for KB documents (organized by scope prefix: __shared__/, user@example.com/)
     const kbDocsBucket = new s3.Bucket(this, "KBDocsBucket", {
@@ -552,69 +556,25 @@ export class SmartHomeStack extends cdk.Stack {
       resources: [kbDocsBucket.bucketArn, `${kbDocsBucket.bucketArn}/*`],
     }));
     kbServiceRole.addToPolicy(new iam.PolicyStatement({
-      actions: ["aoss:APIAccessAll"],
+      // S3 Vectors permissions for the Bedrock KB service role. Bedrock writes
+      // vectors via PutVectors during ingestion and reads via QueryVectors
+      // during Retrieve / RetrieveAndGenerate.
+      actions: [
+        "s3vectors:PutVectors",
+        "s3vectors:QueryVectors",
+        "s3vectors:GetVectors",
+        "s3vectors:DeleteVectors",
+        "s3vectors:ListVectors",
+        "s3vectors:GetIndex",
+        "s3vectors:ListIndexes",
+        "s3vectors:GetVectorBucket",
+      ],
       resources: ["*"],
     }));
     kbServiceRole.addToPolicy(new iam.PolicyStatement({
       actions: ["bedrock:InvokeModel"],
       resources: [`arn:aws:bedrock:${cdk.Aws.REGION}::foundation-model/cohere.embed-multilingual-v3`],
     }));
-
-    // AOSS Encryption Policy (required before collection creation)
-    const aossEncPolicy = new opensearchserverless.CfnSecurityPolicy(this, "KBAOSSEncPolicy", {
-      name: "smarthome-kb-enc",
-      type: "encryption",
-      policy: JSON.stringify({
-        Rules: [{ ResourceType: "collection", Resource: ["collection/smarthome-kb"] }],
-        AWSOwnedKey: true,
-      }),
-    });
-
-    // AOSS Network Policy (allow public access for Lambda + setup script)
-    const aossNetPolicy = new opensearchserverless.CfnSecurityPolicy(this, "KBAOSSNetPolicy", {
-      name: "smarthome-kb-net",
-      type: "network",
-      policy: JSON.stringify([{
-        Rules: [
-          { ResourceType: "collection", Resource: ["collection/smarthome-kb"] },
-          { ResourceType: "dashboard", Resource: ["collection/smarthome-kb"] },
-        ],
-        AllowFromPublic: true,
-      }]),
-    });
-
-    // AOSS Vector Search Collection
-    const aossCollection = new opensearchserverless.CfnCollection(this, "KBAOSSCollection", {
-      name: "smarthome-kb",
-      type: "VECTORSEARCH",
-    });
-    aossCollection.addDependency(aossEncPolicy);
-    aossCollection.addDependency(aossNetPolicy);
-
-    // AOSS Data Access Policy (grants access to KB role, admin Lambda, and account root for setup script)
-    new opensearchserverless.CfnAccessPolicy(this, "KBAOSSDataPolicy", {
-      name: "smarthome-kb-data",
-      type: "data",
-      policy: JSON.stringify([{
-        Rules: [
-          {
-            ResourceType: "collection",
-            Resource: ["collection/smarthome-kb"],
-            Permission: ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems", "aoss:DescribeCollectionItems"],
-          },
-          {
-            ResourceType: "index",
-            Resource: ["index/smarthome-kb/*"],
-            Permission: ["aoss:CreateIndex", "aoss:UpdateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"],
-          },
-        ],
-        Principal: [
-          kbServiceRole.roleArn,
-          adminLambda.role!.roleArn,
-          `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:root`,
-        ],
-      }]),
-    });
 
     // Lambda - KB Query (AgentCore Gateway target for agent to query knowledge base)
     const kbQueryLambda = new lambda.Function(this, "KBQueryLambda", {
@@ -641,8 +601,6 @@ export class SmartHomeStack extends cdk.Stack {
 
     // Grant admin Lambda KB-related permissions
     adminLambda.addEnvironment("KB_DOCS_BUCKET", kbDocsBucket.bucketName);
-    adminLambda.addEnvironment("AOSS_ENDPOINT", aossCollection.attrCollectionEndpoint);
-    adminLambda.addEnvironment("AOSS_COLLECTION_ARN", aossCollection.attrArn);
     adminLambda.addEnvironment("KB_SERVICE_ROLE_ARN", kbServiceRole.roleArn);
     kbDocsBucket.grantReadWrite(adminLambda);
 
@@ -659,11 +617,6 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock:GetIngestionJob",
         "bedrock:ListIngestionJobs",
       ],
-      resources: ["*"],
-    }));
-
-    adminLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["aoss:APIAccessAll"],
       resources: ["*"],
     }));
 
@@ -1020,8 +973,6 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "AdminPassword", { value: adminPassword });
     new cdk.CfnOutput(this, "KBDocsBucketName", { value: kbDocsBucket.bucketName });
     new cdk.CfnOutput(this, "KBQueryLambdaArn", { value: kbQueryLambda.functionArn });
-    new cdk.CfnOutput(this, "AOSSCollectionEndpoint", { value: aossCollection.attrCollectionEndpoint });
-    new cdk.CfnOutput(this, "AOSSCollectionArn", { value: aossCollection.attrArn });
     new cdk.CfnOutput(this, "KBServiceRoleArn", { value: kbServiceRole.roleArn });
     new cdk.CfnOutput(this, "CognitoAuthRoleArn", { value: authRole.roleArn });
     new cdk.CfnOutput(this, "SkillErpBucketName", { value: skillErpBucket.bucketName });
