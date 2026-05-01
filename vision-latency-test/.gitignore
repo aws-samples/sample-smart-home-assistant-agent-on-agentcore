@@ -1,0 +1,9 @@
+images/
+results/
+node_modules/
+__pycache__/
+*.pyc
+.env
+test-results/
+playwright-report/
+run.log

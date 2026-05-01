@@ -21,7 +21,7 @@ from strands.tools.mcp.mcp_client import MCPClient  # noqa: E402
 from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
 from strands.telemetry import StrandsTelemetry  # noqa: E402
 from bedrock_agentcore import BedrockAgentCoreApp  # noqa: E402
-from memory.session import get_memory_session_manager  # noqa: E402
+from memory.session import get_memory_session_manager, _sanitize_actor_id  # noqa: E402
 
 import boto3  # noqa: E402
 from boto3.dynamodb.conditions import Key  # noqa: E402
@@ -156,7 +156,8 @@ CRITICAL RULE — TOOL CALLING: When the user asks you to perform ANY action on 
 IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.
 IMPORTANT: Never fabricate or assume the result of a tool call. If a tool call fails, is rejected, or returns an error, you MUST honestly report the failure to the user. Do not pretend the action succeeded. Tell the user what went wrong and suggest they contact an administrator if the issue persists.
 IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If the tool is unavailable or fails, tell the user you cannot access device information and suggest they contact an administrator.
-KNOWLEDGE BASE: You have access to an enterprise knowledge base. When users ask questions that may relate to company documents, product manuals, troubleshooting guides, or internal knowledge, use the query_knowledge_base tool to retrieve relevant information. Cite the source document when presenting information from the knowledge base."""
+KNOWLEDGE BASE: You have access to an enterprise knowledge base. When users ask questions that may relate to company documents, product manuals, troubleshooting guides, or internal knowledge, use the query_knowledge_base tool to retrieve relevant information. Cite the source document when presenting information from the knowledge base.
+IMAGES IN THIS CONVERSATION: The user may upload images in this chat. Images are analyzed upstream by a vision model (not by you) and the resulting description is saved into this conversation's history as a prior assistant message. When the user references an image ("the image I just sent", "the photo", "上一张图片", "这张图"), you MUST rely on the image description that appears earlier in the conversation. Do NOT say "I cannot see images" or "I don't have image access" — the description is already in your context. If no image description is present in the conversation history, say so honestly and ask the user to re-upload. Never fabricate image contents; never invent colors, modes, or other details that are not stated in a prior image description."""
 
 
 def create_agent(tools=None, session_manager=None, skills=None, model_id=None, system_prompt=None):
@@ -295,6 +296,103 @@ def _extract_user_auth(context) -> str | None:
     return lowered.get("authorization")
 
 
+_memory_client_singleton = None
+
+
+def _memory_client():
+    """Lazily build an AgentCore Memory client (short-term event writes)."""
+    global _memory_client_singleton
+    if _memory_client_singleton is None:
+        try:
+            from bedrock_agentcore.memory.client import MemoryClient
+            _memory_client_singleton = MemoryClient(region_name=AWS_REGION)
+        except Exception as e:
+            logger.warning(f"Memory client init failed: {e}")
+            _memory_client_singleton = False  # sentinel so we don't retry every turn
+    return _memory_client_singleton or None
+
+
+def _persist_vision_turn(session_id, actor_id, user_prompt, description, images, storage_entries=None):
+    """Write the vision exchange to AgentCore Memory short-term events.
+
+    messages: the user's prompt (or placeholder) and Haiku's description.
+    metadata: a small fingerprint of the images (count, MIME types, sizes,
+    sha256 prefix) — never the raw base64, which would blow up metadata limits
+    and pollute future Kimi context. Failure is non-fatal: logs and returns.
+    """
+    memory_id = os.environ.get("MEMORY_SMARTHOMEMEMORY_ID", "")
+    if not memory_id:
+        return
+    client = _memory_client()
+    if not client:
+        return
+    try:
+        from bedrock_agentcore.memory.models.filters import StringValue  # noqa: F401
+    except Exception:
+        StringValue = None  # type: ignore
+
+    import base64 as _b64, hashlib as _hash
+    fingerprints = []
+    for idx, img in enumerate(images or [], start=1):
+        if not isinstance(img, dict):
+            continue
+        mt = img.get("mediaType", "")
+        data = img.get("data", "")
+        try:
+            raw = _b64.b64decode(data, validate=False) if isinstance(data, str) else b""
+        except Exception:
+            raw = b""
+        sha = _hash.sha256(raw).hexdigest()[:16] if raw else ""
+        fingerprints.append(f"{idx}:{mt}:{len(raw)}:{sha}")
+
+    metadata = {}
+    if fingerprints and StringValue is not None:
+        # One metadata key per image (max 3 images, well within the 15-kv cap).
+        for i, fp in enumerate(fingerprints, start=1):
+            metadata[f"image_{i}"] = StringValue(stringValue=fp)
+        metadata["image_count"] = StringValue(stringValue=str(len(fingerprints)))
+        # If session-storage persisted the bytes, attach the relative path so
+        # future agent features (a "re-examine image" tool, a UI viewer, etc.)
+        # can locate the raw file.
+        for i, entry in enumerate(storage_entries or [], start=1):
+            if isinstance(entry, dict) and entry.get("path"):
+                metadata[f"image_{i}_path"] = StringValue(stringValue=entry["path"])
+
+    # Strands' AgentCoreMemoryConverter stores each message as a JSON-serialized
+    # SessionMessage envelope, and on read calls json.loads on every event. If
+    # we write plain strings here, list_messages() raises JSONDecodeError and
+    # the entire short-term history is dropped — including this image turn.
+    # Round-trip through the same converter so Kimi's next text turn sees it.
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    now_iso = _dt.now(_tz.utc).isoformat()
+
+    def _envelope(text: str, role: str, msg_id: int) -> str:
+        return _json.dumps({
+            "message": {"role": role, "content": [{"text": text}]},
+            "message_id": msg_id,
+            "redact_message": None,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        })
+
+    user_text = user_prompt or "[The user sent images without text.]"
+    messages = [
+        (_envelope(user_text, "user", 0), "USER"),
+        (_envelope(description, "assistant", 1), "ASSISTANT"),
+    ]
+    try:
+        client.create_event(
+            memory_id=memory_id,
+            actor_id=_sanitize_actor_id(actor_id),
+            session_id=session_id,
+            messages=messages,
+            metadata=metadata or None,
+        )
+    except Exception as e:
+        logger.warning(f"Memory create_event failed (non-fatal): {e}")
+
+
 def _record_session(actor_id: str, session_id: str) -> None:
     if not SKILLS_TABLE_NAME:
         return
@@ -314,7 +412,11 @@ def _record_session(actor_id: str, session_id: str) -> None:
 def handle_invocation(payload, context):
     """POST /invocations handler — text path (synchronous request/response)."""
     prompt = payload.get("prompt", payload.get("inputText", ""))
-    if not prompt:
+    images = payload.get("images") or []
+
+    # Allow image-only turns: if prompt is empty but images are present, we
+    # substitute a placeholder downstream so Kimi has something to reply to.
+    if not prompt and not images:
         return {"error": "No prompt provided"}
 
     session_id = "default"
@@ -330,10 +432,64 @@ def handle_invocation(payload, context):
     auth_header = _extract_user_auth(context)
 
     # Warm-up ping sent right after login — proves the runtime + JWT are healthy
-    # without burning an LLM turn.
+    # without burning an LLM turn. Warmups never carry images.
     if prompt == "__warmup__":
         logger.info(f"Warmup invocation: actor_id={actor_id}, session_id={session_id}")
         return {"status": "warmup_ok"}
+
+    # Image branch — respond directly from Claude Haiku (bypass Kimi) for
+    # latency. The raw bytes are saved to the runtime's per-session
+    # filesystem first (see agent/session_storage.py), then captioned, then
+    # persisted to AgentCore Memory so follow-up text turns see the context.
+    if images:
+        if not isinstance(images, list) or len(images) > 3:
+            return {"error": "Invalid images payload (max 3)."}
+        logger.info(f"Vision invocation: actor_id={actor_id}, session_id={session_id}, images={len(images)}")
+        _record_session(actor_id, session_id)
+
+        # Persist first: save raw bytes so later features (or retries) can
+        # recover the originals even if Haiku fails. Failures are non-fatal.
+        storage_entries = []
+        try:
+            import session_storage
+            import base64 as _b64
+            for img in images:
+                if not isinstance(img, dict):
+                    storage_entries.append(None)
+                    continue
+                try:
+                    raw = _b64.b64decode(img.get("data", "") or "", validate=False)
+                    entry = session_storage.save_image(
+                        session_id=session_id,
+                        mime=img.get("mediaType", "application/octet-stream"),
+                        raw=raw,
+                        user_prompt=prompt or None,
+                    )
+                    storage_entries.append(entry)
+                except Exception as e:
+                    logger.warning(f"save_image failed for one image (non-fatal): {e}")
+                    storage_entries.append(None)
+        except Exception as e:
+            logger.warning(f"session_storage import failed (non-fatal): {e}")
+            storage_entries = [None] * len(images)
+
+        import vision
+        try:
+            caption_text, warnings = vision.caption_images(images, prompt)
+        except Exception:
+            logger.exception("Vision captioning raised")
+            caption_text = "[Image(s) could not be analyzed at this time.]"
+            warnings = (
+                "Note: vision service was unavailable; please try again."
+            )
+
+        response_text = caption_text
+        if warnings:
+            response_text = f"{response_text}\n\n{warnings}"
+
+        _persist_vision_turn(session_id, actor_id, prompt, response_text, images,
+                             storage_entries=storage_entries)
+        return {"response": response_text, "status": "success"}
 
     logger.info(f"Invocation: actor_id={actor_id}, session_id={session_id}")
     _record_session(actor_id, session_id)

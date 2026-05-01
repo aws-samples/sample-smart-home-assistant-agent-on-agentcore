@@ -57,6 +57,12 @@ const en: Record<string, string> = {
   'chat.voiceMode.disconnected': 'Voice session ended.',
   'chat.voiceMode.micDenied': 'Microphone access denied.',
   'chat.voiceMode.error': 'Voice session error',
+  'chat.attachImage': 'Attach image',
+  'chat.image.tooBig': '{name} — exceeds 20 MB',
+  'chat.image.badFormat': '{name} — unsupported format',
+  'chat.image.tooMany': 'Maximum 3 images per message',
+  'chat.image.readFailed': '{name} — could not be read',
+  'chat.image.remove': 'Remove image',
 };
 
 export default en;

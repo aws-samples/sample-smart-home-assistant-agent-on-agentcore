@@ -1,0 +1,12 @@
+{
+  "name": "vision-latency-probe",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "probe": "playwright test probe.spec.ts",
+    "probe:headed": "playwright test probe.spec.ts --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
+  }
+}

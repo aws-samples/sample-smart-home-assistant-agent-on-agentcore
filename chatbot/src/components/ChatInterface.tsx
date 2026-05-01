@@ -8,6 +8,10 @@ import { signedInvocationsFetch, presignWsUrl } from '../voice/sigv4';
 
 const CUSTOM_AUTH_HEADER = 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken';
 
+const IMAGE_MIME_ALLOWLIST = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const MAX_IMAGES_PER_MESSAGE = 3;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'agent';
@@ -28,6 +32,21 @@ interface ChatMessage {
   // separate bubbles. (contentId would NOT work: Nova Sonic assigns
   // different contentIds to the SPEC and FINAL blocks of one reply.)
   completionId?: string;
+  // Blob URLs for the user's attached images, created per-message so they
+  // survive clearing the input-area thumbnail strip. Revoked on unmount.
+  imageUrls?: string[];
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  // Chunk to avoid `btoa` argument overflow on large files (20 MB).
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
+  }
+  return btoa(binary);
 }
 
 function generateId(): string {
@@ -41,10 +60,15 @@ const ChatInterface: React.FC = () => {
   const [error, setError] = useState('');
   const [voiceActive, setVoiceActive] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState('');
+  const [attachedImages, setAttachedImages] = useState<
+    Array<{ file: File; previewUrl: string; id: string }>
+  >([]);
+  const [imageErrors, setImageErrors] = useState<string[]>([]);
   const { t } = useI18n();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const voiceClientRef = useRef<VoiceClient | null>(null);
   const warmupRef = useRef(false);
   // Pre-signed voice WS URL cached from the post-login warmup. Saves the
@@ -133,19 +157,68 @@ const ChatInterface: React.FC = () => {
     })();
   }, []);
 
+  const addImages = useCallback((incoming: FileList | File[]) => {
+    // Validate synchronously against the CURRENT state, then apply one
+    // pure setState updater at the end. Mixing validation with the updater
+    // breaks under React 18 StrictMode (double-invoked updaters re-push the
+    // same errors or retarget new ones).
+    const files = Array.from(incoming);
+    const errs: string[] = [];
+    const accepted: Array<{ file: File; previewUrl: string; id: string }> = [];
+    let slotsLeft = MAX_IMAGES_PER_MESSAGE - attachedImages.length;
+    for (const f of files) {
+      if (!IMAGE_MIME_ALLOWLIST.includes(f.type)) {
+        errs.push(t('chat.image.badFormat').replace('{name}', f.name));
+        continue;
+      }
+      if (f.size > MAX_IMAGE_BYTES) {
+        errs.push(t('chat.image.tooBig').replace('{name}', f.name));
+        continue;
+      }
+      if (slotsLeft <= 0) {
+        errs.push(t('chat.image.tooMany'));
+        break;
+      }
+      accepted.push({ file: f, previewUrl: URL.createObjectURL(f), id: generateId() });
+      slotsLeft -= 1;
+    }
+    if (accepted.length > 0) setAttachedImages((prev) => [...prev, ...accepted]);
+    setImageErrors(errs);
+    // Reset the input so selecting the same file again still fires onChange.
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [attachedImages.length, t]);
+
+  const removeImage = useCallback((id: string) => {
+    setAttachedImages((prev) => {
+      const target = prev.find((x) => x.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((x) => x.id !== id);
+    });
+  }, []);
+
   const sendMessage = useCallback(async () => {
     const text = inputValue.trim();
-    if (!text) return;
+    if (!text && attachedImages.length === 0) return;
+
+    // Snapshot the strip's Files/URLs: we're about to clear `attachedImages`
+    // but need them for (a) base64 encoding and (b) bubble-long-lived URLs.
+    const snapshotFiles = attachedImages.map((x) => x.file);
+    const bubbleUrls = snapshotFiles.map((f) => URL.createObjectURL(f));
+    // Revoke the strip URLs; the bubble owns its own copies now.
+    attachedImages.forEach((x) => URL.revokeObjectURL(x.previewUrl));
 
     const userMessage: ChatMessage = {
       id: generateId(),
       role: 'user',
       content: text,
       timestamp: new Date(),
+      imageUrls: bubbleUrls.length ? bubbleUrls : undefined,
     };
 
     setMessages((prev) => [...prev, userMessage]);
     setInputValue('');
+    setAttachedImages([]);
+    setImageErrors([]);
     setIsTyping(true);
     setError('');
 
@@ -157,12 +230,23 @@ const ChatInterface: React.FC = () => {
       const userId = decoded.email || decoded['cognito:username'] || decoded.sub;
       const sessionId = `user-session-${decoded.sub}`;
 
+      let images: Array<{ mediaType: string; data: string }> | undefined;
+      if (snapshotFiles.length > 0) {
+        const encoded = await Promise.all(
+          snapshotFiles.map(async (f) => ({ mediaType: f.type, data: await fileToBase64(f) })),
+        );
+        images = encoded;
+      }
+
+      const body: Record<string, unknown> = { prompt: text, userId };
+      if (images) body.images = images;
+
       const response = await signedInvocationsFetch({
         agentRuntimeArn: config.agentRuntimeArn,
         region: config.region,
         credentials: creds,
         sessionId,
-        body: { prompt: text, userId },
+        body,
         extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
       });
 
@@ -188,7 +272,7 @@ const ChatInterface: React.FC = () => {
     } finally {
       setIsTyping(false);
     }
-  }, [inputValue, t]);
+  }, [inputValue, attachedImages, t]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -350,6 +434,16 @@ const ChatInterface: React.FC = () => {
     return () => stopVoice();
   }, [stopVoice]);
 
+  useEffect(() => {
+    // Revoke any lingering blob URLs on unmount — both the live thumbnail
+    // strip and every image URL captured on past messages.
+    return () => {
+      attachedImages.forEach((x) => URL.revokeObjectURL(x.previewUrl));
+      messages.forEach((m) => m.imageUrls?.forEach((u) => URL.revokeObjectURL(u)));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const toggleVoice = () => {
     if (voiceActive) stopVoice();
     else startVoice();
@@ -412,7 +506,14 @@ const ChatInterface: React.FC = () => {
               </div>
             )}
             <div className={`message-bubble ${msg.role === 'user' ? 'bubble-user' : 'bubble-agent'}`}>
-              <div className="message-text">{msg.content}</div>
+              {msg.imageUrls && msg.imageUrls.length > 0 && (
+                <div className="message-images">
+                  {msg.imageUrls.map((u, i) => (
+                    <img key={i} src={u} alt="" className="message-image-thumb" />
+                  ))}
+                </div>
+              )}
+              {msg.content && <div className="message-text">{msg.content}</div>}
               <div className="message-time">{formatTime(msg.timestamp)}</div>
             </div>
           </div>
@@ -438,6 +539,27 @@ const ChatInterface: React.FC = () => {
       </div>
 
       <div className="input-area">
+        {attachedImages.length > 0 && (
+          <div className="image-strip">
+            {attachedImages.map((img) => (
+              <div key={img.id} className="image-strip-item">
+                <img src={img.previewUrl} alt="" title={img.file.name} />
+                <button
+                  type="button"
+                  className="image-strip-remove"
+                  onClick={() => removeImage(img.id)}
+                  aria-label={t('chat.image.remove')}
+                  title={t('chat.image.remove')}
+                >×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {imageErrors.length > 0 && (
+          <div className="image-errors">
+            {imageErrors.map((e, i) => <div key={i}>{e}</div>)}
+          </div>
+        )}
         <div className="input-wrapper">
           <button
             className={`send-button ${voiceActive ? 'send-active' : ''}`}
@@ -453,6 +575,28 @@ const ChatInterface: React.FC = () => {
               <line x1="8" y1="23" x2="16" y2="23" />
             </svg>
           </button>
+          <button
+            className="send-button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={voiceActive || attachedImages.length >= MAX_IMAGES_PER_MESSAGE}
+            aria-label={t('chat.attachImage')}
+            title={t('chat.attachImage')}
+            style={{ marginRight: 8 }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={IMAGE_MIME_ALLOWLIST.join(',')}
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              if (e.target.files) addImages(e.target.files);
+            }}
+          />
           <textarea
             ref={inputRef}
             className="message-input"
@@ -464,9 +608,9 @@ const ChatInterface: React.FC = () => {
             disabled={voiceActive}
           />
           <button
-            className={`send-button ${inputValue.trim() ? 'send-active' : ''}`}
+            className={`send-button ${(inputValue.trim() || attachedImages.length > 0) ? 'send-active' : ''}`}
             onClick={sendMessage}
-            disabled={!inputValue.trim() || voiceActive}
+            disabled={(!inputValue.trim() && attachedImages.length === 0) || voiceActive}
             aria-label="Send message"
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

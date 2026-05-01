@@ -57,6 +57,12 @@ const zh: Record<string, string> = {
   'chat.voiceMode.disconnected': '语音会话已结束。',
   'chat.voiceMode.micDenied': '麦克风权限被拒绝。',
   'chat.voiceMode.error': '语音会话出错',
+  'chat.attachImage': '附加图片',
+  'chat.image.tooBig': '{name} — 超过 20 MB',
+  'chat.image.badFormat': '{name} — 不支持的格式',
+  'chat.image.tooMany': '每条消息最多 3 张图片',
+  'chat.image.readFailed': '{name} — 无法读取',
+  'chat.image.remove': '删除图片',
 };
 
 export default zh;

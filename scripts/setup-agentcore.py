@@ -268,7 +268,10 @@ def main():
     default_app = os.path.join(project_dir, "app", "smarthome")
     if os.path.exists(default_app):
         shutil.rmtree(default_app)
-    shutil.copytree(agent_code_src, default_app)
+    # Exclude tests/ and __pycache__/ from the CodeZip — keeps the container
+    # small and avoids shipping test-only imports (pytest) to production.
+    shutil.copytree(agent_code_src, default_app,
+                    ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
 
     # Patch agentcore.json: set entrypoint, JWT auth, env vars
     config_file = os.path.join(project_dir, "agentcore", "agentcore.json")
@@ -731,10 +734,18 @@ def main():
                     "X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken",
                 ],
             },
+            # Per-session persistent filesystem at /mnt/workspace — the text
+            # agent's vision path (agent/session_storage.py) saves raw
+            # uploaded images there so follow-up turns and future tools can
+            # recover originals without a second upload.
+            filesystemConfigurations=[{
+                "sessionStorage": {"mountPath": "/mnt/workspace"},
+            }],
         )
         ac.update_agent_runtime(**update_kwargs)
         print(f"  Patched MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME={skills_table}")
         print(f"  Runtime set to AWS_IAM auth (SigV4) for /invocations + /ws")
+        print(f"  Session storage enabled at /mnt/workspace")
 
         # Stop all known user runtime sessions so the fresh CodeZip takes
         # effect immediately. Without this, existing sessions keep serving
@@ -850,7 +861,8 @@ def main():
         voice_default_app = os.path.join(voice_project_dir, "app", "smarthomevoice")
         if os.path.exists(voice_default_app):
             shutil.rmtree(voice_default_app)
-        shutil.copytree(agent_code_src, voice_default_app)
+        shutil.copytree(agent_code_src, voice_default_app,
+                        ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
 
         # Patch agentcore.json: entrypoint, env vars, AWS_IAM auth (/ws needs it)
         voice_config_file = os.path.join(voice_project_dir, "agentcore", "agentcore.json")
