@@ -281,25 +281,30 @@
   color: #4a9eff;
 }
 
-/* --- Message Bubbles --- */
+/* --- Message Bubbles: Cloudscape-native, token-driven ---
+   Values come from --chat-* custom properties injected by
+   theme/applyTheme.ts (they wrap the hashed Cloudscape CSS vars, so the
+   bubbles automatically flip when the user toggles dark mode). */
 .message-bubble {
   max-width: 75%;
   padding: 12px 16px;
-  border-radius: 16px;
+  border-radius: var(--chat-radius, 12px);
   position: relative;
+  border: 1px solid var(--chat-border, #e9ebed);
+  background: var(--chat-bubble-incoming-bg, #f6f6f9);
+  color: var(--chat-bubble-incoming-text, #0f141a);
+  box-shadow: var(--chat-shadow, 0 1px 1px rgba(0,7,22,.12));
 }
 
 .bubble-user {
-  background: linear-gradient(135deg, #4a9eff, #2d7ed9);
+  background: var(--chat-primary, #0972d3);
   color: #ffffff;
-  border-bottom-right-radius: 6px;
+  border-color: transparent;
 }
 
 .bubble-agent {
-  background: rgba(30, 30, 50, 0.8);
-  color: #e0e0e0;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom-left-radius: 6px;
+  background: var(--chat-bubble-incoming-bg, #f6f6f9);
+  color: var(--chat-bubble-incoming-text, #0f141a);
 }
 
 .message-text {
@@ -338,13 +343,13 @@
 .message-markdown code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.88em;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-background-layout-panel-content, rgba(0,0,0,.06));
   padding: 1px 5px;
   border-radius: 4px;
 }
 .message-markdown pre {
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--color-background-layout-panel-content, rgba(0,0,0,.06));
+  border: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
   border-radius: 6px;
   padding: 10px 12px;
   margin: 0.5em 0;
@@ -356,15 +361,20 @@
   border-radius: 0;
 }
 .message-markdown a {
-  color: #4a9eff;
+  color: var(--color-text-link-default, #0972d3);
   text-decoration: underline;
   word-break: break-all;
+}
+.bubble-user .message-markdown a {
+  /* Agent reply rendered as markdown uses link-default; the user bubble
+     never renders markdown so no override needed here. */
+  color: inherit;
 }
 .message-markdown blockquote {
   margin: 0.5em 0;
   padding: 0.25em 0.75em;
-  border-left: 3px solid rgba(74, 158, 255, 0.5);
-  color: #c8c8c8;
+  border-left: 3px solid var(--color-border-divider-default, rgba(0,0,0,.15));
+  color: var(--color-text-body-secondary, #5f6b7a);
 }
 .message-markdown table {
   border-collapse: collapse;
@@ -373,13 +383,13 @@
 }
 .message-markdown th,
 .message-markdown td {
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
   padding: 4px 8px;
   text-align: left;
 }
 .message-markdown hr {
   border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
   margin: 0.75em 0;
 }
 
@@ -390,49 +400,20 @@
   text-align: right;
 }
 
-/* --- Typing Indicator --- */
-.typing-indicator {
+/* --- Input Row (Cloudscape-native) --- */
+.input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.input-row-buttons {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 14px 18px;
-  background: rgba(30, 30, 50, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 16px;
-  border-bottom-left-radius: 6px;
 }
-
-.typing-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #4a9eff;
-  animation: typingBounce 1.4s ease-in-out infinite;
-}
-
-.typing-dot:nth-child(2) {
-  animation-delay: 0.2s;
-}
-
-.typing-dot:nth-child(3) {
-  animation-delay: 0.4s;
-}
-
-@keyframes typingBounce {
-  0%, 60%, 100% {
-    transform: translateY(0);
-    opacity: 0.4;
-  }
-  30% {
-    transform: translateY(-6px);
-    opacity: 1;
-  }
-}
-
-/* --- Input Area --- */
-.input-area {
-  padding: 16px 20px 20px;
-  flex-shrink: 0;
+.input-row-textarea {
+  flex: 1;
+  min-width: 0;
 }
 
 .image-strip {
@@ -448,7 +429,7 @@
   height: 48px;
   border-radius: 8px;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--color-background-layout-panel-content, rgba(0,0,0,.06));
 }
 
 .image-strip-item img {
@@ -465,9 +446,9 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: rgba(20, 20, 35, 0.95);
-  color: #e0e0e0;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: var(--color-background-container-content, #ffffff);
+  color: var(--color-text-body-default, #000716);
+  border: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
@@ -475,16 +456,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.image-errors {
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: #ff9e9e;
-  background: rgba(255, 60, 60, 0.08);
-  border: 1px solid rgba(255, 60, 60, 0.2);
-  border-radius: 8px;
 }
 
 .message-images {
@@ -502,69 +473,8 @@
   display: block;
 }
 
-.input-wrapper {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  background: rgba(20, 20, 35, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 14px;
-  padding: 8px 8px 8px 18px;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.input-wrapper:focus-within {
-  border-color: rgba(74, 158, 255, 0.4);
-  box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.08);
-}
-
-.message-input {
-  flex: 1;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: #e0e0e0;
-  font-size: 14px;
-  font-family: inherit;
-  resize: none;
-  max-height: 120px;
-  padding: 6px 0;
-  line-height: 1.5;
-}
-
-.message-input::placeholder {
-  color: #555577;
-}
-
-.send-button {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  border: none;
-  background: rgba(74, 158, 255, 0.15);
-  color: #4a6688;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-  flex-shrink: 0;
-}
-
-.send-button.send-active {
-  background: linear-gradient(135deg, #4a9eff, #2d7ed9);
-  color: #ffffff;
-}
-
-.send-button.send-active:hover {
-  transform: scale(1.05);
-  box-shadow: 0 4px 16px rgba(74, 158, 255, 0.3);
-}
-
-.send-button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
+/* Input wrapper / message-input / send-button removed — the input row
+   now uses Cloudscape Textarea + Button primitives. */
 
 /* --- Input Footer --- */
 .input-footer {

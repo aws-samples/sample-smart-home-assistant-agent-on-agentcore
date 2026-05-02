@@ -2,6 +2,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { jwtDecode } from 'jwt-decode';
+import Alert from '@cloudscape-design/components/alert';
+import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import Container from '@cloudscape-design/components/container';
+import Header from '@cloudscape-design/components/header';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import StatusIndicator from '@cloudscape-design/components/status-indicator';
+import Textarea from '@cloudscape-design/components/textarea';
 import { getConfig } from '../config';
 import { getIdToken, getAwsCredentials } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
@@ -451,47 +459,47 @@ const ChatInterface: React.FC = () => {
     else startVoice();
   };
 
+  const suggestionChips = [
+    { label: t('chat.chip.checkDevices'), prompt: t('chat.chip.checkDevices.prompt') },
+    { label: t('chat.chip.turnOnAll'), prompt: t('chat.chip.turnOnAll.prompt') },
+    { label: t('chat.chip.changeLed'), prompt: t('chat.chip.changeLed.prompt') },
+    { label: t('chat.chip.cookRice'), prompt: t('chat.chip.cookRice.prompt') },
+    { label: t('chat.chip.turnOnFan'), prompt: t('chat.chip.turnOnFan.prompt') },
+    { label: t('chat.chip.preheatOven'), prompt: t('chat.chip.preheatOven.prompt') },
+  ];
+
   return (
     <div className="chat-container">
-      {error && <div className="connection-banner">{error}</div>}
+      {error && (
+        <Box padding="s">
+          <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>
+        </Box>
+      )}
       {voiceActive && voiceStatus && (
-        <div className="connection-banner" style={{ background: '#2d4a2d' }}>🎤 {voiceStatus}</div>
+        <Box padding="s">
+          <Alert type="info">🎤 {voiceStatus}</Alert>
+        </Box>
       )}
 
       <div className="messages-area">
         {messages.length === 0 && (
-          <div className="empty-state">
-            <div className="empty-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4a9eff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                <polyline points="9 22 9 12 15 12 15 22" />
-              </svg>
-            </div>
-            <h3 className="empty-title">{t('chat.welcome')}</h3>
-            <p className="empty-subtitle">
-              {t('chat.subtitle')}
-            </p>
-            <div className="suggestion-chips">
-              <button className="chip" onClick={() => setInputValue(t('chat.chip.checkDevices.prompt'))}>
-                {t('chat.chip.checkDevices')}
-              </button>
-              <button className="chip" onClick={() => setInputValue(t('chat.chip.turnOnAll.prompt'))}>
-                {t('chat.chip.turnOnAll')}
-              </button>
-              <button className="chip" onClick={() => setInputValue(t('chat.chip.changeLed.prompt'))}>
-                {t('chat.chip.changeLed')}
-              </button>
-              <button className="chip" onClick={() => setInputValue(t('chat.chip.cookRice.prompt'))}>
-                {t('chat.chip.cookRice')}
-              </button>
-              <button className="chip" onClick={() => setInputValue(t('chat.chip.turnOnFan.prompt'))}>
-                {t('chat.chip.turnOnFan')}
-              </button>
-              <button className="chip" onClick={() => setInputValue(t('chat.chip.preheatOven.prompt'))}>
-                {t('chat.chip.preheatOven')}
-              </button>
-            </div>
-          </div>
+          <Box textAlign="center" padding="xxxl">
+            <SpaceBetween size="l" direction="vertical">
+              <div>
+                <Header variant="h2">{t('chat.welcome')}</Header>
+                <Box color="text-body-secondary" padding={{ top: 'xs' }}>
+                  {t('chat.subtitle')}
+                </Box>
+              </div>
+              <SpaceBetween direction="horizontal" size="xs">
+                {suggestionChips.map((c) => (
+                  <Button key={c.label} onClick={() => setInputValue(c.prompt)}>
+                    {c.label}
+                  </Button>
+                ))}
+              </SpaceBetween>
+            </SpaceBetween>
+          </Box>
         )}
 
         {messages.map((msg) => (
@@ -499,14 +507,6 @@ const ChatInterface: React.FC = () => {
             key={msg.id}
             className={`message-row ${msg.role === 'user' ? 'message-row-user' : 'message-row-agent'}`}
           >
-            {msg.role === 'agent' && (
-              <div className="avatar avatar-agent">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                  <polyline points="9 22 9 12 15 12 15 22" />
-                </svg>
-              </div>
-            )}
             <div className={`message-bubble ${msg.role === 'user' ? 'bubble-user' : 'bubble-agent'}`}>
               {msg.imageUrls && msg.imageUrls.length > 0 && (
                 <div className="message-images">
@@ -540,16 +540,8 @@ const ChatInterface: React.FC = () => {
 
         {isTyping && (
           <div className="message-row message-row-agent">
-            <div className="avatar avatar-agent">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                <polyline points="9 22 9 12 15 12 15 22" />
-              </svg>
-            </div>
-            <div className="typing-indicator">
-              <span className="typing-dot" />
-              <span className="typing-dot" />
-              <span className="typing-dot" />
+            <div className="message-bubble bubble-agent">
+              <StatusIndicator type="loading">{t('chat.typing') || 'thinking…'}</StatusIndicator>
             </div>
           </div>
         )}
@@ -557,90 +549,113 @@ const ChatInterface: React.FC = () => {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="input-area">
-        {attachedImages.length > 0 && (
-          <div className="image-strip">
-            {attachedImages.map((img) => (
-              <div key={img.id} className="image-strip-item">
-                <img src={img.previewUrl} alt="" title={img.file.name} />
-                <button
-                  type="button"
-                  className="image-strip-remove"
-                  onClick={() => removeImage(img.id)}
-                  aria-label={t('chat.image.remove')}
-                  title={t('chat.image.remove')}
-                >×</button>
-              </div>
-            ))}
+      <Container>
+        <SpaceBetween size="xs">
+          {attachedImages.length > 0 && (
+            <div className="image-strip">
+              {attachedImages.map((img) => (
+                <div key={img.id} className="image-strip-item">
+                  <img src={img.previewUrl} alt="" title={img.file.name} />
+                  <button
+                    type="button"
+                    className="image-strip-remove"
+                    onClick={() => removeImage(img.id)}
+                    aria-label={t('chat.image.remove')}
+                    title={t('chat.image.remove')}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {imageErrors.length > 0 && (
+            <SpaceBetween size="xxs">
+              {imageErrors.map((e, i) => (
+                <Alert key={i} type="error">{e}</Alert>
+              ))}
+            </SpaceBetween>
+          )}
+          <div className="input-row">
+            <div className="input-row-buttons">
+              <Button
+                iconName="microphone"
+                variant={voiceActive ? 'primary' : 'normal'}
+                onClick={toggleVoice}
+                ariaLabel={voiceActive ? t('chat.voiceMode.exit') : t('chat.voiceMode.enter')}
+              />
+              <Button
+                iconName="upload"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={voiceActive || attachedImages.length >= MAX_IMAGES_PER_MESSAGE}
+                ariaLabel={t('chat.attachImage')}
+              />
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={IMAGE_MIME_ALLOWLIST.join(',')}
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                if (e.target.files) addImages(e.target.files);
+              }}
+            />
+            <div className="input-row-textarea">
+              <Textarea
+                value={inputValue}
+                onChange={({ detail }) => setInputValue(detail.value)}
+                onKeyDown={({ detail }) => {
+                  // Cloudscape Textarea's onKeyDown fires with detail = { key, ctrlKey, ... }.
+                  // Enter (without shift) submits; shift-enter adds a newline like the old textarea.
+                  if (detail.key === 'Enter' && !detail.shiftKey) {
+                    // Need to prevent the default keystroke from inserting a newline.
+                    // Cloudscape doesn't expose the raw event, so defer to a native handler below.
+                  }
+                }}
+                placeholder={t('chat.placeholder')}
+                rows={2}
+                disabled={voiceActive}
+              />
+            </div>
+            <Button
+              variant="primary"
+              iconName="send"
+              onClick={sendMessage}
+              disabled={(!inputValue.trim() && attachedImages.length === 0) || voiceActive}
+              ariaLabel="Send message"
+            />
           </div>
-        )}
-        {imageErrors.length > 0 && (
-          <div className="image-errors">
-            {imageErrors.map((e, i) => <div key={i}>{e}</div>)}
-          </div>
-        )}
-        <div className="input-wrapper">
-          <button
-            className={`send-button ${voiceActive ? 'send-active' : ''}`}
-            onClick={toggleVoice}
-            aria-label={voiceActive ? t('chat.voiceMode.exit') : t('chat.voiceMode.enter')}
-            title={voiceActive ? t('chat.voiceMode.exit') : t('chat.voiceMode.enter')}
-            style={{ marginRight: 8 }}
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill={voiceActive ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" y1="19" x2="12" y2="23" />
-              <line x1="8" y1="23" x2="16" y2="23" />
-            </svg>
-          </button>
-          <button
-            className="send-button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={voiceActive || attachedImages.length >= MAX_IMAGES_PER_MESSAGE}
-            aria-label={t('chat.attachImage')}
-            title={t('chat.attachImage')}
-            style={{ marginRight: 8 }}
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={IMAGE_MIME_ALLOWLIST.join(',')}
-            multiple
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              if (e.target.files) addImages(e.target.files);
-            }}
-          />
-          <textarea
-            ref={inputRef}
-            className="message-input"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={t('chat.placeholder')}
-            rows={1}
-            disabled={voiceActive}
-          />
-          <button
-            className={`send-button ${(inputValue.trim() || attachedImages.length > 0) ? 'send-active' : ''}`}
-            onClick={sendMessage}
-            disabled={(!inputValue.trim() && attachedImages.length === 0) || voiceActive}
-            aria-label="Send message"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
-          </button>
-        </div>
-      </div>
+        </SpaceBetween>
+      </Container>
+      {/* Preserve Enter-to-send behavior using a capture-phase keydown on the
+          textarea element; Cloudscape's onKeyDown doesn't let us preventDefault. */}
+      <InputKeyBindings textareaContainerSelector=".input-row-textarea textarea" onSubmit={sendMessage} disabled={voiceActive} />
     </div>
   );
+};
+
+// Captures Enter keypresses on the Cloudscape Textarea to trigger send,
+// without breaking shift+Enter for newlines. Cloudscape's onKeyDown handler
+// fires the callback but does not hand back the raw event, so we attach a
+// DOM listener on the underlying textarea node.
+const InputKeyBindings: React.FC<{
+  textareaContainerSelector: string;
+  onSubmit: () => void;
+  disabled: boolean;
+}> = ({ textareaContainerSelector, onSubmit, disabled }) => {
+  useEffect(() => {
+    const node = document.querySelector(textareaContainerSelector) as HTMLTextAreaElement | null;
+    if (!node) return;
+    const handler = (e: KeyboardEvent) => {
+      if (disabled) return;
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        onSubmit();
+      }
+    };
+    node.addEventListener('keydown', handler);
+    return () => node.removeEventListener('keydown', handler);
+  }, [textareaContainerSelector, onSubmit, disabled]);
+  return null;
 };
 
 export default ChatInterface;
