@@ -49,7 +49,6 @@ import {
   AgentType,
   PromptRecord,
 } from '../api/adminApi';
-import Tabs from '@cloudscape-design/components/tabs';
 import Alert from '@cloudscape-design/components/alert';
 import Badge from '@cloudscape-design/components/badge';
 import CloudscapeBox from '@cloudscape-design/components/box';
@@ -70,7 +69,21 @@ import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
 
-type ActiveTab = 'skills' | 'knowledgeBase' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails' | 'agentPrompts';
+export type ActiveTab =
+  | 'overview'
+  | 'integrations'
+  | 'models'
+  | 'skills'
+  | 'agentPrompts'
+  | 'users'
+  | 'memories'
+  | 'identity'
+  | 'instanceType'
+  | 'sessions'
+  | 'guardrails'
+  | 'observability'
+  | 'evaluations'
+  | 'knowledgeBase';
 
 interface ActorRow {
   actorId: string;
@@ -1204,7 +1217,11 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
 // ---------------------------------------------------------------------------
 // Main AdminConsole component
 // ---------------------------------------------------------------------------
-const AdminConsole: React.FC = () => {
+interface AdminConsoleProps {
+  activeTab: ActiveTab;
+  setActiveTab: (t: ActiveTab) => void;
+}
+const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) => {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [userIds, setUserIds] = useState<string[]>(['__global__']);
   const [selectedUserId, setSelectedUserId] = useState('__global__');
@@ -1233,8 +1250,7 @@ const AdminConsole: React.FC = () => {
   const [modelId, setModelId] = useState('');
   const [savedModelId, setSavedModelId] = useState('');
 
-  // Tabs
-  const [activeTab, setActiveTab] = useState<ActiveTab>('skills');
+  // Active tab is hoisted to App.tsx so the SideNavigation can drive it.
 
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -1681,21 +1697,155 @@ const AdminConsole: React.FC = () => {
 
   return (
     <div className="admin-console">
-      <Tabs
-        activeTabId={activeTab}
-        onChange={({ detail }) => setActiveTab(detail.activeTabId as ActiveTab)}
-        tabs={[
-          { id: 'skills', label: t('tab.skills') },
-          { id: 'knowledgeBase', label: t('tab.knowledgeBase') },
-          { id: 'models', label: t('tab.models') },
-          { id: 'agentPrompts', label: t('tab.agentPrompts') },
-          { id: 'users', label: t('tab.toolAccess') },
-          { id: 'integrations', label: t('tab.integrations') },
-          { id: 'sessions', label: t('tab.sessions') },
-          { id: 'memories', label: t('tab.memories') },
-          { id: 'guardrails', label: t('tab.guardrails') },
-        ]}
-      />
+      {activeTab === 'overview' && (
+        <SpaceBetween size="l">
+          <Container
+            header={
+              <CloudscapeHeader variant="h1" description={t('overview.desc')}>
+                {t('overview.title')}
+              </CloudscapeHeader>
+            }
+          >
+            <SpaceBetween size="m">
+              <CloudscapeBox variant="p">{t('overview.intro')}</CloudscapeBox>
+              <Alert type="info">{t('overview.diagramPlaceholder')}</Alert>
+            </SpaceBetween>
+          </Container>
+        </SpaceBetween>
+      )}
+
+      {activeTab === 'identity' && (
+        <Table
+          header={
+            <CloudscapeHeader variant="h2" description={t('identity.desc')}>
+              {t('identity.title')}
+            </CloudscapeHeader>
+          }
+          loading={usersLoading}
+          loadingText={t('users.loadingUsers')}
+          items={cognitoUsers}
+          trackBy="sub"
+          columnDefinitions={[
+            { id: 'email', header: t('users.colEmail'), cell: (u) => u.email || u.username },
+            {
+              id: 'status',
+              header: t('users.colStatus'),
+              cell: (u) =>
+                u.status === 'CONFIRMED' ? (
+                  <StatusIndicator type="success">{u.status}</StatusIndicator>
+                ) : (
+                  <StatusIndicator type="stopped">{u.status}</StatusIndicator>
+                ),
+            },
+            {
+              id: 'groups',
+              header: t('users.colGroups'),
+              cell: (u) =>
+                u.groups.length > 0 ? (
+                  <SpaceBetween direction="horizontal" size="xxs">
+                    {u.groups.map((g) => (
+                      <Badge key={g} color={g === 'admin' ? 'red' : 'blue'}>{g}</Badge>
+                    ))}
+                  </SpaceBetween>
+                ) : '-',
+            },
+            {
+              id: 'created',
+              header: t('identity.colCreated'),
+              cell: (u) => (u.createdAt ? new Date(u.createdAt).toLocaleString() : '-'),
+            },
+            {
+              id: 'userId',
+              header: t('users.colUserId'),
+              cell: (u) => <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>,
+            },
+          ]}
+          empty={<CloudscapeBox textAlign="center" padding="m"><b>{t('users.noUsers')}</b></CloudscapeBox>}
+        />
+      )}
+
+      {activeTab === 'instanceType' && (
+        <Container
+          header={
+            <CloudscapeHeader variant="h2" description={t('instanceType.desc')}>
+              {t('instanceType.title')}
+            </CloudscapeHeader>
+          }
+        >
+          <SpaceBetween size="m">
+            <Alert type="info">{t('instanceType.comingSoon')}</Alert>
+            <Table
+              items={[
+                { id: 'micro', name: 'MicroVM', status: 'default', description: t('instanceType.microDesc') },
+                { id: 'ec2', name: 'EC2', status: 'planned', description: t('instanceType.ec2Desc') },
+              ]}
+              trackBy="id"
+              columnDefinitions={[
+                { id: 'name', header: t('instanceType.colName'), cell: (r) => r.name },
+                { id: 'description', header: t('instanceType.colDescription'), cell: (r) => r.description },
+                {
+                  id: 'status',
+                  header: t('instanceType.colStatus'),
+                  cell: (r) =>
+                    r.status === 'default' ? (
+                      <StatusIndicator type="success">{t('instanceType.default')}</StatusIndicator>
+                    ) : (
+                      <StatusIndicator type="pending">{t('instanceType.planned')}</StatusIndicator>
+                    ),
+                },
+              ]}
+            />
+          </SpaceBetween>
+        </Container>
+      )}
+
+      {activeTab === 'observability' && (() => {
+        const cfg = getConfig();
+        const url = `https://${cfg.region}.console.aws.amazon.com/cloudwatch/home?region=${cfg.region}#/gen-ai-observability`;
+        return (
+          <Container
+            header={
+              <CloudscapeHeader variant="h2" description={t('observability.desc')}>
+                {t('observability.title')}
+              </CloudscapeHeader>
+            }
+          >
+            <SpaceBetween size="m">
+              <CloudscapeBox>{t('observability.intro')}</CloudscapeBox>
+              <Button variant="primary" href={url} target="_blank" iconAlign="right" iconName="external">
+                {t('observability.openConsole')}
+              </Button>
+            </SpaceBetween>
+          </Container>
+        );
+      })()}
+
+      {activeTab === 'evaluations' && (() => {
+        const cfg = getConfig();
+        const arnParts = cfg.agentRuntimeArn.split(':');
+        const runtimeId = arnParts.length >= 6 ? arnParts[5].replace('runtime/', '') : '';
+        const agentName = runtimeId.replace(/-[^-]+$/, '');
+        const resourceId = encodeURIComponent(`${cfg.agentRuntimeArn}/runtime-endpoint/DEFAULT:DEFAULT`);
+        const url = runtimeId
+          ? `https://${cfg.region}.console.aws.amazon.com/cloudwatch/home?region=${cfg.region}#/gen-ai-observability/agent-core/agent-alias/${runtimeId}/endpoint/DEFAULT/agent/${agentName}?resourceId=${resourceId}&serviceName=${agentName}.DEFAULT&tabId=evaluations`
+          : 'https://console.aws.amazon.com/cloudwatch/home#/gen-ai-observability';
+        return (
+          <Container
+            header={
+              <CloudscapeHeader variant="h2" description={t('evaluations.desc')}>
+                {t('evaluations.title')}
+              </CloudscapeHeader>
+            }
+          >
+            <SpaceBetween size="m">
+              <CloudscapeBox>{t('evaluations.intro')}</CloudscapeBox>
+              <Button variant="primary" href={url} target="_blank" iconAlign="right" iconName="external">
+                {t('evaluations.openConsole')}
+              </Button>
+            </SpaceBetween>
+          </Container>
+        );
+      })()}
 
       {activeTab === 'skills' && (() => {
         const userScopeOptions = userIds.map((id) => ({ value: id, label: displayUserId(id) }));

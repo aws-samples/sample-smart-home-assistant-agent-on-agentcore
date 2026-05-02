@@ -5,6 +5,59 @@ const zh: Record<string, string> = {
   'app.signOut': '退出登录',
   'theme.light': '浅色',
   'theme.dark': '深色',
+
+  // 侧边导航
+  'nav.discover': '探索',
+  'nav.build': '构建',
+  'nav.deploy': '部署',
+  'nav.assess': '评估',
+  'nav.docs': '文档',
+  'nav.prompt': '提示词',
+  'nav.toolPolicy': '工具策略',
+  'nav.agentGuardrails': '安全护栏',
+
+  // 新增导航项
+  'tab.overview': '概览',
+  'tab.identity': '身份',
+  'tab.instanceType': '实例类型',
+  'tab.observability': '可观测性',
+  'tab.evaluations': '评估',
+
+  // 概览
+  'overview.title': '智能家居助手 Agent',
+  'overview.desc': '基于 AWS 的 AI 智能家居设备控制',
+  'overview.intro': '一个全栈应用，演示 AI 代理如何通过自然语言和语音控制 IoT 设备。基于 Amazon Bedrock AgentCore、AWS IoT Core 和 Cognito 构建。',
+  'overview.diagramPlaceholder': '架构图将在此处添加。',
+
+  // 身份
+  'identity.title': '已注册用户',
+  'identity.desc': 'Cognito 用户池中所有已注册的用户。',
+  'identity.colCreated': '创建时间',
+
+  // 实例类型
+  'instanceType.title': '计算实例类型',
+  'instanceType.desc': '为每个用户的 AgentCore Runtime 配置底层计算资源。',
+  'instanceType.comingSoon': 'EC2 实例类型正在规划中。当前所有用户均运行在 MicroVM 上。',
+  'instanceType.microDesc': '由 Bedrock AgentCore 托管的 Firecracker MicroVM。所有用户的默认选择。',
+  'instanceType.ec2Desc': '专用 EC2 实例 — 适用于需要持久状态或专用硬件的用户。',
+  'instanceType.colName': '名称',
+  'instanceType.colDescription': '说明',
+  'instanceType.colStatus': '状态',
+  'instanceType.default': '默认',
+  'instanceType.planned': '规划中',
+
+  // 可观测性
+  'observability.title': '可观测性',
+  'observability.desc': 'Agent 调用的追踪、日志和指标。',
+  'observability.intro': 'Agent Runtime 调用、Token 计数、延迟和错误追踪都会发送到 CloudWatch，并可在 Gen-AI 可观测性控制台中查看。',
+  'observability.openConsole': '打开 CloudWatch Gen-AI 可观测性',
+
+  // 评估
+  'evaluations.title': '评估',
+  'evaluations.desc': 'Agent 响应的质量评估。',
+  'evaluations.intro': 'Bedrock AgentCore 评估通过可配置的测试套件对 Agent 端点运行测试，以评估响应质量、工具使用准确性和安全合规性。',
+  'evaluations.openConsole': '打开评估控制台',
+
   'app.accessDenied': '访问被拒绝',
   'app.accessDeniedMsg': '您必须是 <strong>admin</strong> 组的成员才能使用此控制台。',
 

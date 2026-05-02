@@ -8,8 +8,9 @@ import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
+import SideNavigation from '@cloudscape-design/components/side-navigation';
 import LoginPage from './auth/LoginPage';
-import AdminConsole from './components/AdminConsole';
+import AdminConsole, { ActiveTab } from './components/AdminConsole';
 import { getCurrentSession, signOut, getIsAdmin, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
 import { detectInitialTheme, setTheme, Theme } from './theme/applyTheme';
@@ -39,6 +40,7 @@ const App: React.FC = () => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [theme, setLocalTheme] = useState<Theme>(() => detectInitialTheme());
+  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
   const { t, language, setLanguage } = useI18n();
 
   useEffect(() => {
@@ -155,14 +157,79 @@ const App: React.FC = () => {
     );
   }
 
+  const navItems = [
+    {
+      type: 'section' as const,
+      text: t('nav.discover'),
+      defaultExpanded: true,
+      items: [
+        { type: 'link' as const, text: t('tab.overview'), href: '#/overview' },
+        { type: 'link' as const, text: t('tab.integrations'), href: '#/integrations' },
+      ],
+    },
+    {
+      type: 'section' as const,
+      text: t('nav.build'),
+      defaultExpanded: true,
+      items: [
+        { type: 'link' as const, text: t('tab.models'), href: '#/models' },
+        { type: 'link' as const, text: t('tab.skills'), href: '#/skills' },
+        { type: 'link' as const, text: t('nav.prompt'), href: '#/agentPrompts' },
+        { type: 'link' as const, text: t('nav.toolPolicy'), href: '#/users' },
+        { type: 'link' as const, text: t('tab.memories'), href: '#/memories' },
+        { type: 'link' as const, text: t('tab.knowledgeBase'), href: '#/knowledgeBase' },
+        { type: 'link' as const, text: t('tab.identity'), href: '#/identity' },
+      ],
+    },
+    {
+      type: 'section' as const,
+      text: t('nav.deploy'),
+      defaultExpanded: true,
+      items: [
+        { type: 'link' as const, text: t('tab.instanceType'), href: '#/instanceType' },
+        { type: 'link' as const, text: t('tab.sessions'), href: '#/sessions' },
+      ],
+    },
+    {
+      type: 'section' as const,
+      text: t('nav.assess'),
+      defaultExpanded: true,
+      items: [
+        { type: 'link' as const, text: t('nav.agentGuardrails'), href: '#/guardrails' },
+        { type: 'link' as const, text: t('tab.observability'), href: '#/observability' },
+        { type: 'link' as const, text: t('tab.evaluations'), href: '#/evaluations' },
+      ],
+    },
+    { type: 'divider' as const },
+    {
+      type: 'link' as const,
+      text: t('nav.docs'),
+      href: 'https://github.com/aws-samples/smarthome-assistant-agent',
+      external: true,
+    },
+  ];
+
   return (
     <>
       <div id="top-nav">{topNav}</div>
       <AppLayout
         toolsHide
-        navigationHide
         headerSelector="#top-nav"
-        content={<AdminConsole />}
+        navigation={
+          <SideNavigation
+            header={{ href: '#/overview', text: t('app.title') }}
+            activeHref={`#/${activeTab}`}
+            onFollow={(event) => {
+              const href = event.detail.href;
+              if (href.startsWith('#/')) {
+                event.preventDefault();
+                setActiveTab(href.slice(2) as ActiveTab);
+              }
+            }}
+            items={navItems}
+          />
+        }
+        content={<AdminConsole activeTab={activeTab} setActiveTab={setActiveTab} />}
       />
     </>
   );

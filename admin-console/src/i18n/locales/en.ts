@@ -5,6 +5,59 @@ const en: Record<string, string> = {
   'app.signOut': 'Sign Out',
   'theme.light': 'Light',
   'theme.dark': 'Dark',
+
+  // Side navigation
+  'nav.discover': 'Discover',
+  'nav.build': 'Build',
+  'nav.deploy': 'Deploy',
+  'nav.assess': 'Assess',
+  'nav.docs': 'Docs',
+  'nav.prompt': 'Prompt',
+  'nav.toolPolicy': 'Tool Policy',
+  'nav.agentGuardrails': 'Agent Guardrails',
+
+  // New tabs
+  'tab.overview': 'Overview',
+  'tab.identity': 'Identity',
+  'tab.instanceType': 'Instance Type',
+  'tab.observability': 'Observability',
+  'tab.evaluations': 'Evaluations',
+
+  // Overview page
+  'overview.title': 'Smart Home Assistant Agent',
+  'overview.desc': 'AI-driven smart home device control on AWS',
+  'overview.intro': 'A full-stack application demonstrating AI agents that control IoT devices via natural language and voice. Built on Amazon Bedrock AgentCore, AWS IoT Core, and Cognito.',
+  'overview.diagramPlaceholder': 'Architecture diagram will be added here.',
+
+  // Identity page
+  'identity.title': 'Registered Users',
+  'identity.desc': 'All users registered in the Cognito User Pool.',
+  'identity.colCreated': 'Created',
+
+  // Instance Type page
+  'instanceType.title': 'Compute Instance Type',
+  'instanceType.desc': 'Configure the underlying compute resource for per-user AgentCore Runtimes.',
+  'instanceType.comingSoon': 'EC2 instance types are planned. All users currently run on MicroVM.',
+  'instanceType.microDesc': 'Firecracker-based MicroVM managed by Bedrock AgentCore. Default for all users.',
+  'instanceType.ec2Desc': 'Dedicated EC2 instance — planned for users who need persistent state or specialized hardware.',
+  'instanceType.colName': 'Name',
+  'instanceType.colDescription': 'Description',
+  'instanceType.colStatus': 'Status',
+  'instanceType.default': 'Default',
+  'instanceType.planned': 'Planned',
+
+  // Observability page
+  'observability.title': 'Observability',
+  'observability.desc': 'Traces, logs, and metrics for agent invocations.',
+  'observability.intro': 'Agent runtime invocations, token counts, latency, and error traces are emitted to CloudWatch and viewable in the Gen-AI Observability console.',
+  'observability.openConsole': 'Open CloudWatch Gen-AI Observability',
+
+  // Evaluations page
+  'evaluations.title': 'Evaluations',
+  'evaluations.desc': 'Quality evaluations for agent responses.',
+  'evaluations.intro': 'Bedrock AgentCore Evaluations runs configurable test suites against an agent endpoint to score response quality, tool-use correctness, and safety compliance.',
+  'evaluations.openConsole': 'Open Evaluations console',
+
   'app.accessDenied': 'Access Denied',
   'app.accessDeniedMsg': 'You must be a member of the <strong>admin</strong> group to use this console.',
 
