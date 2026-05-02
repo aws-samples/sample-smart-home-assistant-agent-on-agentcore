@@ -50,6 +50,14 @@ import {
   PromptRecord,
 } from '../api/adminApi';
 import Tabs from '@cloudscape-design/components/tabs';
+import Alert from '@cloudscape-design/components/alert';
+import Badge from '@cloudscape-design/components/badge';
+import CloudscapeBox from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import CloudscapeHeader from '@cloudscape-design/components/header';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import Table from '@cloudscape-design/components/table';
+import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
@@ -814,113 +822,110 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
   };
 
   return (
-    <div className="memories-section">
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
-
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <span className="toolbar-label">{t('memories.title')}</span>
-        </div>
-        <button className="btn btn-secondary btn-sm" onClick={() => { setSelectedActor(null); loadActors(); }}>
-          {t('memories.refresh')}
-        </button>
-      </div>
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success">{success}</Alert>}
 
       {!selectedActor && (
-        <div className="skills-table-container">
-          {loading ? (
-            <div className="loading">{t('memories.loadingActors')}</div>
-          ) : actors.length === 0 ? (
-            <div className="empty-state">
-              <p>{t('memories.noActors')}</p>
-              <p className="empty-hint">{t('memories.noActorsHint')}</p>
-            </div>
-          ) : (
-            <table className="skills-table">
-              <thead>
-                <tr>
-                  <th>{t('memories.colEmail')}</th>
-                  <th>{t('memories.colActorId')}</th>
-                  <th>{t('memories.colActions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {actors.map((row) => (
-                  <tr key={row.actorId}>
-                    <td className="cell-name">{row.email ?? '—'}</td>
-                    <td className="cell-name"><code>{row.actorId}</code></td>
-                    <td className="cell-actions">
-                      <button className="btn btn-sm btn-primary" onClick={() => handleSelectActor(row)}>
-                        {t('memories.viewMemories')}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+        <Table
+          header={
+            <CloudscapeHeader
+              variant="h2"
+              actions={
+                <Button iconName="refresh" onClick={() => { setSelectedActor(null); loadActors(); }}>
+                  {t('memories.refresh')}
+                </Button>
+              }
+            >
+              {t('memories.title')}
+            </CloudscapeHeader>
+          }
+          loading={loading}
+          loadingText={t('memories.loadingActors')}
+          items={actors}
+          trackBy="actorId"
+          columnDefinitions={[
+            { id: 'email', header: t('memories.colEmail'), cell: (row) => row.email ?? '—', sortingField: 'email' },
+            { id: 'actorId', header: t('memories.colActorId'), cell: (row) => <code>{row.actorId}</code> },
+            {
+              id: 'actions',
+              header: t('memories.colActions'),
+              cell: (row) => (
+                <Button variant="inline-link" onClick={() => handleSelectActor(row)}>
+                  {t('memories.viewMemories')}
+                </Button>
+              ),
+            },
+          ]}
+          empty={
+            <CloudscapeBox textAlign="center" padding="m">
+              <b>{t('memories.noActors')}</b>
+              <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                {t('memories.noActorsHint')}
+              </CloudscapeBox>
+            </CloudscapeBox>
+          }
+        />
       )}
 
       {selectedActor && (
-        <div>
-          <div style={{ marginBottom: '16px' }}>
-            <button className="btn btn-secondary btn-sm" onClick={() => setSelectedActor(null)}>
-              {t('memories.backToActors')}
-            </button>
-            <span className="toolbar-label" style={{ marginLeft: '12px' }}>
-              {t('memories.memoriesFor')}{' '}
-              {selectedActor.email ? (
-                <>
-                  <span style={{ color: '#4a9eff' }}>{selectedActor.email}</span>
-                  {' '}<code style={{ color: '#888' }}>({selectedActor.actorId})</code>
-                </>
-              ) : (
-                <code style={{ color: '#4a9eff' }}>{selectedActor.actorId}</code>
-              )}
-            </span>
-          </div>
-
-          <div className="skills-table-container">
-            {recordsLoading ? (
-              <div className="loading">{t('memories.loadingMemories')}</div>
-            ) : records.length === 0 ? (
-              <div className="empty-state">
-                <p>{t('memories.noRecords')}</p>
-              </div>
-            ) : (
-              <table className="skills-table">
-                <thead>
-                  <tr>
-                    <th>{t('memories.colType')}</th>
-                    <th>{t('memories.colContent')}</th>
-                    <th>{t('memories.colCreated')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {records.map((r) => (
-                    <tr key={r.id}>
-                      <td>
-                        <span className={`badge ${r.type === 'facts' ? 'badge-active' : 'badge-admin'}`}>
-                          {r.type}
-                        </span>
-                      </td>
-                      <td className="cell-desc" style={{ maxWidth: '500px', whiteSpace: 'normal' }}>
-                        {r.text}
-                      </td>
-                      <td className="cell-date">
-                        {r.createdAt ? new Date(r.createdAt).toLocaleString() : '-'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
+        <Table
+          header={
+            <CloudscapeHeader
+              variant="h2"
+              description={
+                selectedActor.email ? (
+                  <>
+                    {selectedActor.email} <code>({selectedActor.actorId})</code>
+                  </>
+                ) : (
+                  <code>{selectedActor.actorId}</code>
+                )
+              }
+              actions={
+                <Button onClick={() => setSelectedActor(null)}>
+                  {t('memories.backToActors')}
+                </Button>
+              }
+            >
+              {t('memories.memoriesFor')}
+            </CloudscapeHeader>
+          }
+          loading={recordsLoading}
+          loadingText={t('memories.loadingMemories')}
+          items={records}
+          trackBy="id"
+          columnDefinitions={[
+            {
+              id: 'type',
+              header: t('memories.colType'),
+              cell: (r) =>
+                r.type === 'facts' ? (
+                  <StatusIndicator type="success">{r.type}</StatusIndicator>
+                ) : (
+                  <Badge color="blue">{r.type}</Badge>
+                ),
+            },
+            {
+              id: 'content',
+              header: t('memories.colContent'),
+              cell: (r) => <span style={{ whiteSpace: 'normal' }}>{r.text}</span>,
+              maxWidth: 600,
+            },
+            {
+              id: 'created',
+              header: t('memories.colCreated'),
+              cell: (r) => (r.createdAt ? new Date(r.createdAt).toLocaleString() : '-'),
+            },
+          ]}
+          empty={
+            <CloudscapeBox textAlign="center" padding="m">
+              <b>{t('memories.noRecords')}</b>
+            </CloudscapeBox>
+          }
+        />
       )}
-    </div>
+    </SpaceBetween>
   );
 };
 
