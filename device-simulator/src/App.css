@@ -130,31 +130,21 @@ body {
   }
 }
 
-/* ========== Device Card ========== */
+/* ========== Device Card — Cloudscape-token-driven ========== */
 .device-card {
-  background: linear-gradient(160deg, #101018 0%, #13132a 50%, #101018 100%);
-  border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.06);
+  background: var(--sim-card-bg, #ffffff);
+  border-radius: var(--sim-radius, 16px);
+  border: 1px solid var(--sim-card-border, #e9ebed);
   padding: 20px;
   position: relative;
   overflow: hidden;
   transition: border-color 0.4s, box-shadow 0.4s, transform 0.3s;
-  box-shadow: 0 2px 20px rgba(0,0,0,0.3);
-}
-
-.device-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+  box-shadow: var(--sim-shadow, 0 1px 1px 1px rgba(233, 235, 237, 1));
+  color: var(--sim-text-default, #0f141a);
 }
 
 .device-card:hover {
-  border-color: rgba(120, 120, 255, 0.15);
-  box-shadow: 0 8px 40px rgba(80, 80, 200, 0.1), 0 2px 20px rgba(0,0,0,0.3);
+  border-color: var(--sim-primary, #0972d3);
   transform: translateY(-1px);
 }
 
@@ -168,7 +158,7 @@ body {
 .device-card-header h2 {
   font-size: 1rem;
   font-weight: 600;
-  color: #e8e8f0;
+  color: var(--sim-text-default, #0f141a);
   letter-spacing: -0.01em;
 }
 
@@ -177,11 +167,11 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 0.7rem;
-  color: #666;
+  color: var(--sim-text-secondary, #656871);
   padding: 4px 10px;
-  background: rgba(255,255,255,0.03);
+  background: var(--sim-panel-bg, #f8f8fa);
   border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.04);
+  border: 1px solid var(--sim-card-border, #e9ebed);
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -194,12 +184,12 @@ body {
 }
 
 .device-status .dot.on {
-  background: #22c55e;
-  box-shadow: 0 0 6px #22c55eaa;
+  background: var(--sim-success, #037f0c);
+  box-shadow: 0 0 6px var(--sim-success, #037f0c);
 }
 
 .device-status .dot.off {
-  background: #555;
+  background: var(--sim-text-secondary, #656871);
 }
 
 /* ========== Shared Button Styles ========== */
@@ -209,9 +199,9 @@ body {
 .oven-controls button {
   padding: 5px 12px;
   border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.03);
-  color: #999;
+  border: 1px solid var(--sim-button-border, #7d8998);
+  background: var(--sim-button-bg, #ffffff);
+  color: var(--sim-button-text, #0972d3);
   font-size: 0.7rem;
   font-weight: 500;
   cursor: pointer;
@@ -223,9 +213,18 @@ body {
 .cooker-buttons button:hover,
 .fan-controls button:hover,
 .oven-controls button:hover {
-  background: rgba(255,255,255,0.07);
-  border-color: rgba(255,255,255,0.15);
-  color: #ccc;
+  background: var(--sim-button-active-bg, #f2f8fd);
+  border-color: var(--sim-button-active-border, #0972d3);
+}
+
+.led-controls button.active,
+.cooker-buttons button.active,
+.fan-controls button.active,
+.oven-controls button.active {
+  background: var(--sim-button-active-bg, #f2f8fd);
+  border-color: var(--sim-button-active-border, #0972d3);
+  color: var(--sim-primary, #0972d3);
+  font-weight: 600;
 }
 
 /* ========== LED Matrix ========== */
