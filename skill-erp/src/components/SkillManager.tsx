@@ -1,4 +1,18 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import Alert from '@cloudscape-design/components/alert';
+import Badge from '@cloudscape-design/components/badge';
+import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import Container from '@cloudscape-design/components/container';
+import Form from '@cloudscape-design/components/form';
+import FormField from '@cloudscape-design/components/form-field';
+import Header from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
+import Modal from '@cloudscape-design/components/modal';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import StatusIndicator from '@cloudscape-design/components/status-indicator';
+import Table from '@cloudscape-design/components/table';
+import Textarea from '@cloudscape-design/components/textarea';
 import {
   listMyRecords,
   createMyRecord,
@@ -66,9 +80,7 @@ const SkillManager: React.FC = () => {
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
   const handleCreate = () => {
     clearMessages();
@@ -101,8 +113,7 @@ const SkillManager: React.FC = () => {
     setForm(emptyForm);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async () => {
     clearMessages();
 
     if (!editingId && !SKILL_NAME_RE.test(form.skillName)) {
@@ -179,244 +190,203 @@ const SkillManager: React.FC = () => {
     return translated === key ? status : translated;
   };
 
+  const renderStatus = (status: string) => {
+    const label = statusLabel(status);
+    const s = status.toUpperCase();
+    if (s === 'APPROVED' || s === 'PUBLISHED') return <StatusIndicator type="success">{label}</StatusIndicator>;
+    if (s === 'PENDING' || s === 'REVIEW') return <StatusIndicator type="pending">{label}</StatusIndicator>;
+    if (s === 'REJECTED') return <StatusIndicator type="error">{label}</StatusIndicator>;
+    return <Badge>{label}</Badge>;
+  };
+
   return (
-    <div className="skill-manager">
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <span className="toolbar-label">{t('toolbar.title')}</span>
-        </div>
-        <div className="toolbar-right">
-          <button className="btn btn-secondary btn-sm" onClick={load}>
-            {t('toolbar.refresh')}
-          </button>
-          <button className="btn btn-primary" onClick={handleCreate}>
-            {t('toolbar.newSkill')}
-          </button>
-        </div>
-      </div>
-
-      <p className="toolbar-hint">{t('toolbar.hint')}</p>
-
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success">{success}</Alert>}
 
       {deleteTarget && (
-        <div className="modal-overlay" onClick={() => setDeleteTarget(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{t('table.delete')}</h3>
-            <p>
-              {t('form.deleteConfirm')} <strong>{deleteTarget.name}</strong>?
-            </p>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>
-                {t('form.cancel')}
-              </button>
-              <button className="btn btn-danger" onClick={handleDelete}>
-                {t('table.delete')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <Modal
+          visible
+          onDismiss={() => setDeleteTarget(null)}
+          header={t('table.delete')}
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button onClick={() => setDeleteTarget(null)}>{t('form.cancel')}</Button>
+                <Button variant="primary" onClick={handleDelete}>{t('table.delete')}</Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          <p>{t('form.deleteConfirm')} <strong>{deleteTarget.name}</strong>?</p>
+        </Modal>
       )}
 
       {showForm && (
-        <div className="skill-form-container">
-          <h3>{editingId ? t('form.editTitle') : t('form.createTitle')}</h3>
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label>
-                {t('form.skillName')} <span className="field-required">*</span>
-              </label>
-              <input
-                type="text"
-                value={form.skillName}
-                onChange={(e) =>
-                  setForm({ ...form, skillName: e.target.value.toLowerCase() })
-                }
-                disabled={!!editingId}
-                placeholder={t('form.skillNamePlaceholder')}
-              />
-              <div className="field-hint">{t('form.skillNameHint')}</div>
-            </div>
-
-            <div className="form-group">
-              <label>
-                {t('form.description')} <span className="field-required">*</span>
-              </label>
-              <input
-                type="text"
-                value={form.description}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
-                placeholder={t('form.descriptionPlaceholder')}
-                maxLength={1024}
-              />
-            </div>
-
-            <div className="form-group">
-              <label>{t('form.allowedTools')}</label>
-              <input
-                type="text"
-                value={form.allowedTools}
-                onChange={(e) => setForm({ ...form, allowedTools: e.target.value })}
-                placeholder={t('form.allowedToolsPlaceholder')}
-              />
-            </div>
-
-            <div className="form-section-label">{t('form.optional')}</div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label>{t('form.license')}</label>
-                <input
-                  type="text"
-                  value={form.license}
-                  onChange={(e) => setForm({ ...form, license: e.target.value })}
-                  placeholder={t('form.licensePlaceholder')}
-                />
-              </div>
-              <div className="form-group">
-                <label>{t('form.compatibility')}</label>
-                <input
-                  type="text"
-                  value={form.compatibility}
-                  onChange={(e) =>
-                    setForm({ ...form, compatibility: e.target.value })
-                  }
-                  placeholder={t('form.compatibilityPlaceholder')}
-                  maxLength={500}
-                />
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label>{t('form.metadata')}</label>
-              <div className="metadata-editor">
-                {form.metadata.map((entry, i) => (
-                  <div key={i} className="metadata-row">
-                    <input
-                      type="text"
-                      className="metadata-key"
-                      value={entry.key}
-                      onChange={(e) => {
-                        const updated = [...form.metadata];
-                        updated[i] = { ...updated[i], key: e.target.value };
-                        setForm({ ...form, metadata: updated });
-                      }}
-                      placeholder={t('form.metadataKey')}
-                    />
-                    <input
-                      type="text"
-                      className="metadata-value"
-                      value={entry.value}
-                      onChange={(e) => {
-                        const updated = [...form.metadata];
-                        updated[i] = { ...updated[i], value: e.target.value };
-                        setForm({ ...form, metadata: updated });
-                      }}
-                      placeholder={t('form.metadataValue')}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-danger"
-                      onClick={() => {
-                        const updated = form.metadata.filter((_, idx) => idx !== i);
-                        setForm({ ...form, metadata: updated });
-                      }}
-                    >
-                      {t('form.remove')}
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  className="btn btn-sm btn-secondary"
-                  onClick={() =>
-                    setForm({
-                      ...form,
-                      metadata: [...form.metadata, { key: '', value: '' }],
-                    })
-                  }
+        <Container
+          header={
+            <Header variant="h2">
+              {editingId ? t('form.editTitle') : t('form.createTitle')}
+            </Header>
+          }
+        >
+          <form onSubmit={(e) => { e.preventDefault(); void handleSubmit(); }}>
+            <Form
+              actions={
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button onClick={handleCancel}>{t('form.cancel')}</Button>
+                  <Button variant="primary" formAction="submit">
+                    {editingId ? t('form.save') : t('form.create')}
+                  </Button>
+                </SpaceBetween>
+              }
+            >
+              <SpaceBetween size="m">
+                <FormField
+                  label={<>{t('form.skillName')} <span style={{ color: '#d91515' }}>*</span></>}
+                  description={t('form.skillNameHint')}
                 >
-                  {t('form.addEntry')}
-                </button>
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label>{t('form.instructions')}</label>
-              <textarea
-                className="instructions-textarea"
-                value={form.instructions}
-                onChange={(e) => setForm({ ...form, instructions: e.target.value })}
-                placeholder={t('form.instructionsPlaceholder')}
-                rows={10}
-              />
-            </div>
-
-            <div className="form-actions">
-              <button type="button" className="btn btn-secondary" onClick={handleCancel}>
-                {t('form.cancel')}
-              </button>
-              <button type="submit" className="btn btn-primary">
-                {editingId ? t('form.save') : t('form.create')}
-              </button>
-            </div>
+                  <Input
+                    value={form.skillName}
+                    onChange={({ detail }) => setForm({ ...form, skillName: detail.value.toLowerCase() })}
+                    disabled={!!editingId}
+                    placeholder={t('form.skillNamePlaceholder')}
+                  />
+                </FormField>
+                <FormField label={<>{t('form.description')} <span style={{ color: '#d91515' }}>*</span></>}>
+                  <Input
+                    value={form.description}
+                    onChange={({ detail }) => setForm({ ...form, description: detail.value })}
+                    placeholder={t('form.descriptionPlaceholder')}
+                  />
+                </FormField>
+                <FormField label={t('form.allowedTools')}>
+                  <Input
+                    value={form.allowedTools}
+                    onChange={({ detail }) => setForm({ ...form, allowedTools: detail.value })}
+                    placeholder={t('form.allowedToolsPlaceholder')}
+                  />
+                </FormField>
+                <Box color="text-body-secondary" fontSize="body-s">{t('form.optional')}</Box>
+                <FormField label={t('form.license')}>
+                  <Input
+                    value={form.license}
+                    onChange={({ detail }) => setForm({ ...form, license: detail.value })}
+                    placeholder={t('form.licensePlaceholder')}
+                  />
+                </FormField>
+                <FormField label={t('form.compatibility')}>
+                  <Input
+                    value={form.compatibility}
+                    onChange={({ detail }) => setForm({ ...form, compatibility: detail.value })}
+                    placeholder={t('form.compatibilityPlaceholder')}
+                  />
+                </FormField>
+                <FormField label={t('form.metadata')}>
+                  <SpaceBetween size="xs">
+                    {form.metadata.map((entry, i) => (
+                      <SpaceBetween key={i} direction="horizontal" size="xs">
+                        <Input
+                          value={entry.key}
+                          onChange={({ detail }) => {
+                            const updated = [...form.metadata];
+                            updated[i] = { ...updated[i], key: detail.value };
+                            setForm({ ...form, metadata: updated });
+                          }}
+                          placeholder={t('form.metadataKey')}
+                        />
+                        <Input
+                          value={entry.value}
+                          onChange={({ detail }) => {
+                            const updated = [...form.metadata];
+                            updated[i] = { ...updated[i], value: detail.value };
+                            setForm({ ...form, metadata: updated });
+                          }}
+                          placeholder={t('form.metadataValue')}
+                        />
+                        <Button
+                          onClick={() => {
+                            const updated = form.metadata.filter((_, idx) => idx !== i);
+                            setForm({ ...form, metadata: updated });
+                          }}
+                        >
+                          {t('form.remove')}
+                        </Button>
+                      </SpaceBetween>
+                    ))}
+                    <Button
+                      onClick={() => setForm({ ...form, metadata: [...form.metadata, { key: '', value: '' }] })}
+                    >
+                      {t('form.addEntry')}
+                    </Button>
+                  </SpaceBetween>
+                </FormField>
+                <FormField label={t('form.instructions')}>
+                  <Textarea
+                    value={form.instructions}
+                    onChange={({ detail }) => setForm({ ...form, instructions: detail.value })}
+                    placeholder={t('form.instructionsPlaceholder')}
+                    rows={10}
+                  />
+                </FormField>
+              </SpaceBetween>
+            </Form>
           </form>
-        </div>
+        </Container>
       )}
 
       {!showForm && (
-        <div className="records-table-container">
-          {isLoading ? (
-            <div className="loading">{t('common.loading')}</div>
-          ) : records.length === 0 ? (
-            <div className="empty-state">
-              <p>{t('table.empty')}</p>
-              <p className="empty-hint">{t('table.emptyHint')}</p>
-            </div>
-          ) : (
-            <table className="records-table">
-              <thead>
-                <tr>
-                  <th>{t('table.name')}</th>
-                  <th>{t('table.description')}</th>
-                  <th>{t('table.status')}</th>
-                  <th>{t('table.updated')}</th>
-                  <th>{t('table.actions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {records.map((r) => (
-                  <tr key={r.recordId}>
-                    <td className="cell-name">{r.name}</td>
-                    <td className="cell-desc">{r.description}</td>
-                    <td className="cell-status">
-                      <span className={`status-badge status-${r.status.toLowerCase()}`}>
-                        {statusLabel(r.status)}
-                      </span>
-                    </td>
-                    <td className="cell-date">
-                      {r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'}
-                    </td>
-                    <td className="cell-actions">
-                      <button className="btn btn-sm btn-secondary" onClick={() => handleEdit(r)}>
-                        {t('table.edit')}
-                      </button>
-                      <button
-                        className="btn btn-sm btn-danger"
-                        onClick={() => setDeleteTarget(r)}
-                      >
-                        {t('table.delete')}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+        <Table
+          header={
+            <Header
+              variant="h2"
+              description={t('toolbar.hint')}
+              actions={
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button iconName="refresh" onClick={load}>{t('toolbar.refresh')}</Button>
+                  <Button variant="primary" onClick={handleCreate}>{t('toolbar.newSkill')}</Button>
+                </SpaceBetween>
+              }
+            >
+              {t('toolbar.title')}
+            </Header>
+          }
+          loading={isLoading}
+          loadingText={t('common.loading')}
+          items={records}
+          trackBy="recordId"
+          columnDefinitions={[
+            { id: 'name', header: t('table.name'), cell: (r) => r.name },
+            { id: 'description', header: t('table.description'), cell: (r) => r.description },
+            { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status) },
+            {
+              id: 'updated',
+              header: t('table.updated'),
+              cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
+            },
+            {
+              id: 'actions',
+              header: t('table.actions'),
+              minWidth: 180,
+              cell: (r) => (
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button onClick={() => handleEdit(r)}>{t('table.edit')}</Button>
+                  <Button onClick={() => setDeleteTarget(r)}>{t('table.delete')}</Button>
+                </SpaceBetween>
+              ),
+            },
+          ]}
+          empty={
+            <Box textAlign="center" padding="m">
+              <b>{t('table.empty')}</b>
+              <Box variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                {t('table.emptyHint')}
+              </Box>
+            </Box>
+          }
+        />
       )}
-    </div>
+    </SpaceBetween>
   );
 };
 

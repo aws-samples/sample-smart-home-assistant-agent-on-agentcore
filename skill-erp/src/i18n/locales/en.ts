@@ -84,6 +84,7 @@ const en: Record<string, string> = {
 
   'erp.tab.skills': 'Skills',
   'erp.tab.a2a': 'A2A Agents',
+  'erp.nav.publish': 'Publish',
 
   'erp.a2a.list.title': 'My A2A Agents',
   'erp.a2a.list.hint': 'Each record you publish goes to AgentCore Registry as an A2A_AGENT descriptor for admin approval.',

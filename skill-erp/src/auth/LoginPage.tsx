@@ -1,4 +1,13 @@
 import React, { useState } from 'react';
+import Alert from '@cloudscape-design/components/alert';
+import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import Container from '@cloudscape-design/components/container';
+import Form from '@cloudscape-design/components/form';
+import FormField from '@cloudscape-design/components/form-field';
+import Header from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 import { signIn, signUp, confirmSignUp, AuthTokens } from './CognitoAuth';
 import { useI18n } from '../i18n';
 
@@ -23,8 +32,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
     setInfo('');
   };
 
-  const handleSignIn = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSignIn = async () => {
     clearMessages();
     setIsLoading(true);
     try {
@@ -37,8 +45,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
     }
   };
 
-  const handleSignUp = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSignUp = async () => {
     clearMessages();
     setIsLoading(true);
     try {
@@ -52,8 +59,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
     }
   };
 
-  const handleConfirm = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleConfirm = async () => {
     clearMessages();
     setIsLoading(true);
     try {
@@ -68,86 +74,97 @@ const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
   };
 
   return (
-    <div className="login-container">
-      <div className="login-card">
-        <div className="login-lang-row">
-          <button
-            className="lang-switch"
-            onClick={() => setLanguage(language === 'en' ? 'zh' : 'en')}
-          >
+    <Box padding={{ top: 'xxxl' }}>
+      <div style={{ maxWidth: 420, margin: '0 auto', padding: '0 16px' }}>
+        <Box float="right" padding={{ bottom: 's' }}>
+          <Button variant="link" onClick={() => setLanguage(language === 'en' ? 'zh' : 'en')}>
             {language === 'en' ? '中文' : 'EN'}
-          </button>
-        </div>
-        <div className="login-header">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#4a9eff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="16" y1="13" x2="8" y2="13" />
-            <line x1="16" y1="17" x2="8" y2="17" />
-            <polyline points="10 9 9 9 8 9" />
-          </svg>
-          <h1>{t('login.title')}</h1>
-          <p className="login-subtitle">{t('login.subtitle')}</p>
-        </div>
+          </Button>
+        </Box>
+        <Container
+          header={
+            <Header variant="h1" description={t('login.subtitle')}>
+              {t('login.title')}
+            </Header>
+          }
+        >
+          {mode === 'signin' && (
+            <form onSubmit={(e) => { e.preventDefault(); void handleSignIn(); }}>
+              <Form
+                actions={
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button variant="link" onClick={() => { clearMessages(); setMode('signup'); }}>
+                      {t('login.noAccount')}
+                    </Button>
+                    <Button variant="primary" formAction="submit" loading={isLoading} disabled={!email || !password}>
+                      {t('login.signIn')}
+                    </Button>
+                  </SpaceBetween>
+                }
+              >
+                <SpaceBetween size="l">
+                  {error && <Alert type="error">{error}</Alert>}
+                  {info && <Alert type="info">{info}</Alert>}
+                  <FormField label={t('login.email')}>
+                    <Input type="email" value={email} onChange={({ detail }) => setEmail(detail.value)} />
+                  </FormField>
+                  <FormField label={t('login.password')}>
+                    <Input type="password" value={password} onChange={({ detail }) => setPassword(detail.value)} />
+                  </FormField>
+                </SpaceBetween>
+              </Form>
+            </form>
+          )}
 
-        {error && <div className="login-error">{error}</div>}
-        {info && <div className="login-info">{info}</div>}
+          {mode === 'signup' && (
+            <form onSubmit={(e) => { e.preventDefault(); void handleSignUp(); }}>
+              <Form
+                actions={
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button variant="link" onClick={() => { clearMessages(); setMode('signin'); }}>
+                      {t('login.haveAccount')}
+                    </Button>
+                    <Button variant="primary" formAction="submit" loading={isLoading} disabled={!email || !password}>
+                      {t('login.signUp')}
+                    </Button>
+                  </SpaceBetween>
+                }
+              >
+                <SpaceBetween size="l">
+                  {error && <Alert type="error">{error}</Alert>}
+                  <FormField label={t('login.email')}>
+                    <Input type="email" value={email} onChange={({ detail }) => setEmail(detail.value)} />
+                  </FormField>
+                  <FormField label={t('login.password')}>
+                    <Input type="password" value={password} onChange={({ detail }) => setPassword(detail.value)} />
+                  </FormField>
+                </SpaceBetween>
+              </Form>
+            </form>
+          )}
 
-        {mode === 'signin' && (
-          <form onSubmit={handleSignIn}>
-            <div className="form-group">
-              <label>{t('login.email')}</label>
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-            </div>
-            <div className="form-group">
-              <label>{t('login.password')}</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-            </div>
-            <button type="submit" className="login-button" disabled={isLoading}>
-              {isLoading ? t('login.signingIn') : t('login.signIn')}
-            </button>
-            <div className="login-switch">
-              <button type="button" className="link-button" onClick={() => { clearMessages(); setMode('signup'); }}>
-                {t('login.noAccount')}
-              </button>
-            </div>
-          </form>
-        )}
-
-        {mode === 'signup' && (
-          <form onSubmit={handleSignUp}>
-            <div className="form-group">
-              <label>{t('login.email')}</label>
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-            </div>
-            <div className="form-group">
-              <label>{t('login.password')}</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-            </div>
-            <button type="submit" className="login-button" disabled={isLoading}>
-              {isLoading ? t('login.signingUp') : t('login.signUp')}
-            </button>
-            <div className="login-switch">
-              <button type="button" className="link-button" onClick={() => { clearMessages(); setMode('signin'); }}>
-                {t('login.haveAccount')}
-              </button>
-            </div>
-          </form>
-        )}
-
-        {mode === 'confirm' && (
-          <form onSubmit={handleConfirm}>
-            <div className="form-group">
-              <label>{t('login.confirmCode')}</label>
-              <input type="text" value={code} onChange={(e) => setCode(e.target.value)} required />
-            </div>
-            <button type="submit" className="login-button" disabled={isLoading}>
-              {isLoading ? t('login.confirming') : t('login.confirm')}
-            </button>
-          </form>
-        )}
+          {mode === 'confirm' && (
+            <form onSubmit={(e) => { e.preventDefault(); void handleConfirm(); }}>
+              <Form
+                actions={
+                  <Button variant="primary" formAction="submit" loading={isLoading} disabled={!code}>
+                    {t('login.confirm')}
+                  </Button>
+                }
+              >
+                <SpaceBetween size="l">
+                  {error && <Alert type="error">{error}</Alert>}
+                  {info && <Alert type="info">{info}</Alert>}
+                  <FormField label={t('login.confirmCode')}>
+                    <Input value={code} onChange={({ detail }) => setCode(detail.value)} />
+                  </FormField>
+                </SpaceBetween>
+              </Form>
+            </form>
+          )}
+        </Container>
       </div>
-    </div>
+    </Box>
   );
 };
 

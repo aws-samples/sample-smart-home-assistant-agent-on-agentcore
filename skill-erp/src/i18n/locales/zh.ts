@@ -84,6 +84,7 @@ const zh: Record<string, string> = {
 
   'erp.tab.skills': '技能',
   'erp.tab.a2a': 'A2A 代理',
+  'erp.nav.publish': '发布',
 
   'erp.a2a.list.title': '我的 A2A 代理',
   'erp.a2a.list.hint': '每条记录会作为 A2A_AGENT 描述符发布到 AgentCore Registry，等待管理员审批。',
