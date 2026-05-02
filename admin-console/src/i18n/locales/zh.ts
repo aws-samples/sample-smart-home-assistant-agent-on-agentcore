@@ -183,6 +183,7 @@ const zh: Record<string, string> = {
   'memories.loadingActors': '加载参与者中...',
   'memories.noActors': '未找到记忆参与者。',
   'memories.noActorsHint': '当用户与聊天机器人交互时会创建记忆。',
+  'memories.colEmail': '邮箱',
   'memories.colActorId': '参与者 ID',
   'memories.colActions': '操作',
   'memories.viewMemories': '查看记忆',

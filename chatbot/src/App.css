@@ -294,6 +294,80 @@
   word-wrap: break-word;
 }
 
+/* react-markdown wraps content in block elements; undo pre-wrap so
+   paragraphs/lists don't get stray blank lines from source newlines. */
+.message-markdown {
+  white-space: normal;
+}
+.message-markdown > *:first-child { margin-top: 0; }
+.message-markdown > *:last-child { margin-bottom: 0; }
+.message-markdown p { margin: 0.5em 0; }
+.message-markdown ul,
+.message-markdown ol { margin: 0.35em 0; padding-left: 1.4em; }
+.message-markdown li { margin: 0.15em 0; }
+.message-markdown h1,
+.message-markdown h2,
+.message-markdown h3,
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.25;
+}
+.message-markdown h1 { font-size: 1.15em; }
+.message-markdown h2 { font-size: 1.1em; }
+.message-markdown h3 { font-size: 1.05em; }
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6 { font-size: 1em; }
+.message-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.message-markdown pre {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+.message-markdown pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+.message-markdown a {
+  color: #4a9eff;
+  text-decoration: underline;
+  word-break: break-all;
+}
+.message-markdown blockquote {
+  margin: 0.5em 0;
+  padding: 0.25em 0.75em;
+  border-left: 3px solid rgba(74, 158, 255, 0.5);
+  color: #c8c8c8;
+}
+.message-markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+}
+.message-markdown th,
+.message-markdown td {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 4px 8px;
+  text-align: left;
+}
+.message-markdown hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  margin: 0.75em 0;
+}
+
 .message-time {
   font-size: 11px;
   opacity: 0.5;

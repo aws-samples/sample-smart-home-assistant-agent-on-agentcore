@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { jwtDecode } from 'jwt-decode';
 import { getConfig } from '../config';
 import { getIdToken, getAwsCredentials } from '../auth/CognitoAuth';
@@ -513,7 +515,24 @@ const ChatInterface: React.FC = () => {
                   ))}
                 </div>
               )}
-              {msg.content && <div className="message-text">{msg.content}</div>}
+              {msg.content && (
+                msg.role === 'agent' ? (
+                  <div className="message-text message-markdown">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        a: ({ node: _node, ...props }) => (
+                          <a {...props} target="_blank" rel="noopener noreferrer" />
+                        ),
+                      }}
+                    >
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <div className="message-text">{msg.content}</div>
+                )
+              )}
               <div className="message-time">{formatTime(msg.timestamp)}</div>
             </div>
           </div>

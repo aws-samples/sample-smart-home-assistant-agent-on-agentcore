@@ -51,7 +51,13 @@ import {
 } from '../api/adminApi';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
+import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
+
+interface ActorRow {
+  actorId: string;
+  email: string | null;
+}
 
 // Skill name validation (matches Strands SDK pattern)
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
@@ -745,8 +751,8 @@ interface MemoriesTabProps {
 }
 
 const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, clearMessages }) => {
-  const [actors, setActors] = useState<string[]>([]);
-  const [selectedActor, setSelectedActor] = useState<string | null>(null);
+  const [actors, setActors] = useState<ActorRow[]>([]);
+  const [selectedActor, setSelectedActor] = useState<ActorRow | null>(null);
   const [records, setRecords] = useState<MemoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
@@ -755,8 +761,32 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
   const loadActors = useCallback(async () => {
     setLoading(true);
     try {
-      const a = await listMemoryActors();
-      setActors(a);
+      // Cognito lookup is best-effort — if it fails the table still shows
+      // raw actorIds instead of blocking the whole tab.
+      const [a, users] = await Promise.all([
+        listMemoryActors(),
+        listCognitoUsers().catch((err) => {
+          console.warn('listCognitoUsers failed; actorIds will not be resolved to emails', err);
+          return [] as CognitoUserInfo[];
+        }),
+      ]);
+      const emailByActor = new Map<string, string>();
+      for (const u of users) {
+        if (u.email) {
+          emailByActor.set(sanitizeActorId(u.email), u.email);
+          emailByActor.set(sanitizeActorId(u.sub), u.email);
+        }
+      }
+      const rows: ActorRow[] = a.map((actorId) => ({
+        actorId,
+        email: emailByActor.get(actorId) ?? null,
+      }));
+      rows.sort((x, y) => {
+        if (x.email && !y.email) return -1;
+        if (!x.email && y.email) return 1;
+        return (x.email ?? x.actorId).localeCompare(y.email ?? y.actorId);
+      });
+      setActors(rows);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -766,12 +796,12 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
 
   useEffect(() => { loadActors(); }, [loadActors]);
 
-  const handleSelectActor = async (actorId: string) => {
+  const handleSelectActor = async (row: ActorRow) => {
     clearMessages();
-    setSelectedActor(actorId);
+    setSelectedActor(row);
     setRecordsLoading(true);
     try {
-      const r = await getMemoryRecords(actorId);
+      const r = await getMemoryRecords(row.actorId);
       setRecords(r);
     } catch (err: any) {
       setError(err.message);
@@ -807,16 +837,18 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
             <table className="skills-table">
               <thead>
                 <tr>
+                  <th>{t('memories.colEmail')}</th>
                   <th>{t('memories.colActorId')}</th>
                   <th>{t('memories.colActions')}</th>
                 </tr>
               </thead>
               <tbody>
-                {actors.map((a) => (
-                  <tr key={a}>
-                    <td className="cell-name">{a}</td>
+                {actors.map((row) => (
+                  <tr key={row.actorId}>
+                    <td className="cell-name">{row.email ?? '—'}</td>
+                    <td className="cell-name"><code>{row.actorId}</code></td>
                     <td className="cell-actions">
-                      <button className="btn btn-sm btn-primary" onClick={() => handleSelectActor(a)}>
+                      <button className="btn btn-sm btn-primary" onClick={() => handleSelectActor(row)}>
                         {t('memories.viewMemories')}
                       </button>
                     </td>
@@ -835,7 +867,15 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
               {t('memories.backToActors')}
             </button>
             <span className="toolbar-label" style={{ marginLeft: '12px' }}>
-              {t('memories.memoriesFor')} <code style={{ color: '#4a9eff' }}>{selectedActor}</code>
+              {t('memories.memoriesFor')}{' '}
+              {selectedActor.email ? (
+                <>
+                  <span style={{ color: '#4a9eff' }}>{selectedActor.email}</span>
+                  {' '}<code style={{ color: '#888' }}>({selectedActor.actorId})</code>
+                </>
+              ) : (
+                <code style={{ color: '#4a9eff' }}>{selectedActor.actorId}</code>
+              )}
             </span>
           </div>
 

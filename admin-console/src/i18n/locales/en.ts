@@ -183,6 +183,7 @@ const en: Record<string, string> = {
   'memories.loadingActors': 'Loading actors...',
   'memories.noActors': 'No memory actors found.',
   'memories.noActorsHint': 'Memories are created when users interact with the chatbot.',
+  'memories.colEmail': 'Email',
   'memories.colActorId': 'Actor ID',
   'memories.colActions': 'Actions',
   'memories.viewMemories': 'View Memories',
