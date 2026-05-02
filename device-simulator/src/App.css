@@ -6,9 +6,13 @@
 }
 
 body {
-  background: #08080e;
-  color: #e0e0e0;
   font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+}
+
+.sim-connection-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
 }
 
 .app {
