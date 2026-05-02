@@ -336,6 +336,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
           {
             id: 'actions',
             header: t('models.colActions'),
+            minWidth: 120,
             cell: (u) => (
               <Button
                 variant="primary"
@@ -819,6 +820,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
             {
               id: 'actions',
               header: t('memories.colActions'),
+              minWidth: 160,
               cell: (row) => (
                 <Button variant="inline-link" onClick={() => handleSelectActor(row)}>
                   {t('memories.viewMemories')}
@@ -1166,6 +1168,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
           {
             id: 'actions',
             header: t('kb.colActions'),
+            minWidth: 110,
             cell: (doc) => <Button onClick={() => handleDelete(doc.key)}>{t('kb.delete')}</Button>,
           },
         ]}
@@ -2243,6 +2246,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
             {
               id: 'actions',
               header: t('skills.colActions'),
+              minWidth: 180,
               cell: (s) => (
                 <SpaceBetween direction="horizontal" size="xs">
                   <Button onClick={() => handleEdit(s)}>{t('skills.edit')}</Button>
@@ -2363,6 +2367,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
               {
                 id: 'actions',
                 header: t('sessions.colActions'),
+                minWidth: 220,
                 cell: (s) => (
                   <SpaceBetween direction="horizontal" size="xs">
                     <Button
@@ -2563,6 +2568,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                 {
                   id: 'demo',
                   header: t('users.colDemo'),
+                  minWidth: 280,
                   cell: (u) => {
                     const cfg = getConfig();
                     const loginHint = u.email || u.username;
@@ -2592,6 +2598,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                 {
                   id: 'actions',
                   header: t('users.colActions'),
+                  minWidth: 200,
                   cell: (u) => (
                     <Button variant="primary" onClick={() => handleManagePermissions(u)}>
                       {t('users.managePermissions')}
@@ -2732,6 +2739,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                   {
                     id: 'actions',
                     header: t('integrations.a2a.col.actions'),
+                    minWidth: 110,
                     cell: (r) => (
                       <Button onClick={() => setA2aDrawer(r)}>{t('integrations.a2a.view')}</Button>
                     ),
@@ -2871,7 +2879,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
             columnDefinitions={[
               { id: 'name', header: t('guardrails.colGuardrail'), cell: (i) => i.name },
               { id: 'description', header: t('guardrails.colDescription'), cell: (i) => i.description },
-              { id: 'action', header: t('guardrails.colAction'), cell: (i) => i.action },
+              { id: 'action', header: t('guardrails.colAction'), minWidth: 220, cell: (i) => i.action },
             ]}
           />
         );
