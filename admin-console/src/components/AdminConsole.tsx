@@ -2246,92 +2246,98 @@ const AdminConsole: React.FC = () => {
 
       {/* Sessions Tab */}
       {activeTab === 'sessions' && (
-        <div className="sessions-section">
-          {error && <div className="alert alert-error">{error}</div>}
-          {success && <div className="alert alert-success">{success}</div>}
+        <SpaceBetween size="l">
+          {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+          {success && <Alert type="success">{success}</Alert>}
 
-          <div className="toolbar">
-            <div className="toolbar-left">
-              <span className="toolbar-label">{t('sessions.title')}</span>
-            </div>
-            <button className="btn btn-secondary btn-sm" onClick={loadSessions}>
-              {t('sessions.refresh')}
-            </button>
-          </div>
-
-          <div className="skills-table-container">
-            {sessionsLoading ? (
-              <div className="loading">{t('sessions.loading')}</div>
-            ) : sessions.length === 0 ? (
-              <div className="empty-state">
-                <p>{t('sessions.noSessions')}</p>
-                <p className="empty-hint">{t('sessions.noSessionsHint')}</p>
-              </div>
-            ) : (
-              <table className="skills-table">
-                <thead>
-                  <tr>
-                    <th>{t('sessions.colUserId')}</th>
-                    <th>{t('sessions.colKind')}</th>
-                    <th>{t('sessions.colSessionId')}</th>
-                    <th>{t('sessions.colLastActive')}</th>
-                    <th>{t('sessions.colTokens7d')}</th>
-                    <th>{t('sessions.colActions')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sessions.map((s) => (
-                    // SessionId alone isn't unique — the same user's text and
-                    // voice sessions share a sessionId (derived from the JWT
-                    // sub in the chatbot) but land on different runtimes.
-                    // Compose a key that includes kind to keep React keys stable.
-                    <tr key={`${s.kind || 'text'}:${s.sessionId}`}>
-                      <td className="cell-name" title={s.userId}>
-                        {s.userId.length > 24 ? s.userId.slice(0, 24) + '...' : s.userId}
-                      </td>
-                      <td className="cell-tools">
-                        {s.kind === 'voice' ? t('sessions.kindVoice') : t('sessions.kindText')}
-                      </td>
-                      <td className="cell-tools" title={s.sessionId}>
-                        {s.sessionId.length > 36 ? s.sessionId.slice(0, 36) + '...' : s.sessionId}
-                      </td>
-                      <td className="cell-date">
-                        {s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '-'}
-                      </td>
-                      <td className="cell-date">
-                        {typeof s.totalTokens7d === 'number'
-                          ? s.totalTokens7d.toLocaleString()
-                          : '-'}
-                      </td>
-                      <td className="cell-actions">
-                        <button
-                          className="btn btn-sm btn-secondary"
-                          onClick={() => setShellTarget({
-                            userId: s.userId,
-                            sessionId: s.sessionId,
-                            kind: s.kind ?? 'text',
-                          })}
-                          style={{ marginRight: 6 }}
-                        >
-                          {t('sessions.shell')}
-                        </button>
-                        <button
-                          className="btn btn-sm btn-danger"
-                          onClick={() => handleStopSession(s.sessionId, s.kind)}
-                        >
-                          {t('sessions.stop')}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <Table
+            header={
+              <CloudscapeHeader
+                variant="h2"
+                actions={
+                  <Button iconName="refresh" onClick={loadSessions}>
+                    {t('sessions.refresh')}
+                  </Button>
+                }
+              >
+                {t('sessions.title')}
+              </CloudscapeHeader>
+            }
+            loading={sessionsLoading}
+            loadingText={t('sessions.loading')}
+            items={sessions}
+            // SessionId alone isn't unique — a user's text and voice sessions
+            // share the same sessionId (derived from the JWT sub). Compose a
+            // key that includes kind so React diffing stays stable.
+            trackBy={(s) => `${s.kind || 'text'}:${s.sessionId}`}
+            columnDefinitions={[
+              {
+                id: 'userId',
+                header: t('sessions.colUserId'),
+                cell: (s) => (
+                  <span title={s.userId}>
+                    {s.userId.length > 24 ? s.userId.slice(0, 24) + '...' : s.userId}
+                  </span>
+                ),
+              },
+              {
+                id: 'kind',
+                header: t('sessions.colKind'),
+                cell: (s) => (s.kind === 'voice' ? t('sessions.kindVoice') : t('sessions.kindText')),
+              },
+              {
+                id: 'sessionId',
+                header: t('sessions.colSessionId'),
+                cell: (s) => (
+                  <span title={s.sessionId}>
+                    {s.sessionId.length > 36 ? s.sessionId.slice(0, 36) + '...' : s.sessionId}
+                  </span>
+                ),
+              },
+              {
+                id: 'lastActive',
+                header: t('sessions.colLastActive'),
+                cell: (s) => (s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '-'),
+              },
+              {
+                id: 'tokens7d',
+                header: t('sessions.colTokens7d'),
+                cell: (s) => (typeof s.totalTokens7d === 'number' ? s.totalTokens7d.toLocaleString() : '-'),
+              },
+              {
+                id: 'actions',
+                header: t('sessions.colActions'),
+                cell: (s) => (
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button
+                      onClick={() => setShellTarget({
+                        userId: s.userId,
+                        sessionId: s.sessionId,
+                        kind: s.kind ?? 'text',
+                      })}
+                    >
+                      {t('sessions.shell')}
+                    </Button>
+                    <Button onClick={() => handleStopSession(s.sessionId, s.kind)}>
+                      {t('sessions.stop')}
+                    </Button>
+                  </SpaceBetween>
+                ),
+              },
+            ]}
+            empty={
+              <CloudscapeBox textAlign="center" padding="m">
+                <b>{t('sessions.noSessions')}</b>
+                <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                  {t('sessions.noSessionsHint')}
+                </CloudscapeBox>
+              </CloudscapeBox>
+            }
+          />
           {shellTarget && (
             <ShellModal target={shellTarget} onClose={() => setShellTarget(null)} />
           )}
-        </div>
+        </SpaceBetween>
       )}
 
       {/* Tool Access Tab */}
