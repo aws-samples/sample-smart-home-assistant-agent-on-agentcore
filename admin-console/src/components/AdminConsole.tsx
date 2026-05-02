@@ -54,10 +54,17 @@ import Alert from '@cloudscape-design/components/alert';
 import Badge from '@cloudscape-design/components/badge';
 import CloudscapeBox from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
+import Container from '@cloudscape-design/components/container';
+import FormField from '@cloudscape-design/components/form-field';
 import CloudscapeHeader from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
+import Select from '@cloudscape-design/components/select';
+import SegmentedControl from '@cloudscape-design/components/segmented-control';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import Table from '@cloudscape-design/components/table';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
+import Table from '@cloudscape-design/components/table';
+import Textarea from '@cloudscape-design/components/textarea';
+import Modal from '@cloudscape-design/components/modal';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
@@ -220,111 +227,120 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     }
   };
 
-  return (
-    <div className="models-section">
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
+  const modelOptions = [
+    { value: '', label: t('models.notSet') },
+    ...AVAILABLE_MODELS.map((m, i) =>
+      (m as any).disabled
+        ? { value: `__group__${i}`, label: m.label, disabled: true }
+        : { value: (m as any).id as string, label: m.label }
+    ),
+  ];
+  const userModelOptions = [
+    { value: '', label: t('models.useGlobalDefault') },
+    ...AVAILABLE_MODELS.map((m, i) =>
+      (m as any).disabled
+        ? { value: `__group__${i}`, label: m.label, disabled: true }
+        : { value: (m as any).id as string, label: m.label }
+    ),
+  ];
+  const findOption = (opts: typeof modelOptions, value: string) =>
+    opts.find((o) => o.value === value) ?? opts[0];
 
-      <div className="settings-panel" style={{ marginBottom: '20px' }}>
-        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>{t('models.globalDefault')}</h3>
-        <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>
-          {t('models.globalHint')}
-        </p>
-        <div className="settings-row">
-          <select
-            className="settings-select"
-            value={globalModelId}
-            onChange={(e) => setGlobalModelId(e.target.value)}
-          >
-            <option value="">{t('models.notSet')}</option>
-            {AVAILABLE_MODELS.map((m, i) =>
-              (m as any).disabled ? (
-                <option key={i} disabled>{m.label}</option>
-              ) : (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              )
-            )}
-          </select>
-          <button
-            className="btn btn-primary btn-sm"
+  return (
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success">{success}</Alert>}
+
+      <Container
+        header={
+          <CloudscapeHeader variant="h2" description={t('models.globalHint')}>
+            {t('models.globalDefault')}
+          </CloudscapeHeader>
+        }
+      >
+        <SpaceBetween size="s" direction="horizontal">
+          <div style={{ minWidth: 280 }}>
+            <Select
+              selectedOption={findOption(modelOptions, globalModelId)}
+              onChange={({ detail }) => setGlobalModelId((detail.selectedOption.value as string) || '')}
+              options={modelOptions}
+            />
+          </div>
+          <Button
+            variant="primary"
             onClick={handleSaveGlobal}
             disabled={globalModelId === savedGlobalModelId}
           >
             {t('models.save')}
-          </button>
-        </div>
-      </div>
+          </Button>
+        </SpaceBetween>
+      </Container>
 
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <span className="toolbar-label">{t('models.perUser')}</span>
-        </div>
-        <button className="btn btn-secondary btn-sm" onClick={loadData}>
-          {t('models.refresh')}
-        </button>
-      </div>
-
-      <div className="skills-table-container">
-        {loading ? (
-          <div className="loading">{t('models.loadingUsers')}</div>
-        ) : users.length === 0 ? (
-          <div className="empty-state">
-            <p>{t('models.noUsers')}</p>
-          </div>
-        ) : (
-          <table className="skills-table">
-            <thead>
-              <tr>
-                <th>{t('models.colEmail')}</th>
-                <th>{t('models.colStatus')}</th>
-                <th>{t('models.colModel')}</th>
-                <th>{t('models.colActions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((u) => (
-                <tr key={u.sub}>
-                  <td className="cell-name">{u.email || u.username}</td>
-                  <td>
-                    <span className={`badge ${u.status === 'CONFIRMED' ? 'badge-active' : 'badge-inactive'}`}>
-                      {u.status}
-                    </span>
-                  </td>
-                  <td>
-                    <select
-                      className="settings-select"
-                      style={{ minWidth: '240px' }}
-                      value={userModels[u.sub] || ''}
-                      onChange={(e) =>
-                        setUserModels((prev) => ({ ...prev, [u.sub]: e.target.value }))
-                      }
-                    >
-                      <option value="">{t('models.useGlobalDefault')}</option>
-                      {AVAILABLE_MODELS.map((m, i) =>
-                        (m as any).disabled ? (
-                          <option key={i} disabled>{m.label}</option>
-                        ) : (
-                          <option key={m.id} value={m.id}>{m.label}</option>
-                        )
-                      )}
-                    </select>
-                  </td>
-                  <td className="cell-actions">
-                    <button
-                      className="btn btn-sm btn-primary"
-                      onClick={() => handleSaveUserModel(u)}
-                      disabled={(userModels[u.sub] || '') === (savedUserModels[u.sub] || '')}
-                    >
-                      {t('models.save')}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
+      <Table
+        header={
+          <CloudscapeHeader
+            variant="h2"
+            actions={
+              <Button iconName="refresh" onClick={loadData}>
+                {t('models.refresh')}
+              </Button>
+            }
+          >
+            {t('models.perUser')}
+          </CloudscapeHeader>
+        }
+        loading={loading}
+        loadingText={t('models.loadingUsers')}
+        items={users}
+        trackBy="sub"
+        columnDefinitions={[
+          { id: 'email', header: t('models.colEmail'), cell: (u) => u.email || u.username },
+          {
+            id: 'status',
+            header: t('models.colStatus'),
+            cell: (u) =>
+              u.status === 'CONFIRMED' ? (
+                <StatusIndicator type="success">{u.status}</StatusIndicator>
+              ) : (
+                <StatusIndicator type="stopped">{u.status}</StatusIndicator>
+              ),
+          },
+          {
+            id: 'model',
+            header: t('models.colModel'),
+            cell: (u) => (
+              <div style={{ minWidth: 260 }}>
+                <Select
+                  selectedOption={findOption(userModelOptions, userModels[u.sub] || '')}
+                  onChange={({ detail }) =>
+                    setUserModels((prev) => ({ ...prev, [u.sub]: (detail.selectedOption.value as string) || '' }))
+                  }
+                  options={userModelOptions}
+                />
+              </div>
+            ),
+          },
+          {
+            id: 'actions',
+            header: t('models.colActions'),
+            cell: (u) => (
+              <Button
+                variant="primary"
+                onClick={() => handleSaveUserModel(u)}
+                disabled={(userModels[u.sub] || '') === (savedUserModels[u.sub] || '')}
+              >
+                {t('models.save')}
+              </Button>
+            ),
+          },
+        ]}
+        empty={
+          <CloudscapeBox textAlign="center" padding="m">
+            <b>{t('models.noUsers')}</b>
+          </CloudscapeBox>
+        }
+      />
+    </SpaceBetween>
   );
 };
 
@@ -405,175 +421,107 @@ const PromptEditorCard: React.FC<PromptEditorCardProps> = ({
 
   const badge = isGlobalScope
     ? record.isOverride
-      ? <span className="badge badge-active">{t('prompts.badgeGlobalCustom')}</span>
-      : <span className="badge badge-inactive">{t('prompts.badgeGlobalDefault')}</span>
+      ? <StatusIndicator type="success">{t('prompts.badgeGlobalCustom')}</StatusIndicator>
+      : <StatusIndicator type="stopped">{t('prompts.badgeGlobalDefault')}</StatusIndicator>
     : record.isOverride
-      ? <span className="badge badge-active">{t('prompts.badgeUserSet')}</span>
-      : <span className="badge badge-inactive">{t('prompts.badgeUserEmpty')}</span>;
+      ? <StatusIndicator type="success">{t('prompts.badgeUserSet')}</StatusIndicator>
+      : <StatusIndicator type="stopped">{t('prompts.badgeUserEmpty')}</StatusIndicator>;
+
+  const editorRows = isGlobalScope
+    ? agentType === 'voice' ? 12 : 18
+    : agentType === 'voice' ? 8 : 10;
 
   return (
-    <div
-      className="settings-panel"
-      style={{
-        flex: '1 1 0',
-        minWidth: '320px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '10px',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-        <h3 style={{ color: '#fff', margin: 0, fontSize: '16px' }}>{title}</h3>
-        {badge}
-      </div>
-      <p className="settings-hint" style={{ margin: 0 }}>{hint}</p>
-
-      {/* At user scope, show the Global body as read-only context above the editor. */}
-      {!isGlobalScope && (
-        <div>
-          <label
-            style={{
-              display: 'block',
-              color: '#ccc',
-              fontSize: '12px',
-              fontWeight: 600,
-              marginBottom: '4px',
-            }}
+    <div style={{ flex: '1 1 0', minWidth: '320px' }}>
+      <Container
+        header={
+          <CloudscapeHeader
+            variant="h3"
+            description={hint}
+            actions={badge}
           >
-            {t('prompts.globalBaseLabel')}
-          </label>
-          <p className="settings-hint" style={{ margin: '0 0 6px 0', fontSize: '11px' }}>
-            {t('prompts.globalBaseHint')}
-          </p>
-          <textarea
-            value={record.globalBody || t('prompts.globalBaseEmpty')}
-            readOnly
-            spellCheck={false}
-            style={{
-              ...PROMPT_TEXTAREA_STYLE,
-              minHeight: '120px',
-              opacity: 0.7,
-              fontStyle: record.globalBody ? 'normal' : 'italic',
-            }}
-          />
-        </div>
-      )}
-
-      {/* Main editor: at Global scope edits the global body; at user scope edits the addendum. */}
-      <div>
-        {!isGlobalScope && (
-          <>
-            <label
-              style={{
-                display: 'block',
-                color: '#eaeaea',
-                fontSize: '12px',
-                fontWeight: 600,
-                marginBottom: '4px',
-              }}
-            >
-              {t('prompts.userAddendumLabel')}
-            </label>
-            <p className="settings-hint" style={{ margin: '0 0 6px 0', fontSize: '11px' }}>
-              {t('prompts.userAddendumHint')}
-            </p>
-          </>
-        )}
-        <textarea
-          value={draft}
-          onChange={(e) => onChangeDraft(e.target.value)}
-          spellCheck={false}
-          style={{
-            ...PROMPT_TEXTAREA_STYLE,
-            minHeight: isGlobalScope
-              ? agentType === 'voice' ? '220px' : '340px'
-              : agentType === 'voice' ? '140px' : '180px',
-          }}
-        />
-      </div>
-
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-        <button
-          className="btn btn-primary btn-sm"
-          onClick={onSave}
-          disabled={!dirty || saving || !draft.trim()}
-        >
-          {saving ? t('app.loading') : t('prompts.save')}
-        </button>
-        <button
-          className="btn btn-secondary btn-sm"
-          onClick={onDiscard}
-          disabled={!dirty}
-        >
-          {t('prompts.revert')}
-        </button>
-        {record.isOverride && (
-          <button
-            className="btn btn-danger btn-sm"
-            onClick={onReset}
-            disabled={saving}
-          >
-            {isGlobalScope ? t('prompts.revertToDefault') : t('prompts.removeOverride')}
-          </button>
-        )}
-        {record.updatedAt && record.isOverride && (
-          <span className="settings-hint" style={{ marginLeft: 'auto', fontSize: '12px' }}>
-            {t('prompts.lastEdited')} {new Date(record.updatedAt).toLocaleString()}
-            {record.updatedBy ? ` · ${t('prompts.lastEditedBy')} ${record.updatedBy}` : ''}
-          </span>
-        )}
-      </div>
-
-      {/* Effective prompt preview (collapsible). Only worth showing at user
-          scope where the admin can't see the concatenation in the main editor. */}
-      {!isGlobalScope && (
-        <details>
-          <summary
-            style={{
-              cursor: 'pointer',
-              color: '#ccc',
-              fontSize: '12px',
-              fontWeight: 600,
-              padding: '4px 0',
-            }}
-          >
-            {t('prompts.effectivePreview')}
-          </summary>
-          <pre
-            style={{
-              ...PROMPT_TEXTAREA_STYLE,
-              minHeight: '140px',
-              maxHeight: '300px',
-              overflow: 'auto',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              marginTop: '6px',
-              color: '#9db4c2',
-            }}
-          >
-            {effectivePrompt}
-          </pre>
-        </details>
-      )}
-
-      <div
-        style={{
-          marginTop: '8px',
-          border: '1px dashed #3a3a3a',
-          borderRadius: '4px',
-          padding: '12px',
-          background: '#121212',
-          opacity: 0.6,
-        }}
-        aria-disabled
+            {title}
+          </CloudscapeHeader>
+        }
       >
-        <div style={{ color: '#aaa', fontSize: '13px', fontWeight: 600, marginBottom: '6px' }}>
-          {t('prompts.evoCardTitle')}
-        </div>
-        <div style={{ color: '#888', fontSize: '12px', lineHeight: '1.5' }}>
-          {t('prompts.evoCardComingSoon')}
-        </div>
-      </div>
+        <SpaceBetween size="m">
+          {!isGlobalScope && (
+            <FormField
+              label={t('prompts.globalBaseLabel')}
+              description={t('prompts.globalBaseHint')}
+            >
+              <Textarea
+                value={record.globalBody || t('prompts.globalBaseEmpty')}
+                readOnly
+                spellcheck={false}
+                rows={6}
+              />
+            </FormField>
+          )}
+          <FormField
+            label={!isGlobalScope ? t('prompts.userAddendumLabel') : undefined}
+            description={!isGlobalScope ? t('prompts.userAddendumHint') : undefined}
+          >
+            <Textarea
+              value={draft}
+              onChange={({ detail }) => onChangeDraft(detail.value)}
+              spellcheck={false}
+              rows={editorRows}
+            />
+          </FormField>
+
+          <SpaceBetween direction="horizontal" size="xs">
+            <Button
+              variant="primary"
+              onClick={onSave}
+              disabled={!dirty || saving || !draft.trim()}
+              loading={saving}
+            >
+              {t('prompts.save')}
+            </Button>
+            <Button onClick={onDiscard} disabled={!dirty}>
+              {t('prompts.revert')}
+            </Button>
+            {record.isOverride && (
+              <Button onClick={onReset} disabled={saving}>
+                {isGlobalScope ? t('prompts.revertToDefault') : t('prompts.removeOverride')}
+              </Button>
+            )}
+          </SpaceBetween>
+
+          {record.updatedAt && record.isOverride && (
+            <CloudscapeBox color="text-body-secondary" fontSize="body-s">
+              {t('prompts.lastEdited')} {new Date(record.updatedAt).toLocaleString()}
+              {record.updatedBy ? ` · ${t('prompts.lastEditedBy')} ${record.updatedBy}` : ''}
+            </CloudscapeBox>
+          )}
+
+          {!isGlobalScope && (
+            <details>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>
+                {t('prompts.effectivePreview')}
+              </summary>
+              <pre
+                style={{
+                  ...PROMPT_TEXTAREA_STYLE,
+                  minHeight: '140px',
+                  maxHeight: '300px',
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  marginTop: '6px',
+                }}
+              >
+                {effectivePrompt}
+              </pre>
+            </details>
+          )}
+
+          <Alert type="info" header={t('prompts.evoCardTitle')}>
+            {t('prompts.evoCardComingSoon')}
+          </Alert>
+        </SpaceBetween>
+      </Container>
     </div>
   );
 };
@@ -690,32 +638,40 @@ const AgentPromptTab: React.FC<AgentPromptTabProps> = ({
       .filter((s): s is string => !!s),
   ];
 
-  return (
-    <div className="prompts-section">
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
+  const scopeSelectOptions = scopeOptions.map((scope) => ({
+    value: scope,
+    label: scopeLabel(scope),
+  }));
+  const selectedScopeOption =
+    scopeSelectOptions.find((o) => o.value === selectedScope) ?? scopeSelectOptions[0];
 
-      <div className="settings-panel" style={{ marginBottom: '16px' }}>
-        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>{t('prompts.title')}</h3>
-        <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>{t('prompts.desc')}</p>
-        <div className="settings-row">
-          <label className="toolbar-label">{t('prompts.userScope')}</label>
-          <select
-            className="settings-select"
-            value={selectedScope}
-            onChange={(e) => setSelectedScope(e.target.value)}
-          >
-            {scopeOptions.map((scope) => (
-              <option key={scope} value={scope}>
-                {scopeLabel(scope)}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+  return (
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success">{success}</Alert>}
+
+      <Container
+        header={
+          <CloudscapeHeader variant="h2" description={t('prompts.desc')}>
+            {t('prompts.title')}
+          </CloudscapeHeader>
+        }
+      >
+        <FormField label={t('prompts.userScope')}>
+          <div style={{ maxWidth: 360 }}>
+            <Select
+              selectedOption={selectedScopeOption}
+              onChange={({ detail }) => setSelectedScope(detail.selectedOption.value as string)}
+              options={scopeSelectOptions}
+            />
+          </div>
+        </FormField>
+      </Container>
 
       {loading || !prompts ? (
-        <div className="loading">{t('prompts.loading')}</div>
+        <CloudscapeBox textAlign="center" padding="l">
+          <StatusIndicator type="loading">{t('prompts.loading')}</StatusIndicator>
+        </CloudscapeBox>
       ) : (
         <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
           <PromptEditorCard
@@ -746,7 +702,7 @@ const AgentPromptTab: React.FC<AgentPromptTabProps> = ({
           />
         </div>
       )}
-    </div>
+    </SpaceBetween>
   );
 };
 
@@ -1084,182 +1040,164 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
     scopeItems.unshift({ scope: '__shared__', documentCount: 0 });
   }
 
+  const scopeSelectOptions = scopeItems.map((s) => ({ value: s.scope, label: displayScope(s.scope) }));
+  const selectedScopeOption =
+    scopeSelectOptions.find((o) => o.value === selectedScope) ?? scopeSelectOptions[0];
+
+  const kbStatusIndicator =
+    kbStatus === 'ACTIVE' ? <StatusIndicator type="success">{t('kb.statusActive')}</StatusIndicator>
+    : kbStatus === 'NOT_INITIALIZED' ? <StatusIndicator type="stopped">{t('kb.statusNotInit')}</StatusIndicator>
+    : <StatusIndicator type="pending">{kbStatus}</StatusIndicator>;
+
+  const fileInputId = 'kb-file-input';
+
   return (
-    <div className="kb-section">
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success">{success}</Alert>}
 
-      <div className="settings-panel" style={{ marginBottom: '16px' }}>
-        <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '16px' }}>{t('kb.title')}</h3>
-        <p className="settings-hint" style={{ margin: '0 0 12px 0' }}>
-          {t('kb.desc')}
-        </p>
-        <div className="settings-row">
-          <span className="toolbar-label">{t('kb.status')}</span>
-          <span className={`badge ${kbStatus === 'ACTIVE' ? 'badge-active' : kbStatus === 'NOT_INITIALIZED' ? 'badge-inactive' : 'badge-group'}`}>
-            {kbStatus === 'ACTIVE' ? t('kb.statusActive') : kbStatus === 'NOT_INITIALIZED' ? t('kb.statusNotInit') : kbStatus}
-          </span>
-        </div>
-      </div>
-
-      {/* Scope summary cards */}
-      {scopeItems.length > 0 && (
-        <div className="settings-panel" style={{ marginBottom: '16px' }}>
-          <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>{t('kb.scopeSummary')}</h3>
-          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+      <Container
+        header={
+          <CloudscapeHeader variant="h2" description={t('kb.desc')} actions={kbStatusIndicator}>
+            {t('kb.title')}
+          </CloudscapeHeader>
+        }
+      >
+        <SpaceBetween size="s">
+          <CloudscapeBox fontSize="body-s" color="text-body-secondary">
+            {t('kb.scopeSummary')}
+          </CloudscapeBox>
+          <SpaceBetween direction="horizontal" size="xs">
             {scopeItems.map((s) => (
-              <button
+              <Button
                 key={s.scope}
-                className={`btn btn-sm ${selectedScope === s.scope ? 'btn-primary' : 'btn-secondary'}`}
+                variant={selectedScope === s.scope ? 'primary' : 'normal'}
                 onClick={() => setSelectedScope(s.scope)}
-                style={{ minWidth: '120px' }}
               >
-                {displayScope(s.scope)} ({s.documentCount} {t('kb.documents')})
-              </button>
+                {displayScope(s.scope)} ({s.documentCount})
+              </Button>
             ))}
-          </div>
-        </div>
-      )}
+          </SpaceBetween>
+        </SpaceBetween>
+      </Container>
 
-      {/* Toolbar */}
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <label className="toolbar-label">{t('kb.scope')}</label>
-          <select
-            className="toolbar-select"
-            value={selectedScope}
-            onChange={(e) => setSelectedScope(e.target.value)}
+      <Table
+        header={
+          <CloudscapeHeader
+            variant="h2"
+            actions={
+              <SpaceBetween direction="horizontal" size="xs">
+                <input
+                  type="file"
+                  id={fileInputId}
+                  style={{ display: 'none' }}
+                  disabled={uploading}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleUpload(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+                <Button
+                  variant="primary"
+                  loading={uploading}
+                  onClick={() => document.getElementById(fileInputId)?.click()}
+                >
+                  {t('kb.uploadDoc')}
+                </Button>
+                <Button onClick={handleSync} loading={syncing}>
+                  {t('kb.sync')}
+                </Button>
+                <Button iconName="refresh" onClick={() => { loadStatus(); loadDocuments(selectedScope); loadSyncStatus(); }}>
+                  {t('kb.refresh')}
+                </Button>
+              </SpaceBetween>
+            }
           >
-            {scopeItems.map((s) => (
-              <option key={s.scope} value={s.scope}>
-                {displayScope(s.scope)}
-              </option>
-            ))}
-          </select>
-          <button className="btn btn-secondary btn-sm" onClick={handleAddScope}>
-            {t('kb.addScope')}
-          </button>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <label className="file-upload-btn btn btn-primary btn-sm" style={{ marginBottom: 0 }}>
-            {uploading ? t('kb.uploading') : t('kb.uploadDoc')}
-            <input
-              type="file"
-              hidden
-              disabled={uploading}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) {
-                  handleUpload(file);
-                  e.target.value = '';
-                }
-              }}
-            />
-          </label>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={handleSync}
-            disabled={syncing}
-          >
-            {syncing ? t('kb.syncing') : t('kb.sync')}
-          </button>
-          <button className="btn btn-secondary btn-sm" onClick={() => { loadStatus(); loadDocuments(selectedScope); loadSyncStatus(); }}>
-            {t('kb.refresh')}
-          </button>
-        </div>
-      </div>
+            <SpaceBetween direction="horizontal" size="xs" alignItems="center">
+              <span>{t('kb.scope')}</span>
+              <div style={{ minWidth: 220 }}>
+                <Select
+                  selectedOption={selectedScopeOption}
+                  onChange={({ detail }) => setSelectedScope(detail.selectedOption.value as string)}
+                  options={scopeSelectOptions}
+                />
+              </div>
+              <Button onClick={handleAddScope}>{t('kb.addScope')}</Button>
+            </SpaceBetween>
+          </CloudscapeHeader>
+        }
+        loading={docsLoading}
+        loadingText={t('files.loading')}
+        items={documents}
+        trackBy="key"
+        columnDefinitions={[
+          { id: 'name', header: t('kb.colName'), cell: (doc) => doc.name },
+          {
+            id: 'size',
+            header: t('kb.colSize'),
+            cell: (doc) =>
+              doc.size < 1024
+                ? `${doc.size} B`
+                : doc.size < 1048576
+                  ? `${(doc.size / 1024).toFixed(1)} KB`
+                  : `${(doc.size / 1048576).toFixed(1)} MB`,
+          },
+          {
+            id: 'modified',
+            header: t('kb.colModified'),
+            cell: (doc) => new Date(doc.lastModified).toLocaleDateString(),
+          },
+          {
+            id: 'actions',
+            header: t('kb.colActions'),
+            cell: (doc) => <Button onClick={() => handleDelete(doc.key)}>{t('kb.delete')}</Button>,
+          },
+        ]}
+        empty={
+          <CloudscapeBox textAlign="center" padding="m">
+            <b>{kbStatus === 'NOT_INITIALIZED' ? t('kb.notInitialized') : t('kb.noDocuments')}</b>
+            <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+              {t('kb.noDocumentsHint')}
+            </CloudscapeBox>
+          </CloudscapeBox>
+        }
+      />
 
-      {/* Document list */}
-      <div className="skills-table-container">
-        {docsLoading ? (
-          <div className="loading">{t('files.loading')}</div>
-        ) : documents.length === 0 ? (
-          <div className="empty-state">
-            <p>{kbStatus === 'NOT_INITIALIZED' ? t('kb.notInitialized') : t('kb.noDocuments')}</p>
-            <p className="empty-hint">{t('kb.noDocumentsHint')}</p>
-          </div>
-        ) : (
-          <table className="skills-table">
-            <thead>
-              <tr>
-                <th>{t('kb.colName')}</th>
-                <th>{t('kb.colSize')}</th>
-                <th>{t('kb.colModified')}</th>
-                <th>{t('kb.colActions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {documents.map((doc) => (
-                <tr key={doc.key}>
-                  <td className="cell-name">{doc.name}</td>
-                  <td className="cell-date">
-                    {doc.size < 1024
-                      ? `${doc.size} B`
-                      : doc.size < 1048576
-                        ? `${(doc.size / 1024).toFixed(1)} KB`
-                        : `${(doc.size / 1048576).toFixed(1)} MB`}
-                  </td>
-                  <td className="cell-date">
-                    {new Date(doc.lastModified).toLocaleDateString()}
-                  </td>
-                  <td className="cell-actions">
-                    <button
-                      className="btn btn-sm btn-danger"
-                      onClick={() => handleDelete(doc.key)}
-                    >
-                      {t('kb.delete')}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* Sync status */}
       {syncJobs.length > 0 && (
-        <div style={{ marginTop: '16px' }}>
-          <div className="toolbar">
-            <div className="toolbar-left">
-              <span className="toolbar-label">{t('kb.syncStatus')}</span>
-            </div>
-          </div>
-          <div className="skills-table-container">
-            <table className="skills-table">
-              <thead>
-                <tr>
-                  <th>{t('kb.syncJobStatus')}</th>
-                  <th>{t('kb.syncJobStarted')}</th>
-                  <th>{t('kb.syncJobUpdated')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {syncJobs.map((job) => (
-                  <tr key={job.ingestionJobId}>
-                    <td>
-                      <span className={`badge ${
-                        job.status === 'COMPLETE' ? 'badge-active' :
-                        job.status === 'IN_PROGRESS' || job.status === 'STARTING' ? 'badge-group' :
-                        'badge-inactive'
-                      }`}>
-                        {job.status}
-                      </span>
-                    </td>
-                    <td className="cell-date">
-                      {job.startedAt ? new Date(job.startedAt).toLocaleString() : '-'}
-                    </td>
-                    <td className="cell-date">
-                      {job.updatedAt ? new Date(job.updatedAt).toLocaleString() : '-'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <Table
+          header={<CloudscapeHeader variant="h3">{t('kb.syncStatus')}</CloudscapeHeader>}
+          items={syncJobs}
+          trackBy="ingestionJobId"
+          columnDefinitions={[
+            {
+              id: 'status',
+              header: t('kb.syncJobStatus'),
+              cell: (job) =>
+                job.status === 'COMPLETE' ? (
+                  <StatusIndicator type="success">{job.status}</StatusIndicator>
+                ) : job.status === 'IN_PROGRESS' || job.status === 'STARTING' ? (
+                  <StatusIndicator type="in-progress">{job.status}</StatusIndicator>
+                ) : (
+                  <StatusIndicator type="stopped">{job.status}</StatusIndicator>
+                ),
+            },
+            {
+              id: 'started',
+              header: t('kb.syncJobStarted'),
+              cell: (job) => (job.startedAt ? new Date(job.startedAt).toLocaleString() : '-'),
+            },
+            {
+              id: 'updated',
+              header: t('kb.syncJobUpdated'),
+              cell: (job) => (job.updatedAt ? new Date(job.updatedAt).toLocaleString() : '-'),
+            },
+          ]}
+        />
       )}
-    </div>
+    </SpaceBetween>
   );
 };
 
@@ -1759,149 +1697,127 @@ const AdminConsole: React.FC = () => {
         ]}
       />
 
-      {activeTab === 'skills' && (
+      {activeTab === 'skills' && (() => {
+        const userScopeOptions = userIds.map((id) => ({ value: id, label: displayUserId(id) }));
+        const selectedUserOption = userScopeOptions.find((o) => o.value === selectedUserId) ?? userScopeOptions[0];
+        const registryTargetOption = userScopeOptions.find((o) => o.value === registryTargetUser) ?? userScopeOptions[0];
+        return (
       <>
-      {/* Toolbar */}
-      <div className="toolbar">
-        <div className="toolbar-left">
-          <label className="toolbar-label">{t('skills.userScope')}</label>
-          <select
-            className="toolbar-select"
-            value={selectedUserId}
-            onChange={(e) => setSelectedUserId(e.target.value)}
-          >
-            {userIds.map((id) => (
-              <option key={id} value={id}>
-                {displayUserId(id)}
-              </option>
-            ))}
-          </select>
-          <button className="btn btn-secondary btn-sm" onClick={handleAddUserScope}>
-            {t('skills.addUser')}
-          </button>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button className="btn btn-secondary" onClick={handleOpenRegistryModal}>
-            {t('registry.addFromRegistry')}
-          </button>
-          <button className="btn btn-primary" onClick={handleCreate}>
-            {t('skills.createSkill')}
-          </button>
-        </div>
-      </div>
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success">{success}</Alert>}
 
-      {/* Messages */}
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
+      <SpaceBetween size="s" direction="horizontal">
+        <span style={{ alignSelf: 'center' }}>{t('skills.userScope')}</span>
+        <div style={{ minWidth: 220 }}>
+          <Select
+            selectedOption={selectedUserOption}
+            onChange={({ detail }) => setSelectedUserId(detail.selectedOption.value as string)}
+            options={userScopeOptions}
+          />
+        </div>
+        <Button onClick={handleAddUserScope}>{t('skills.addUser')}</Button>
+        <div style={{ flex: 1 }} />
+        <Button onClick={handleOpenRegistryModal}>{t('registry.addFromRegistry')}</Button>
+        <Button variant="primary" onClick={handleCreate}>{t('skills.createSkill')}</Button>
+      </SpaceBetween>
 
       {/* Registry import modal */}
       {showRegistryModal && (
-        <div className="modal-overlay" onClick={() => !registryImporting && setShowRegistryModal(false)}>
-          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
-            <h3>{t('registry.modalTitle')}</h3>
-            <p className="modal-hint">{t('registry.modalHint')}</p>
-
-            <div className="form-group" style={{ marginTop: 12 }}>
-              <label>{t('registry.targetScope')}</label>
-              <select
-                className="toolbar-select"
-                style={{ width: '100%', maxWidth: 'none' }}
-                value={registryTargetUser}
-                onChange={(e) => setRegistryTargetUser(e.target.value)}
+        <Modal
+          visible
+          onDismiss={() => !registryImporting && setShowRegistryModal(false)}
+          header={t('registry.modalTitle')}
+          size="large"
+          footer={
+            <CloudscapeBox float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button onClick={() => setShowRegistryModal(false)} disabled={registryImporting}>
+                  {t('skills.cancel')}
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={handleRegistryImport}
+                  loading={registryImporting}
+                  disabled={registryLoading || registryRecords.length === 0}
+                >
+                  {t('registry.import')}
+                </Button>
+              </SpaceBetween>
+            </CloudscapeBox>
+          }
+        >
+          <SpaceBetween size="m">
+            <p>{t('registry.modalHint')}</p>
+            <FormField label={t('registry.targetScope')}>
+              <Select
+                selectedOption={registryTargetOption}
+                onChange={({ detail }) => setRegistryTargetUser(detail.selectedOption.value as string)}
+                options={userScopeOptions}
                 disabled={registryImporting}
-              >
-                {userIds.map((id) => (
-                  <option key={id} value={id}>{displayUserId(id)}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="registry-records-list">
-              {registryLoading ? (
-                <div className="loading">{t('registry.loading')}</div>
-              ) : registryRecords.length === 0 ? (
-                <div className="empty-state">
-                  <p>{t('registry.noApproved')}</p>
-                  <p className="empty-hint">{t('registry.noApprovedHint')}</p>
-                </div>
-              ) : (
-                <table className="skills-table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: '32px' }}></th>
-                      <th>{t('registry.colName')}</th>
-                      <th>{t('registry.colDescription')}</th>
-                      <th>{t('registry.colVersion')}</th>
-                      <th>{t('registry.colUpdated')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {registryRecords.map((r) => (
-                      <tr key={r.recordId}>
-                        <td>
-                          <input
-                            type="checkbox"
-                            checked={!!registrySelections[r.recordId]}
-                            onChange={(e) =>
-                              setRegistrySelections((prev) => ({
-                                ...prev,
-                                [r.recordId]: e.target.checked,
-                              }))
-                            }
-                            disabled={registryImporting}
-                          />
-                        </td>
-                        <td className="cell-name">{r.name}</td>
-                        <td className="cell-desc">{r.description}</td>
-                        <td className="cell-date">{r.recordVersion}</td>
-                        <td className="cell-date">
-                          {r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-
-            <div className="modal-actions">
-              <button
-                className="btn btn-secondary"
-                onClick={() => setShowRegistryModal(false)}
-                disabled={registryImporting}
-              >
-                {t('skills.cancel')}
-              </button>
-              <button
-                className="btn btn-primary"
-                onClick={handleRegistryImport}
-                disabled={registryImporting || registryLoading || registryRecords.length === 0}
-              >
-                {registryImporting ? t('registry.importing') : t('registry.import')}
-              </button>
-            </div>
-          </div>
-        </div>
+              />
+            </FormField>
+            <Table
+              loading={registryLoading}
+              loadingText={t('registry.loading')}
+              items={registryRecords}
+              trackBy="recordId"
+              columnDefinitions={[
+                {
+                  id: 'select',
+                  header: '',
+                  cell: (r) => (
+                    <input
+                      type="checkbox"
+                      checked={!!registrySelections[r.recordId]}
+                      onChange={(e) =>
+                        setRegistrySelections((prev) => ({ ...prev, [r.recordId]: e.target.checked }))
+                      }
+                      disabled={registryImporting}
+                    />
+                  ),
+                },
+                { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
+                { id: 'description', header: t('registry.colDescription'), cell: (r) => r.description },
+                { id: 'version', header: t('registry.colVersion'), cell: (r) => r.recordVersion },
+                {
+                  id: 'updated',
+                  header: t('registry.colUpdated'),
+                  cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
+                },
+              ]}
+              empty={
+                <CloudscapeBox textAlign="center" padding="m">
+                  <b>{t('registry.noApproved')}</b>
+                  <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                    {t('registry.noApprovedHint')}
+                  </CloudscapeBox>
+                </CloudscapeBox>
+              }
+            />
+          </SpaceBetween>
+        </Modal>
       )}
 
-      {/* Delete confirmation modal */}
+      {/* Delete confirmation */}
       {deleteTarget && (
-        <div className="modal-overlay" onClick={() => setDeleteTarget(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{t('skills.deleteSkill')}</h3>
-            <p>
-              {t('skills.deleteConfirm')} <strong>{deleteTarget.skillName}</strong> {t('skills.forUserScope')} <strong>{displayUserId(deleteTarget.userId)}</strong>?
-            </p>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setDeleteTarget(null)}>
-                {t('skills.cancel')}
-              </button>
-              <button className="btn btn-danger" onClick={handleDelete}>
-                {t('skills.delete')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <Modal
+          visible
+          onDismiss={() => setDeleteTarget(null)}
+          header={t('skills.deleteSkill')}
+          footer={
+            <CloudscapeBox float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button onClick={() => setDeleteTarget(null)}>{t('skills.cancel')}</Button>
+                <Button variant="primary" onClick={handleDelete}>{t('skills.delete')}</Button>
+              </SpaceBetween>
+            </CloudscapeBox>
+          }
+        >
+          <p>
+            {t('skills.deleteConfirm')} <strong>{deleteTarget.skillName}</strong>{' '}
+            {t('skills.forUserScope')} <strong>{displayUserId(deleteTarget.userId)}</strong>?
+          </p>
+        </Modal>
       )}
 
       {/* Skill Form */}
@@ -2156,58 +2072,48 @@ const AdminConsole: React.FC = () => {
 
       {/* Skills Table */}
       {!showForm && (
-        <div className="skills-table-container">
-          {isLoading ? (
-            <div className="loading">{t('skills.loading')}</div>
-          ) : skills.length === 0 ? (
-            <div className="empty-state">
-              <p>{t('skills.noSkills')}</p>
-              <p className="empty-hint">{t('skills.noSkillsHint')}</p>
-            </div>
-          ) : (
-            <table className="skills-table">
-              <thead>
-                <tr>
-                  <th>{t('skills.colName')}</th>
-                  <th>{t('skills.colDescription')}</th>
-                  <th>{t('skills.colTools')}</th>
-                  <th>{t('skills.colUpdated')}</th>
-                  <th>{t('skills.colActions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {skills.map((skill) => (
-                  <tr key={`${skill.userId}:${skill.skillName}`}>
-                    <td className="cell-name">{skill.skillName}</td>
-                    <td className="cell-desc">{skill.description}</td>
-                    <td className="cell-tools">
-                      {(skill.allowedTools || []).join(', ') || '-'}
-                    </td>
-                    <td className="cell-date">
-                      {skill.updatedAt
-                        ? new Date(skill.updatedAt).toLocaleDateString()
-                        : '-'}
-                    </td>
-                    <td className="cell-actions">
-                      <button className="btn btn-sm btn-secondary" onClick={() => handleEdit(skill)}>
-                        {t('skills.edit')}
-                      </button>
-                      <button
-                        className="btn btn-sm btn-danger"
-                        onClick={() => setDeleteTarget(skill)}
-                      >
-                        {t('skills.delete')}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+        <Table
+          loading={isLoading}
+          loadingText={t('skills.loading')}
+          items={skills}
+          trackBy={(s) => `${s.userId}:${s.skillName}`}
+          columnDefinitions={[
+            { id: 'name', header: t('skills.colName'), cell: (s) => s.skillName },
+            { id: 'description', header: t('skills.colDescription'), cell: (s) => s.description },
+            {
+              id: 'tools',
+              header: t('skills.colTools'),
+              cell: (s) => (s.allowedTools || []).join(', ') || '-',
+            },
+            {
+              id: 'updated',
+              header: t('skills.colUpdated'),
+              cell: (s) => (s.updatedAt ? new Date(s.updatedAt).toLocaleDateString() : '-'),
+            },
+            {
+              id: 'actions',
+              header: t('skills.colActions'),
+              cell: (s) => (
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button onClick={() => handleEdit(s)}>{t('skills.edit')}</Button>
+                  <Button onClick={() => setDeleteTarget(s)}>{t('skills.delete')}</Button>
+                </SpaceBetween>
+              ),
+            },
+          ]}
+          empty={
+            <CloudscapeBox textAlign="center" padding="m">
+              <b>{t('skills.noSkills')}</b>
+              <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                {t('skills.noSkillsHint')}
+              </CloudscapeBox>
+            </CloudscapeBox>
+          }
+        />
       )}
       </>
-      )}
+        );
+      })()}
 
       {/* Knowledge Base Tab */}
       {activeTab === 'knowledgeBase' && (
@@ -2342,446 +2248,414 @@ const AdminConsole: React.FC = () => {
 
       {/* Tool Access Tab */}
       {activeTab === 'users' && (
-        <div className="users-section">
-          {error && <div className="alert alert-error">{error}</div>}
-          {success && <div className="alert alert-success">{success}</div>}
+        <SpaceBetween size="l">
+          {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+          {success && <Alert type="success">{success}</Alert>}
 
-          <div className="settings-panel">
-            <div className="settings-row">
-              <label className="toolbar-label">{t('users.policyEngine')}</label>
-              <select
-                className="toolbar-select"
-                style={{ minWidth: '140px' }}
-                value={policyMode}
-                onChange={(e) => setPolicyMode(e.target.value as 'ENFORCE' | 'LOG_ONLY')}
-              >
-                <option value="ENFORCE">{t('users.enforce')}</option>
-                <option value="LOG_ONLY">{t('users.logOnly')}</option>
-              </select>
-              <span className={`badge ${policyMode === 'ENFORCE' ? 'badge-active' : 'badge-inactive'}`}>
-                {policyMode === 'ENFORCE' ? t('users.enforced') : t('users.auditOnly')}
-              </span>
-            </div>
-          </div>
-
-          <div className="toolbar">
-            <div className="toolbar-left">
-              <span className="toolbar-label">{t('users.perUserPerms')}</span>
-            </div>
-            <button className="btn btn-secondary btn-sm" onClick={loadCognitoUsers}>
-              {t('users.refresh')}
-            </button>
-          </div>
+          <Container header={<CloudscapeHeader variant="h3">{t('users.policyEngine')}</CloudscapeHeader>}>
+            <SpaceBetween direction="horizontal" size="s">
+              <div style={{ minWidth: 180 }}>
+                <Select
+                  selectedOption={
+                    policyMode === 'ENFORCE'
+                      ? { value: 'ENFORCE', label: t('users.enforce') }
+                      : { value: 'LOG_ONLY', label: t('users.logOnly') }
+                  }
+                  onChange={({ detail }) => setPolicyMode(detail.selectedOption.value as 'ENFORCE' | 'LOG_ONLY')}
+                  options={[
+                    { value: 'ENFORCE', label: t('users.enforce') },
+                    { value: 'LOG_ONLY', label: t('users.logOnly') },
+                  ]}
+                />
+              </div>
+              {policyMode === 'ENFORCE' ? (
+                <StatusIndicator type="success">{t('users.enforced')}</StatusIndicator>
+              ) : (
+                <StatusIndicator type="warning">{t('users.auditOnly')}</StatusIndicator>
+              )}
+            </SpaceBetween>
+          </Container>
 
           {selectedPermUser && (
-            <div className="perm-editor">
-              <h3>
-                {t('users.toolPermsFor')}{' '}
-                <span className="perm-user-email">
-                  {selectedPermUser.email || selectedPermUser.username}
-                </span>
-              </h3>
-              <p className="perm-hint">
-                {t('users.toolPermsHint')}{' '}
-                {t('users.actorId')} <code>{getActorId(selectedPermUser)}</code>
-              </p>
-
-              {gatewayTools.length === 0 ? (
-                <div className="empty-state">
-                  <p>{t('users.noTools')}</p>
-                </div>
-              ) : (
-                <>
-                  <div className="perm-select-bar">
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-secondary"
-                      onClick={() => {
-                        const all: Record<string, boolean> = {};
-                        for (const tt of gatewayTools) all[tt.name] = true;
-                        setUserToolSelections(all);
-                      }}
-                    >
-                      {t('users.selectAll')}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-secondary"
-                      onClick={() => {
-                        const none: Record<string, boolean> = {};
-                        for (const tt of gatewayTools) none[tt.name] = false;
-                        setUserToolSelections(none);
-                      }}
-                    >
-                      {t('users.deselectAll')}
-                    </button>
-                  </div>
-                  <div className="perm-tool-list">
-                    {gatewayTools.map((tool) => (
-                      <label key={tool.name} className="perm-tool-item">
-                        <input
-                          type="checkbox"
-                          className="perm-tool-checkbox"
-                          checked={!!userToolSelections[tool.name]}
-                          onChange={(e) =>
-                            setUserToolSelections((prev) => ({
-                              ...prev,
-                              [tool.name]: e.target.checked,
-                            }))
-                          }
-                        />
-                        <span className="perm-tool-name">{tool.name}</span>
-                        <span className="perm-tool-desc">{tool.description}</span>
-                        <span className="perm-tool-target">{tool.targetName}</span>
-                      </label>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={handleCancelPermissions}
+            <Container
+              header={
+                <CloudscapeHeader
+                  variant="h2"
+                  description={
+                    <>
+                      {t('users.toolPermsHint')} {t('users.actorId')}{' '}
+                      <code>{getActorId(selectedPermUser)}</code>
+                    </>
+                  }
                 >
-                  {t('users.cancel')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={handleSavePermissions}
-                  disabled={!permIsDirty || permSaving}
-                >
-                  {permSaving ? t('users.saving') : t('users.savePermissions')}
-                </button>
-              </div>
-            </div>
+                  {t('users.toolPermsFor')} {selectedPermUser.email || selectedPermUser.username}
+                </CloudscapeHeader>
+              }
+            >
+              <SpaceBetween size="m">
+                {gatewayTools.length === 0 ? (
+                  <CloudscapeBox textAlign="center" padding="m">
+                    <b>{t('users.noTools')}</b>
+                  </CloudscapeBox>
+                ) : (
+                  <>
+                    <SpaceBetween direction="horizontal" size="xs">
+                      <Button
+                        onClick={() => {
+                          const all: Record<string, boolean> = {};
+                          for (const tt of gatewayTools) all[tt.name] = true;
+                          setUserToolSelections(all);
+                        }}
+                      >
+                        {t('users.selectAll')}
+                      </Button>
+                      <Button
+                        onClick={() => {
+                          const none: Record<string, boolean> = {};
+                          for (const tt of gatewayTools) none[tt.name] = false;
+                          setUserToolSelections(none);
+                        }}
+                      >
+                        {t('users.deselectAll')}
+                      </Button>
+                    </SpaceBetween>
+                    <div className="perm-tool-list">
+                      {gatewayTools.map((tool) => (
+                        <label key={tool.name} className="perm-tool-item">
+                          <input
+                            type="checkbox"
+                            className="perm-tool-checkbox"
+                            checked={!!userToolSelections[tool.name]}
+                            onChange={(e) =>
+                              setUserToolSelections((prev) => ({
+                                ...prev,
+                                [tool.name]: e.target.checked,
+                              }))
+                            }
+                          />
+                          <span className="perm-tool-name">{tool.name}</span>
+                          <span className="perm-tool-desc">{tool.description}</span>
+                          <span className="perm-tool-target">{tool.targetName}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button onClick={handleCancelPermissions}>{t('users.cancel')}</Button>
+                  <Button
+                    variant="primary"
+                    onClick={handleSavePermissions}
+                    disabled={!permIsDirty || permSaving}
+                    loading={permSaving}
+                  >
+                    {t('users.savePermissions')}
+                  </Button>
+                </SpaceBetween>
+              </SpaceBetween>
+            </Container>
           )}
 
           {!selectedPermUser && (
-            <div className="skills-table-container">
-              {usersLoading ? (
-                <div className="loading">{t('users.loadingUsers')}</div>
-              ) : cognitoUsers.length === 0 ? (
-                <div className="empty-state">
-                  <p>{t('users.noUsers')}</p>
-                </div>
-              ) : (
-                <table className="skills-table">
-                  <thead>
-                    <tr>
-                      <th>{t('users.colEmail')}</th>
-                      <th>{t('users.colUserId')}</th>
-                      <th>{t('users.colStatus')}</th>
-                      <th>{t('users.colGroups')}</th>
-                      <th>{t('users.colDemo')}</th>
-                      <th>{t('users.colActions')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cognitoUsers.map((u) => {
-                      const cfg = getConfig();
-                      const loginHint = u.email || u.username;
-                      const chatUrl = cfg.chatbotUrl
-                        ? `${cfg.chatbotUrl.replace(/\/$/, '')}/?username=${encodeURIComponent(loginHint)}`
-                        : '';
-                      const simUrl = cfg.deviceSimulatorUrl
-                        ? `${cfg.deviceSimulatorUrl.replace(/\/$/, '')}/?userId=${encodeURIComponent(u.sub)}`
-                        : '';
-                      return (
-                      <tr key={u.sub}>
-                        <td className="cell-name">{loginHint}</td>
-                        <td className="cell-tools" title={u.sub}>
-                          {u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}
-                        </td>
-                        <td>
-                          <span
-                            className={`badge ${
-                              u.status === 'CONFIRMED'
-                                ? 'badge-active'
-                                : 'badge-inactive'
-                            }`}
-                          >
-                            {u.status}
-                          </span>
-                        </td>
-                        <td>
-                          {u.groups.length > 0
-                            ? u.groups.map((g) => (
-                                <span
-                                  key={g}
-                                  className={`badge ${
-                                    g === 'admin' ? 'badge-admin' : 'badge-group'
-                                  }`}
-                                >
-                                  {g}
-                                </span>
-                              ))
-                            : '-'}
-                        </td>
-                        <td className="cell-actions">
-                          {chatUrl ? (
-                            <a
-                              className="btn btn-sm btn-secondary"
-                              href={chatUrl}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              title={t('users.openChatbotTitle')}
-                              style={{ marginRight: 6 }}
-                            >
-                              {t('users.openChatbot')}
-                            </a>
-                          ) : null}
-                          {simUrl ? (
-                            <a
-                              className="btn btn-sm btn-secondary"
-                              href={simUrl}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              title={t('users.openDeviceSimTitle')}
-                            >
-                              {t('users.openDeviceSim')}
-                            </a>
-                          ) : null}
-                          {!chatUrl && !simUrl ? <span className="perm-hint">-</span> : null}
-                        </td>
-                        <td className="cell-actions">
-                          <button
-                            className="btn btn-sm btn-primary"
-                            onClick={() => handleManagePermissions(u)}
-                          >
-                            {t('users.managePermissions')}
-                          </button>
-                        </td>
-                      </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </div>
+            <Table
+              header={
+                <CloudscapeHeader
+                  variant="h2"
+                  actions={
+                    <Button iconName="refresh" onClick={loadCognitoUsers}>
+                      {t('users.refresh')}
+                    </Button>
+                  }
+                >
+                  {t('users.perUserPerms')}
+                </CloudscapeHeader>
+              }
+              loading={usersLoading}
+              loadingText={t('users.loadingUsers')}
+              items={cognitoUsers}
+              trackBy="sub"
+              columnDefinitions={[
+                { id: 'email', header: t('users.colEmail'), cell: (u) => u.email || u.username },
+                {
+                  id: 'userId',
+                  header: t('users.colUserId'),
+                  cell: (u) => (
+                    <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>
+                  ),
+                },
+                {
+                  id: 'status',
+                  header: t('users.colStatus'),
+                  cell: (u) =>
+                    u.status === 'CONFIRMED' ? (
+                      <StatusIndicator type="success">{u.status}</StatusIndicator>
+                    ) : (
+                      <StatusIndicator type="stopped">{u.status}</StatusIndicator>
+                    ),
+                },
+                {
+                  id: 'groups',
+                  header: t('users.colGroups'),
+                  cell: (u) =>
+                    u.groups.length > 0 ? (
+                      <SpaceBetween direction="horizontal" size="xxs">
+                        {u.groups.map((g) => (
+                          <Badge key={g} color={g === 'admin' ? 'red' : 'blue'}>
+                            {g}
+                          </Badge>
+                        ))}
+                      </SpaceBetween>
+                    ) : (
+                      '-'
+                    ),
+                },
+                {
+                  id: 'demo',
+                  header: t('users.colDemo'),
+                  cell: (u) => {
+                    const cfg = getConfig();
+                    const loginHint = u.email || u.username;
+                    const chatUrl = cfg.chatbotUrl
+                      ? `${cfg.chatbotUrl.replace(/\/$/, '')}/?username=${encodeURIComponent(loginHint)}`
+                      : '';
+                    const simUrl = cfg.deviceSimulatorUrl
+                      ? `${cfg.deviceSimulatorUrl.replace(/\/$/, '')}/?userId=${encodeURIComponent(u.sub)}`
+                      : '';
+                    return (
+                      <SpaceBetween direction="horizontal" size="xxs">
+                        {chatUrl && (
+                          <Button iconName="external" iconAlign="right" href={chatUrl} target="_blank">
+                            {t('users.openChatbot')}
+                          </Button>
+                        )}
+                        {simUrl && (
+                          <Button iconName="external" iconAlign="right" href={simUrl} target="_blank">
+                            {t('users.openDeviceSim')}
+                          </Button>
+                        )}
+                        {!chatUrl && !simUrl && <span>-</span>}
+                      </SpaceBetween>
+                    );
+                  },
+                },
+                {
+                  id: 'actions',
+                  header: t('users.colActions'),
+                  cell: (u) => (
+                    <Button variant="primary" onClick={() => handleManagePermissions(u)}>
+                      {t('users.managePermissions')}
+                    </Button>
+                  ),
+                },
+              ]}
+              empty={
+                <CloudscapeBox textAlign="center" padding="m">
+                  <b>{t('users.noUsers')}</b>
+                </CloudscapeBox>
+              }
+            />
           )}
-        </div>
+        </SpaceBetween>
       )}
 
       {/* Integration Registry Tab */}
       {activeTab === 'integrations' && (
-        <div className="integrations-section">
-          <div className="sub-tab-bar">
-            <button
-              className={`sub-tab ${integrationsSubTab === 'overview' ? 'sub-tab-active' : ''}`}
-              onClick={() => setIntegrationsSubTab('overview')}
-            >
-              {t('integrations.sub.overview')}
-            </button>
-            <button
-              className={`sub-tab ${integrationsSubTab === 'a2a' ? 'sub-tab-active' : ''}`}
-              onClick={() => setIntegrationsSubTab('a2a')}
-            >
-              {t('integrations.sub.a2a')}
-            </button>
-            <button className="sub-tab sub-tab-disabled" disabled>
-              {t('integrations.sub.mcp')} · {t('integrations.comingSoon')}
-            </button>
-            <button className="sub-tab sub-tab-disabled" disabled>
-              {t('integrations.sub.apiGw')} · {t('integrations.comingSoon')}
-            </button>
-          </div>
+        <SpaceBetween size="l">
+          <SegmentedControl
+            selectedId={integrationsSubTab}
+            onChange={({ detail }) => setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a')}
+            options={[
+              { id: 'overview', text: t('integrations.sub.overview') },
+              { id: 'a2a', text: t('integrations.sub.a2a') },
+              { id: 'mcp', text: `${t('integrations.sub.mcp')} · ${t('integrations.comingSoon')}`, disabled: true },
+              { id: 'apigw', text: `${t('integrations.sub.apiGw')} · ${t('integrations.comingSoon')}`, disabled: true },
+            ]}
+          />
 
           {integrationsSubTab === 'overview' && (
-            <div>
-              <div className="settings-panel" style={{ marginBottom: '16px' }}>
-                <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>{t('integrations.title')}</h3>
-                <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
-                  {t('integrations.desc')}
-                </p>
-              </div>
-
-              <div className="skills-table-container">
-                <table className="skills-table">
-                  <thead>
-                    <tr>
-                      <th>{t('integrations.colType')}</th>
-                      <th>{t('integrations.colDescription')}</th>
-                      <th>{t('integrations.colStatus')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td className="cell-name">{t('integrations.lambdaTargets')}</td>
-                      <td className="cell-desc">{t('integrations.lambdaDesc')}</td>
-                      <td><span className="badge badge-active">{t('integrations.active')}</span></td>
-                    </tr>
-                    <tr>
-                      <td className="cell-name">{t('integrations.mcpServers')}</td>
-                      <td className="cell-desc">{t('integrations.mcpDesc')}</td>
-                      <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
-                    </tr>
-                    <tr>
-                      <td className="cell-name">{t('integrations.a2aAgents')}</td>
-                      <td className="cell-desc">{t('integrations.a2aDesc')}</td>
-                      <td><span className="badge badge-active">{t('integrations.active')}</span></td>
-                    </tr>
-                    <tr>
-                      <td className="cell-name">{t('integrations.apiGateway')}</td>
-                      <td className="cell-desc">{t('integrations.apiDesc')}</td>
-                      <td><span className="badge badge-inactive">{t('integrations.planned')}</span></td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="settings-panel" style={{ marginTop: '16px' }}>
-                <h3 style={{ color: '#fff', margin: '0 0 8px 0', fontSize: '14px' }}>{t('integrations.roadmap')}</h3>
-                <p className="settings-hint" style={{ margin: 0, lineHeight: '1.6' }}>
-                  {t('integrations.roadmapDesc')}
-                </p>
-              </div>
-            </div>
+            <SpaceBetween size="l">
+              <Table
+                header={
+                  <CloudscapeHeader variant="h2" description={t('integrations.desc')}>
+                    {t('integrations.title')}
+                  </CloudscapeHeader>
+                }
+                items={[
+                  { id: 'lambda', name: t('integrations.lambdaTargets'), description: t('integrations.lambdaDesc'), active: true },
+                  { id: 'mcp', name: t('integrations.mcpServers'), description: t('integrations.mcpDesc'), active: false },
+                  { id: 'a2a', name: t('integrations.a2aAgents'), description: t('integrations.a2aDesc'), active: true },
+                  { id: 'api', name: t('integrations.apiGateway'), description: t('integrations.apiDesc'), active: false },
+                ]}
+                trackBy="id"
+                columnDefinitions={[
+                  { id: 'type', header: t('integrations.colType'), cell: (i) => i.name },
+                  { id: 'description', header: t('integrations.colDescription'), cell: (i) => i.description },
+                  {
+                    id: 'status',
+                    header: t('integrations.colStatus'),
+                    cell: (i) =>
+                      i.active ? (
+                        <StatusIndicator type="success">{t('integrations.active')}</StatusIndicator>
+                      ) : (
+                        <StatusIndicator type="pending">{t('integrations.planned')}</StatusIndicator>
+                      ),
+                  },
+                ]}
+              />
+              <Container header={<CloudscapeHeader variant="h3">{t('integrations.roadmap')}</CloudscapeHeader>}>
+                <CloudscapeBox color="text-body-secondary">{t('integrations.roadmapDesc')}</CloudscapeBox>
+              </Container>
+            </SpaceBetween>
           )}
 
           {integrationsSubTab === 'a2a' && (
-            <div>
-              <div className="toolbar">
-                <div className="toolbar-left">
-                  <span className="toolbar-label">
-                    {t('integrations.a2a.title')} ({a2aAgents.length})
-                  </span>
-                </div>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => {
-                    setA2aLoading(true);
-                    setA2aError('');
-                    listA2aAgents()
-                      .then(setA2aAgents)
-                      .catch((err: any) => setA2aError(err.message))
-                      .finally(() => setA2aLoading(false));
-                  }}
-                >
-                  {t('integrations.a2a.refresh')}
-                </button>
-              </div>
-              {a2aError && <div className="alert alert-error">{a2aError}</div>}
+            <SpaceBetween size="l">
+              {a2aError && <Alert type="error" dismissible onDismiss={() => setA2aError('')}>{a2aError}</Alert>}
 
-              {a2aLoading ? (
-                <div className="loading">{t('common.loading')}</div>
-              ) : a2aAgents.length === 0 ? (
-                <div className="empty-state">
-                  <p>{t('integrations.a2a.empty')}</p>
-                  <p className="empty-hint">{t('integrations.a2a.emptyHint')}</p>
-                </div>
-              ) : (
-                <table className="skills-table">
-                  <thead>
-                    <tr>
-                      <th>{t('integrations.a2a.col.name')}</th>
-                      <th>{t('integrations.a2a.col.description')}</th>
-                      <th>{t('integrations.a2a.col.endpoint')}</th>
-                      <th>{t('integrations.a2a.col.auth')}</th>
-                      <th>{t('integrations.a2a.col.tags')}</th>
-                      <th>{t('integrations.a2a.col.publishedBy')}</th>
-                      <th>{t('integrations.a2a.col.lastUpdated')}</th>
-                      <th>{t('integrations.a2a.col.actions')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {a2aAgents.map((r) => {
+              <Table
+                header={
+                  <CloudscapeHeader
+                    variant="h2"
+                    counter={`(${a2aAgents.length})`}
+                    actions={
+                      <Button
+                        iconName="refresh"
+                        onClick={() => {
+                          setA2aLoading(true);
+                          setA2aError('');
+                          listA2aAgents()
+                            .then(setA2aAgents)
+                            .catch((err: any) => setA2aError(err.message))
+                            .finally(() => setA2aLoading(false));
+                        }}
+                      >
+                        {t('integrations.a2a.refresh')}
+                      </Button>
+                    }
+                  >
+                    {t('integrations.a2a.title')}
+                  </CloudscapeHeader>
+                }
+                loading={a2aLoading}
+                loadingText={t('common.loading')}
+                items={a2aAgents}
+                trackBy="recordId"
+                columnDefinitions={[
+                  { id: 'name', header: t('integrations.a2a.col.name'), cell: (r) => r.name },
+                  { id: 'description', header: t('integrations.a2a.col.description'), cell: (r) => r.description },
+                  {
+                    id: 'endpoint',
+                    header: t('integrations.a2a.col.endpoint'),
+                    cell: (r) => (
+                      <span title={r.card.url}>
+                        {r.card.url && r.card.url.length > 48 ? r.card.url.slice(0, 48) + '…' : r.card.url}
+                      </span>
+                    ),
+                  },
+                  {
+                    id: 'auth',
+                    header: t('integrations.a2a.col.auth'),
+                    cell: (r) => (r.card.authentication?.schemes || ['none'])[0],
+                  },
+                  {
+                    id: 'tags',
+                    header: t('integrations.a2a.col.tags'),
+                    cell: (r) => {
                       const tags = r.card.tags || [];
                       const visible = tags.slice(0, 3);
                       const overflow = tags.length - visible.length;
-                      const authScheme = (r.card.authentication?.schemes || ['none'])[0];
                       return (
-                        <tr key={r.recordId}>
-                          <td className="cell-name">{r.name}</td>
-                          <td className="cell-desc">{r.description}</td>
-                          <td className="cell-desc" title={r.card.url}>
-                            {r.card.url && r.card.url.length > 48 ? r.card.url.slice(0, 48) + '…' : r.card.url}
-                          </td>
-                          <td className="cell-desc">{authScheme}</td>
-                          <td className="cell-desc">
-                            {visible.map((tg) => (
-                              <span key={tg} className="badge badge-inactive" style={{ marginRight: 4 }}>{tg}</span>
-                            ))}
-                            {overflow > 0 && <span className="badge">+{overflow}</span>}
-                          </td>
-                          <td className="cell-desc">{r.publishedBy || '—'}</td>
-                          <td className="cell-date">
-                            {r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'}
-                          </td>
-                          <td className="cell-actions">
-                            <button
-                              className="btn btn-sm btn-secondary"
-                              onClick={() => setA2aDrawer(r)}
-                            >
-                              {t('integrations.a2a.view')}
-                            </button>
-                          </td>
-                        </tr>
+                        <SpaceBetween direction="horizontal" size="xxs">
+                          {visible.map((tg) => <Badge key={tg}>{tg}</Badge>)}
+                          {overflow > 0 && <Badge>+{overflow}</Badge>}
+                        </SpaceBetween>
                       );
-                    })}
-                  </tbody>
-                </table>
-              )}
+                    },
+                  },
+                  { id: 'publishedBy', header: t('integrations.a2a.col.publishedBy'), cell: (r) => r.publishedBy || '—' },
+                  {
+                    id: 'lastUpdated',
+                    header: t('integrations.a2a.col.lastUpdated'),
+                    cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'),
+                  },
+                  {
+                    id: 'actions',
+                    header: t('integrations.a2a.col.actions'),
+                    cell: (r) => (
+                      <Button onClick={() => setA2aDrawer(r)}>{t('integrations.a2a.view')}</Button>
+                    ),
+                  },
+                ]}
+                empty={
+                  <CloudscapeBox textAlign="center" padding="m">
+                    <b>{t('integrations.a2a.empty')}</b>
+                    <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                      {t('integrations.a2a.emptyHint')}
+                    </CloudscapeBox>
+                  </CloudscapeBox>
+                }
+              />
 
               {a2aDrawer && (
-                <div className="drawer-overlay" onClick={() => setA2aDrawer(null)}>
-                  <div className="drawer" onClick={(e) => e.stopPropagation()}>
-                    <div className="drawer-header">
-                      <h3>{a2aDrawer.name}</h3>
-                      <button className="btn btn-sm btn-secondary" onClick={() => setA2aDrawer(null)}>
-                        {t('form.close')}
-                      </button>
-                    </div>
-                    <div className="drawer-body">
-                      <p>{a2aDrawer.description}</p>
-                      <dl className="drawer-fields">
-                        <dt>{t('integrations.a2a.drawer.endpoint')}</dt>
-                        <dd>{a2aDrawer.card.url}</dd>
-                        <dt>{t('integrations.a2a.drawer.version')}</dt>
-                        <dd>{a2aDrawer.card.version}</dd>
-                        <dt>{t('integrations.a2a.drawer.provider')}</dt>
-                        <dd>{a2aDrawer.card.provider?.organization || '—'}</dd>
-                        <dt>{t('integrations.a2a.drawer.auth')}</dt>
-                        <dd>{(a2aDrawer.card.authentication?.schemes || []).join(', ') || 'none'}</dd>
-                        <dt>{t('integrations.a2a.drawer.capabilities')}</dt>
-                        <dd>
-                          {(['streaming', 'pushNotifications', 'stateTransitionHistory'] as const)
-                            .filter((k) => a2aDrawer.card.capabilities?.[k])
-                            .join(', ') || '—'}
-                        </dd>
-                        <dt>{t('integrations.a2a.drawer.tags')}</dt>
-                        <dd>{(a2aDrawer.card.tags || []).join(', ') || '—'}</dd>
-                        <dt>{t('integrations.a2a.drawer.skills')}</dt>
-                        <dd>
-                          <ul className="drawer-skills">
-                            {(a2aDrawer.card.skills || []).map((s) => (
-                              <li key={s.id}>
-                                <strong>{s.id}</strong> — {s.name}: {s.description}
-                                {s.examples && s.examples.length > 0 && (
-                                  <ul>
-                                    {s.examples.map((ex, i) => <li key={i}><em>{ex}</em></li>)}
-                                  </ul>
-                                )}
-                              </li>
-                            ))}
-                          </ul>
-                        </dd>
-                        <dt>{t('integrations.a2a.drawer.recordId')}</dt>
-                        <dd><code>{a2aDrawer.recordId}</code></dd>
-                        <dt>{t('integrations.a2a.drawer.createdAt')}</dt>
-                        <dd>{a2aDrawer.createdAt ? new Date(a2aDrawer.createdAt).toLocaleString() : '-'}</dd>
-                        <dt>{t('integrations.a2a.drawer.updatedAt')}</dt>
-                        <dd>{a2aDrawer.updatedAt ? new Date(a2aDrawer.updatedAt).toLocaleString() : '-'}</dd>
-                      </dl>
-                    </div>
-                  </div>
-                </div>
+                <Modal
+                  visible
+                  onDismiss={() => setA2aDrawer(null)}
+                  header={a2aDrawer.name}
+                  size="large"
+                  footer={
+                    <CloudscapeBox float="right">
+                      <Button onClick={() => setA2aDrawer(null)}>{t('form.close')}</Button>
+                    </CloudscapeBox>
+                  }
+                >
+                  <SpaceBetween size="s">
+                    <p>{a2aDrawer.description}</p>
+                    <dl className="drawer-fields">
+                      <dt>{t('integrations.a2a.drawer.endpoint')}</dt>
+                      <dd>{a2aDrawer.card.url}</dd>
+                      <dt>{t('integrations.a2a.drawer.version')}</dt>
+                      <dd>{a2aDrawer.card.version}</dd>
+                      <dt>{t('integrations.a2a.drawer.provider')}</dt>
+                      <dd>{a2aDrawer.card.provider?.organization || '—'}</dd>
+                      <dt>{t('integrations.a2a.drawer.auth')}</dt>
+                      <dd>{(a2aDrawer.card.authentication?.schemes || []).join(', ') || 'none'}</dd>
+                      <dt>{t('integrations.a2a.drawer.capabilities')}</dt>
+                      <dd>
+                        {(['streaming', 'pushNotifications', 'stateTransitionHistory'] as const)
+                          .filter((k) => a2aDrawer.card.capabilities?.[k])
+                          .join(', ') || '—'}
+                      </dd>
+                      <dt>{t('integrations.a2a.drawer.tags')}</dt>
+                      <dd>{(a2aDrawer.card.tags || []).join(', ') || '—'}</dd>
+                      <dt>{t('integrations.a2a.drawer.skills')}</dt>
+                      <dd>
+                        <ul className="drawer-skills">
+                          {(a2aDrawer.card.skills || []).map((s) => (
+                            <li key={s.id}>
+                              <strong>{s.id}</strong> — {s.name}: {s.description}
+                              {s.examples && s.examples.length > 0 && (
+                                <ul>
+                                  {s.examples.map((ex, i) => <li key={i}><em>{ex}</em></li>)}
+                                </ul>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </dd>
+                      <dt>{t('integrations.a2a.drawer.recordId')}</dt>
+                      <dd><code>{a2aDrawer.recordId}</code></dd>
+                      <dt>{t('integrations.a2a.drawer.createdAt')}</dt>
+                      <dd>{a2aDrawer.createdAt ? new Date(a2aDrawer.createdAt).toLocaleString() : '-'}</dd>
+                      <dt>{t('integrations.a2a.drawer.updatedAt')}</dt>
+                      <dd>{a2aDrawer.updatedAt ? new Date(a2aDrawer.updatedAt).toLocaleString() : '-'}</dd>
+                    </dl>
+                  </SpaceBetween>
+                </Modal>
               )}
-            </div>
+            </SpaceBetween>
           )}
-        </div>
+        </SpaceBetween>
       )}
 
       {/* Memories Tab */}
@@ -2803,72 +2677,53 @@ const AdminConsole: React.FC = () => {
             + `#/gen-ai-observability/agent-core/agent-alias/${runtimeId}/endpoint/DEFAULT/agent/${agentName}`
             + `?resourceId=${resourceId}&serviceName=${agentName}.DEFAULT&tabId=evaluations`
           : 'https://console.aws.amazon.com/cloudwatch/home#/gen-ai-observability';
+        const items = [
+          {
+            id: 'evaluator',
+            name: t('guardrails.evaluator'),
+            description: t('guardrails.evaluatorDesc'),
+            action: (
+              <Button variant="primary" href={evaluatorUrl} target="_blank" iconAlign="right" iconName="external">
+                {t('guardrails.openConsole')}
+              </Button>
+            ),
+          },
+          {
+            id: 'bedrock',
+            name: t('guardrails.bedrockGuardrails'),
+            description: t('guardrails.bedrockDesc'),
+            action: (
+              <Button variant="primary" href="https://console.aws.amazon.com/bedrock/home#/guardrails" target="_blank" iconAlign="right" iconName="external">
+                {t('guardrails.openConsole')}
+              </Button>
+            ),
+          },
+          {
+            id: 'cedar',
+            name: t('guardrails.cedarPolicy'),
+            description: t('guardrails.cedarDesc'),
+            action: (
+              <Button onClick={() => setActiveTab('users')}>
+                {t('guardrails.goToToolAccess')}
+              </Button>
+            ),
+          },
+        ];
         return (
-        <div className="guardrails-section">
-          <div className="settings-panel" style={{ marginBottom: '16px' }}>
-            <h3 style={{ color: '#fff', margin: '0 0 12px 0', fontSize: '16px' }}>{t('guardrails.title')}</h3>
-            <p className="settings-hint" style={{ margin: '0 0 16px 0' }}>
-              {t('guardrails.desc')}
-            </p>
-          </div>
-
-          <div className="skills-table-container">
-            <table className="skills-table">
-              <thead>
-                <tr>
-                  <th>{t('guardrails.colGuardrail')}</th>
-                  <th>{t('guardrails.colDescription')}</th>
-                  <th>{t('guardrails.colAction')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td className="cell-name">{t('guardrails.evaluator')}</td>
-                  <td className="cell-desc">
-                    {t('guardrails.evaluatorDesc')}
-                  </td>
-                  <td className="cell-actions">
-                    <a
-                      className="btn btn-sm btn-primary"
-                      href={evaluatorUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {t('guardrails.openConsole')}
-                    </a>
-                  </td>
-                </tr>
-                <tr>
-                  <td className="cell-name">{t('guardrails.bedrockGuardrails')}</td>
-                  <td className="cell-desc">
-                    {t('guardrails.bedrockDesc')}
-                  </td>
-                  <td className="cell-actions">
-                    <a
-                      className="btn btn-sm btn-primary"
-                      href="https://console.aws.amazon.com/bedrock/home#/guardrails"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {t('guardrails.openConsole')}
-                    </a>
-                  </td>
-                </tr>
-                <tr>
-                  <td className="cell-name">{t('guardrails.cedarPolicy')}</td>
-                  <td className="cell-desc">
-                    {t('guardrails.cedarDesc')}
-                  </td>
-                  <td className="cell-actions">
-                    <button className="btn btn-sm btn-secondary" onClick={() => setActiveTab('users')}>
-                      {t('guardrails.goToToolAccess')}
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
+          <Table
+            header={
+              <CloudscapeHeader variant="h2" description={t('guardrails.desc')}>
+                {t('guardrails.title')}
+              </CloudscapeHeader>
+            }
+            items={items}
+            trackBy="id"
+            columnDefinitions={[
+              { id: 'name', header: t('guardrails.colGuardrail'), cell: (i) => i.name },
+              { id: 'description', header: t('guardrails.colDescription'), cell: (i) => i.description },
+              { id: 'action', header: t('guardrails.colAction'), cell: (i) => i.action },
+            ]}
+          />
         );
       })()}
     </div>
