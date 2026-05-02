@@ -3,6 +3,8 @@ const en: Record<string, string> = {
   'app.loading': 'Loading...',
   'app.title': 'Agent Harness Management',
   'app.signOut': 'Sign Out',
+  'theme.light': 'Light',
+  'theme.dark': 'Dark',
   'app.accessDenied': 'Access Denied',
   'app.accessDeniedMsg': 'You must be a member of the <strong>admin</strong> group to use this console.',
 

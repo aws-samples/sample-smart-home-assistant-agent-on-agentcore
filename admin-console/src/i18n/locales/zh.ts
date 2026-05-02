@@ -3,6 +3,8 @@ const zh: Record<string, string> = {
   'app.loading': '加载中...',
   'app.title': '智能体管理平台',
   'app.signOut': '退出登录',
+  'theme.light': '浅色',
+  'theme.dark': '深色',
   'app.accessDenied': '访问被拒绝',
   'app.accessDeniedMsg': '您必须是 <strong>admin</strong> 组的成员才能使用此控制台。',
 

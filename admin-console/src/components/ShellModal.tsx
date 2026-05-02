@@ -7,6 +7,9 @@
  * abort controller. Resets on close.
  */
 import React, { useMemo, useState, useCallback } from 'react';
+import Modal from '@cloudscape-design/components/modal';
+import Box from '@cloudscape-design/components/box';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 
 import AnsiOutput, { chunksToPlainText } from './AnsiOutput';
 import { useI18n } from '../i18n';
@@ -136,15 +139,14 @@ const ShellModal: React.FC<Props> = ({ target, onClose }) => {
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal shell-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="shell-modal-header">
-          <h3>{t('shell.title').replace('{sessionId}', target.sessionId)}</h3>
-          <button className="btn btn-sm btn-secondary" onClick={onClose}>
-            {t('shell.close')}
-          </button>
-        </div>
-
+    <Modal
+      visible
+      onDismiss={onClose}
+      header={t('shell.title').replace('{sessionId}', target.sessionId)}
+      size="large"
+    >
+      <Box>
+        <SpaceBetween size="s">
         <div className="shell-modal-row">
           <label className="shell-field-label">{t('shell.fieldRuntime')}</label>
           <label className="shell-radio">
@@ -254,8 +256,9 @@ const ShellModal: React.FC<Props> = ({ target, onClose }) => {
               .replace('{ms}', String(exit.ms))}
           </div>
         )}
-      </div>
-    </div>
+        </SpaceBetween>
+      </Box>
+    </Modal>
   );
 };
 

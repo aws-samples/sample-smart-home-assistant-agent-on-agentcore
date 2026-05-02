@@ -49,10 +49,13 @@ import {
   AgentType,
   PromptRecord,
 } from '../api/adminApi';
+import Tabs from '@cloudscape-design/components/tabs';
 import { getConfig } from '../config';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
+
+type ActiveTab = 'skills' | 'knowledgeBase' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails' | 'agentPrompts';
 
 interface ActorRow {
   actorId: string;
@@ -1288,7 +1291,7 @@ const AdminConsole: React.FC = () => {
   const [savedModelId, setSavedModelId] = useState('');
 
   // Tabs
-  const [activeTab, setActiveTab] = useState<'skills' | 'knowledgeBase' | 'models' | 'sessions' | 'users' | 'integrations' | 'memories' | 'guardrails' | 'agentPrompts'>('skills');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('skills');
 
   // Sessions
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -1735,63 +1738,21 @@ const AdminConsole: React.FC = () => {
 
   return (
     <div className="admin-console">
-      {/* Tabs */}
-      <div className="tab-bar">
-        <button
-          className={`tab ${activeTab === 'skills' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('skills')}
-        >
-          {t('tab.skills')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'knowledgeBase' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('knowledgeBase')}
-        >
-          {t('tab.knowledgeBase')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'models' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('models')}
-        >
-          {t('tab.models')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'agentPrompts' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('agentPrompts')}
-        >
-          {t('tab.agentPrompts')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'users' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('users')}
-        >
-          {t('tab.toolAccess')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'integrations' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('integrations')}
-        >
-          {t('tab.integrations')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'sessions' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('sessions')}
-        >
-          {t('tab.sessions')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'memories' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('memories')}
-        >
-          {t('tab.memories')}
-        </button>
-        <button
-          className={`tab ${activeTab === 'guardrails' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('guardrails')}
-        >
-          {t('tab.guardrails')}
-        </button>
-      </div>
+      <Tabs
+        activeTabId={activeTab}
+        onChange={({ detail }) => setActiveTab(detail.activeTabId as ActiveTab)}
+        tabs={[
+          { id: 'skills', label: t('tab.skills') },
+          { id: 'knowledgeBase', label: t('tab.knowledgeBase') },
+          { id: 'models', label: t('tab.models') },
+          { id: 'agentPrompts', label: t('tab.agentPrompts') },
+          { id: 'users', label: t('tab.toolAccess') },
+          { id: 'integrations', label: t('tab.integrations') },
+          { id: 'sessions', label: t('tab.sessions') },
+          { id: 'memories', label: t('tab.memories') },
+          { id: 'guardrails', label: t('tab.guardrails') },
+        ]}
+      />
 
       {activeTab === 'skills' && (
       <>
