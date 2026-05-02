@@ -2,6 +2,21 @@
    Smart Home Assistant - Chat UI Styles
    ========================================= */
 
+/* Tie signature chat-surface colors to Cloudscape tokens so they flip
+   when the user toggles light/dark. Bubble gradients stay branded. */
+:root {
+  --chat-surface: var(--color-background-container-content, #0a0a0f);
+  --chat-text: var(--color-text-body-default, #e0e0e0);
+  --chat-text-muted: var(--color-text-body-secondary, #8888aa);
+  --chat-bubble-agent: var(--color-background-container-content, rgba(30, 30, 50, 0.8));
+  --chat-bubble-border: var(--color-border-divider-default, rgba(255, 255, 255, 0.06));
+  --chat-accent: var(--color-text-link-default, #4a9eff);
+}
+
+.chat-container {
+  color: var(--chat-text);
+}
+
 /* --- Loading Screen --- */
 .loading-screen {
   display: flex;
