@@ -28,7 +28,21 @@ command -v node      >/dev/null 2>&1 || { echo "Node.js is required. Install fro
 command -v npm       >/dev/null 2>&1 || { echo "npm is required."; exit 1; }
 command -v aws       >/dev/null 2>&1 || { echo "AWS CLI is required."; exit 1; }
 command -v python3   >/dev/null 2>&1 || { echo "Python 3 is required."; exit 1; }
-command -v agentcore >/dev/null 2>&1 || { echo "agentcore CLI is required. Install: pip install strands-agents-builder"; exit 1; }
+command -v agentcore >/dev/null 2>&1 || { echo "agentcore CLI is required. Install: npm install -g @aws/agentcore"; exit 1; }
+
+# Minimum agentcore CLI version — 0.13.0 fixes a scaffold-test regression
+# (missing configBundles) that breaks `agentcore deploy`.
+AGENTCORE_MIN_VERSION="0.13.0"
+AGENTCORE_VERSION="$(agentcore --version 2>&1 | tr -d '\r' | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+if [ -z "$AGENTCORE_VERSION" ]; then
+    echo "Could not determine agentcore CLI version. Install latest: npm install -g @aws/agentcore"
+    exit 1
+fi
+# Lexicographic compare works for dotted semver when each component fits; for 0.X.Y use proper version sort
+if [ "$(printf '%s\n%s\n' "$AGENTCORE_MIN_VERSION" "$AGENTCORE_VERSION" | sort -V | head -1)" != "$AGENTCORE_MIN_VERSION" ]; then
+    echo "agentcore CLI >= $AGENTCORE_MIN_VERSION required (found $AGENTCORE_VERSION). Upgrade: npm install -g @aws/agentcore@latest"
+    exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

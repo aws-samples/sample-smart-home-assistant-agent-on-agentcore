@@ -14,6 +14,7 @@
 - [8.8. Per-User Model Selection](#88-per-user-model-selection)
 - [8.9. Fixed Session ID and Session Tracking](#89-fixed-session-id-and-session-tracking)
 - [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
+- [8.11. Image Input (Vision Bypass Path)](#811-image-input-vision-bypass-path)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
@@ -38,8 +39,8 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | Subsystem | Technology | Purpose |
 |-----------|-----------|---------|
 | Device Simulator | React + TypeScript + MQTT | Visual simulation of 4 smart home devices |
-| Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent |
-| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5) | Text chat via `POST /invocations` |
+| Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent; supports image attachments (≤3 images, ≤20 MB each) that route to a vision model |
+| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5 for text; Claude Haiku 4.5 for images) | Text chat via `POST /invocations`; image turns bypass Kimi and return the vision model's description directly |
 | AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws` |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
 | Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation |
@@ -528,6 +529,7 @@ The chatbot communicates with the AgentCore Runtime via HTTP POST:
 
 ```
 Browser --HTTP POST--> AgentCore Runtime ---> Strands Agent (Kimi K2.5)
+                                           \-> Vision model (Claude Haiku 4.5)  [when images present]
 ```
 
 **HTTP POST Invocation:**
@@ -542,19 +544,36 @@ Browser --HTTP POST--> AgentCore Runtime ---> Strands Agent (Kimi K2.5)
 
 #### HTTP Message Protocol
 
-**Client -> Server (POST):**
+**Client -> Server (POST) — text only:**
 ```json
 {"prompt": "Turn on the LED to rainbow mode", "userId": "user@example.com"}
 ```
+
+**Client -> Server (POST) — with image attachments:**
+```json
+{
+  "prompt": "describe this dashboard",
+  "userId": "user@example.com",
+  "images": [
+    {"mediaType": "image/png",  "data": "<base64>"},
+    {"mediaType": "image/jpeg", "data": "<base64>"}
+  ]
+}
+```
+
+- `images` is optional. When present it must be a list of ≤3 objects; oversize or wrong-type items are rejected client-side before send (≤20 MB raw per image; `image/png|jpeg|webp|gif`).
+- When `images` is present the payload is handled by the agent's vision bypass path (see §8.11); Kimi is not called.
 
 **Server -> Client (Response):**
 ```json
 {"response": "I'll set the LED matrix to rainbow mode. The command has been sent!", "status": "success"}
 ```
 
+The response shape is the same for text and image turns; for image turns the body is the vision model's description (plus any `Note: …` warnings from partial failures).
+
 #### UI Pattern
 
-The `ChatInterface` sends a prompt via `fetch()`, shows a typing indicator while waiting, then renders the complete response when it arrives.
+The `ChatInterface` has a paperclip button next to the send button that opens a multi-select file picker (up to 3 images, ≤20 MB each, `image/png|jpeg|webp|gif`). Selected images render as 48×48 thumbnails above the textarea, each with a × to remove. On send, files are base64-encoded in parallel and included in the POST body's `images` array; the user bubble also renders the thumbnails alongside the text. Typing indicator and response rendering are identical to text-only turns.
 
 ### 7.3 Session Persistence
 
@@ -662,6 +681,10 @@ The MCP protocol allows the agent to dynamically discover available tools (devic
 ```
 agent/
 ├── agent.py              # BedrockAgentCoreApp with @app.entrypoint handler
+├── vision.py             # Claude Haiku 4.5 captioning via Bedrock Converse
+│                          # (used for image-turn bypass; see §8.11)
+├── session_storage.py    # Per-session filesystem helpers at /mnt/workspace
+│                          # (atomic image writes + index.jsonl catalog)
 ├── memory/
 │   ├── __init__.py
 │   └── session.py        # AgentCoreMemorySessionManager factory (follows agentcore CLI pattern)
@@ -673,9 +696,12 @@ agent/
 │   ├── fan-control/
 │   ├── oven-control/
 │   └── all-devices-on/   # Discovers devices then turns them on sequentially
+├── tests/                # pytest unit tests (excluded from CodeZip deploy)
 ├── pyproject.toml        # Dependencies for AgentCore CodeZip packaging
 └── Dockerfile            # Optional, for local container testing
 ```
+
+The `tests/` directory is intentionally excluded from the CodeZip packaging — `scripts/setup-agentcore.py` filters it out (along with `__pycache__`/`*.pyc`) so the production container never ships test-only imports.
 
 **Skills** provide on-demand specialized instructions. Skills are loaded dynamically from DynamoDB per invocation (`load_skills_from_dynamodb`), with the `./skills/` directory serving as a fallback when `SKILLS_TABLE_NAME` is not configured. When the agent activates a skill, it loads the full instructions into context:
 
@@ -1038,6 +1064,90 @@ The text agent calls this inside `invoke_agent()` on every request; the voice ag
 **Defaults mirror.** The Lambda ships a local `agent_prompt_defaults.py` that duplicates the two hardcoded constants from `agent/agent.py` and `agent/voice_session.py`. The duplication is intentional: the admin Lambda and the agent runtime live in separate packages, and making the tab render "what the agent will use when no override exists" without a round-trip to the runtime is worth the copy. The module carries a short comment flagging that the constants must be updated in the same commit as the agent-side source of truth.
 
 **Evo integration stub.** Each editor card renders a disabled "Optimization Suggestions (AgentCore Evo)" block. AgentCore Evo does not yet exist in this codebase; the card is a visual placeholder so future work can wire up an optimization endpoint without a tab-layout change.
+
+**Image-awareness clause (text prompt).** The hardcoded text `SYSTEM_PROMPT` contains an `IMAGES IN THIS CONVERSATION:` section that tells Kimi image descriptions are injected into the conversation history as prior assistant messages (written by the vision bypass path in §8.11). Without this clause Kimi would respond to follow-up questions about past uploads by denying image access or fabricating contents. Admins editing the global prompt must keep this section when overriding, or follow-up turns referring to earlier images will regress.
+
+---
+
+### 8.11 Image Input (Vision Bypass Path)
+
+Image turns use a dedicated path that bypasses Kimi entirely: the runtime calls a vision model (Claude Haiku 4.5) to caption the uploaded images and returns the description straight to the chatbot. This keeps latency low (one model call instead of two) and keeps Kimi's tool-calling / KB / skills loop focused on text.
+
+```
+POST /invocations
+  {"prompt": "...", "userId": "...",
+   "images": [{"mediaType": "image/png", "data": "<base64>"}]}
+              │
+              ▼
+  handle_invocation (agent/agent.py)
+              │
+              ├── payload.images present? ── no ──► invoke_agent() → Kimi K2.5
+              │                                    (normal text path)
+              │
+              └── yes: vision bypass
+                     │
+                     ├─ validate: isinstance(list) && len ≤ 3 → 400 on violation
+                     │
+                     ├─ 1. PERSIST raw bytes to /mnt/workspace/<sid>/uploads/images/
+                     │    via session_storage.save_image (atomic tempfile + os.replace,
+                     │    dedup by sha256, append index.jsonl entry). Non-fatal on error.
+                     │
+                     ├─ 2. vision.caption_images(images, prompt)
+                     │       → bedrock-runtime.converse on VISION_MODEL_ID
+                     │         (default us.anthropic.claude-haiku-4-5-20251001-v1:0;
+                     │          env-overridable, e.g. us.amazon.nova-lite-v1:0).
+                     │       → Per-image validation (MIME allowlist, ≤20 MB after decode)
+                     │         is defense-in-depth mirroring the client cap.
+                     │       → Partial-success: rejected images emit a "Note: …" warning;
+                     │         ≥1 valid image → the call proceeds.
+                     │       → One retry on Throttling/ServiceUnavailable; on final
+                     │         failure returns a placeholder + service-unavailable note.
+                     │
+                     ├─ 3. PERSIST exchange to AgentCore Memory (short-term event):
+                     │    (user_prompt, USER) + (haiku_description, ASSISTANT), each
+                     │    wrapped in the Strands SessionMessage envelope so Kimi's
+                     │    session manager can deserialize them on the next text turn.
+                     │    Metadata carries a fingerprint per image (mime/bytes/sha16)
+                     │    and image_N_path pointing to the session-storage file.
+                     │
+                     └─ 4. Return {"response": caption_text + warnings, "status": "success"}
+```
+
+**Why bypass Kimi.** Measured in `vision-latency-test/` (30 rounds × 2 models × 3 image counts), the bypass path lands at p50 ≈ 3.3 s (Haiku, 1 image, cold) / 2.0 s (Nova Lite, 1 image, cold). Routing the same turn through Kimi after pre-captioning would roughly double that (two LLM hops plus an extra token-pricing cost on Kimi for the long description).
+
+**Model swap.** `VISION_MODEL_ID` is captured at module-load (so each container version is pinned to one vision model) and resolved via Bedrock `Converse` for whichever multimodal model the operator prefers. Tested paths: Claude Haiku 4.5 (default — stronger OCR / fine-detail) and Amazon Nova Lite (~1.7× faster, lower cost, lighter detail). Swapping is an `update_agent_runtime` env-var patch — no source-code change and no `agentcore deploy`. The update rolls a new container version; subsequent sessions start on the new model.
+
+**Memory envelope.** Because the Strands `AgentCoreMemoryConverter` writes and reads events as JSON-serialized `SessionMessage` dicts, the vision bypass must mirror that format exactly. Plain-text events cause `JSONDecodeError` in `list_messages()` and silently drop the entire short-term history for the session, leaving Kimi with no memory of uploaded images. `agent/agent.py:_persist_vision_turn` serializes each message as `{"message": {"role": "...", "content": [{"text": "..."}]}, "message_id": N, "redact_message": null, "created_at": "...", "updated_at": "..."}` so later text turns round-trip cleanly.
+
+**Per-session filesystem.** The runtime is configured with `filesystemConfigurations=[{sessionStorage: {mountPath: "/mnt/workspace"}}]` (set by `scripts/setup-agentcore.py`). Every `runtimeSessionId` gets an isolated writable volume at `/mnt/workspace/<session_id>/` that survives across invocations within the same session. The layout:
+
+```
+/mnt/workspace/<session_id>/
+└── uploads/
+    └── images/
+        ├── <iso-timestamp>__<sha256[:16]>.<ext>   # raw bytes, atomic writes
+        └── index.jsonl                            # append-only catalog
+```
+
+`index.jsonl` rows: `{ts, sha256, mime, bytes, path, user_prompt, caption_event_id?}`. The directory is reserved for the image subsystem today; the top-level `uploads/` namespace is intentional so future modalities (audio, documents) can coexist without churn. The volume is automatically torn down when the session is closed by AgentCore — no TTL sweep needed.
+
+**Client-side limits (defense mirrored server-side):**
+
+| Limit | Value | Rationale |
+|-------|-------|-----------|
+| Max images per turn | 3 | Fits AgentCore metadata cap (1 fingerprint + 1 path per image + `image_count` = 7 of 15 KV slots) |
+| Max bytes per image | 20 MB raw | Fits well inside the 100 MB runtime payload cap even at the 3-image × base64 bloat worst case |
+| MIME allowlist | `png \| jpeg \| webp \| gif` | Matches Bedrock Converse `image/format` support |
+
+**Error surfaces:**
+
+| Failure | Behavior |
+|---------|----------|
+| Client: >3 files / bad MIME / too large | Inline error under thumbnail strip; not sent |
+| Server: `images` not a list or >3 items | 400 `{"error": "Invalid images payload (max 3)."}` |
+| Server: per-image bad MIME or decoded >20 MB | Soft-reject in `caption_images`, warning lists indices, remaining images still captioned |
+| Vision model throttled / unavailable after one retry | Placeholder caption + `Note: vision service was unavailable…`, user still gets a reply |
+| Memory write fails after successful caption | Caption returned to user anyway; next turn simply won't see this one in memory (logged at WARN) |
 
 ---
 
@@ -2161,6 +2271,26 @@ Invoke the Strands Agent and get a complete response.
 }
 ```
 
+**Request Body (with image attachments — vision bypass path):**
+```json
+{
+  "prompt": "describe this",
+  "userId": "user@example.com",
+  "images": [
+    {"mediaType": "image/png",  "data": "<base64>"},
+    {"mediaType": "image/jpeg", "data": "<base64>"}
+  ]
+}
+```
+
+`images` field rules (see §8.11 for the full flow):
+
+| Field | Type | Constraint |
+|-------|------|------------|
+| `images` | array, optional | max 3 items; >3 returns `400 {"error": "Invalid images payload (max 3)."}` |
+| `images[].mediaType` | string | one of `image/png`, `image/jpeg`, `image/webp`, `image/gif` |
+| `images[].data` | string | base64-encoded raw bytes; decoded size must be ≤ 20 MB |
+
 **Response:**
 ```json
 {
@@ -2168,6 +2298,8 @@ Invoke the Strands Agent and get a complete response.
   "status": "success"
 }
 ```
+
+Response shape is the same for text and image turns; image turns return the vision model's description in `response` (plus any `Note: …` partial-failure warnings appended).
 
 Special: `{"prompt": "__warmup__"}` returns `{"status": "warmup_ok"}` without invoking the LLM. The chatbot fires this immediately after login to pre-warm the runtime container.
 
@@ -2395,6 +2527,7 @@ Both apps use content-hash filenames for cache busting via CloudFront.
 | **AgentCore Gateway (MCP)** for tool access | Standard MCP protocol for tool discovery and invocation; decouples agent from tool implementation |
 | **Strands Agents SDK** | Python-native agent framework with skill system, MCP client support, and BedrockAgentCoreApp integration |
 | **Kimi K2.5** model (`moonshotai.kimi-k2.5`) | User requirement; available via Bedrock model access |
+| **Claude Haiku 4.5** for image captioning (default `VISION_MODEL_ID`) | Native multimodal on Bedrock Converse, strong OCR / fine-detail, same IAM footprint as Kimi. Latency bench (`vision-latency-test/`) vs Nova Lite: Haiku p50 3.3–5.4 s, Nova Lite p50 2.0–3.2 s depending on image count; the choice is env-flag-driven so operators can pick by workload |
 | **CDK over CloudFormation/SAM** | TypeScript type safety, higher-level constructs, better developer experience |
 | **Two-stack deploy** (CDK + agentcore CLI) | CDK JS SDK lacks AgentCore client; `agentcore` CLI has native `AWS::BedrockAgentCore::Runtime` support |
 | **CodeZip** (not Docker) for agent | No Docker required; `agentcore` CLI packages Python code as zip, uses managed Python 3.13 runtime |
@@ -2413,6 +2546,8 @@ Both apps use content-hash filenames for cache busting via CloudFront.
 | Lambda | Concurrent executions | 1,000 default, auto-scales |
 | IoT Core | Per-account | 500,000 connections default |
 | Bedrock (Kimi-2.5) | Per-model throttling | Dependent on Kimi-2.5 quota |
+| Bedrock vision (Haiku 4.5 / Nova Lite) | Per-model throttling | Called only on image turns; one retry on Throttling/ServiceUnavailable before falling back to a placeholder reply |
+| Session storage `/mnt/workspace` | Per session | Managed by AgentCore; evicted when the session closes. One directory per `runtimeSessionId`, fully isolated across sessions |
 | Cognito | Per-region | 40 req/sec default for auth APIs |
 
 For production use, consider:
