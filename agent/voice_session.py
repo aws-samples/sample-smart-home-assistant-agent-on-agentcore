@@ -213,6 +213,68 @@ def _record_voice_session(actor_id: str, session_id: str) -> None:
         logger.warning(f"Failed to record voice session: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Voice transcript -> AgentCore Memory
+# ---------------------------------------------------------------------------
+# Shared lazy boto3 client; instantiated inside the runtime on first write so
+# the cold-path imports at voice-agent startup stay unchanged.
+_memory_client = None
+
+
+def _get_memory_client():
+    global _memory_client
+    if _memory_client is None:
+        import boto3
+        _memory_client = boto3.client(
+            "bedrock-agentcore",
+            region_name=os.getenv("AWS_REGION", "us-west-2"),
+        )
+    return _memory_client
+
+
+# Import the same sanitizer text agent uses so both modalities land under
+# the same Memory actor namespace for the same Cognito identity.
+from memory.session import MEMORY_ID as _TEXT_MEMORY_ID, _sanitize_actor_id  # noqa: E402
+
+
+def persist_voice_transcript(
+    *,
+    actor_id: str,
+    session_id: str,
+    role: str,
+    text: str,
+) -> None:
+    """Write one finalized Nova Sonic transcript turn to the same AgentCore
+    Memory (MEMORY_ID) the text agent uses, under the same actor namespace,
+    so the follow-up text chat sees the user's voice history as prior turns.
+
+    Safe to call with a short text: Memory accepts any non-empty string.
+    Failures are swallowed — a voice session must never fail because of a
+    best-effort memory write.
+    """
+    if not _TEXT_MEMORY_ID:
+        return
+    if not text or not text.strip():
+        return
+    if role not in ("user", "assistant"):
+        return
+    try:
+        _get_memory_client().create_event(
+            memoryId=_TEXT_MEMORY_ID,
+            actorId=_sanitize_actor_id(actor_id),
+            sessionId=session_id,
+            eventTimestamp=datetime.now(timezone.utc),
+            payload=[{
+                "conversational": {
+                    "role": role.upper(),
+                    "content": {"text": text.strip()},
+                }
+            }],
+        )
+    except Exception as e:
+        logger.warning(f"persist_voice_transcript failed (non-fatal): {e}")
+
+
 def _extract_devices(mcp_response):
     """Pull the devices JSON out of whatever shape the MCP call returns.
 
@@ -582,6 +644,17 @@ async def handle_voice_session(
                         event.get("is_final"), event.get("completionId"),
                         event.get("contentId"), (event.get("text") or "")[:80],
                     )
+                    # Persist finalized turns into the same AgentCore Memory
+                    # the text agent uses, so a follow-up text chat in the
+                    # same session sees the voice conversation as prior turns.
+                    # SPECULATIVE turns are skipped to avoid duplicates.
+                    if event.get("is_final"):
+                        persist_voice_transcript(
+                            actor_id=actor_id,
+                            session_id=session_id,
+                            role=event.get("role") or "user",
+                            text=event.get("text") or "",
+                        )
             except Exception:
                 pass
             try:
