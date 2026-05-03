@@ -205,6 +205,29 @@ def get_mcp_tools(mcp_client):
     return tools
 
 
+def _extract_sub_from_auth(auth_header: str | None) -> str | None:
+    """Decode the Cognito `sub` from the forwarded idToken. Used to scope
+    MCP tool calls (device control, device discovery) so the LLM cannot
+    forge another user's identity — the sub comes from a token the runtime
+    has already validated."""
+    if not auth_header:
+        return None
+    try:
+        import base64 as _b64
+        token = auth_header
+        if token.lower().startswith("bearer "):
+            token = token.split(" ", 1)[1]
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(_b64.urlsafe_b64decode(payload))
+        sub = claims.get("sub")
+        return sub if sub else None
+    except Exception:
+        return None
+
+
 def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None):
     session_manager = get_memory_session_manager(session_id, actor_id)
 
@@ -241,36 +264,100 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
         with mcp_client:
             mcp_tools = get_mcp_tools(mcp_client)
 
-            kb_tool_present = any(t.tool_name == "query_knowledge_base" for t in mcp_tools)
-            if kb_tool_present:
-                non_kb_tools = [t for t in mcp_tools if t.tool_name != "query_knowledge_base"]
-                kb_user_id = actor_id if actor_id not in ("default", "__global__", "") else None
+            # Every MCP tool that reaches a per-user backend (KB, IoT, ...)
+            # is wrapped so the agent's runtime-validated identity is injected
+            # as an argument. The LLM cannot override these — its tool-call
+            # arguments pass through our wrapper, which replaces the
+            # user-scoping fields before hitting the Lambda.
+            user_sub_from_jwt = _extract_sub_from_auth(auth_header)
+            kb_user_id = actor_id if actor_id not in ("default", "__global__", "") else None
 
-                from strands import tool as strands_tool
+            from strands import tool as strands_tool
+            import uuid as _uuid
 
+            # MCP tool names come through with the Gateway target prefix
+            # (e.g. SmartHomeDeviceControl___control_device). Match on the
+            # trailing suffix so we don't accidentally leave the raw MCP tool
+            # in-list alongside our wrapper, and remember the exact MCP name
+            # so the wrapper can call the original tool by its real name.
+            scoped_suffixes = ("query_knowledge_base", "control_device", "discover_devices")
+            mcp_name_for = {}  # suffix -> actual MCP tool_name, e.g. "SmartHome___control_device"
+            for t in mcp_tools:
+                for s in scoped_suffixes:
+                    if t.tool_name == s or t.tool_name.endswith("___" + s):
+                        mcp_name_for[s] = t.tool_name
+            def _is_scoped(name: str) -> bool:
+                return any(name == s or name.endswith("___" + s) for s in scoped_suffixes)
+            non_scoped_tools = [t for t in mcp_tools if not _is_scoped(t.tool_name)]
+            present_suffixes = set(mcp_name_for.keys())
+
+            wrapped_tools = []
+            if "query_knowledge_base" in present_suffixes:
                 @strands_tool
                 def query_knowledge_base(query: str) -> str:
                     """Query the enterprise knowledge base to retrieve relevant documents.
                     Use this when users ask about company documents, product manuals,
                     troubleshooting guides, or internal knowledge."""
-                    import uuid
                     args = {"query": query}
                     if kb_user_id:
                         args["user_id"] = kb_user_id
                     result = mcp_client.call_tool_sync(
-                        tool_use_id=str(uuid.uuid4()),
-                        name="query_knowledge_base",
+                        tool_use_id=str(_uuid.uuid4()),
+                        name=mcp_name_for["query_knowledge_base"],
                         arguments=args,
                     )
                     if hasattr(result, 'content') and result.content:
                         texts = [c.text for c in result.content if hasattr(c, 'text')]
                         return "\n".join(texts) if texts else json.dumps(result.content, default=str)
                     return str(result)
-
-                all_tools = non_kb_tools + [query_knowledge_base]
+                wrapped_tools.append(query_knowledge_base)
                 logger.info(f"KB tool wrapped with user_id={kb_user_id} (LLM cannot override)")
+
+            if "control_device" in present_suffixes:
+                @strands_tool
+                def control_device(device_type: str, command: dict) -> str:
+                    """Send a command to one of the user's smart home devices. Returns
+                    a short confirmation or error message. `device_type` is one of
+                    led_matrix, rice_cooker, fan, oven. `command` is a JSON object with
+                    an `action` field and action-specific parameters."""
+                    args = {"device_type": device_type, "command": command}
+                    if user_sub_from_jwt:
+                        args["user_id"] = user_sub_from_jwt
+                    result = mcp_client.call_tool_sync(
+                        tool_use_id=str(_uuid.uuid4()),
+                        name=mcp_name_for["control_device"],
+                        arguments=args,
+                    )
+                    if hasattr(result, 'content') and result.content:
+                        texts = [c.text for c in result.content if hasattr(c, 'text')]
+                        return "\n".join(texts) if texts else json.dumps(result.content, default=str)
+                    return str(result)
+                wrapped_tools.append(control_device)
+
+            if "discover_devices" in present_suffixes:
+                @strands_tool
+                def discover_devices() -> str:
+                    """List the user's smart home devices and their supported actions."""
+                    args = {}
+                    if user_sub_from_jwt:
+                        args["user_id"] = user_sub_from_jwt
+                    result = mcp_client.call_tool_sync(
+                        tool_use_id=str(_uuid.uuid4()),
+                        name=mcp_name_for["discover_devices"],
+                        arguments=args,
+                    )
+                    if hasattr(result, 'content') and result.content:
+                        texts = [c.text for c in result.content if hasattr(c, 'text')]
+                        return "\n".join(texts) if texts else json.dumps(result.content, default=str)
+                    return str(result)
+                wrapped_tools.append(discover_devices)
+
+            if user_sub_from_jwt:
+                logger.info(f"Device tools wrapped with user_sub={user_sub_from_jwt[:8]}... (LLM cannot override)")
             else:
-                all_tools = mcp_tools
+                logger.warning("No user sub from JWT — device tools will hit Lambda without user scoping (likely to fail)")
+
+            all_tools = non_scoped_tools + wrapped_tools
 
             agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)
             return str(agent(prompt))

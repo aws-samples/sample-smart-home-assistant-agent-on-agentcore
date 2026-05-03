@@ -1,12 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
 import AppLayout from '@cloudscape-design/components/app-layout';
+import Box from '@cloudscape-design/components/box';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { MqttClient } from './mqtt/MqttClient';
 import LedMatrix from './components/LedMatrix';
 import RiceCooker from './components/RiceCooker';
 import Fan from './components/Fan';
 import Oven from './components/Oven';
+import LoginPage from './auth/LoginPage';
+import { getCurrentSession, getUserSub, ensureIotPolicyAttached, signOut, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
 import { detectInitialTheme, setTheme, Theme } from './theme/applyTheme';
 
@@ -30,26 +35,69 @@ const MOON_ICON = (
 );
 
 const App: React.FC = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [userSub, setUserSub] = useState('');
   const [connected, setConnected] = useState(false);
   const [theme, setLocalTheme] = useState<Theme>(() => detectInitialTheme());
   const { t, language, setLanguage } = useI18n();
 
-  useEffect(() => {
-    setTheme(theme);
-  }, [theme]);
+  useEffect(() => { setTheme(theme); }, [theme]);
 
-  useEffect(() => {
+  const startMqtt = async (idToken: string) => {
+    // AttachPolicy is the workaround for IoT refusing authenticated Cognito
+    // WebSocket connects. Idempotent + fast after the first time.
+    try {
+      await ensureIotPolicyAttached();
+    } catch (e) {
+      console.error('ensureIotPolicyAttached failed:', e);
+    }
     const mqtt = MqttClient.getInstance();
-    const unsub = mqtt.onConnectionChange(setConnected);
+    mqtt.onConnectionChange(setConnected);
+    mqtt.connect(idToken).catch((err) => console.error('MQTT connect failed:', err));
+  };
 
-    mqtt.connect().catch((err) => {
-      console.error('Failed to connect MQTT:', err);
-    });
-
-    return () => {
-      unsub();
-    };
+  // On load, check if there's a cached session.
+  useEffect(() => {
+    getCurrentSession()
+      .then(async (tokens) => {
+        const sub = await getUserSub();
+        setUserSub(sub);
+        setIsAuthenticated(true);
+        await startMqtt(tokens.idToken);
+      })
+      .catch(() => setIsAuthenticated(false))
+      .finally(() => setIsLoading(false));
   }, []);
+
+  const handleAuthenticated = async (tokens: AuthTokens) => {
+    const sub = await getUserSub();
+    setUserSub(sub);
+    setIsAuthenticated(true);
+    await startMqtt(tokens.idToken);
+  };
+
+  const handleLogout = () => {
+    signOut();
+    setIsAuthenticated(false);
+    setUserSub('');
+    MqttClient.getInstance().disconnect();
+  };
+
+  if (isLoading) {
+    return (
+      <Box textAlign="center" padding="xxxl">
+        <SpaceBetween size="m" direction="vertical">
+          <Spinner size="large" />
+          <Box color="text-body-secondary">Loading…</Box>
+        </SpaceBetween>
+      </Box>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage onAuthenticated={handleAuthenticated} />;
+  }
 
   const topNav = (
     <TopNavigation
@@ -80,6 +128,12 @@ const App: React.FC = () => {
             setLocalTheme(next);
           },
         },
+        {
+          type: 'button',
+          text: t('app.signOut'),
+          iconName: 'external',
+          onClick: handleLogout,
+        },
       ]}
       i18nStrings={{ overflowMenuTriggerText: 'More', overflowMenuTitleText: 'All' }}
     />
@@ -102,10 +156,10 @@ const App: React.FC = () => {
               )}
             </div>
             <div className="dashboard-grid">
-              <LedMatrix />
-              <RiceCooker />
-              <Fan />
-              <Oven />
+              <LedMatrix userSub={userSub} />
+              <RiceCooker userSub={userSub} />
+              <Fan userSub={userSub} />
+              <Oven userSub={userSub} />
             </div>
           </div>
         }

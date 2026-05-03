@@ -7,6 +7,25 @@ const zh: Record<string, string> = {
   // Common
   'common.on': '开',
   'common.off': '关',
+  'app.signOut': '退出登录',
+
+  // 登录
+  'login.title': '设备模拟器',
+  'login.signIn': '登录',
+  'login.signIn.subtitle': '使用您的智能家居账号登录，即可控制本账号下的模拟设备。',
+  'login.signUp': '注册',
+  'login.signUp.subtitle': '注册新账号。',
+  'login.confirm': '确认',
+  'login.confirm.subtitle': '输入邮件中收到的验证码以完成注册。',
+  'login.username': '用户名',
+  'login.password': '密码',
+  'login.email': '邮箱',
+  'login.confirmCode': '验证码',
+  'login.enterUsername': '请输入用户名',
+  'login.enterPassword': '请输入密码',
+  'login.noAccount': '还没有账号？',
+  'login.hasAccount': '已有账号？',
+  'login.verificationSent': '验证码已发送到您的邮箱。',
 
   // LED Matrix
   'led.title': 'LED 矩阵',

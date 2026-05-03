@@ -32,7 +32,9 @@ function hexToRgb(hex: string): [number, number, number] {
   return [r, g, b];
 }
 
-const LedMatrix: React.FC = () => {
+interface Props { userSub: string; }
+
+const LedMatrix: React.FC<Props> = ({ userSub }) => {
   const [power, setPower] = useState(false);
   const [mode, setMode] = useState<LedMode>('rainbow');
   const [brightness, setBrightness] = useState(80);
@@ -173,10 +175,11 @@ const LedMatrix: React.FC = () => {
     };
   }, [generateFrame]);
 
-  // MQTT subscription
+  // MQTT subscription (per-user topic prefix)
   useEffect(() => {
+    if (!userSub) return;
     const mqtt = MqttClient.getInstance();
-    const topic = 'smarthome/led_matrix/command';
+    const topic = `smarthome/${userSub}/led_matrix/command`;
     const handler = (_topic: string, payload: any) => {
       switch (payload.action) {
         case 'setMode':
@@ -198,7 +201,7 @@ const LedMatrix: React.FC = () => {
     };
     mqtt.subscribe(topic, handler);
     return () => mqtt.unsubscribe(topic, handler);
-  }, []);
+  }, [userSub]);
 
   const modes: { key: LedMode; labelKey: string }[] = [
     { key: 'rainbow', labelKey: 'led.mode.rainbow' },

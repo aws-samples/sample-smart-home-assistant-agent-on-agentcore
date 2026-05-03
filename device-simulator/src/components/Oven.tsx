@@ -12,7 +12,9 @@ const MODE_LABEL_KEYS: Record<OvenMode, string> = {
   preheat: 'oven.mode.preheat',
 };
 
-const Oven: React.FC = () => {
+interface Props { userSub: string; }
+
+const Oven: React.FC<Props> = ({ userSub }) => {
   const [power, setPower] = useState(false);
   const [mode, setMode] = useState<OvenMode>('off');
   const [targetTemp, setTargetTemp] = useState(350);
@@ -86,10 +88,11 @@ const Oven: React.FC = () => {
     }
   };
 
-  // MQTT subscription
+  // MQTT subscription (per-user topic prefix)
   useEffect(() => {
+    if (!userSub) return;
     const mqtt = MqttClient.getInstance();
-    const topic = 'smarthome/oven/command';
+    const topic = `smarthome/${userSub}/oven/command`;
     const handler = (_topic: string, payload: any) => {
       switch (payload.action) {
         case 'setMode':
@@ -116,7 +119,7 @@ const Oven: React.FC = () => {
     };
     mqtt.subscribe(topic, handler);
     return () => mqtt.unsubscribe(topic, handler);
-  }, [mode]);
+  }, [mode, userSub]);
 
   const formatTime = (seconds: number): string => {
     const h = Math.floor(seconds / 3600);

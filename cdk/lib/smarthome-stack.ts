@@ -80,6 +80,21 @@ export class SmartHomeStack extends cdk.Stack {
         "ForAnyValue:StringLike": { "cognito-identity.amazonaws.com:amr": "authenticated" },
       }, "sts:AssumeRoleWithWebIdentity"),
     });
+    // Authenticated users can connect to IoT Core and subscribe/publish on
+    // any topic. Per-user isolation at the topic level is NOT enforced by
+    // this IAM policy — that would require mapping the Identity Pool
+    // identity ID (which is what `cognito-identity.amazonaws.com:sub` resolves
+    // to in policy conditions) back to the User Pool `sub` our topic scheme
+    // uses, which isn't trivial. Instead:
+    //   • The agent→Lambda path is gated: iot-control derives the User Pool
+    //     `sub` from the validated JWT and publishes to
+    //     `smarthome/<sub>/<device>/command` only. The LLM cannot forge it.
+    //   • Device-simulator clients only subscribe to their own
+    //     `smarthome/<own-sub>/+` filter, so browser-side isolation holds as
+    //     long as the device-simulator client composes topics correctly.
+    // A determined user can still subscribe to another user's topics with
+    // raw MQTT; closing that would require an IoT Core Policy keyed on a
+    // Cognito User Pool custom claim (future hardening).
     authRole.addToPolicy(new iam.PolicyStatement({
       actions: ["iot:Connect", "iot:Subscribe", "iot:Receive", "iot:Publish"],
       resources: ["*"],
@@ -107,6 +122,34 @@ export class SmartHomeStack extends cdk.Stack {
     for (const deviceType of ["led_matrix", "rice_cooker", "fan", "oven"]) {
       new iot.CfnThing(this, `IoTThing-${deviceType}`, { thingName: `smarthome-${deviceType}` });
     }
+
+    // AWS IoT Core, even for SigV4 WebSocket MQTT, enforces authorization
+    // via an IoT *Policy* (distinct from IAM) — this is a long-standing quirk
+    // of connecting authenticated Cognito users. We declare a permissive
+    // policy here, and the device-simulator attaches it to each user's
+    // Cognito identity at login via iot:AttachPolicy. (The unauthenticated
+    // Cognito role happens to pass without this — only the authenticated
+    // flow trips the check.)
+    new iot.CfnPolicy(this, "DeviceSimClientPolicy", {
+      policyName: "smarthome-device-sim-client",
+      policyDocument: {
+        Version: "2012-10-17",
+        Statement: [
+          { Effect: "Allow", Action: ["iot:Connect", "iot:Subscribe", "iot:Receive", "iot:Publish"], Resource: "*" },
+        ],
+      },
+    });
+    // Allow the authenticated users to self-attach the policy above to their
+    // own Cognito identity. iot:AttachPolicy's resource policy binds against
+    // both the policy ARN AND the target identity, and the target is a
+    // transient `cognito-identity.amazonaws.com:sub` that can't be enumerated
+    // in advance, so we use `*` here. The policy document itself
+    // (smarthome-device-sim-client) is the least-privileged MQTT policy,
+    // limiting blast radius even if someone forced an attach.
+    authRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["iot:AttachPolicy", "iot:ListAttachedPolicies"],
+      resources: ["*"],
+    }));
 
     // ========================
     // Lambda - IoT Control (AgentCore Gateway target)
@@ -823,7 +866,9 @@ export class SmartHomeStack extends cdk.Stack {
     const deviceSimConfig = `window.__CONFIG__ = {
   iotEndpoint: "${iotEndpointAddress}",
   region: "${cdk.Aws.REGION}",
-  cognitoIdentityPoolId: "${identityPool.ref}"
+  cognitoIdentityPoolId: "${identityPool.ref}",
+  cognitoUserPoolId: "${userPool.userPoolId}",
+  cognitoClientId: "${userPoolClient.userPoolClientId}"
 };`;
 
     new cr.AwsCustomResource(this, "WriteDeviceSimConfig", {
@@ -911,11 +956,15 @@ export class SmartHomeStack extends cdk.Stack {
     // ========================
     // Deploy static assets
     // ========================
+    // prune:false preserves config.js — that file is written by a sibling
+    // AwsCustomResource and would otherwise be deleted on every deploy
+    // because it's not part of the dist/ sources below.
     new s3deploy.BucketDeployment(this, "DeployDeviceSim", {
       sources: [s3deploy.Source.asset(path.join(__dirname, "../../device-simulator/dist"))],
       destinationBucket: deviceSimBucket,
       distribution: deviceSimDistribution,
       distributionPaths: ["/*"],
+      prune: false,
     });
 
     new s3deploy.BucketDeployment(this, "DeployChatbot", {
@@ -923,6 +972,7 @@ export class SmartHomeStack extends cdk.Stack {
       destinationBucket: chatbotBucket,
       distribution: chatbotDistribution,
       distributionPaths: ["/*"],
+      prune: false,
     });
 
     new s3deploy.BucketDeployment(this, "DeployAdminConsole", {
@@ -930,6 +980,7 @@ export class SmartHomeStack extends cdk.Stack {
       destinationBucket: adminBucket,
       distribution: adminDistribution,
       distributionPaths: ["/*"],
+      prune: false,
     });
 
     new s3deploy.BucketDeployment(this, "DeploySkillErp", {
@@ -937,6 +988,7 @@ export class SmartHomeStack extends cdk.Stack {
       destinationBucket: skillErpBucket,
       distribution: skillErpDistribution,
       distributionPaths: ["/*"],
+      prune: false,
     });
 
     // ========================

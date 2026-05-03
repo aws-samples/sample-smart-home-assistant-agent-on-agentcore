@@ -39,7 +39,16 @@ export class MqttClient {
     this.connectionListeners.forEach((l) => l(connected));
   }
 
-  async connect(): Promise<void> {
+  /**
+   * idToken — optional Cognito User Pool idToken. When supplied, Identity Pool
+   * credentials are federated from the User Pool login (authenticated role),
+   * so the MQTT client subscribes/publishes as the signed-in user. When
+   * omitted the client falls back to the unauthenticated Identity Pool role
+   * (pre-auth visitors). After this change the device simulator always signs
+   * in first, so the token path is the only one exercised in practice; the
+   * unauth path is left as a defensive fallback.
+   */
+  async connect(idToken?: string): Promise<void> {
     const config = getConfig();
 
     if (!config.cognitoIdentityPoolId) {
@@ -49,10 +58,15 @@ export class MqttClient {
       return;
     }
 
-    // Fetch temporary credentials from Cognito Identity Pool
+    // Fetch temporary credentials from Cognito Identity Pool — authenticated
+    // if we have an idToken, otherwise the unauthenticated role.
+    const logins = idToken && config.cognitoUserPoolId
+      ? { [`cognito-idp.${config.region}.amazonaws.com/${config.cognitoUserPoolId}`]: idToken }
+      : undefined;
     const credentialsProvider = fromCognitoIdentityPool({
       identityPoolId: config.cognitoIdentityPoolId,
       clientConfig: { region: config.region },
+      logins,
     });
 
     const creds = await credentialsProvider();
@@ -127,13 +141,14 @@ export class MqttClient {
     setInterval(async () => {
       try {
         console.log("Refreshing Cognito credentials...");
-        const newCreds = await credentialsProvider();
-        // Reconnect with new credentials
+        await credentialsProvider();
+        // Reconnect with new credentials — re-thread the current idToken so
+        // the refreshed session stays authenticated as the same user.
         if (this.client) {
           this.client.stop();
           this.client = null;
         }
-        await this.connect();
+        await this.connect(idToken);
       } catch (e) {
         console.error("Failed to refresh credentials:", e);
       }

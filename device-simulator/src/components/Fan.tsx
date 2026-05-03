@@ -5,7 +5,9 @@ import { useI18n } from '../i18n';
 const SPEED_LABEL_KEYS = ['fan.speed.off', 'fan.speed.low', 'fan.speed.medium', 'fan.speed.high'];
 const SPIN_DURATIONS = ['0s', '3s', '1.5s', '0.6s'];
 
-const Fan: React.FC = () => {
+interface Props { userSub: string; }
+
+const Fan: React.FC<Props> = ({ userSub }) => {
   const [power, setPower] = useState(false);
   const [speed, setSpeed] = useState(0);
   const [oscillation, setOscillation] = useState(false);
@@ -45,10 +47,11 @@ const Fan: React.FC = () => {
     if (s === 0) setPower(false);
   };
 
-  // MQTT subscription
+  // MQTT subscription (per-user topic prefix)
   useEffect(() => {
+    if (!userSub) return;
     const mqtt = MqttClient.getInstance();
-    const topic = 'smarthome/fan/command';
+    const topic = `smarthome/${userSub}/fan/command`;
     const handler = (_topic: string, payload: any) => {
       switch (payload.action) {
         case 'setPower':
@@ -71,7 +74,7 @@ const Fan: React.FC = () => {
     };
     mqtt.subscribe(topic, handler);
     return () => mqtt.unsubscribe(topic, handler);
-  }, [speed]);
+  }, [speed, userSub]);
 
   const formatTime = (seconds: number): string => {
     const h = Math.floor(seconds / 3600);

@@ -7,6 +7,25 @@ const en: Record<string, string> = {
   // Common
   'common.on': 'ON',
   'common.off': 'OFF',
+  'app.signOut': 'Sign Out',
+
+  // Login
+  'login.title': 'Device Simulator',
+  'login.signIn': 'Sign In',
+  'login.signIn.subtitle': 'Sign in with your smart home account to control your simulated devices.',
+  'login.signUp': 'Sign Up',
+  'login.signUp.subtitle': 'Create a new account.',
+  'login.confirm': 'Confirm',
+  'login.confirm.subtitle': 'Enter the code emailed to you to finish creating your account.',
+  'login.username': 'Username',
+  'login.password': 'Password',
+  'login.email': 'Email',
+  'login.confirmCode': 'Verification code',
+  'login.enterUsername': 'Enter username',
+  'login.enterPassword': 'Enter password',
+  'login.noAccount': "Don't have an account?",
+  'login.hasAccount': 'Already have an account?',
+  'login.verificationSent': 'A verification code has been emailed to you.',
 
   // LED Matrix
   'led.title': 'LED Matrix',

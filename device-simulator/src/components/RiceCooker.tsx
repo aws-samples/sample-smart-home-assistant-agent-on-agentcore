@@ -33,7 +33,9 @@ const STATUS_LABEL_KEYS: Record<CookerStatus, string> = {
   done: 'rice.status.done',
 };
 
-const RiceCooker: React.FC = () => {
+interface Props { userSub: string; }
+
+const RiceCooker: React.FC<Props> = ({ userSub }) => {
   const [status, setStatus] = useState<CookerStatus>('idle');
   const [cookingMode, setCookingMode] = useState<CookingMode>('white_rice');
   const [timeRemaining, setTimeRemaining] = useState(0);
@@ -90,10 +92,11 @@ const RiceCooker: React.FC = () => {
     setTimeRemaining(0);
   };
 
-  // MQTT subscription
+  // MQTT subscription (per-user topic prefix)
   useEffect(() => {
+    if (!userSub) return;
     const mqtt = MqttClient.getInstance();
-    const topic = 'smarthome/rice_cooker/command';
+    const topic = `smarthome/${userSub}/rice_cooker/command`;
     const handler = (_topic: string, payload: any) => {
       switch (payload.action) {
         case 'start':
@@ -109,7 +112,7 @@ const RiceCooker: React.FC = () => {
     };
     mqtt.subscribe(topic, handler);
     return () => mqtt.unsubscribe(topic, handler);
-  }, []);
+  }, [userSub]);
 
   const formatTime = (seconds: number): string => {
     const m = Math.floor(seconds / 60);
