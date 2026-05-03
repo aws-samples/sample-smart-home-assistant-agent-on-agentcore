@@ -38,13 +38,14 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 
 | Subsystem | Technology | Purpose |
 |-----------|-----------|---------|
-| Device Simulator | React + TypeScript + MQTT | Visual simulation of 4 smart home devices |
-| Chatbot | React + TypeScript + HTTP POST | Natural-language interface to the AI agent; supports image attachments (≤3 images, ≤20 MB each) that route to a vision model |
-| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5 for text; Claude Haiku 4.5 for images) | Text chat via `POST /invocations`; image turns bypass Kimi and return the vision model's description directly |
-| AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws` |
-| Tool Access | AgentCore Gateway (MCP Server) + Lambda | Device discovery, command routing, KB query, and device control via MCP |
-| Admin Console | React + TypeScript + REST API | Agent Harness Management: skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation |
-| Skill ERP | React + TypeScript + REST API | End-user skill publishing: authors SKILL.md records, publishes to AgentCore Registry for curator approval |
+| Device Simulator | React + TypeScript + Cloudscape + MQTT + Cognito | Per-user authenticated visual simulation of 4 smart home devices; each user sees only their own scope via `smarthome/<userSub>/...` topics |
+| Chatbot | React + TypeScript + Cloudscape + HTTP POST | Natural-language interface to the AI agent. Fully Cloudscape-native UI (including bubbles/input), renders agent replies as markdown, supports image attachments (≤3 images, ≤20 MB each) that route to a vision model |
+| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5 default; per-user Bedrock model override) | Text chat via `POST /invocations`; wraps per-user MCP tools (control_device, discover_devices, query_knowledge_base) to inject the validated `user_id`; image turns bypass the text model and return the vision model's caption |
+| AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws`; finalized transcripts persisted to the same AgentCore Memory the text agent uses |
+| AI Agent (vision) | Claude Haiku 4.5 default (per-user multimodal model override) via Bedrock Converse | Captions uploaded images; captions injected as prior assistant messages so the text agent can answer follow-up questions |
+| Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
+| Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Management with AWS-Console-style left-nav: Discover (Overview, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations). Supports light/dark themes. |
+| Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AgentCore Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + **S3 Vectors** + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering. Vector store is the pay-per-vector S3 Vectors service (no fixed monthly floor). |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
@@ -116,13 +117,17 @@ R = Read/Subscribe   W = Write/Publish   V = Validate JWT   I = Invoke
 ### Flow 1: Device Command
 
 ```
-User (Chatbot)
+User (Chatbot, logged in — idToken carries Cognito sub)
     |
     | "Turn on the LED matrix to rainbow mode"
     v
 AgentCore Runtime (HTTP POST /invocations) --> Strands Agent (Kimi K2.5)
                                        |
-                                       | MCP Client call
+                                       | Agent wraps control_device / discover_devices so the
+                                       | JWT-validated `sub` is injected as `user_id` before
+                                       | the MCP call — LLM cannot forge this argument.
+                                       |
+                                       | MCP Client call (with user_id)
                                        v
                                 AgentCore Gateway (MCP Server)
                                        |
@@ -130,14 +135,15 @@ AgentCore Runtime (HTTP POST /invocations) --> Strands Agent (Kimi K2.5)
                                        v
                                 iot-control Lambda
                                        |
-                                       | iot-data:Publish
+                                       | Refuses requests without user_id.
+                                       | iot-data:Publish scoped to the caller's sub.
                                        v
                                 AWS IoT Core
-                                Topic: smarthome/led_matrix/command
+                                Topic: smarthome/<userSub>/led_matrix/command
                                        |
                                        | MQTT over WebSocket (SigV4)
                                        v
-                                Device Simulator (Browser)
+                                Device Simulator (Browser, same signed-in user)
                                 LedMatrix component receives:
                                 {"action":"setMode","mode":"rainbow"}
 ```
@@ -201,24 +207,29 @@ Strands Agent processes request
 ```
 Device Simulator (Browser)
     |
-    | Cognito Identity Pool (unauthenticated)
+    | 1. Cognito User Pool sign-in -> idToken (JWT with `sub`)
     v
-AWS STS (AssumeRoleWithWebIdentity)
+LoginPage (Cloudscape)
     |
-    | Temporary AWS credentials
+    | 2. Attach `smarthome-device-sim-client` IoT policy to this identity
+    |    (workaround: IoT refuses SigV4 MQTT over WS without an attached IoT policy)
+    v
+Cognito Identity Pool (authenticated, federated via User Pool login)
+    |
+    | 3. Temporary AWS credentials (authenticated role)
     v
 MqttClient.ts
     |
-    | MQTT5 over WebSocket with SigV4
-    | ClientId: "device-sim-{random}"
+    | 4. MQTT5 over WebSocket with SigV4
+    |    ClientId: "device-sim-{random}"
     v
 AWS IoT Core
     |
-    | Subscribe to:
-    |   smarthome/led_matrix/command
-    |   smarthome/rice_cooker/command
-    |   smarthome/fan/command
-    |   smarthome/oven/command
+    | 5. Subscribe (scoped to the signed-in user's own sub) to:
+    |      smarthome/<userSub>/led_matrix/command
+    |      smarthome/<userSub>/rice_cooker/command
+    |      smarthome/<userSub>/fan/command
+    |      smarthome/<userSub>/oven/command
     v
 Each device component receives
 commands and updates its UI state
@@ -353,32 +364,45 @@ Internet
 
 ### 6.1 MQTT Connection Strategy
 
-The device simulator runs entirely in the browser. It connects to AWS IoT Core using MQTT5 over WebSocket with SigV4 authentication, obtaining temporary credentials from a Cognito Identity Pool.
+The device simulator runs entirely in the browser. Users sign in with the shared Cognito User Pool (same one the chatbot uses) and the resulting idToken federates authenticated Identity Pool credentials for SigV4 MQTT.
 
 ```
 Browser
   |
-  +-> fromCognitoIdentityPool() -> temporary AWS credentials
+  +-> LoginPage (Cognito User Pool: signIn / signUp / confirm)
+  |     -> idToken (JWT with `sub` = user UUID)
   |
-  +-> new auth.StaticCredentialProvider({aws_access_id, aws_secret_key, aws_sts_token})
-  |     (browser build of aws-iot-device-sdk-v2 uses StaticCredentialProvider; refreshed every 45min)
+  +-> AttachPolicy(smarthome-device-sim-client) to the caller's Cognito identity
+  |     (workaround: IoT refuses SigV4 WS connects without an attached IoT policy,
+  |      even when IAM already allows iot:Connect)
+  |
+  +-> fromCognitoIdentityPool({ logins: { 'cognito-idp...': idToken } })
+  |     -> authenticated temporary AWS credentials
   |
   +-> Mqtt5Client (aws-iot-device-sdk-v2)
         |-> WebSocket SigV4 auth
         |-> clientId: "device-sim-{random}"
         |-> keepAlive: 30s
-        |-> auto-reconnect with re-subscribe
+        |-> auto-reconnect with re-subscribe, refresh every 45min
+        |-> subscribes to:  smarthome/<userSub>/{led_matrix,rice_cooker,fan,oven}/command
 ```
 
-**Note:** The aws-iot-device-sdk-v2 has different APIs for Node.js and browser bundles. The browser build exports `auth.StaticCredentialProvider` (not `auth.AwsCredentialsProvider.newStatic()`). We use `new auth.StaticCredentialProvider({aws_access_id, aws_secret_key, aws_sts_token})` with credentials fetched from `@aws-sdk/credential-providers`'s `fromCognitoIdentityPool()`, and refresh by reconnecting every 45 minutes. TypeScript uses `(auth as any).StaticCredentialProvider` since the Node.js type definitions don't include the browser API.
+**Note on the browser SDK:** The aws-iot-device-sdk-v2 has different APIs for Node.js and browser bundles. The browser build exports `auth.StaticCredentialProvider` (not `auth.AwsCredentialsProvider.newStatic()`). TypeScript uses `(auth as any).StaticCredentialProvider` since the Node.js type definitions don't include the browser API.
 
 **Key design decisions:**
-- **Singleton MQTT client**: All 4 device components share one `MqttClient` instance to avoid multiple WebSocket connections
-- **Unauthenticated Cognito access**: The device simulator does not require user login - it uses the Cognito Identity Pool's unauthenticated role for simplicity
-- **Topic convention**: `smarthome/{device_type}/command` where device_type is one of: `led_matrix`, `rice_cooker`, `fan`, `oven`
-- **All devices off by default**: Every device starts in the powered-off state when the page loads
-- **Auto-power-on**: Setting a mode, speed, temperature, or color via MQTT automatically powers on the device (e.g., `setMode` on LED Matrix also sets `power: true`), so the agent doesn't need to send a separate `setPower` command
-- **Layout**: LED Matrix occupies the left column; Rice Cooker, Fan, and Oven stack compactly on the right
+- **Authenticated access required**: The device simulator gates on Cognito sign-in. The unauthenticated Identity Pool role exists as a CDK remnant but the new client never uses it.
+- **Per-user MQTT topics**: All subscriptions and publishes use `smarthome/<userSub>/<device>/command`. Each user's browser sees only their own simulated devices.
+- **IoT AttachPolicy at login**: `ensureIotPolicyAttached()` runs on sign-in before the MQTT client starts. It attaches the `smarthome-device-sim-client` IoT policy (CDK-managed) to the user's Cognito identity ID. This is AWS's documented workaround for authenticated Cognito users getting `Connection refused: Not authorized` when trying to use MQTT over WebSockets.
+- **Singleton MQTT client**: All 4 device components share one `MqttClient` instance to avoid multiple WebSocket connections.
+- **All devices off by default**: Every device starts in the powered-off state when the page loads.
+- **Auto-power-on**: Setting a mode, speed, temperature, or color via MQTT automatically powers on the device (e.g., `setMode` on LED Matrix also sets `power: true`), so the agent doesn't need to send a separate `setPower` command.
+- **Layout**: LED Matrix occupies the left column; Rice Cooker, Fan, and Oven stack compactly on the right.
+
+#### Security model & known limitation
+
+Per-user isolation has two layers:
+- **Agent → Lambda path (strict)**: the `iot-control` Lambda publishes only on `smarthome/<user_id>/...`. The `user_id` comes from the agent's wrapper, which decodes it from the runtime-validated idToken — the LLM cannot forge it.
+- **Browser → IoT Core (best-effort)**: the authenticated Cognito IAM role currently allows IoT operations on `*` because mapping Identity Pool identity IDs back to User Pool subs is nontrivial. A determined user could subscribe to another user's topics with raw MQTT; closing that gap would require an IoT Core Policy keyed on a Cognito custom claim and is deferred as future hardening.
 
 ### 6.2 Device Components
 
@@ -472,11 +496,14 @@ Configuration is injected at deploy time via a `config.js` file served from S3:
 window.__CONFIG__ = {
   iotEndpoint: "a1b2c3d4e5f6g7-ats.iot.us-east-1.amazonaws.com",
   region: "us-east-1",
-  cognitoIdentityPoolId: "us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  cognitoIdentityPoolId: "us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  // Added when the device simulator adopted Cognito User Pool sign-in:
+  cognitoUserPoolId: "us-east-1_XXXXXXXXX",
+  cognitoClientId: "abcdef1234567890"
 };
 ```
 
-This approach avoids baking environment-specific values into the webpack bundle, enabling the same build to work across environments.
+This approach avoids baking environment-specific values into the webpack bundle, enabling the same build to work across environments. The CDK stack's `BucketDeployment` for the device-sim bundle uses `prune: false` so the `AwsCustomResource`-written `config.js` survives every deploy.
 
 ---
 
@@ -676,6 +703,26 @@ AWS IoT Core MQTT
 
 The MCP protocol allows the agent to dynamically discover available tools (device control actions) and their schemas from the gateway, then invoke them as needed.
 
+#### Tool-argument wrapping for per-user scoping
+
+Some backend tools need the caller's identity (KB retrieval, device control, device discovery). AgentCore Gateway's `client_context.custom` does **not** forward the caller's JWT claims to Lambda targets — it only passes Gateway metadata (`bedrockAgentCoreToolName`, target/gateway IDs). So the agent wraps these MCP tools with a thin Strands `@tool` on the client side:
+
+1. The agent decodes the user's `sub` from the runtime-validated idToken once per invocation.
+2. For `query_knowledge_base`, `control_device`, and `discover_devices`, it replaces the raw MCP tool with a wrapper of the same short name. The wrapper calls `mcp_client.call_tool_sync(name=<prefixed MCP tool name>)` and injects `user_id=<sub>` into the arguments.
+3. The LLM sees only the short name and the non-identity arguments. Whatever it tries to pass as `user_id` is overwritten by the wrapper before the Lambda call. Prompt-injection attacks can't escalate to another user's scope.
+4. The Lambda refuses any request that arrives without a `user_id` argument, so requests that bypass the wrapper fail fast.
+
+Tool suffixes to wrap are matched against both the bare name and the `<TargetName>___<suffix>` Gateway-prefixed form.
+
+#### Strands built-in tools
+
+In addition to MCP tools surfaced by the Gateway, the agent registers a small set of Strands `strands_tools` built-ins:
+
+- `http_request` — used by the `weather-lookup` skill (Open-Meteo geocode + forecast).
+- `file_write` — used by the `user-feedback` skill to persist records under `/mnt/workspace/feedback/`.
+
+Loaded lazily so the runtime still boots if `strands-agents-tools` is absent. Built-ins default to interactive consent prompts that have no place in a hosted runtime, so `BYPASS_TOOL_CONSENT=true` is set as a runtime environment variable. `agent_core_memory` is **not** auto-registered — it is a provider-style tool (`AgentCoreMemoryToolProvider`) that needs per-session instantiation, and the agent's session manager already persists turns to Memory.
+
 ### 8.4 Agent Directory Structure
 
 ```
@@ -695,7 +742,9 @@ agent/
 │   ├── rice-cooker-control/
 │   ├── fan-control/
 │   ├── oven-control/
-│   └── all-devices-on/   # Discovers devices then turns them on sequentially
+│   ├── all-devices-on/   # Discovers devices then turns them on sequentially
+│   ├── weather-lookup/   # Open-Meteo geocoder + forecast via http_request (reference skill)
+│   └── user-feedback/    # Persists JSON records under /mnt/workspace/feedback/ via file_write (reference skill)
 ├── tests/                # pytest unit tests (excluded from CodeZip deploy)
 ├── pyproject.toml        # Dependencies for AgentCore CodeZip packaging
 └── Dockerfile            # Optional, for local container testing
@@ -967,8 +1016,8 @@ S3: smarthome-skill-files-{accountId}
 | `POST` | `/skills/{userId}/{skillName}/files/upload-url` | Get presigned S3 upload URL |
 | `POST` | `/skills/{userId}/{skillName}/files/download-url` | Get presigned S3 download URL |
 | `DELETE` | `/skills/{userId}/{skillName}/files?path=` | Delete a skill file |
-| `GET` | `/settings/{userId}` | Get user settings (modelId) |
-| `PUT` | `/settings/{userId}` | Update user settings |
+| `GET` | `/settings/{userId}` | Get user settings (`modelId` + `visionModelId`) |
+| `PUT` | `/settings/{userId}` | Update user settings (either field, independently patchable) |
 | `GET` | `/sessions` | List all user runtime sessions |
 | `GET` | `/users` | List all Cognito users with groups |
 | `GET` | `/tools` | List all gateway tools (reads tool schemas from targets) |
@@ -981,18 +1030,23 @@ S3: smarthome-skill-files-{accountId}
 
 ### 8.8 Per-User Model Selection
 
-Administrators can assign a different LLM model to each user (or set a global default) via the Admin Console. The setting is stored in DynamoDB using a reserved key `skillName = "__settings__"`.
+Administrators can assign different LLM models to each user (or set a global default) via the Admin Console for **both** the text agent and the vision agent. Settings are stored in DynamoDB using a reserved key `skillName = "__settings__"`.
 
 **Storage format:**
 ```
 PK: userId (e.g., "zihangh@amazon.com" or "__global__")
 SK: "__settings__"
-modelId: "us.anthropic.claude-sonnet-4-6"
+modelId: "us.anthropic.claude-sonnet-4-6"          # text agent model
+visionModelId: "us.anthropic.claude-haiku-4-5-..."   # vision (multimodal) model
 ```
 
-**Resolution order:** User-specific setting > `__global__` setting > `MODEL_ID` env var (default: `moonshotai.kimi-k2.5`).
+`PUT /settings/{userId}` accepts either field independently — absent fields retain their existing values so callers can patch one without clobbering the other.
 
-**Available models** (shown as dropdown in Admin Console):
+**Resolution order (text):** user-specific `modelId` > `__global__` `modelId` > `MODEL_ID` env var (default: `moonshotai.kimi-k2.5`).
+
+**Resolution order (vision):** user-specific `visionModelId` > `__global__` `visionModelId` > `VISION_MODEL_ID` env var (default: `us.anthropic.claude-haiku-4-5-20251001-v1:0`). The agent reads this via `load_user_settings(actor_id)` and threads it into `vision.caption_images(..., model_id=...)`.
+
+**Available text models** (Admin Console dropdown):
 - Moonshot: Kimi K2.5, Kimi K2 Thinking
 - Claude 4.6: Sonnet, Opus
 - Claude 4.5: Sonnet, Opus, Haiku
@@ -1004,6 +1058,11 @@ modelId: "us.anthropic.claude-sonnet-4-6"
 - MiniMax: M2.5, M2.1, M2
 - Meta Llama: Llama 4 Maverick/Scout, Llama 3.3 70B
 - OpenAI: GPT OSS 120B/20B
+
+**Available vision models** (separate dropdown — only multimodal models that accept images in Bedrock Converse):
+- Claude: Haiku 4.5, Sonnet 4.5/4.6, Opus 4.5/4.6, 3.7 Sonnet, 3.5 Haiku
+- Nova: Pro, Lite
+- Qwen: Qwen3 VL 235B A22B
 
 ### 8.9 Fixed Session ID and Session Tracking
 
@@ -1318,24 +1377,29 @@ A key design challenge: React apps need environment-specific values (API endpoin
 
 ### 9.4 Admin Console Design
 
-The admin console is an independent React + TypeScript frontend app for managing agent skills. It follows the same deployment pattern as the device simulator and chatbot (S3 + CloudFront + config.js injection).
+The admin console is an independent React + TypeScript frontend app for managing the agent harness. It uses **Cloudscape Design System** (the same component library AWS uses for the AWS Console) with light/dark theme support; the main layout is Cloudscape `AppLayout` + `TopNavigation` + `SideNavigation`. Deployment follows the same pattern as the device simulator and chatbot (S3 + CloudFront + `config.js` injection).
 
 **Directory Structure:**
 
 ```
 admin-console/
 ├── src/
-│   ├── index.tsx            # React DOM entry point
-│   ├── App.tsx              # Auth routing + admin role gate
-│   ├── App.css              # Dark theme styles (matches chatbot)
+│   ├── index.tsx            # React DOM entry point; imports Cloudscape global styles + applies initial theme
+│   ├── App.tsx              # TopNavigation + AppLayout + SideNavigation shell, auth + role gate, theme toggle
+│   ├── App.css              # Minimal residual styles (most styling comes from Cloudscape tokens)
 │   ├── config.ts            # Runtime config (adminApiUrl, Cognito IDs)
+│   ├── theme/
+│   │   └── applyTheme.ts    # applyMode wrapper + localStorage persistence (key: admin.theme)
 │   ├── auth/
 │   │   ├── CognitoAuth.ts   # Sign in, session management, admin role check
-│   │   └── LoginPage.tsx    # Login form
+│   │   └── LoginPage.tsx    # Cloudscape Form / Input / Button login page
 │   ├── api/
-│   │   └── adminApi.ts      # REST client for admin API (skills, models, tool access, knowledge base, memories, sessions)
+│   │   ├── adminApi.ts      # REST client for admin API
+│   │   └── sanitizeActor.ts # Mirror of agent-side _sanitize_actor_id; resolves Memory actor IDs back to user emails
 │   └── components/
-│       └── AdminConsole.tsx  # 9-tab harness management (skills, knowledge base, models, agent prompt, tool access, integrations, sessions, memories, quality evaluation)
+│       ├── AdminConsole.tsx # Thin router — holds activeTab, shared error/success banners
+│       ├── ShellModal.tsx   # Remote-shell modal (Cloudscape Modal frame; ANSI terminal body stays custom)
+│       └── AnsiOutput.tsx   # ANSI color stream renderer used by ShellModal
 ├── public/
 │   ├── index.html           # HTML template with config.js loader
 │   └── config.js            # Runtime config placeholder (overwritten by CDK)
@@ -1346,20 +1410,28 @@ admin-console/
 
 **Key Features:**
 
-- **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see an "Access Denied" page.
-- **Nine tabs** for comprehensive agent harness management:
+- **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see a Cloudscape `Alert` "Access Denied" page.
+- **AWS-Console-style side navigation** with four collapsible sections (Discover / Build / Deploy / Assess) plus a Docs link. This replaces the previous top tab-bar layout and matches the AWS Console's IA.
+- **Light/Dark theme toggle** in the top-right, persisted to `localStorage` under `admin.theme`. Initial paint honors `prefers-color-scheme` on first visit.
+- **Fourteen pages** organised under those four sections:
 
-| Tab | Purpose |
-|-----|---------|
-| **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
-| **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
-| **Models** | Global default model + per-user model override table (priority: per-user > global > env var) |
-| **Agent Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
-| **Tool Access** | Per-user tool permissions via Cedar policies, Policy Engine mode toggle (ENFORCE/LOG_ONLY), and **Demo Links** column with one-click deep links to the chatbot (`?username=<email>` for login prefill) and device simulator for each user — optimized for admin-led demos |
-| **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AgentCore Registry with publisher info; details drawer shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.10. |
-| **Sessions** | Runtime session monitoring with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), **Remote Shell** button, and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` to the admin API so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears from the list immediately. Remote Shell opens a modal that streams shell commands into the runtime container via `InvokeAgentRuntimeCommand` (see §9.11). |
-| **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory |
-| **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles, and Cedar Policy Engine settings |
+| Section | Page | Purpose |
+|---|---|---|
+| Discover | **Overview** | Intro card + architecture-diagram placeholder |
+| Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AgentCore Registry with publisher info; details modal shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
+| Build | **Models** | Global default model + per-user model override table for both text agent (`modelId`) and vision agent (`visionModelId`); resolution priority: per-user > global > env var |
+| Build | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
+| Build | **Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
+| Build | **Tool Policy** | Per-user tool permissions. Lists built-in Strands/AgentCore tools (default-allowed) and Gateway-scanned tools (opt-in) side-by-side with Cloudscape `Badge`s tagging the source. Cedar policy enforcement with ENFORCE/LOG_ONLY toggle. |
+| Build | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory. Actor IDs are resolved back to the user's email via the sanitizer mirror. |
+| Build | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
+| Build | **Identity** | Registered-users table (Cognito User Pool) |
+| Deploy | **Instance Type** | Compute class configuration (MicroVM today, EC2 planned) |
+| Deploy | **Sessions** | Runtime session monitoring with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), **Remote Shell** button, and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears immediately. Remote Shell opens a modal that streams shell commands into the runtime container via `InvokeAgentRuntimeCommand` (see §9.10), including a row of example-command chips for common ops. |
+| Assess | **Agent Guardrails** | Links to AgentCore Evaluator + Bedrock Guardrails consoles |
+| Assess | **Observability** | Link to CloudWatch Gen-AI Observability |
+| Assess | **Evaluations** | Link to AgentCore Evaluations console |
+| (external) | **Docs** | Link to the public repo |
 
 **CDK Resources:**
 
@@ -1376,21 +1448,29 @@ admin-console/
 
 ### 9.5 Per-User Tool Permission Management
 
-Administrators can control which gateway tools each user is allowed to invoke via the Admin Console's **Users** tab.
+Administrators can control which tools each user is allowed to invoke via the Admin Console's **Tool Policy** tab (previously labelled "Tool Access"; same page, renamed in the side-nav).
+
+Two sources of tools are listed side-by-side, each tagged with a Cloudscape `Badge`:
+
+- **Built-in** — Strands SDK / AgentCore tools that ship with the runtime (`calculator`, `current_time`, `http_request`, `think`, `sleep`, `handoff_to_user`, `retrieve`, `file_read`, `agent_core_memory`, `agent_core_browser`, `agent_core_code_interpreter`). Default-allowed for every user when no explicit permission record exists.
+- **Gateway** — tools discovered from AgentCore Gateway targets (`control_device`, `discover_devices`, `query_knowledge_base`, etc.). Opt-in per user.
+
+`GET /tools` returns both sets in one response, each item tagged with `source: "builtin" | "gateway"`. The UI renders a Badge per tool so admins can distinguish runtime-local surface from gateway-routed surface.
 
 **Architecture:**
 
 ```
-Admin Console (Users tab)
+Admin Console (Tool Policy tab)
     |
     | 1. List Cognito users (GET /users)
-    | 2. List gateway tools (GET /tools)
+    | 2. List built-in + gateway tools (GET /tools)
     | 3. Load user permissions (GET /users/{userId}/permissions)
     | 4. Save permissions (PUT /users/{userId}/permissions)
     v
 admin-api Lambda
     |
     +--- Cognito ListUsers + AdminListGroupsForUser
+    +--- Curated Strands/AgentCore built-in tools list (defaults allowed)
     +--- AgentCore Control: ListGatewayTargets + GetGatewayTarget (tool schemas)
     +--- DynamoDB: user-tool mappings (userId, __permissions__)
     +--- AgentCore Policy Engine: Cedar per-user permit policies
@@ -2041,6 +2121,31 @@ button no longer pays a CloudFront round-trip to download the worklet.
 - **Bedrock control-plane warmup** via provisioned concurrency is not
   exposed by AgentCore Runtime at time of writing.
 
+#### Voice transcripts persisted to AgentCore Memory
+
+Nova Sonic emits `bidi_transcript_stream` events in two stages per
+utterance: `SPECULATIVE` then `FINAL`. The voice session handler
+forwards every transcript event to the browser for live display, AND,
+when `is_final=True`, also calls `persist_voice_transcript()` which
+writes the turn to the **same AgentCore Memory** (`MEMORY_SMARTHOMEMEMORY_ID`)
+and **same actor namespace** the text agent uses. Event payload:
+
+```
+{
+  "conversational": {
+    "role": "USER" | "ASSISTANT",
+    "content": { "text": "<the finalized transcript>" }
+  }
+}
+```
+
+Because text and voice share `MEMORY_ID`, `actor_id` (sanitized), and
+`session_id` (both derived from the Cognito `sub`), a follow-up text
+chat in the same session sees the voice turns as prior
+user/assistant messages. The write is best-effort — failures are
+logged and swallowed so a hiccup on the Memory API never kills the
+live voice stream.
+
 ### 9.8 Skill ERP & AgentCore Registry
 
 **Goal.** Give regular (non-admin) users a self-service surface to publish
@@ -2183,6 +2288,13 @@ button that opens a modal running a shell command inside the targeted
 AgentCore Runtime container and streaming stdout/stderr back live —
 functionally an SSH-style debug console for the `smarthome` and
 `smarthomevoice` runtimes.
+
+**Example-command chips.** The modal includes a row of one-click example
+commands useful for agent-runtime ops: list uploaded images under
+`/mnt/workspace/`, dump loaded skills, show memory/disk usage, list
+running processes, print agent env vars, tail recent logs, print
+Python + installed packages. Clicking a chip drops the command into the
+textarea so admins can tweak it before running.
 
 **Browser talks to AgentCore directly.** The modal calls
 `bedrock-agentcore:InvokeAgentRuntimeCommand` via
@@ -2402,21 +2514,22 @@ Currently returns a mock list of 4 devices. In production, this would query IoT 
 
 ### 11.1 Topic Hierarchy
 
+All device topics are now **per-user scoped**. `<userSub>` is the Cognito User Pool `sub` (UUID) of the signed-in user. The device simulator publishes and subscribes only under its own prefix, and the `iot-control` Lambda only publishes to the caller's prefix — derived from the agent-wrapped tool argument, not from anything the LLM can forge.
+
 ```
 smarthome/
-├── led_matrix/
-│   └── command      # Commands to LED matrix
-├── rice_cooker/
-│   └── command      # Commands to rice cooker
-├── fan/
-│   └── command      # Commands to fan
-└── oven/
-    └── command      # Commands to oven
+└── <userSub>/
+    ├── led_matrix/command    # Commands to that user's LED matrix
+    ├── rice_cooker/command   # Commands to that user's rice cooker
+    ├── fan/command           # Commands to that user's fan
+    └── oven/command          # Commands to that user's oven
 ```
+
+See §6.1 (Device Simulator MQTT Connection) and §8.3 (Tool Access via Gateway) for how `<userSub>` propagates from the browser's Cognito session and from the agent's validated idToken.
 
 ### 11.2 Command Message Schemas
 
-#### LED Matrix (`smarthome/led_matrix/command`)
+#### LED Matrix (`smarthome/<userSub>/led_matrix/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
@@ -2425,7 +2538,7 @@ smarthome/
 | `setBrightness` | `brightness`: 0-100 | `{"action":"setBrightness","brightness":75}` |
 | `setColor` | `color`: hex string | `{"action":"setColor","color":"#FF00FF"}` |
 
-#### Rice Cooker (`smarthome/rice_cooker/command`)
+#### Rice Cooker (`smarthome/<userSub>/rice_cooker/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
@@ -2433,7 +2546,7 @@ smarthome/
 | `stop` | (none) | `{"action":"stop"}` |
 | `keepWarm` | `enabled`: boolean | `{"action":"keepWarm","enabled":true}` |
 
-#### Fan (`smarthome/fan/command`)
+#### Fan (`smarthome/<userSub>/fan/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
@@ -2441,7 +2554,7 @@ smarthome/
 | `setSpeed` | `speed`: 0 (off), 1 (low), 2 (medium), 3 (high) | `{"action":"setSpeed","speed":2}` |
 | `setOscillation` | `enabled`: boolean | `{"action":"setOscillation","enabled":true}` |
 
-#### Oven (`smarthome/oven/command`)
+#### Oven (`smarthome/<userSub>/oven/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
