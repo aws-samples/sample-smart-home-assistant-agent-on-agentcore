@@ -705,6 +705,12 @@ def main():
         # Voice-mode env vars: Nova Sonic model + gateway ARN (welcome clip is
         # baked into the CodeZip, so no S3 path env var is needed).
         existing_env["NOVA_SONIC_MODEL_ID"] = "amazon.nova-2-sonic-v1:0"
+        # Strands built-in tools default to requiring interactive consent
+        # before file_write / http_request / shell side-effects. In a hosted
+        # runtime there is no user at a prompt to confirm, so we bypass the
+        # consent dialog. Risk is bounded because tool access is gated by the
+        # agent's wrapper and the skill definitions in DynamoDB.
+        existing_env["BYPASS_TOOL_CONSENT"] = "true"
         if gateway_arn:
             existing_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
         # Runtime auth mode: AWS_IAM (SigV4). The CUSTOM_JWT path on the

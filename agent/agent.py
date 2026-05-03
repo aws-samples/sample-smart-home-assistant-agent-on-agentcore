@@ -357,7 +357,28 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             else:
                 logger.warning("No user sub from JWT — device tools will hit Lambda without user scoping (likely to fail)")
 
-            all_tools = non_scoped_tools + wrapped_tools
+            # Surface a small set of Strands built-in tools so skills like
+            # weather-lookup (needs http_request) actually have the tool
+            # they reference. Imported lazily so the runtime still boots if
+            # strands_tools is absent. We intentionally do NOT register
+            # strands_tools.agent_core_memory — it's a provider-style tool
+            # (AgentCoreMemoryToolProvider) that needs per-session
+            # instantiation and does not load as a plain module. The
+            # session_manager already persists turns to Memory, so the
+            # user-feedback skill records its marker as conversation text.
+            builtin_tools = []
+            try:
+                from strands_tools import http_request as _sst_http_request
+                builtin_tools.append(_sst_http_request)
+            except Exception as e:
+                logger.warning(f"http_request built-in not available: {e}")
+            try:
+                from strands_tools import file_write as _sst_file_write
+                builtin_tools.append(_sst_file_write)
+            except Exception as e:
+                logger.warning(f"file_write built-in not available: {e}")
+
+            all_tools = non_scoped_tools + wrapped_tools + builtin_tools
 
             agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)
             return str(agent(prompt))
