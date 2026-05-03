@@ -6,10 +6,10 @@
 
 > **实现原理、架构图、协议细节** 请参见 [`docs/architecture-and-design.md`](docs/architecture-and-design.md)。本 README 专注于**部署和使用**。
 
-![architecture](docs/screenshots/architecture.drawio.png)
-![chatbot](docs/screenshots/smarthomeassistant-chat.png)
-![device simulator](docs/screenshots/smarthomeassistant-devices-v2.png)
-![admin console](docs/screenshots/smarthomeassistant-admin.png)
+![architecture](screenshots/architecture.drawio.png)
+![chatbot](screenshots/smarthomeassistant-chat.png)
+![device simulator](screenshots/smarthomeassistant-devices-v2.png)
+![admin console](screenshots/smarthomeassistant-admin.png)
 
 ## 前置条件
 
