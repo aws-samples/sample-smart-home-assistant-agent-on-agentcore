@@ -98,12 +98,14 @@ def _warning_from_rejections(rejections):
     return "Note: rejected " + "; ".join(parts) + "."
 
 
-def caption_images(images, user_prompt):
+def caption_images(images, user_prompt, model_id=None):
     """Return (caption_text, warnings) for the supplied images.
 
     - Empty caption is never returned; a placeholder is substituted so the
       caller can always construct a well-formed augmented prompt.
     - Bedrock failures after one retry also fall back to a placeholder.
+    - `model_id` is an optional per-user override read from DynamoDB
+      settings; falls back to the VISION_MODEL_ID env default.
     """
     valid_blocks, rejections = _validate_and_decode(images or [])
     warnings = _warning_from_rejections(rejections)
@@ -120,12 +122,14 @@ def caption_images(images, user_prompt):
         "content": [{"text": preface}, *valid_blocks],
     }]
 
+    effective_model = model_id or VISION_MODEL_ID
+
     attempts = 0
     last_err = None
     while attempts < 2:
         try:
             resp = _client().converse(
-                modelId=VISION_MODEL_ID,
+                modelId=effective_model,
                 messages=messages,
             )
             content = resp.get("output", {}).get("message", {}).get("content", [])

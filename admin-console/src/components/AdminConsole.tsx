@@ -139,6 +139,26 @@ const AVAILABLE_MODELS = [
   { id: 'openai.gpt-oss-20b-1:0', label: 'GPT OSS 20B' },
 ] as const;
 
+// Multimodal (vision-capable) Bedrock models offered to the vision agent.
+// Intentionally a narrower subset of AVAILABLE_MODELS — only models that
+// accept image inputs in Bedrock Converse. Admins pick any one per user;
+// empty string = use VISION_MODEL_ID env default (Claude Haiku 4.5).
+const VISION_MODELS = [
+  { id: '', label: '── Claude (multimodal) ──', disabled: true },
+  { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5' },
+  { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5' },
+  { id: 'us.anthropic.claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { id: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5' },
+  { id: 'us.anthropic.claude-opus-4-6-v1', label: 'Claude Opus 4.6' },
+  { id: 'us.anthropic.claude-3-7-sonnet-20250219-v1:0', label: 'Claude 3.7 Sonnet' },
+  { id: 'us.anthropic.claude-3-5-haiku-20241022-v1:0', label: 'Claude 3.5 Haiku' },
+  { id: '', label: '── Nova ──', disabled: true },
+  { id: 'us.amazon.nova-pro-v1:0', label: 'Nova Pro' },
+  { id: 'us.amazon.nova-lite-v1:0', label: 'Nova Lite' },
+  { id: '', label: '── Qwen (multimodal) ──', disabled: true },
+  { id: 'qwen.qwen3-vl-235b-a22b', label: 'Qwen3 VL 235B A22B' },
+] as const;
+
 interface MetadataEntry {
   key: string;
   value: string;
@@ -180,9 +200,13 @@ interface ModelsTabProps {
 const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, setError, setSuccess }) => {
   const [globalModelId, setGlobalModelId] = useState('');
   const [savedGlobalModelId, setSavedGlobalModelId] = useState('');
+  const [globalVisionModelId, setGlobalVisionModelId] = useState('');
+  const [savedGlobalVisionModelId, setSavedGlobalVisionModelId] = useState('');
   const [users, setUsers] = useState<CognitoUserInfo[]>([]);
   const [userModels, setUserModels] = useState<Record<string, string>>({});
   const [savedUserModels, setSavedUserModels] = useState<Record<string, string>>({});
+  const [userVisionModels, setUserVisionModels] = useState<Record<string, string>>({});
+  const [savedUserVisionModels, setSavedUserVisionModels] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const { t } = useI18n();
 
@@ -192,21 +216,28 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
       const globalSettings = await getSettings('__global__');
       setGlobalModelId(globalSettings.modelId || '');
       setSavedGlobalModelId(globalSettings.modelId || '');
+      setGlobalVisionModelId(globalSettings.visionModelId || '');
+      setSavedGlobalVisionModelId(globalSettings.visionModelId || '');
 
       const cognitoUsers = await listCognitoUsers();
       setUsers(cognitoUsers);
 
       const models: Record<string, string> = {};
+      const visionModels: Record<string, string> = {};
       for (const u of cognitoUsers) {
         try {
           const s = await getSettings(u.email || u.username || u.sub);
           models[u.sub] = s.modelId || '';
+          visionModels[u.sub] = s.visionModelId || '';
         } catch {
           models[u.sub] = '';
+          visionModels[u.sub] = '';
         }
       }
       setUserModels(models);
       setSavedUserModels({ ...models });
+      setUserVisionModels(visionModels);
+      setSavedUserVisionModels({ ...visionModels });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -219,8 +250,12 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
   const handleSaveGlobal = async () => {
     clearMessages();
     try {
-      await updateSettings('__global__', { modelId: globalModelId });
+      await updateSettings('__global__', {
+        modelId: globalModelId,
+        visionModelId: globalVisionModelId,
+      });
       setSavedGlobalModelId(globalModelId);
+      setSavedGlobalVisionModelId(globalVisionModelId);
       setSuccess(t('models.globalUpdated'));
     } catch (err: any) {
       setError(err.message);
@@ -231,9 +266,11 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     clearMessages();
     const userId = user.email || user.username || user.sub;
     const newModel = userModels[user.sub] || '';
+    const newVisionModel = userVisionModels[user.sub] || '';
     try {
-      await updateSettings(userId, { modelId: newModel });
+      await updateSettings(userId, { modelId: newModel, visionModelId: newVisionModel });
       setSavedUserModels((prev) => ({ ...prev, [user.sub]: newModel }));
+      setSavedUserVisionModels((prev) => ({ ...prev, [user.sub]: newVisionModel }));
       setSuccess(t('models.userUpdated').replace('{user}', user.email || user.username || ''));
     } catch (err: any) {
       setError(err.message);
@@ -256,6 +293,22 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
         : { value: (m as any).id as string, label: m.label }
     ),
   ];
+  const visionModelOptions = [
+    { value: '', label: t('models.notSet') },
+    ...VISION_MODELS.map((m, i) =>
+      (m as any).disabled
+        ? { value: `__vgroup__${i}`, label: m.label, disabled: true }
+        : { value: (m as any).id as string, label: m.label }
+    ),
+  ];
+  const userVisionModelOptions = [
+    { value: '', label: t('models.useGlobalDefault') },
+    ...VISION_MODELS.map((m, i) =>
+      (m as any).disabled
+        ? { value: `__vgroup__${i}`, label: m.label, disabled: true }
+        : { value: (m as any).id as string, label: m.label }
+    ),
+  ];
   const findOption = (opts: typeof modelOptions, value: string) =>
     opts.find((o) => o.value === value) ?? opts[0];
 
@@ -271,18 +324,32 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
           </CloudscapeHeader>
         }
       >
-        <SpaceBetween size="s" direction="horizontal">
-          <div style={{ minWidth: 280 }}>
-            <Select
-              selectedOption={findOption(modelOptions, globalModelId)}
-              onChange={({ detail }) => setGlobalModelId((detail.selectedOption.value as string) || '')}
-              options={modelOptions}
-            />
-          </div>
+        <SpaceBetween size="s">
+          <FormField label={t('models.textModelLabel')}>
+            <div style={{ minWidth: 320 }}>
+              <Select
+                selectedOption={findOption(modelOptions, globalModelId)}
+                onChange={({ detail }) => setGlobalModelId((detail.selectedOption.value as string) || '')}
+                options={modelOptions}
+              />
+            </div>
+          </FormField>
+          <FormField label={t('models.visionModelLabel')} description={t('models.visionModelHint')}>
+            <div style={{ minWidth: 320 }}>
+              <Select
+                selectedOption={findOption(visionModelOptions, globalVisionModelId)}
+                onChange={({ detail }) => setGlobalVisionModelId((detail.selectedOption.value as string) || '')}
+                options={visionModelOptions}
+              />
+            </div>
+          </FormField>
           <Button
             variant="primary"
             onClick={handleSaveGlobal}
-            disabled={globalModelId === savedGlobalModelId}
+            disabled={
+              globalModelId === savedGlobalModelId
+              && globalVisionModelId === savedGlobalVisionModelId
+            }
           >
             {t('models.save')}
           </Button>
@@ -334,6 +401,21 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             ),
           },
           {
+            id: 'visionModel',
+            header: t('models.colVisionModel'),
+            cell: (u) => (
+              <div style={{ minWidth: 240 }}>
+                <Select
+                  selectedOption={findOption(userVisionModelOptions, userVisionModels[u.sub] || '')}
+                  onChange={({ detail }) =>
+                    setUserVisionModels((prev) => ({ ...prev, [u.sub]: (detail.selectedOption.value as string) || '' }))
+                  }
+                  options={userVisionModelOptions}
+                />
+              </div>
+            ),
+          },
+          {
             id: 'actions',
             header: t('models.colActions'),
             minWidth: 120,
@@ -341,7 +423,10 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
               <Button
                 variant="primary"
                 onClick={() => handleSaveUserModel(u)}
-                disabled={(userModels[u.sub] || '') === (savedUserModels[u.sub] || '')}
+                disabled={
+                  (userModels[u.sub] || '') === (savedUserModels[u.sub] || '')
+                  && (userVisionModels[u.sub] || '') === (savedUserVisionModels[u.sub] || '')
+                }
               >
                 {t('models.save')}
               </Button>
@@ -1423,10 +1508,16 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     try {
       const perms = await getUserPermissions(getActorId(user));
       const allowed = perms.allowedTools || [];
-      setPermOriginal(allowed);
+      // If the user has no explicit permission record yet (empty list),
+      // default-allow every built-in tool per spec. Gateway-scanned tools
+      // stay unchecked by default — admins opt users in explicitly.
+      const initialAllowed = allowed.length === 0
+        ? gatewayTools.filter((t) => t.source === 'builtin').map((t) => t.name)
+        : allowed;
+      setPermOriginal(initialAllowed);
       const selections: Record<string, boolean> = {};
       for (const tool of gatewayTools) {
-        selections[tool.name] = allowed.includes(tool.name);
+        selections[tool.name] = initialAllowed.includes(tool.name);
       }
       setUserToolSelections(selections);
     } catch (err: any) {
@@ -2489,6 +2580,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                             }
                           />
                           <span className="perm-tool-name">{tool.name}</span>
+                          {tool.source === 'builtin' ? (
+                            <Badge color="green">{t('users.toolSourceBuiltin')}</Badge>
+                          ) : (
+                            <Badge color="blue">{t('users.toolSourceGateway')}</Badge>
+                          )}
                           <span className="perm-tool-desc">{tool.description}</span>
                           <span className="perm-tool-target">{tool.targetName}</span>
                         </label>

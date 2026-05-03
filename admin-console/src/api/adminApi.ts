@@ -130,6 +130,9 @@ export async function listUsers(): Promise<string[]> {
 export interface UserSettings {
   userId: string;
   modelId: string;
+  /** Optional per-user Bedrock multimodal model used by the vision captioning
+   *  pipeline. Empty string = use the global default. */
+  visionModelId?: string;
 }
 
 export async function getSettings(userId: string): Promise<UserSettings> {
@@ -147,7 +150,7 @@ export async function getSettings(userId: string): Promise<UserSettings> {
 
 export async function updateSettings(
   userId: string,
-  settings: { modelId: string }
+  settings: { modelId?: string; visionModelId?: string }
 ): Promise<void> {
   const headers = await authHeaders();
   const res = await fetch(
@@ -276,6 +279,8 @@ export interface GatewayTool {
   name: string;
   description: string;
   targetName: string;
+  /** Tagged by the admin API so the UI can group and default-check built-ins. */
+  source?: 'builtin' | 'gateway';
 }
 
 export interface UserPermissions {

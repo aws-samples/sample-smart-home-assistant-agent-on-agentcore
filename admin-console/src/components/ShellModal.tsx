@@ -9,6 +9,7 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import Modal from '@cloudscape-design/components/modal';
 import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 
 import AnsiOutput, { chunksToPlainText } from './AnsiOutput';
@@ -22,6 +23,20 @@ const MAX_TIMEOUT_SECONDS = 3600;
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const MIN_SESSION_ID_LEN = 33;
 const HISTORY_MAX = 20;
+
+// Example commands admins commonly need when inspecting an AgentCore
+// Runtime session. Keys map to i18n labels; the value is injected verbatim
+// into the command textarea when the chip is clicked.
+const EXAMPLE_COMMANDS: Array<{ key: string; command: string }> = [
+  { key: 'shell.examples.listImages', command: 'ls -la /mnt/workspace/ 2>/dev/null | head -40' },
+  { key: 'shell.examples.showSkills', command: 'ls -la /mnt/skills/ 2>/dev/null && echo --- && cat /mnt/skills/*.md 2>/dev/null | head -200' },
+  { key: 'shell.examples.memUsage', command: 'cat /proc/meminfo | head -5 && echo --- && ps -o pid,rss,cmd -e --sort=-rss | head -10' },
+  { key: 'shell.examples.processes', command: 'ps auxf --no-headers | head -20' },
+  { key: 'shell.examples.diskUsage', command: 'df -h / /tmp /mnt 2>/dev/null && echo --- && du -sh /tmp/* 2>/dev/null | sort -rh | head -10' },
+  { key: 'shell.examples.envVars', command: "env | grep -iE 'AWS_|MEMORY_|GATEWAY_|AGENT_' | sort" },
+  { key: 'shell.examples.recentLogs', command: 'tail -60 /var/log/agent.log 2>/dev/null || journalctl -n 60 --no-pager 2>/dev/null || dmesg | tail -60' },
+  { key: 'shell.examples.pythonVer', command: 'python3 --version && pip list 2>/dev/null | head -20' },
+];
 
 export interface ShellTarget {
   userId: string;
@@ -191,6 +206,22 @@ const ShellModal: React.FC<Props> = ({ target, onClose }) => {
           {t('shell.byteCounter')
             .replace('{bytes}', String(bytes))
             .replace('{max}', String(MAX_COMMAND_BYTES))}
+        </div>
+
+        <div className="shell-modal-row" style={{ flexWrap: 'wrap', gap: 6 }}>
+          <label className="shell-field-label" style={{ alignSelf: 'center' }}>
+            {t('shell.examplesLabel')}
+          </label>
+          {EXAMPLE_COMMANDS.map((ex) => (
+            <Button
+              key={ex.key}
+              variant="inline-link"
+              disabled={running}
+              onClick={() => setCommand(ex.command)}
+            >
+              {t(ex.key)}
+            </Button>
+          ))}
         </div>
 
         <div className="shell-modal-row">

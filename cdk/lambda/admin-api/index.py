@@ -253,33 +253,50 @@ def list_users(_event):
 
 
 def get_settings(event):
-    """GET /settings/{userId} — return user settings (e.g., modelId)."""
+    """GET /settings/{userId} — return user settings (modelId + visionModelId)."""
     path_params = event.get("pathParameters") or {}
     user_id = path_params.get("userId", "")
 
     resp = table.get_item(Key={"userId": user_id, "skillName": "__settings__"})
     item = resp.get("Item")
     if not item:
-        return response(200, {"userId": user_id, "modelId": ""})
-    return response(200, {"userId": item["userId"], "modelId": item.get("modelId", "")})
+        return response(200, {"userId": user_id, "modelId": "", "visionModelId": ""})
+    return response(200, {
+        "userId": item["userId"],
+        "modelId": item.get("modelId", ""),
+        "visionModelId": item.get("visionModelId", ""),
+    })
 
 
 def update_settings(event):
-    """PUT /settings/{userId} — update user settings (e.g., modelId)."""
+    """PUT /settings/{userId} — update user settings.
+
+    Accepts `modelId` (text agent) and/or `visionModelId` (image captioning).
+    Only fields present in the request body are updated; absent fields retain
+    their existing value so callers can patch one model without clobbering the
+    other.
+    """
     path_params = event.get("pathParameters") or {}
     user_id = path_params.get("userId", "")
     body = json.loads(event.get("body") or "{}")
 
-    model_id = body.get("modelId", "")
+    existing = table.get_item(Key={"userId": user_id, "skillName": "__settings__"}).get("Item") or {}
+    model_id = body.get("modelId", existing.get("modelId", ""))
+    vision_model_id = body.get("visionModelId", existing.get("visionModelId", ""))
     ts = now_iso()
 
     table.put_item(Item={
         "userId": user_id,
         "skillName": "__settings__",
         "modelId": model_id,
+        "visionModelId": vision_model_id,
         "updatedAt": ts,
     })
-    return response(200, {"message": f"Settings updated for '{user_id}'", "modelId": model_id})
+    return response(200, {
+        "message": f"Settings updated for '{user_id}'",
+        "modelId": model_id,
+        "visionModelId": vision_model_id,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -652,12 +669,36 @@ def list_cognito_users(_event):
     return response(200, {"users": users})
 
 
-def list_gateway_tools(_event):
-    """GET /tools — list all tools from AgentCore Gateway targets."""
-    if not GATEWAY_ID:
-        return response(500, {"error": "GATEWAY_ID not configured"})
+# Curated list of Strands SDK + AgentCore built-in tools we expose to admins
+# for per-user permissioning. Keep this short and safe-by-default: anything
+# that touches a shell, spawns an LLM, or browses the web is omitted unless
+# there's a clear operational reason an admin would enable it on a per-user
+# basis. Built-ins are allowed for every user by default — admins uncheck to
+# deny.
+BUILTIN_TOOLS = [
+    {"name": "calculator", "description": "Evaluate math expressions.", "targetName": "Strands built-in"},
+    {"name": "current_time", "description": "Return the current date/time, optionally in a requested time zone.", "targetName": "Strands built-in"},
+    {"name": "http_request", "description": "Perform an HTTP request to a public URL.", "targetName": "Strands built-in"},
+    {"name": "think", "description": "Give the model an extended scratchpad before answering.", "targetName": "Strands built-in"},
+    {"name": "sleep", "description": "Pause for a short interval (useful for staggering actions).", "targetName": "Strands built-in"},
+    {"name": "handoff_to_user", "description": "Escalate a conversation back to a human user.", "targetName": "Strands built-in"},
+    {"name": "retrieve", "description": "Retrieve documents from a configured knowledge base index.", "targetName": "Strands built-in"},
+    {"name": "file_read", "description": "Read a file from the runtime filesystem (e.g. /mnt/workspace/).", "targetName": "Strands built-in"},
+    {"name": "agent_core_memory", "description": "Read and write AgentCore Memory records programmatically.", "targetName": "AgentCore built-in"},
+    {"name": "agent_core_browser", "description": "Open a Chrome session in AgentCore Browser for automated web use.", "targetName": "AgentCore built-in"},
+    {"name": "agent_core_code_interpreter", "description": "Run Python snippets in an AgentCore Code Interpreter sandbox.", "targetName": "AgentCore built-in"},
+]
 
-    tools = []
+
+def list_gateway_tools(_event):
+    """GET /tools — list built-in Strands/AgentCore tools + tools discovered
+    on the AgentCore Gateway. Each entry is tagged with a `source` field:
+    `builtin` for the curated list above, `gateway` for everything scanned."""
+    tools = [dict(t, source="builtin") for t in BUILTIN_TOOLS]
+
+    if not GATEWAY_ID:
+        return response(200, {"tools": tools})
+
     try:
         targets_resp = agentcore_control.list_gateway_targets(
             gatewayIdentifier=GATEWAY_ID
@@ -692,11 +733,12 @@ def list_gateway_tools(_event):
                         "name": tool_def.get("name", ""),
                         "description": tool_def.get("description", ""),
                         "targetName": target_name,
+                        "source": "gateway",
                     })
             except Exception as e:
                 logger.warning(f"Failed to get target {target_id}: {e}")
     except Exception as e:
-        return response(500, {"error": f"Failed to list gateway tools: {str(e)}"})
+        logger.warning(f"Failed to list gateway tools (returning built-ins only): {e}")
 
     return response(200, {"tools": tools})
 
