@@ -23,6 +23,7 @@
 - [9.8. Skill ERP & AgentCore Registry](#98-skill-erp--agentcore-registry)
 - [9.9. Integration Registry & A2A Agents](#99-integration-registry--a2a-agents)
 - [9.10. Remote Shell Commands per Session](#910-remote-shell-commands-per-session)
+- [9.11. Browser Use — Live Agent Web Automation](#911-browser-use--live-agent-web-automation)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -43,6 +44,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5 default; per-user Bedrock model override) | Text chat via `POST /invocations`; wraps per-user MCP tools (control_device, discover_devices, query_knowledge_base) to inject the validated `user_id`; image turns bypass the text model and return the vision model's caption |
 | AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws`; finalized transcripts persisted to the same AgentCore Memory the text agent uses |
 | AI Agent (vision) | Claude Haiku 4.5 default (per-user multimodal model override) via Bedrock Converse | Captions uploaded images; captions injected as prior assistant messages so the text agent can answer follow-up questions |
+| AI Agent (browser) | `browser-use` + AgentCore Browser Tool (`aws.browser.v1`) driven by the text agent's `browse_web` Strands tool | Live web automation when the user asks something that needs a real site (product search, news, Wikipedia). Chatbot renders the live DCV stream + a Take/Release Control button; per-step screenshots land in the agent session's `/mnt/workspace/<sid>/browser/` (see §9.11). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
 | Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Management with AWS-Console-style left-nav: Discover (Overview, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations). Supports light/dark themes. |
 | Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AgentCore Registry for curator approval |
@@ -602,6 +604,17 @@ The response shape is the same for text and image turns; for image turns the bod
 
 The `ChatInterface` has a paperclip button next to the send button that opens a multi-select file picker (up to 3 images, ≤20 MB each, `image/png|jpeg|webp|gif`). Selected images render as 48×48 thumbnails above the textarea, each with a × to remove. On send, files are base64-encoded in parallel and included in the POST body's `images` array; the user bubble also renders the thumbnails alongside the text. Typing indicator and response rendering are identical to text-only turns.
 
+To the right of the chat column the `BrowserPanel` surfaces live agent
+browser sessions. It defaults to a 40-px-wide vertical rail ("Browser"
++ "Files" labels); clicking either expands the panel to 720 px on that
+tab. While the agent is typing the chatbot polls
+`/sessions?action=browser-active` every 1.5 s; once a session is running
+it renders the DCV live-view stream, a Take/Release Control toggle, and
+a Files tab that walks the text-agent runtime's `/mnt/workspace/<sid>/`
+via direct `InvokeAgentRuntimeCommand` SDK calls. A maximize button in
+the panel header flips to `flex: 1` so wide pages (Amazon, Wikipedia)
+render without horizontal clipping. See §9.11 for the full design.
+
 ### 7.3 Session Persistence
 
 - **Auth tokens**: Managed by Cognito SDK in `localStorage`. Auto-refreshed.
@@ -736,7 +749,9 @@ agent/
 │   ├── __init__.py
 │   └── session.py        # AgentCoreMemorySessionManager factory (follows agentcore CLI pattern)
 ├── tools/
-│   └── device_control.py # Fallback tool for local dev (Lambda invocation via boto3)
+│   ├── device_control.py # Fallback tool for local dev (Lambda invocation via boto3)
+│   └── browser_use.py    # `browse_web` Strands tool — drives AgentCore Browser Tool
+│                          # via `browser-use` + DCV (see §9.11)
 ├── skills/
 │   ├── led-control/      # SKILL.md with LED-specific instructions
 │   ├── rice-cooker-control/
@@ -744,7 +759,8 @@ agent/
 │   ├── oven-control/
 │   ├── all-devices-on/   # Discovers devices then turns them on sequentially
 │   ├── weather-lookup/   # Open-Meteo geocoder + forecast via http_request (reference skill)
-│   └── user-feedback/    # Persists JSON records under /mnt/workspace/feedback/ via file_write (reference skill)
+│   ├── user-feedback/    # Persists JSON records under /mnt/workspace/feedback/ via file_write (reference skill)
+│   └── browser-use/      # Auto-routes live-web queries to `browse_web` (see §9.11)
 ├── tests/                # pytest unit tests (excluded from CodeZip deploy)
 ├── pyproject.toml        # Dependencies for AgentCore CodeZip packaging
 └── Dockerfile            # Optional, for local container testing
@@ -1111,7 +1127,7 @@ The text agent calls this inside `invoke_agent()` on every request; the voice ag
 
 **Admin UI.** At Global scope the tab shows two side-by-side editors (Text / Voice). At per-user scope each editor splits into three rows: a read-only Global base view, an editable per-user addendum, and a collapsible "Effective Prompt Preview" that concatenates them the same way the agent does. Badges indicate the state (`Built-in Default`, `Custom Global`, `No User Override`, `User Override`), and the reset button is labelled `Revert to Default` at global scope or `Remove Override` at per-user scope, so the semantic difference between "wipe everyone's custom prompt" and "drop this user's addendum" is never ambiguous.
 
-**Transport (no new API Gateway methods).** The admin API carries prompts on the **existing** `/skills` routes to stay under the admin Lambda's 20 KB resource-policy cap (one extra method costs ~400 bytes × 2 stages). Requests are dispatched to prompt handlers when `skillName` starts with the reserved `__prompt_` prefix:
+**Transport (no new API Gateway methods).** The admin API carries prompts on the **existing** `/skills` routes to stay under the admin Lambda's 20 KB resource-policy cap. The CDK passes `allowTestInvoke: false` to the admin `LambdaIntegration` which suppresses AWS's per-method `/test-invoke-stage/*` permission (halving the policy — 20 KB → ~10 KB — so new routes and `browse_web`-related dispatch fit comfortably). Even with that headroom, the prompt API piggybacks on `/skills` and the browser-session-poll API piggybacks on `/sessions` via `?action=` dispatch because adding methods is still expensive and a fresh cold deploy would otherwise be within a few hundred bytes of the cap. Requests are dispatched to prompt handlers when `skillName` starts with the reserved `__prompt_` prefix:
 
 | Method | Path | Behavior when skillName matches `__prompt_*__` |
 |--------|------|------------------------------------------------|
@@ -2361,6 +2377,213 @@ and other admin-only actions live on an `admin`-group role.
 - The SDK module (~100 KB minified) is lazy-imported on modal open so it
   never loads for admins who don't use the feature.
 
+### 9.11 Browser Use — Live Agent Web Automation
+
+The agent can drive a real Chromium browser through the **AgentCore Browser
+Tool** and stream it live to the user. This turns "look up current info
+on the web" from a fragile `http_request` + HTML-scraping chain into an
+explicit, auditable browse with a live video feed the user can watch and
+even take over mid-run.
+
+**User-visible flow.** The user asks a natural-language question like
+*"What does example.com say right now?"* or *"淘宝上 iPhone 16 最便宜的是多少?"*
+The agent's system prompt + the `browser-use` skill's description route
+any live-web question to the `browse_web(goal)` tool. The tool opens a
+Chrome session on AgentCore, the chatbot's right-side panel shows the
+real browser streaming over DCV, per-step PNG screenshots land in the
+agent session's `/mnt/workspace/<sid>/browser/` (visible in the same
+panel's Files tab), and when the agent returns a summary it gets quoted
+into the chat reply.
+
+**Architecture:**
+
+```
+┌──────── Chatbot (React) ──────────────────────────────┐
+│  ChatInterface                                        │
+│   └─ BrowserPanel (right column, collapsed by default)│
+│       Collapsed state: vertical rail with             │
+│         • "Browser" → expand to Live view tab         │
+│         • "Files"   → expand to Files tab             │
+│       Expanded state: 720px default, maximize ⤢ to    │
+│         fill chat column; restore back to 720px.      │
+│       Live view tab:                                   │
+│         • DCV viewer (<script src=/dcvjs/dcv.js>)      │
+│         • "Take control" ↔ "Release control" button   │
+│         • Pause indicator when human drives           │
+│       Files tab:                                       │
+│         • Walks /mnt/workspace/<agentSessionId>/       │
+│         • Click file → download (blob URL)            │
+│  Polling loop (1.5 s while agent is typing):          │
+│    GET /sessions?action=browser-active&userId=X →     │
+│    {sessionId, liveViewUrl, status, startedAt, ...}   │
+│  Direct SDK calls (no Lambda hop):                    │
+│    InvokeAgentRuntimeCommand  — file list + download  │
+│    UpdateBrowserStream        — take/release control  │
+└──────────────┬────────────────────────────────────────┘
+               │ SigV4 (Identity Pool creds)
+               ▼
+┌──────── Text Agent Runtime (Strands) ──────────────────┐
+│  agent.py registers `browse_web` iff the user's        │
+│  effective skill set includes "browser-use".           │
+│                                                        │
+│  tools/browser_use.run_browse_web(goal, user_id, sid): │
+│    1. BrowserClient.start(identifier="aws.browser.v1") │
+│       → sessionId, ws_url, live_view_url, headers      │
+│    2. PutItem DDB smarthome-browser-sessions           │
+│         status="running", browserIdentifier, liveViewUrl│
+│    3. browser_use.Agent(task=goal, llm=ChatAWSBedrock, │
+│         browser_session=Browser(cdp_url=ws_url,        │
+│             browser_profile=BrowserProfile(headers)),  │
+│         register_new_step_callback=<screenshot each    │
+│             step to /mnt/workspace/<sid>/browser/>)    │
+│       .run()  (asyncio.wait_for 120s cap)              │
+│    4. Success: PutItem status="idle"  (NOT stopped —    │
+│       AgentCore reaps the session at 15 min idle cap;  │
+│       the user can keep driving via Take Control).     │
+│       Failure: BrowserClient.stop() + status="failed". │
+│    5. Return summary text (+breadcrumb about Files)    │
+└──────────────┬────────────────────────────────────────┘
+               │ SigV4 headers (bc.generate_ws_headers)
+               ▼
+┌──────── AgentCore Browser Tool ────────────────────────┐
+│  • aws.browser.v1 — AWS-managed Chrome, web-bot-auth   │
+│    on by default.                                      │
+│  • Automation stream  (CDP WebSocket) → browser-use    │
+│  • Live-view stream   (DCV over HTTPS) → chatbot       │
+└────────────────────────────────────────────────────────┘
+```
+
+**Core design choices:**
+
+- **Direct SDK from the browser, not through Lambda.** The chatbot calls
+  `InvokeAgentRuntimeCommand` and `UpdateBrowserStream` with Identity-Pool
+  credentials — same pattern as §9.10 Remote Shell. Adding those three
+  user-facing operations through the admin Lambda would have pushed its
+  resource-based policy past the 20 KB cap (see §9.4 note). The file
+  browser does a `bash -c 'ls -lA <path>'` and a `head -c CAP <path> |
+  base64 -w0` via `InvokeAgentRuntimeCommand` and parses the output
+  client-side — no per-file-operation Lambda code.
+- **Use `bedrock_agentcore.tools.browser_client.BrowserClient` rather
+  than raw boto3.** The helper builds SigV4-signed WebSocket upgrade
+  headers that Playwright must forward on the CDP handshake — a bare
+  `wss://` connect is rejected with HTTP 403 because the endpoint
+  requires AWS4 auth on the upgrade. Raw `start_browser_session` returns
+  a URL that is NOT accepted by Playwright.
+- **Explicit `Browser + BrowserProfile(headers=...)` not `BrowserSession
+  (headers=...)`.** The shortcut form silently drops the headers through
+  pydantic field merging in some `browser-use` builds; the explicit form
+  routes them through to `cdp_use.CDPClient(additional_headers=...)`
+  reliably.
+- **DDB row carries `browserIdentifier`** so `UpdateBrowserStream`
+  (human take-control) targets the correct browser. Rows without it fall
+  back to the default `aws.browser.v1`.
+- **Per-step screenshots.** `register_new_step_callback` fires after
+  every browse action; the callback writes a PNG to the text-agent
+  runtime's `/mnt/workspace/<agentSessionId>/browser/step-NNN-HH-MM-SS.png`.
+  Saving into the agent's session-storage (not the browser sandbox FS)
+  means the Files tab already shows them via the existing workspace-probe
+  path.
+- **Session isolation.** DDB primary key is `(userId, sessionId)`. The
+  chatbot polling endpoint enforces self-or-admin on the caller's Cognito
+  claim. Polls use `ConsistentRead` because AgentCore writes
+  `running → idle` within the tool's wall-clock cap and eventually-
+  consistent reads were missing the short window.
+- **Keep-alive after the tool returns.** On success the tool does **not**
+  call `BrowserClient.stop()` — the AgentCore session survives until its
+  `sessionTimeoutSeconds=900` (15 min) idle timeout. DDB row flips to
+  `status="idle"`; the chatbot keeps rendering the live view and the Take
+  Control toggle stays active. This lets the user finish the task by
+  hand — scroll the page, click a filter the agent didn't think of,
+  paste credentials — without a second tool invocation. Failure paths
+  still call `stop()` so a half-broken session doesn't burn compute.
+- **Fixed DCV canvas + scroll wrapper.** The `DcvViewer` component
+  requests `1280×800` via `requestDisplayLayout([{rect, primary}])` on
+  every `firstFrame` and `displayLayout` callback, and nests the DCV
+  `<div>` inside a `overflow: auto` wrapper. When the panel is narrower
+  than 1280 px or shorter than 800 px, browser-native scrollbars appear
+  (horizontal + vertical) so the user can reach any part of the page
+  without resizing.
+
+**Agent-vs-human control toggle.** `BrowserClient.update_stream(
+"DISABLED")` severs the CDP WebSocket; the browser-use loop inside the
+tool errors out on its next action and the tool returns
+`"Browsing failed: ..."`. From the user's perspective the DCV stream
+stays alive and they can drive the browser manually (mouse/keyboard
+forwarded through DCV). Releasing re-enables the automation stream but
+since the tool has already returned, practical use is "take control to
+finish what the agent started, then run a new prompt." When the tool
+exits successfully without the user ever taking control, the DDB row
+is `idle` and the same Take Control button remains clickable for the
+15-minute session lifetime — no distinction between "agent was
+interrupted" and "agent finished on its own".
+
+**Default-collapsed panel + maximize.** The panel renders by default as a
+40-px-wide vertical rail so the chat column remains the focus. Clicking
+either "Browser" or "Files" expands the panel to 720 px on that tab. A
+`⤢` button in the header flips the panel to `flex: 1` (fills the chat
+column's remaining horizontal space) for reading full Amazon / Wikipedia
+pages; `⤡` restores the 720 px default. The `×` button collapses the
+panel back to the rail (it does not hide the rail itself — the rail is
+always present, so re-expanding is always one click). Rail labels read
+bottom-to-top via `writing-mode: vertical-rl` (standard for right-edge
+IDE-style tab rails).
+
+**Welcome-screen prompt chips grouped by capability.** The empty chat
+state surfaces five labelled groups of starter prompts so users discover
+the agent's surface area without reading docs:
+
+- **Smart devices** — device discovery, power, LED/fan/oven/rice modes
+  (`discover_devices` + `control_device` MCP tools)
+- **Knowledge base** — product manuals, presets, troubleshooting codes
+  (`query_knowledge_base` MCP tool → Bedrock KB over S3 Vectors)
+- **Weather** — geocode + forecast for a free-text place
+  (`weather-lookup` skill → `http_request` → Open-Meteo)
+- **Live web browser** — `example.com`, shopping search, Wikipedia,
+  current-IP lookups (`browser-use` skill → `browse_web` tool)
+- **Image analysis** — attach-image-then-ask flow (vision bypass path,
+  see §8.11)
+
+**Skill auto-trigger.** `agent/skills/browser-use/SKILL.md`'s
+`description` frontmatter explicitly enumerates trigger phrasings ("look
+up", "search on X", "check current", "find online", product searches,
+news headlines, current prices) so Kimi invokes `browse_web` without the
+user naming the tool. The skill is included in the default seed list;
+per-user overrides in `Admin Console → Skills` can remove or rename it.
+
+**DynamoDB table `smarthome-browser-sessions`:**
+
+| attr                | type | note                                               |
+| ------------------- | ---- | -------------------------------------------------- |
+| `userId` (PK)       | S    | Cognito email / username                           |
+| `sessionId` (SK)    | S    | AgentCore browser session id (ULID)                |
+| `agentSessionId`    | S    | Parent text-agent session id                       |
+| `browserIdentifier` | S    | `aws.browser.v1` (or a custom browser ARN)         |
+| `liveViewUrl`       | S    | SigV4-presigned URL (5 min expiry)                 |
+| `status`            | S    | `running` (tool actively driving) / `idle` (tool done, browser kept alive for the user) / `failed` |
+| `goal`              | S    | First 200 chars of the user-visible goal           |
+| `startedAt`         | S    | ISO8601                                            |
+| `endedAt`           | S    | Optional — set on failed only (idle rows stay open) |
+| `lastError`         | S    | Optional — truncated to 500 chars                  |
+| `ttl`               | N    | Epoch seconds, +1h; row auto-expires               |
+
+**IAM.** Two roles gain additional permissions:
+
+- **Text-agent runtime role** (`AgentCore-smarthome-*`): granted
+  `bedrock-agentcore:*` on `*` (tightened to `Start/Stop/Get/List
+  BrowserSession + UpdateBrowserStream + InvokeBrowser + UseBrowser`
+  didn't work — the WebSocket upgrade itself needs a broader grant)
+  plus DDB read/write on `smarthome-browser-sessions`.
+- **Cognito authenticated role** (`SmartHomeAssistantStack-CognitoAuthRole*`):
+  appended `bedrock-agentcore:UpdateBrowserStream` alongside the
+  existing `InvokeAgentRuntime* + InvokeAgentRuntimeCommand` grants.
+
+**Dependencies.** `agent/pyproject.toml` adds `browser-use>=0.1.40` and
+`playwright>=1.50`. Both ride along with the runtime's CodeZip through
+the agentcore-CLI scaffold. The chatbot ships the Amazon **DCV Web
+Client SDK** under `public/dcvjs/`; it is EULA-licensed and fetched on
+every deploy by `scripts/01-install-deps.sh` from a public AWS
+CloudFront URL (not redistributed in this repo).
+
 ---
 
 ## 10. API Reference
@@ -2422,6 +2645,28 @@ Special: `{"prompt": "__warmup__"}` returns `{"status": "warmup_ok"}` without in
 #### GET /ping
 
 Health check endpoint. Returns 200 when the runtime is healthy.
+
+#### Admin-API `/sessions?action=browser-*` (chatbot-facing)
+
+The chatbot polls `GET /sessions?action=browser-active&userId=<email>` to
+surface the user's live browser session in the right-side panel. This
+endpoint piggybacks on the existing admin `/sessions` route (the admin
+Lambda's resource-based policy is at the 20 KB cap — see §9.4 — so we
+dispatch by `?action=` rather than add a new API Gateway method). The
+handler enforces self-or-admin against the caller's Cognito claim:
+non-admin callers may only query their own `userId`.
+
+- **Request:** `Authorization: Bearer <idToken>`; query params `action`
+  (one of `browser-active`), `userId`.
+- **Response:** the latest DDB row (any status) sorted by `startedAt`
+  descending, using `ConsistentRead` to avoid missing the brief
+  `running` window. Empty `{}` when the user has never browsed.
+
+Workspace file browsing and browser take/release control do **not** go
+through the Lambda; the chatbot calls `bedrock-agentcore:
+InvokeAgentRuntimeCommand` and `bedrock-agentcore:UpdateBrowserStream`
+directly with Identity-Pool credentials (same pattern as §9.10 Remote
+Shell).
 
 ### 10.2 AgentCore Gateway (MCP Server)
 
@@ -2620,8 +2865,19 @@ TypeScript (TSX) -> ts-loader -> Webpack 5 -> dist/
                                      |
                                      +-> CSS: style-loader + css-loader
                                      +-> HTML: html-webpack-plugin
+                                     +-> copy-webpack-plugin → dist/dcvjs/
                                      +-> Output: bundle.[hash].js + index.html
 ```
+
+The chatbot ships the **Amazon DCV Web Client SDK** under `public/dcvjs/`
+for the BrowserPanel live-view feature (§9.11). The SDK is **not**
+committed to this repo (Amazon DCV EULA terms); `scripts/01-install-deps.sh`
+downloads a fresh copy from a public AWS CloudFront URL on every deploy
+before the webpack build. Once present under `public/dcvjs/`, Webpack's
+static-asset copy plugin ships it into `dist/dcvjs/` alongside the bundle.
+A fresh clone that skips the install script will build successfully but
+the live-view panel will fall back to a "Failed to load /dcvjs/dcv.js"
+error state.
 
 Both apps use content-hash filenames for cache busting via CloudFront.
 

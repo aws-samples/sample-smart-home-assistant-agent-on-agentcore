@@ -797,7 +797,10 @@ def main():
                 {
                     "Effect": "Allow",
                     "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
-                    "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                    "Resource": [
+                        f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                        f"arn:aws:dynamodb:{REGION}:{account_id}:table/smarthome-browser-sessions",
+                    ],
                 },
                 {
                     "Effect": "Allow",
@@ -811,6 +814,21 @@ def main():
                         "bedrock:InvokeModelWithBidirectionalStream",
                         "bedrock:InvokeModelWithResponseStream",
                         "bedrock:InvokeModel",
+                    ],
+                    "Resource": "*",
+                },
+                {
+                    # AgentCore Browser Tool — browse_web starts, drives, and
+                    # stops browser sessions. The APIs live on the data-plane
+                    # (bedrock-agentcore), not the control-plane. We grant the
+                    # full bedrock-agentcore:* because the browser-automation
+                    # CDP WebSocket upgrade is authorised by AWS via IAM but
+                    # does not surface as a single action name — restricting
+                    # to explicit actions caused the upgrade to be rejected
+                    # with HTTP 403. Scope is bounded to the service.
+                    "Effect": "Allow",
+                    "Action": [
+                        "bedrock-agentcore:*",
                     ],
                     "Resource": "*",
                 },
@@ -1032,16 +1050,30 @@ def main():
                 PolicyName="AgentCoreRuntimeInvoke",
                 PolicyDocument=json.dumps({
                     "Version": "2012-10-17",
-                    "Statement": [{
-                        "Effect": "Allow",
-                        "Action": [
-                            "bedrock-agentcore:InvokeAgentRuntime",
-                            "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
-                            "bedrock-agentcore:InvokeAgentRuntimeCommand",
-                        ],
-                        # Wildcard covers endpoint qualifiers (e.g. /DEFAULT).
-                        "Resource": invoke_resources,
-                    }],
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "bedrock-agentcore:InvokeAgentRuntime",
+                                "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                                "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                            ],
+                            # Wildcard covers endpoint qualifiers (e.g. /DEFAULT).
+                            "Resource": invoke_resources,
+                        },
+                        {
+                            # UpdateBrowserStream is how the chatbot's "Take
+                            # control / Release control" toggle flips the
+                            # automation stream ENABLED↔DISABLED for a live
+                            # browser session. Called directly from the
+                            # browser, same pattern as InvokeAgentRuntimeCommand.
+                            "Effect": "Allow",
+                            "Action": [
+                                "bedrock-agentcore:UpdateBrowserStream",
+                            ],
+                            "Resource": "*",
+                        },
+                    ],
                 }),
             )
             print(f"  Granted runtime-invoke on {len(invoke_resources) // 2} runtime(s) to Cognito auth role {cognito_auth_role_name}")
@@ -1066,6 +1098,7 @@ def main():
                 "COGNITO_USER_POOL_ID": outputs.get("UserPoolId", ""),
                 "GATEWAY_ID": gateway_id,
                 "MEMORY_ID": memory_id,
+                "BROWSER_SESSIONS_TABLE_NAME": "smarthome-browser-sessions",
             }
             # Preserve SKILL_FILES_BUCKET from CDK stack
             skill_files_bucket = outputs.get("SkillFilesBucketName", "")
@@ -1338,6 +1371,7 @@ def main():
   cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
   agentRuntimeArn: "{runtime_arn}",
   voiceAgentRuntimeArn: "{voice_runtime_arn}",
+  adminApiUrl: "{outputs.get('AdminApiUrl', '')}",
   region: "{REGION}"
 }};"""
         print("Updating chatbot config.js...")

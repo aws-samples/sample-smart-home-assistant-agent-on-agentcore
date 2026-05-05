@@ -52,6 +52,17 @@ ALLOWED_FILE_DIRS = {"scripts", "references", "assets"}
 SKILL_NAME_RE = re.compile(r"^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$")
 
 
+def _json_default(o):
+    # DynamoDB returns integer/float numbers as Decimal, which json.dumps
+    # can't serialize out of the box. Convert to int when exact, else float.
+    from decimal import Decimal
+    if isinstance(o, Decimal):
+        return int(o) if o == o.to_integral_value() else float(o)
+    if isinstance(o, set):
+        return list(o)
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def response(status_code, body):
     """Return an API Gateway proxy response with CORS headers."""
     return {
@@ -62,7 +73,7 @@ def response(status_code, body):
             "Access-Control-Allow-Headers": "Content-Type,Authorization",
             "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
         },
-        "body": json.dumps(body),
+        "body": json.dumps(body, default=_json_default),
     }
 
 
@@ -71,6 +82,27 @@ def check_admin(event):
     claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
     groups = claims.get("cognito:groups", "")
     return "admin" in groups
+
+
+def _caller_id(event) -> str:
+    """Return the caller's stable identifier used as DDB userId.
+
+    The agent and the chatbot both key DDB rows by email (falling back to the
+    Cognito username / sub when email is absent). This helper mirrors that
+    resolution so self-access checks on user-facing routes agree with how
+    rows were written.
+    """
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+    return claims.get("email") or claims.get("cognito:username") or claims.get("sub") or ""
+
+
+def _require_self_or_admin(event, target_user_id: str):
+    """Return None if caller may act as `target_user_id`, else an error response."""
+    if check_admin(event):
+        return None
+    if _caller_id(event) == target_user_id:
+        return None
+    return response(403, {"error": "Forbidden: caller is not target user or admin"})
 
 
 def now_iso():
@@ -1694,17 +1726,69 @@ def list_a2a_agents(_event):
 
 
 # ---------------------------------------------------------------------------
+# Browser sessions / workspace files (user-facing; chatbot polls these)
+# ---------------------------------------------------------------------------
+
+BROWSER_SESSIONS_TABLE_NAME = os.environ.get("BROWSER_SESSIONS_TABLE_NAME", "smarthome-browser-sessions")
+
+
+def _browser_sessions_table():
+    return dynamodb.Table(BROWSER_SESSIONS_TABLE_NAME)
+
+
+def handle_browser_sessions_active(event):
+    params = event.get("queryStringParameters") or {}
+    user_id = params.get("userId", "")
+    if not user_id:
+        return response(400, {"error": "userId required"})
+    guard = _require_self_or_admin(event, user_id)
+    if guard:
+        return guard
+
+    t = _browser_sessions_table()
+    # Return the row with the most recent startedAt (any status). The sort
+    # key is sessionId (a ULID), not time, so we can't rely on DDB ordering;
+    # fetch the last ~20 partitions and pick the highest startedAt client
+    # side. ConsistentRead is required because the agent writes
+    # `running` → `completed` within ~30s and eventually-consistent reads
+    # were missing the brief running window entirely.
+    resp = t.query(
+        KeyConditionExpression=Key("userId").eq(user_id),
+        Limit=20,
+        ConsistentRead=True,
+    )
+    items = resp.get("Items", [])
+    if not items:
+        return response(200, {})
+    items.sort(key=lambda i: i.get("startedAt", ""), reverse=True)
+    return response(200, items[0])
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
 def handler(event, context):
     logger.info("Event: %s", json.dumps(event, default=str))
 
-    if not check_admin(event):
-        return response(403, {"error": "Forbidden: admin group required"})
-
     method = event.get("httpMethod", "")
     resource = event.get("resource", "")
+
+    # User-facing browser session lookup: chatbot polls this during an
+    # agent turn. We piggyback on the existing GET /sessions route and
+    # dispatch by action= because the admin Lambda's auto-generated resource
+    # policy is already at the 20 KB API Gateway cap (same reason prompts
+    # reuse /skills/{userId}/{skillName}). Workspace file browsing does NOT
+    # route through this Lambda — per arch §9.10 the chatbot calls
+    # InvokeAgentRuntimeCommand directly with Identity Pool credentials.
+    if resource == "/sessions" and method == "GET":
+        action = (event.get("queryStringParameters") or {}).get("action", "")
+        if action == "browser-active":
+            return handle_browser_sessions_active(event)
+        # Fall through to the admin-gated list_sessions below if no action=.
+
+    if not check_admin(event):
+        return response(403, {"error": "Forbidden: admin group required"})
 
     # User & tool permission routes
     if resource == "/users" and method == "GET":

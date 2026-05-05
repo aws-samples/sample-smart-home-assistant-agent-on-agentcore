@@ -15,6 +15,8 @@ import { getIdToken, getAwsCredentials } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { VoiceClient } from '../voice/VoiceClient';
 import { signedInvocationsFetch, presignWsUrl } from '../voice/sigv4';
+import BrowserPanel from './BrowserPanel';
+import { fetchActiveBrowserSession, BrowserSessionInfo } from '../api/browserSessions';
 
 const CUSTOM_AUTH_HEADER = 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken';
 
@@ -74,6 +76,23 @@ const ChatInterface: React.FC = () => {
     Array<{ file: File; previewUrl: string; id: string }>
   >([]);
   const [imageErrors, setImageErrors] = useState<string[]>([]);
+  const [browserSession, setBrowserSession] = useState<BrowserSessionInfo | null>(null);
+  // The user identifier used for /browser-sessions polling — same resolution
+  // rule as the runtime (email → cognito:username → sub). Captured on the
+  // first sendMessage so the polling effect has a stable value.
+  const [browserUserId, setBrowserUserId] = useState<string | null>(null);
+  const [browserAgentSessionId, setBrowserAgentSessionId] = useState<string | null>(null);
+  // The Browser panel is always rendered on the right as a narrow
+  // vertical rail; clicking either rail label expands it into the full
+  // 720px view on that tab. The ✕ in the expanded panel only collapses
+  // back to the rail, so the user always has one-click re-entry.
+  const [browserPanelExpanded, setBrowserPanelExpanded] = useState(false);
+  const [browserPanelTab, setBrowserPanelTab] = useState<'live' | 'files'>('live');
+  // Timestamp of the most recent sendMessage — used by the polling effect
+  // to drop any DDB rows from previous runs (startedAt < this) so the
+  // panel doesn't render a dead session while waiting for the new
+  // tool call to write its `running` row.
+  const sendStartAtRef = useRef<number>(0);
   const { t } = useI18n();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -167,6 +186,72 @@ const ChatInterface: React.FC = () => {
     })();
   }, []);
 
+  // Capture the logged-in user's id + sessionId on mount. We retry a few
+  // times because Cognito's getIdToken() can race its own refresh on the
+  // very first page load (we saw the browser report a CORS error that was
+  // actually a 401 on a not-yet-refreshed token).
+  useEffect(() => {
+    let cancelled = false;
+    const resolveUser = async (attempt = 0): Promise<void> => {
+      try {
+        const token = await getIdToken();
+        if (cancelled) return;
+        const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
+        const uid = decoded.email || decoded['cognito:username'] || decoded.sub;
+        setBrowserUserId(uid);
+        setBrowserAgentSessionId(`user-session-${decoded.sub}`);
+      } catch {
+        if (cancelled || attempt > 5) return;
+        setTimeout(() => resolveUser(attempt + 1), 500);
+      }
+    };
+    resolveUser();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Poll /sessions?action=browser-active while the agent is thinking, and
+  // keep ticking for a short "tail" window after the turn ends so the
+  // brief `running` DDB row (which is overwritten by `completed` within
+  // ~30s of the tool finishing) is always captured.
+  useEffect(() => {
+    if (!browserUserId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await fetchActiveBrowserSession(browserUserId);
+        if (cancelled) return;
+        if (!s) return;
+        // Drop rows from previous runs. Give a 5s grace before sendStartAt
+        // to cover clock skew between browser and agent runtime.
+        if (sendStartAtRef.current > 0 && s.startedAt) {
+          const startedMs = new Date(s.startedAt).getTime();
+          if (startedMs < sendStartAtRef.current - 5000) return;
+        }
+        setBrowserSession(s);
+        // Don't auto-expand the panel — the rail is always visible and
+        // the user decides when to open. A running session surfaces via
+        // the polled row reaching BrowserPanel; no parent-state toggle
+        // is needed here.
+      } catch {
+        // Transient auth / network errors are ignored.
+      }
+    };
+    if (isTyping) {
+      tick();
+      const iv = window.setInterval(tick, 1500);
+      return () => {
+        cancelled = true;
+        window.clearInterval(iv);
+      };
+    }
+    // Not typing: do one final catch-up tick so the panel surfaces even
+    // when the whole browse_web tool completes before React has re-run
+    // this effect (happens when Kimi replies faster than the tool's
+    // running → completed DDB write transition).
+    tick();
+    return () => { cancelled = true; };
+  }, [isTyping, browserUserId]);
+
   const addImages = useCallback((incoming: FileList | File[]) => {
     // Validate synchronously against the CURRENT state, then apply one
     // pure setState updater at the end. Mixing validation with the updater
@@ -231,6 +316,12 @@ const ChatInterface: React.FC = () => {
     setImageErrors([]);
     setIsTyping(true);
     setError('');
+    // Clear stale browser-session state so the panel doesn't show a
+    // completed row from a previous run while polling races the new
+    // tool call's DDB write. The polling effect below also guards on
+    // sendStartAt so returned rows older than this send are ignored.
+    setBrowserSession(null);
+    sendStartAtRef.current = Date.now();
 
     try {
       const config = getConfig();
@@ -239,6 +330,8 @@ const ChatInterface: React.FC = () => {
       const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
       const userId = decoded.email || decoded['cognito:username'] || decoded.sub;
       const sessionId = `user-session-${decoded.sub}`;
+      setBrowserUserId(userId);
+      setBrowserAgentSessionId(sessionId);
 
       let images: Array<{ mediaType: string; data: string }> | undefined;
       if (snapshotFiles.length > 0) {
@@ -459,17 +552,57 @@ const ChatInterface: React.FC = () => {
     else startVoice();
   };
 
-  const suggestionChips = [
-    { label: t('chat.chip.checkDevices'), prompt: t('chat.chip.checkDevices.prompt') },
-    { label: t('chat.chip.turnOnAll'), prompt: t('chat.chip.turnOnAll.prompt') },
-    { label: t('chat.chip.changeLed'), prompt: t('chat.chip.changeLed.prompt') },
-    { label: t('chat.chip.cookRice'), prompt: t('chat.chip.cookRice.prompt') },
-    { label: t('chat.chip.turnOnFan'), prompt: t('chat.chip.turnOnFan.prompt') },
-    { label: t('chat.chip.preheatOven'), prompt: t('chat.chip.preheatOven.prompt') },
+  // Suggestion chips grouped by capability so the welcome screen
+  // surfaces the agent's full surface area (device control, knowledge
+  // base, weather, vision, live-web). Clicking a chip stages the prompt
+  // in the input box; the user still has to hit Send.
+  const suggestionGroups: Array<{ title: string; chips: Array<{ label: string; prompt: string }> }> = [
+    {
+      title: t('chat.group.devices'),
+      chips: [
+        { label: t('chat.chip.checkDevices'), prompt: t('chat.chip.checkDevices.prompt') },
+        { label: t('chat.chip.turnOnAll'), prompt: t('chat.chip.turnOnAll.prompt') },
+        { label: t('chat.chip.changeLed'), prompt: t('chat.chip.changeLed.prompt') },
+        { label: t('chat.chip.cookRice'), prompt: t('chat.chip.cookRice.prompt') },
+        { label: t('chat.chip.turnOnFan'), prompt: t('chat.chip.turnOnFan.prompt') },
+        { label: t('chat.chip.preheatOven'), prompt: t('chat.chip.preheatOven.prompt') },
+      ],
+    },
+    {
+      title: t('chat.group.knowledge'),
+      chips: [
+        { label: t('chat.chip.kb.ledManual'), prompt: t('chat.chip.kb.ledManual.prompt') },
+        { label: t('chat.chip.kb.ricePresets'), prompt: t('chat.chip.kb.ricePresets.prompt') },
+        { label: t('chat.chip.kb.fanErrors'), prompt: t('chat.chip.kb.fanErrors.prompt') },
+      ],
+    },
+    {
+      title: t('chat.group.weather'),
+      chips: [
+        { label: t('chat.chip.weather.today'), prompt: t('chat.chip.weather.today.prompt') },
+        { label: t('chat.chip.weather.beijing'), prompt: t('chat.chip.weather.beijing.prompt') },
+      ],
+    },
+    {
+      title: t('chat.group.browser'),
+      chips: [
+        { label: t('chat.chip.browser.example'), prompt: t('chat.chip.browser.example.prompt') },
+        { label: t('chat.chip.browser.amazon'), prompt: t('chat.chip.browser.amazon.prompt') },
+        { label: t('chat.chip.browser.wiki'), prompt: t('chat.chip.browser.wiki.prompt') },
+        { label: t('chat.chip.browser.httpbin'), prompt: t('chat.chip.browser.httpbin.prompt') },
+      ],
+    },
+    {
+      title: t('chat.group.vision'),
+      chips: [
+        { label: t('chat.chip.vision.describe'), prompt: t('chat.chip.vision.describe.prompt') },
+      ],
+    },
   ];
 
   return (
-    <div className="chat-container">
+    <div style={{ display: 'flex', flexDirection: 'row', height: '100%' }}>
+    <div className="chat-container" style={{ flex: 1, minWidth: 0 }}>
       {error && (
         <Box padding="s">
           <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>
@@ -491,11 +624,18 @@ const ChatInterface: React.FC = () => {
                   {t('chat.subtitle')}
                 </Box>
               </div>
-              <SpaceBetween direction="horizontal" size="xs">
-                {suggestionChips.map((c) => (
-                  <Button key={c.label} onClick={() => setInputValue(c.prompt)}>
-                    {c.label}
-                  </Button>
+              <SpaceBetween size="m" direction="vertical">
+                {suggestionGroups.map((g) => (
+                  <SpaceBetween key={g.title} size="xs" direction="vertical">
+                    <Box color="text-body-secondary" fontSize="body-s">{g.title}</Box>
+                    <SpaceBetween direction="horizontal" size="xs">
+                      {g.chips.map((c) => (
+                        <Button key={c.label} onClick={() => setInputValue(c.prompt)}>
+                          {c.label}
+                        </Button>
+                      ))}
+                    </SpaceBetween>
+                  </SpaceBetween>
                 ))}
               </SpaceBetween>
             </SpaceBetween>
@@ -629,6 +769,15 @@ const ChatInterface: React.FC = () => {
       {/* Preserve Enter-to-send behavior using a capture-phase keydown on the
           textarea element; Cloudscape's onKeyDown doesn't let us preventDefault. */}
       <InputKeyBindings textareaContainerSelector=".input-row-textarea textarea" onSubmit={sendMessage} disabled={voiceActive} />
+    </div>
+      <BrowserPanel
+        session={browserSession}
+        agentSessionId={browserAgentSessionId}
+        expanded={browserPanelExpanded}
+        activeTab={browserPanelTab}
+        onExpand={(tab) => { setBrowserPanelTab(tab); setBrowserPanelExpanded(true); }}
+        onCollapse={() => setBrowserPanelExpanded(false)}
+      />
     </div>
   );
 };

@@ -49,6 +49,41 @@ const zh: Record<string, string> = {
   'chat.chip.turnOnFan.prompt': '将风扇调到2档',
   'chat.chip.preheatOven': '预热烤箱到180\u00b0C',
   'chat.chip.preheatOven.prompt': '预热烤箱到180摄氏度',
+
+  // 示例提示词分组
+  'chat.group.devices': '智能设备',
+  'chat.group.knowledge': '知识库',
+  'chat.group.weather': '天气',
+  'chat.group.browser': '实时网页浏览',
+  'chat.group.vision': '图片分析',
+
+  // 知识库
+  'chat.chip.kb.ledManual': 'LED 矩阵支持哪些模式',
+  'chat.chip.kb.ledManual.prompt': 'LED 矩阵支持哪些模式？怎么切换？',
+  'chat.chip.kb.ricePresets': '电饭煲都有哪些预设',
+  'chat.chip.kb.ricePresets.prompt': '电饭煲都有哪些预设？各适合什么场景？',
+  'chat.chip.kb.fanErrors': '风扇故障码 E3',
+  'chat.chip.kb.fanErrors.prompt': '风扇报错 E3 是什么意思，怎么处理？',
+
+  // 天气
+  'chat.chip.weather.today': '北京今天天气',
+  'chat.chip.weather.today.prompt': '北京今天天气怎么样？',
+  'chat.chip.weather.beijing': '未来三天预报',
+  'chat.chip.weather.beijing.prompt': '北京未来三天天气如何？',
+
+  // 浏览器
+  'chat.chip.browser.example': 'example.com 现在显示什么',
+  'chat.chip.browser.example.prompt': 'https://example.com 现在网页上显示什么内容？',
+  'chat.chip.browser.amazon': '淘宝搜索无线耳机',
+  'chat.chip.browser.amazon.prompt': '去淘宝上搜索 100 元以下销量最好的无线耳机，给我列出品牌、价格、评分前三。',
+  'chat.chip.browser.wiki': '维基百科总结 Python',
+  'chat.chip.browser.wiki.prompt': '打开 Python (programming language) 的维基百科页面，总结前三节的内容。',
+  'chat.chip.browser.httpbin': '查看浏览器公网 IP',
+  'chat.chip.browser.httpbin.prompt': '打开 https://httpbin.org/ip，告诉我页面上显示的 IP 地址。',
+
+  // 图片分析
+  'chat.chip.vision.describe': '识别图片（先点回形针）',
+  'chat.chip.vision.describe.prompt': '先用回形针按钮上传图片，然后问："描述一下这张图片里是什么。"',
   'chat.sendFailed': '消息发送失败',
   'chat.voiceMode.enter': '切换到语音模式',
   'chat.voiceMode.exit': '切换到文本模式',
@@ -63,6 +98,27 @@ const zh: Record<string, string> = {
   'chat.image.tooMany': '每条消息最多 3 张图片',
   'chat.image.readFailed': '{name} — 无法读取',
   'chat.image.remove': '删除图片',
+
+  // Browser panel
+  'browserPanel.title': '浏览器',
+  'browserPanel.liveView': '实时画面',
+  'browserPanel.files': '文件',
+  'browserPanel.noActive': '当前没有正在运行的浏览器会话。',
+  'browserPanel.opening': '正在打开浏览器...',
+  'browserPanel.goal': '目标',
+  'browserPanel.refresh': '刷新',
+  'browserPanel.download': '下载',
+  'browserPanel.parent': '上级',
+  'browserPanel.errorLoad': '无法加载文件列表。',
+  'browserPanel.emptyDir': '目录为空。',
+  'browserPanel.sessionEnded': '浏览器会话已结束。本次运行生成的文件仍可在"文件"标签页查看。',
+  'browserPanel.takeControl': '接管控制',
+  'browserPanel.releaseControl': '交还给 Agent',
+  'browserPanel.humanMode': '手动控制中 — Agent 已暂停。',
+  'browserPanel.idleMode': 'Agent 已完成 — 浏览器仍可操作，直到会话超时。',
+  'browserPanel.collapse': '折叠',
+  'browserPanel.maximize': '最大化',
+  'browserPanel.restore': '还原',
 };
 
 export default zh;

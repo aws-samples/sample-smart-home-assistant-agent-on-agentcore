@@ -15,4 +15,6 @@ dependencies = [
     "aws_sdk_bedrock_runtime>=0.3.0",
     "aws-opentelemetry-distro>=0.10.0",
     "opentelemetry-exporter-otlp-proto-http",
+    "browser-use>=0.1.40",
+    "playwright>=1.50",
 ]

@@ -378,6 +378,29 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             except Exception as e:
                 logger.warning(f"file_write built-in not available: {e}")
 
+            # Browser-use tool: only register when the effective skill set
+            # for this user includes "browser-use". The closure pins user_id
+            # and agent_session_id — the LLM cannot forge either because
+            # neither field appears in the tool's input schema.
+            skill_names = {getattr(s, "name", "") for s in (skills or [])}
+            if "browser-use" in skill_names:
+                from tools.browser_use import run_browse_web as _run_browse_web
+                _bound_user = actor_id
+                _bound_session = session_id
+
+                @strands_tool
+                def browse_web(goal: str) -> str:
+                    """Open a live browser and drive it to accomplish the user's goal.
+                    The user can watch the browser in a side panel while it runs.
+                    Returns a short text summary."""
+                    return _run_browse_web(
+                        goal=goal,
+                        user_id=_bound_user,
+                        agent_session_id=_bound_session,
+                    )
+                wrapped_tools.append(browse_web)
+                logger.info(f"browse_web registered for actor={actor_id}")
+
             all_tools = non_scoped_tools + wrapped_tools + builtin_tools
 
             agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)

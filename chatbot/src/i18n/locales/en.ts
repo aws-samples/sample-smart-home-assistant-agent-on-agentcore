@@ -49,6 +49,41 @@ const en: Record<string, string> = {
   'chat.chip.turnOnFan.prompt': 'Turn on the fan at speed 2',
   'chat.chip.preheatOven': 'Preheat oven to 350\u00b0F',
   'chat.chip.preheatOven.prompt': 'Preheat oven to 350 degrees',
+
+  // Suggestion group headings
+  'chat.group.devices': 'Smart devices',
+  'chat.group.knowledge': 'Knowledge base',
+  'chat.group.weather': 'Weather',
+  'chat.group.browser': 'Live web browser',
+  'chat.group.vision': 'Image analysis',
+
+  // Knowledge base chips (answered from enterprise KB documents)
+  'chat.chip.kb.ledManual': 'LED matrix modes',
+  'chat.chip.kb.ledManual.prompt': 'What LED matrix modes are supported and how do I switch between them?',
+  'chat.chip.kb.ricePresets': 'Rice cooker presets',
+  'chat.chip.kb.ricePresets.prompt': 'What cooking presets does the rice cooker support?',
+  'chat.chip.kb.fanErrors': 'Fan troubleshooting',
+  'chat.chip.kb.fanErrors.prompt': 'The fan shows error code E3 \u2014 what does it mean and how do I fix it?',
+
+  // Weather chips (weather-lookup skill via http_request)
+  'chat.chip.weather.today': 'Today\u2019s weather in San Francisco',
+  'chat.chip.weather.today.prompt': 'What\u2019s the weather like today in San Francisco?',
+  'chat.chip.weather.beijing': 'Beijing forecast',
+  'chat.chip.weather.beijing.prompt': '\u5317\u4eac\u672a\u6765\u4e09\u5929\u5929\u6c14\u5982\u4f55\uff1f',
+
+  // Live browser chips (browser-use skill \u2192 browse_web tool)
+  'chat.chip.browser.example': 'What does example.com show?',
+  'chat.chip.browser.example.prompt': 'What does https://example.com say right now?',
+  'chat.chip.browser.amazon': 'Find wireless earbuds on Amazon',
+  'chat.chip.browser.amazon.prompt': 'Find the top 3 wireless earbuds under $100 on amazon.com \u2014 brand, price, rating.',
+  'chat.chip.browser.wiki': 'Summarize Python on Wikipedia',
+  'chat.chip.browser.wiki.prompt': 'Open the Python (programming language) Wikipedia page and summarize the first three sections.',
+  'chat.chip.browser.httpbin': 'Show the browser\u2019s public IP',
+  'chat.chip.browser.httpbin.prompt': 'Open https://httpbin.org/ip and tell me the IP address shown.',
+
+  // Vision chip \u2014 reminds users they can attach an image via the paperclip
+  'chat.chip.vision.describe': 'Describe an image (use paperclip first)',
+  'chat.chip.vision.describe.prompt': 'Attach an image with the paperclip, then ask: \u201cDescribe what you see in this image.\u201d',
   'chat.sendFailed': 'Failed to send message',
   'chat.voiceMode.enter': 'Switch to voice mode',
   'chat.voiceMode.exit': 'Switch to text mode',
@@ -63,6 +98,27 @@ const en: Record<string, string> = {
   'chat.image.tooMany': 'Maximum 3 images per message',
   'chat.image.readFailed': '{name} — could not be read',
   'chat.image.remove': 'Remove image',
+
+  // Browser panel
+  'browserPanel.title': 'Browser',
+  'browserPanel.liveView': 'Live view',
+  'browserPanel.files': 'Files',
+  'browserPanel.noActive': 'No browser session is running.',
+  'browserPanel.opening': 'Opening browser...',
+  'browserPanel.goal': 'Goal',
+  'browserPanel.refresh': 'Refresh',
+  'browserPanel.download': 'Download',
+  'browserPanel.parent': 'Up',
+  'browserPanel.errorLoad': 'Could not load files.',
+  'browserPanel.emptyDir': 'Empty.',
+  'browserPanel.sessionEnded': 'Browser session ended. Files from the run are still available in the Files tab.',
+  'browserPanel.takeControl': 'Take control',
+  'browserPanel.releaseControl': 'Release control to agent',
+  'browserPanel.humanMode': 'Human control — agent paused.',
+  'browserPanel.idleMode': 'Agent done — browser still yours until it times out.',
+  'browserPanel.collapse': 'Collapse',
+  'browserPanel.maximize': 'Maximize',
+  'browserPanel.restore': 'Restore',
 };
 
 export default en;

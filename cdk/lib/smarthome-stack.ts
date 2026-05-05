@@ -283,6 +283,20 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // DynamoDB - Browser Sessions Table
+    // Tracks live AgentCore browser sessions so the chatbot can surface
+    // liveViewUrl and status. ttl auto-evicts stale rows after 1h.
+    // ========================
+    const browserSessionsTable = new dynamodb.Table(this, "BrowserSessionsTable", {
+      tableName: "smarthome-browser-sessions",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sessionId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
     // S3 - Skill Files (scripts, references, assets)
     // ========================
     const skillFilesBucket = new s3.Bucket(this, "SkillFilesBucket", {
@@ -315,11 +329,13 @@ export class SmartHomeStack extends cdk.Stack {
         SKILL_FILES_BUCKET: skillFilesBucket.bucketName,
         AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
         COGNITO_USER_POOL_ID: userPool.userPoolId,
+        BROWSER_SESSIONS_TABLE_NAME: browserSessionsTable.tableName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
     skillsTable.grantReadWriteData(adminLambda);
     skillFilesBucket.grantReadWrite(adminLambda);
+    browserSessionsTable.grantReadData(adminLambda);
 
     // ========================
     // Lambda - User Init (Cognito Post-Confirmation trigger)
@@ -405,7 +421,14 @@ export class SmartHomeStack extends cdk.Stack {
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
 
-    const adminIntegration = new apigw.LambdaIntegration(adminLambda);
+    // `allowTestInvoke: false` halves the Lambda resource policy by skipping
+    // the /test-invoke-stage/* permission. Without this the admin API sits
+    // within ~250 bytes of the 20 KB Lambda resource-policy cap (AWS quota),
+    // and a fresh cold deploy can fail with "The final policy size is bigger
+    // than the limit (20480)".
+    const adminIntegration = new apigw.LambdaIntegration(adminLambda, {
+      allowTestInvoke: false,
+    });
 
     // /users (Cognito users)
     const usersApiResource = adminApi.root.addResource("users");
@@ -484,6 +507,13 @@ export class SmartHomeStack extends cdk.Stack {
     const kbResource = adminApi.root.addResource("knowledge-bases");
     kbResource.addMethod("GET", adminIntegration, authMethodOptions);
     kbResource.addMethod("POST", adminIntegration, authMethodOptions);
+
+    // NOTE: Browser-session + workspace-file probing does NOT get its own
+    // API Gateway path because the admin Lambda's auto-generated resource
+    // policy is already at the 20 KB cap (see the similar note for prompt
+    // routes near the top of the Skill section). We piggyback on the
+    // existing `GET /sessions` route and dispatch by `?action=browser-*`
+    // inside the admin Lambda. No new method = no new Lambda permission.
 
     // Grant admin Lambda permission to stop runtime sessions and read memory
     adminLambda.addToRolePolicy(new iam.PolicyStatement({

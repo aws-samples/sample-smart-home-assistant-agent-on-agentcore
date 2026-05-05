@@ -9,6 +9,7 @@ interface AppConfig {
   // string means the deploy hasn't been run post-split yet; the chatbot
   // falls back to agentRuntimeArn for voice in that transition case.
   voiceAgentRuntimeArn: string;
+  adminApiUrl: string;
   region: string;
 }
 
@@ -21,6 +22,7 @@ export function getConfig(): AppConfig {
     cognitoIdentityPoolId: raw.cognitoIdentityPoolId ?? '',
     agentRuntimeArn: raw.agentRuntimeArn ?? '',
     voiceAgentRuntimeArn: raw.voiceAgentRuntimeArn ?? '',
-    region: raw.region ?? 'us-east-1',
+    adminApiUrl: raw.adminApiUrl ?? '',
+    region: raw.region ?? 'us-west-2',
   };
 }

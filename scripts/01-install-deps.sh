@@ -44,4 +44,30 @@ pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/user-init"     -q --upgrade 2>/dev/
 pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/kb-query"      -q --upgrade 2>/dev/null || true
 pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/skill-erp-api" -q --upgrade 2>/dev/null || true
 
+# ------------------------------------------------------------------------------
+# Fetch the Amazon DCV Web Client SDK into chatbot/public/dcvjs/.
+# Required for the BrowserPanel live-view feature: the chatbot's DcvViewer
+# component loads /dcvjs/dcv.js at runtime to render the AgentCore browser
+# live-view stream. The SDK is not redistributed in this repo (EULA terms);
+# we download a fresh copy on every deploy from the public AWS CloudFront.
+# Skip if already present to keep re-deploys fast.
+# ------------------------------------------------------------------------------
+DCV_DIR="$SCRIPT_DIR/chatbot/public/dcvjs"
+DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/webclientsdk/nice-dcv-web-client-sdk-1.9.100-952.zip"
+if [ -f "$DCV_DIR/dcv.js" ]; then
+    echo "==> DCV Web SDK already present in chatbot/public/dcvjs/ — skipping download."
+else
+    echo "==> Downloading Amazon DCV Web Client SDK..."
+    command -v curl   >/dev/null 2>&1 || { echo "curl is required for DCV SDK download."; exit 1; }
+    command -v unzip  >/dev/null 2>&1 || { echo "unzip is required for DCV SDK download."; exit 1; }
+    TMPDIR=$(mktemp -d)
+    trap "rm -rf \"$TMPDIR\"" EXIT
+    curl -sL -o "$TMPDIR/dcv-sdk.zip" "$DCV_URL"
+    unzip -q "$TMPDIR/dcv-sdk.zip" -d "$TMPDIR"
+    mkdir -p "$DCV_DIR"
+    cp -r "$TMPDIR/nice-dcv-web-client-sdk/dcvjs-umd/"* "$DCV_DIR/"
+    echo "    -> $DCV_DIR populated ($(du -sh "$DCV_DIR" | awk '{print $1}'))"
+    echo "    NOTE: the SDK ships under Amazon DCV EULA — see chatbot/public/dcvjs/EULA.txt"
+fi
+
 echo "==> Step 1 complete."
