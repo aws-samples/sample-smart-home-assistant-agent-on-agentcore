@@ -106,6 +106,20 @@ const ChatInterface: React.FC = () => {
   // expire ours at 4 min to be safe.
   const presignedWsRef = useRef<{ url: string; expiresAt: number } | null>(null);
 
+  // Per-login runtimeSessionId. Reused by warmup, text chat, voice, and
+  // browser-use so they all land on the same microVM (no cold start after
+  // warmup). The `${Date.now()}` suffix gives each page load a fresh
+  // session window, which keeps AgentCore Online Evaluation's trace
+  // batches short and prevents historical traces from poisoning new
+  // evaluations.
+  const loginSessionIdRef = useRef<string | null>(null);
+  const loginSessionIdFor = useCallback((sub: string) => {
+    if (!loginSessionIdRef.current) {
+      loginSessionIdRef.current = `user-session-${sub}-${Date.now()}`;
+    }
+    return loginSessionIdRef.current;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
@@ -137,7 +151,10 @@ const ChatInterface: React.FC = () => {
         const [token, creds] = await Promise.all([getIdToken(), getAwsCredentials()]);
         const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
         const userId = decoded.email || decoded['cognito:username'] || decoded.sub;
-        const sessionId = `user-session-${decoded.sub}`;
+        // Share session.id with real chat turns so warmup heats the same
+        // microVM that serves them (AgentCore Runtime isolates microVMs
+        // per runtimeSessionId).
+        const sessionId = loginSessionIdFor(decoded.sub);
 
         const targets = [config.agentRuntimeArn];
         // Voice runtime is a separate ARN; fall back to text ARN if the deploy
@@ -146,6 +163,17 @@ const ChatInterface: React.FC = () => {
           targets.push(config.voiceAgentRuntimeArn);
         }
 
+        // X-Amzn-Trace-Id with Sampled=0 keeps the warmup turn out of the
+        // sampled trace window. The root Starlette span still makes it to
+        // aws/spans because LOCAL_ROOT spans are exported regardless, but
+        // the rest of the warmup request is suppressed.
+        const warmupTraceId = (() => {
+          const ts = Math.floor(Date.now() / 1000).toString(16);
+          const uniq = Array.from(crypto.getRandomValues(new Uint8Array(12)))
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+          return `Root=1-${ts}-${uniq};Sampled=0`;
+        })();
+
         await Promise.allSettled(targets.map((arn) =>
           signedInvocationsFetch({
             agentRuntimeArn: arn,
@@ -153,14 +181,15 @@ const ChatInterface: React.FC = () => {
             credentials: creds,
             sessionId,
             body: { prompt: '__warmup__', userId },
-            extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
+            extraHeaders: {
+              [CUSTOM_AUTH_HEADER]: token,
+              'X-Amzn-Trace-Id': warmupTraceId,
+            },
           })
         ));
 
-        // Pre-presign the voice WS URL with the same creds we already have
-        // in scope. The presigned URL is signed for 5 min; cache with a 4-min
-        // TTL so stale-but-unexpired URLs never hit the runtime. startVoice
-        // will re-presign if the cached entry has aged past the TTL.
+        // Pre-presign the voice WS URL with the same session id so the
+        // first voice tap skips the 200-400ms presign roundtrip.
         const voiceArn = config.voiceAgentRuntimeArn || config.agentRuntimeArn;
         if (voiceArn) {
           try {
@@ -199,7 +228,7 @@ const ChatInterface: React.FC = () => {
         const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
         const uid = decoded.email || decoded['cognito:username'] || decoded.sub;
         setBrowserUserId(uid);
-        setBrowserAgentSessionId(`user-session-${decoded.sub}`);
+        setBrowserAgentSessionId(loginSessionIdFor(decoded.sub));
       } catch {
         if (cancelled || attempt > 5) return;
         setTimeout(() => resolveUser(attempt + 1), 500);
@@ -329,7 +358,7 @@ const ChatInterface: React.FC = () => {
       const creds = await getAwsCredentials();
       const decoded = jwtDecode<{ sub: string; email?: string; 'cognito:username'?: string }>(token);
       const userId = decoded.email || decoded['cognito:username'] || decoded.sub;
-      const sessionId = `user-session-${decoded.sub}`;
+      const sessionId = loginSessionIdFor(decoded.sub);
       setBrowserUserId(userId);
       setBrowserAgentSessionId(sessionId);
 
@@ -403,7 +432,7 @@ const ChatInterface: React.FC = () => {
       const token = await getIdToken();
       const creds = await getAwsCredentials();
       const decoded = jwtDecode<{ sub: string }>(token);
-      const sessionId = `user-session-${decoded.sub}`;
+      const sessionId = loginSessionIdFor(decoded.sub);
 
       // Voice lives on its own AgentCore Runtime post-split. Fall back to the
       // text runtime ARN if voiceAgentRuntimeArn is empty (transitional state

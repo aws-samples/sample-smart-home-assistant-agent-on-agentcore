@@ -2,38 +2,28 @@ import os
 import json
 import logging
 
-# ADOT auto-instrumentation: programmatic equivalent of `opentelemetry-instrument python agent.py`.
-# Must run before any other imports so ADOT can patch libraries (botocore, requests, etc.).
-# On AgentCore managed runtime, ADOT exports spans to CloudWatch automatically.
-# Gated by DISABLE_ADOT=1 so the voice runtime (which imports this module for
-# its DynamoDB helpers) can opt out — see docs/superpowers/specs/2026-04-23-voice-agent-split-design.md.
-_ADOT_DISABLED = os.environ.get("DISABLE_ADOT") == "1"
-if not _ADOT_DISABLED:
-    os.environ.setdefault("OTEL_PYTHON_DISTRO", "aws_distro")
-    os.environ.setdefault("OTEL_PYTHON_CONFIGURATOR", "aws_configurator")
-    from opentelemetry.instrumentation.auto_instrumentation import sitecustomize  # noqa: E402
-    sitecustomize.initialize()
+# OpenTelemetry instrumentation is handled entirely by the AgentCore Runtime
+# container: `agentcore deploy` auto-instruments the process, emits spans
+# to aws/spans, and propagates session.id from the runtimeSessionId header.
+# Do NOT call StrandsTelemetry, set OTEL_SEMCONV_STABILITY_OPT_IN, or attach
+# baggage here — those override the runtime's providers and break span
+# export. Mirrors the AWS-official Strands sample at
+# amazon-bedrock-agentcore-samples/.../07-AgentCore-evaluations/00-prereqs/
+# eval_agent_strands.py. See docs/architecture-and-design.md §9.13.
 
-from strands import Agent, AgentSkills  # noqa: E402
-from strands.vended_plugins.skills import Skill  # noqa: E402
-from strands.models.bedrock import BedrockModel  # noqa: E402
-from strands.tools.mcp.mcp_client import MCPClient  # noqa: E402
-from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
-from strands.telemetry import StrandsTelemetry  # noqa: E402
-from bedrock_agentcore import BedrockAgentCoreApp  # noqa: E402
-from memory.session import get_memory_session_manager, _sanitize_actor_id  # noqa: E402
+from strands import Agent, AgentSkills
+from strands.vended_plugins.skills import Skill
+from strands.models.bedrock import BedrockModel
+from strands.tools.mcp.mcp_client import MCPClient
+from mcp.client.streamable_http import streamablehttp_client
+from bedrock_agentcore import BedrockAgentCoreApp
+from memory.session import get_memory_session_manager, _sanitize_actor_id
 
-import boto3  # noqa: E402
-from boto3.dynamodb.conditions import Key  # noqa: E402
+import boto3
+from boto3.dynamodb.conditions import Key
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Configure Strands to emit OTEL traces (GenAI semantic conventions).
-# Gated by DISABLE_ADOT=1 so voice runtime can opt out (its sessions are long
-# streams where per-event spans give little triage value).
-if not _ADOT_DISABLED:
-    StrandsTelemetry()
 
 # agentcore CLI sets env vars as AGENTCORE_GATEWAY_{GATEWAYNAME}_URL / _ARN
 GATEWAY_URL = os.environ.get("AGENTCORE_GATEWAY_URL", "")

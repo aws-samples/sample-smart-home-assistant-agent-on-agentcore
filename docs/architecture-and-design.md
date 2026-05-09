@@ -12,7 +12,7 @@
 - [8. AI Agent Design](#8-ai-agent-design) (includes [8.6 Agent Internal Data Flow](#86-agent-internal-data-flow))
 - [8.7. Skill Management](#87-skill-management)
 - [8.8. Per-User Model Selection](#88-per-user-model-selection)
-- [8.9. Fixed Session ID and Session Tracking](#89-fixed-session-id-and-session-tracking)
+- [8.9. Per-Login Session ID and Session Tracking](#89-per-login-session-id-and-session-tracking)
 - [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
 - [8.11. Image Input (Vision Bypass Path)](#811-image-input-vision-bypass-path)
 - [9. Infrastructure Design](#9-infrastructure-design)
@@ -24,6 +24,7 @@
 - [9.9. Integration Registry & A2A Agents](#99-integration-registry--a2a-agents)
 - [9.10. Remote Shell Commands per Session](#910-remote-shell-commands-per-session)
 - [9.11. Browser Use — Live Agent Web Automation](#911-browser-use--live-agent-web-automation)
+- [9.12. Observability and AgentCore Online Evaluation](#912-observability-and-agentcore-online-evaluation)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -46,7 +47,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent (vision) | Claude Haiku 4.5 default (per-user multimodal model override) via Bedrock Converse | Captions uploaded images; captions injected as prior assistant messages so the text agent can answer follow-up questions |
 | AI Agent (browser) | `browser-use` + AgentCore Browser Tool (`aws.browser.v1`) driven by the text agent's `browse_web` Strands tool | Live web automation when the user asks something that needs a real site (product search, news, Wikipedia). Chatbot renders the live DCV stream + a Take/Release Control button; per-step screenshots land in the agent session's `/mnt/workspace/<sid>/browser/` (see §9.11). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
-| Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Management with AWS-Console-style left-nav: Discover (Overview, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations). Supports light/dark themes. |
+| Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Control Center with AWS-Console-style left-nav: Discover (Overview, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations). Supports light/dark themes. |
 | Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AgentCore Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + **S3 Vectors** + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering. Vector store is the pay-per-vector S3 Vectors service (no fixed monthly floor). |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
@@ -494,18 +495,17 @@ Temperature simulation: heats at 5% of remaining delta per tick (500ms), with +/
 Configuration is injected at deploy time via a `config.js` file served from S3:
 
 ```javascript
-// config.js (written by CDK custom resource)
+// config.js (written by CDK custom resource AND re-written by setup-agentcore.py)
 window.__CONFIG__ = {
   iotEndpoint: "a1b2c3d4e5f6g7-ats.iot.us-east-1.amazonaws.com",
   region: "us-east-1",
   cognitoIdentityPoolId: "us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  // Added when the device simulator adopted Cognito User Pool sign-in:
   cognitoUserPoolId: "us-east-1_XXXXXXXXX",
   cognitoClientId: "abcdef1234567890"
 };
 ```
 
-This approach avoids baking environment-specific values into the webpack bundle, enabling the same build to work across environments. The CDK stack's `BucketDeployment` for the device-sim bundle uses `prune: false` so the `AwsCustomResource`-written `config.js` survives every deploy.
+This approach avoids baking environment-specific values into the webpack bundle, enabling the same build to work across environments. The CDK stack's `BucketDeployment` for the device-sim bundle uses `prune: false` so the `AwsCustomResource`-written `config.js` survives every deploy. `setup-agentcore.py` rewrites the same file in step 6 (to refresh IoT endpoint / identity pool values); both writers must emit the full set of Cognito fields — missing `cognitoUserPoolId`/`cognitoClientId` breaks sign-in with "Both UserPoolId and ClientId are required".
 
 ---
 
@@ -1080,11 +1080,11 @@ visionModelId: "us.anthropic.claude-haiku-4-5-..."   # vision (multimodal) model
 - Nova: Pro, Lite
 - Qwen: Qwen3 VL 235B A22B
 
-### 8.9 Fixed Session ID and Session Tracking
+### 8.9 Per-Login Session ID and Session Tracking
 
-Each user gets a **fixed runtime session ID** derived from their Cognito `sub` (UUID). This means the same user always uses the same session across invocations, enabling session persistence.
+Each page load gets a **fresh runtime session ID** generated once in the chatbot (`chatbot/src/components/ChatInterface.tsx` — `loginSessionIdRef`). The same id is reused by warmup, text chat, voice, and browser-use for the whole login so they all land on the same AgentCore Runtime microVM (the post-login warmup heats that microVM, and subsequent chat turns skip the ~5s cold start). Refreshing or re-logging-in rotates the id.
 
-**Session ID format:** `user-session-{cognito-sub}` (set by the chatbot via the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header).
+**Session ID format:** `user-session-{cognito-sub}-{Date.now()}` (set by the chatbot via the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header). The timestamp suffix scopes each AgentCore **Online Evaluation** batch to a single login's traces — without it, historical traces from previous days accumulate under the same `session.id` and a single broken Strands span poisons every subsequent evaluation with `AgentSpanMappingException: Failed to parse user_query`. Cross-session continuity is instead preserved by AgentCore Memory's long-term summaries (keyed on `actor_id = cognito sub`, not `session_id`), so STM resets per login but LTM carries context across logins.
 
 **User identification:** The AgentCore Runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent process. To work around this, the chatbot passes the user's email in the POST body as `userId`, and the agent reads it from `payload.get("userId")`.
 
@@ -1393,7 +1393,7 @@ A key design challenge: React apps need environment-specific values (API endpoin
 
 ### 9.4 Admin Console Design
 
-The admin console is an independent React + TypeScript frontend app for managing the agent harness. It uses **Cloudscape Design System** (the same component library AWS uses for the AWS Console) with light/dark theme support; the main layout is Cloudscape `AppLayout` + `TopNavigation` + `SideNavigation`. Deployment follows the same pattern as the device simulator and chatbot (S3 + CloudFront + `config.js` injection).
+The admin console (branded **Agent Harness Control Center** / 智能体管控中心) is an independent React + TypeScript frontend app for managing the agent harness. It uses **Cloudscape Design System** (the same component library AWS uses for the AWS Console) with light/dark theme support; the main layout is Cloudscape `AppLayout` + `TopNavigation` + `SideNavigation`. Deployment follows the same pattern as the device simulator and chatbot (S3 + CloudFront + `config.js` injection).
 
 **Directory Structure:**
 
@@ -2583,6 +2583,55 @@ the agentcore-CLI scaffold. The chatbot ships the Amazon **DCV Web
 Client SDK** under `public/dcvjs/`; it is EULA-licensed and fetched on
 every deploy by `scripts/01-install-deps.sh` from a public AWS
 CloudFront URL (not redistributed in this repo).
+
+### 9.12 Observability and AgentCore Online Evaluation
+
+**Instrumentation.** AgentCore Runtime auto-instruments the agent container
+with ADOT/OpenTelemetry when deployed via `agentcore deploy` — see the
+[AWS docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html#enabling-observability-runtime-hosted)
+and the AWS-official Strands eval sample
+([`eval_agent_strands.py`](https://github.com/awslabs/amazon-bedrock-agentcore-samples/blob/main/01-tutorials/07-AgentCore-evaluations/00-prereqs/eval_agent_strands.py)).
+We deliberately do **not** call `StrandsTelemetry`, set
+`OTEL_SEMCONV_STABILITY_OPT_IN`, or attach OTel baggage in `agent/agent.py`
+— any of those overrides the runtime's TracerProvider and stops Strands
+spans from reaching the `aws/spans` CloudWatch Logs group.
+
+The voice runtime opts out entirely (`DISABLE_ADOT=1` via both
+`voice_agent.py` and `setup-agentcore.py`) because bi-directional streams
+produce far too many per-event spans for the telemetry to be useful and
+the ADOT init costs 100–300 ms of cold-start latency.
+
+**Evaluators.** `scripts/setup-agentcore.py` provisions:
+
+- A custom LLM-as-judge evaluator `SmartHomeQuality` (SESSION level,
+  Claude Sonnet 4).
+- An online evaluation config `SmartHomeOnlineEval` with 100 % sampling,
+  auto-enabled on create.
+
+In addition to the custom evaluator, AgentCore's built-in evaluators
+run against every session: `Builtin.Helpfulness`, `Correctness`,
+`Conciseness`, `InstructionFollowing`, `Harmfulness`, `GoalSuccessRate`,
+`ToolSelectionAccuracy`. Results land in the CloudWatch Logs group
+`/aws/bedrock-agentcore/evaluations/results/{online-eval-id}` and on the
+CloudWatch **GenAI Observability** dashboard.
+
+**Session-scoping note — why session IDs rotate per login.** AgentCore's
+Online Evaluation runs `Evaluate(sessionSpans=[...], traceIds=[...])`
+across the **entire 7-day span window** of whatever `session.id` it sees.
+If the chatbot pinned `session.id = user-session-{sub}`, every login
+reused the same window, and a single broken trace from any previous day
+would poison every subsequent evaluation with
+`AgentSpanMappingException: Failed to parse user_query from agent-span`.
+The chatbot therefore generates a fresh `user-session-{sub}-{timestamp}`
+on each page load (see §8.9 and
+`chatbot/src/components/ChatInterface.tsx`'s `loginSessionIdRef`). That
+rotation keeps the evaluated trace window short and clean, while AgentCore
+Memory's long-term summaries — keyed on `actor_id = sub`, not
+`session_id` — still carry context across logins.
+
+Warmup requests additionally send `X-Amzn-Trace-Id: Root=...;Sampled=0`
+so the short-circuit `__warmup__` turn is not sampled into `aws/spans`
+alongside the real agent turns.
 
 ---
 

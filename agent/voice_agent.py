@@ -8,11 +8,11 @@ imports below).
 
 Why a separate runtime: see docs/superpowers/specs/2026-04-23-voice-agent-split-design.md.
 
-ADOT auto-instrumentation is disabled here — voice sessions are long streams
-where per-event spans add little triage value, and `sitecustomize.initialize()`
-adds 100-300ms to cold start. The DISABLE_ADOT env var is also set by
-setup-agentcore.py on the runtime; the line below is belt-and-braces for
-local-dev runs.
+ADOT auto-instrumentation is skipped here — voice sessions are long
+bi-directional streams where per-event spans add little triage value and
+the ADOT init adds 100-300ms to cold start. The DISABLE_ADOT env var is
+also set by setup-agentcore.py on the runtime; the line below is
+belt-and-braces for local-dev runs.
 """
 import os
 
