@@ -664,6 +664,104 @@ def _resolve_user_for_session(session_id: str, kind: str) -> str:
 # User & Tool Permission Management
 # ---------------------------------------------------------------------------
 
+def create_cognito_user(event):
+    """POST /users with body {action: 'create', email}.
+    Uses AdminCreateUser with the default invitation flow — Cognito emails the
+    user a temporary password and they set their own on first sign-in. Same
+    effect as clicking 'Create user' in the Cognito User Pool console."""
+    if not COGNITO_USER_POOL_ID:
+        return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
+    body = json.loads(event.get("body") or "{}")
+    email = (body.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return response(400, {"error": "Valid email required"})
+    try:
+        resp = cognito_client.admin_create_user(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=email,
+            UserAttributes=[
+                {"Name": "email", "Value": email},
+                {"Name": "email_verified", "Value": "true"},
+            ],
+            DesiredDeliveryMediums=["EMAIL"],
+        )
+        u = resp.get("User", {})
+        return response(200, {
+            "username": u.get("Username"),
+            "status": u.get("UserStatus"),
+        })
+    except cognito_client.exceptions.UsernameExistsException:
+        return response(409, {"error": f"User {email} already exists"})
+    except Exception as e:
+        return response(500, {"error": str(e)})
+
+
+def add_user_to_admin_group(event):
+    """POST /users with body {action: 'add-to-admin', username}.
+    Idempotent — AdminAddUserToGroup is a no-op if already a member."""
+    if not COGNITO_USER_POOL_ID:
+        return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
+    body = json.loads(event.get("body") or "{}")
+    username = (body.get("username") or "").strip()
+    if not username:
+        return response(400, {"error": "username required"})
+    try:
+        cognito_client.admin_add_user_to_group(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=username,
+            GroupName="admin",
+        )
+        return response(200, {"ok": True})
+    except cognito_client.exceptions.UserNotFoundException:
+        return response(404, {"error": f"User {username} not found"})
+    except Exception as e:
+        return response(500, {"error": str(e)})
+
+
+def remove_user_from_admin_group(event):
+    """POST /users with body {action: 'remove-from-admin', username}.
+    Idempotent — AdminRemoveUserFromGroup is a no-op if not a member."""
+    if not COGNITO_USER_POOL_ID:
+        return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
+    body = json.loads(event.get("body") or "{}")
+    username = (body.get("username") or "").strip()
+    if not username:
+        return response(400, {"error": "username required"})
+    try:
+        cognito_client.admin_remove_user_from_group(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=username,
+            GroupName="admin",
+        )
+        return response(200, {"ok": True})
+    except cognito_client.exceptions.UserNotFoundException:
+        return response(404, {"error": f"User {username} not found"})
+    except Exception as e:
+        return response(500, {"error": str(e)})
+
+
+def delete_cognito_user(event):
+    """POST /users with body {action: 'delete', username}.
+    Leaves per-user data (DynamoDB settings, AgentCore memory, KB S3 prefix)
+    orphaned — admins can clean those up separately if needed."""
+    if not COGNITO_USER_POOL_ID:
+        return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
+    body = json.loads(event.get("body") or "{}")
+    username = (body.get("username") or "").strip()
+    if not username:
+        return response(400, {"error": "username required"})
+    try:
+        cognito_client.admin_delete_user(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=username,
+        )
+        return response(200, {"ok": True})
+    except cognito_client.exceptions.UserNotFoundException:
+        return response(404, {"error": f"User {username} not found"})
+    except Exception as e:
+        return response(500, {"error": str(e)})
+
+
 def list_cognito_users(_event):
     """GET /users — list all users from Cognito user pool."""
     if not COGNITO_USER_POOL_ID:
@@ -1793,6 +1891,18 @@ def handler(event, context):
     # User & tool permission routes
     if resource == "/users" and method == "GET":
         return list_cognito_users(event)
+    if resource == "/users" and method == "POST":
+        body_obj = json.loads(event.get("body") or "{}")
+        action = body_obj.get("action", "")
+        if action == "create":
+            return create_cognito_user(event)
+        if action == "add-to-admin":
+            return add_user_to_admin_group(event)
+        if action == "remove-from-admin":
+            return remove_user_from_admin_group(event)
+        if action == "delete":
+            return delete_cognito_user(event)
+        return response(400, {"error": f"Unknown users action: {action}"})
     if resource == "/tools" and method == "GET":
         return list_gateway_tools(event)
     if resource == "/memories" and method == "GET":

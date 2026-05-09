@@ -90,7 +90,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 6. **浏览器实时预览**（右侧默认折叠的 rail，点击展开）：问 Agent 任何需要查实时网页的问题（"example.com 现在显示什么"、"去淘宝上搜 iPhone 16"、"Amazon 上 100 美元以下耳机排名"），无需手动说"use browse_web"—— skill 描述会让 Kimi 自行调用。右侧 DCV 实时流按 1280×800 渲染（窗口更小时自动出现滚动条），每步截图保存到 Agent 的 `/mnt/workspace/<session>/browser/`，"文件"标签页可下载。任务完成后 AgentCore 会话保持 **15 分钟** 不关，点 **"接管控制"** 就能自己继续浏览/验证码/点筛选，不需要重新触发一次工具。详见 [架构文档 §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation)
 7. **欢迎屏示例提示**：分 5 组（智能设备 / 知识库 / 天气 / 实时网页浏览 / 图片分析），覆盖所有能力，点击即填入输入框
 
-### 管理控制台 —— Agent Harness Management
+### 管理控制台 —— Agent Harness Control Center
 
 使用部署输出中的管理员凭证登录（或在 Cognito 控制台把现有用户加到 `admin` 组）。9 个管理页签：
 
@@ -429,7 +429,7 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 6. **Live browser preview** (right-side rail, collapsed by default — click a label to expand): ask the agent any live-web question ("what does example.com say right now?", "find top 3 wireless earbuds under $100 on Amazon", "summarize the Python Wikipedia page") without saying `browse_web` — the skill description auto-routes it to the tool. The right panel streams the real Chrome via DCV at 1280×800 (scrollbars appear when the panel is narrower); each step is screenshotted into the agent's `/mnt/workspace/<session>/browser/` which the Files tab can browse and download. After the tool returns, the AgentCore session stays alive for **15 minutes** — click **Take control** to drive the browser manually (fill captchas, click filters, etc.) without a new tool call. See [architecture §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation).
 7. **Grouped starter prompts on the welcome screen**: 5 labelled groups (Smart devices / Knowledge base / Weather / Live web browser / Image analysis) cover every capability — click a chip to stage its prompt.
 
-### Admin Console — Agent Harness Management
+### Admin Console — Agent Harness Control Center
 
 Log in with the admin credentials from deploy output (or add a user to the `admin` Cognito group). Nine tabs:
 

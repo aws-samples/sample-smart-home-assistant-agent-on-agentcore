@@ -15,6 +15,10 @@ import {
   getDownloadUrl,
   deleteSkillFile,
   listCognitoUsers,
+  createCognitoUser,
+  addUserToAdminGroup,
+  removeUserFromAdminGroup,
+  deleteCognitoUser,
   listGatewayTools,
   getUserPermissions,
   updateUserPermissions,
@@ -65,6 +69,7 @@ import Table from '@cloudscape-design/components/table';
 import Textarea from '@cloudscape-design/components/textarea';
 import Modal from '@cloudscape-design/components/modal';
 import { getConfig } from '../config';
+import { getCurrentUserEmail } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
@@ -315,7 +320,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
   return (
     <SpaceBetween size="l">
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-      {success && <Alert type="success">{success}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
       <Container
         header={
@@ -747,7 +752,7 @@ const AgentPromptTab: React.FC<AgentPromptTabProps> = ({
   return (
     <SpaceBetween size="l">
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-      {success && <Alert type="success">{success}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
       <Container
         header={
@@ -816,7 +821,7 @@ interface MemoriesTabProps {
   clearMessages: () => void;
 }
 
-const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, clearMessages }) => {
+const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, setSuccess, clearMessages }) => {
   const [actors, setActors] = useState<ActorRow[]>([]);
   const [selectedActor, setSelectedActor] = useState<ActorRow | null>(null);
   const [records, setRecords] = useState<MemoryRecord[]>([]);
@@ -879,7 +884,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, cle
   return (
     <SpaceBetween size="l">
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-      {success && <Alert type="success">{success}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
       {!selectedActor && (
         <Table
@@ -1154,7 +1159,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
   return (
     <SpaceBetween size="l">
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-      {success && <Alert type="success">{success}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
       <Container
         header={
@@ -1316,7 +1321,89 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [currentEmail, setCurrentEmail] = useState('');
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [addingUser, setAddingUser] = useState(false);
+  const [promotingUser, setPromotingUser] = useState('');
+  const [demotingUser, setDemotingUser] = useState('');
+  const [deletingUser, setDeletingUser] = useState('');
+  const [deleteUserTarget, setDeleteUserTarget] = useState<{ username: string; email: string } | null>(null);
   const { t } = useI18n();
+
+  useEffect(() => {
+    getCurrentUserEmail().then(setCurrentEmail).catch(() => setCurrentEmail(''));
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'overview') {
+      loadCognitoUsers();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const handleCreateUser = async () => {
+    const email = newUserEmail.trim();
+    if (!email) { setError(t('overview.addUserEmailLabel')); return; }
+    clearMessages();
+    setAddingUser(true);
+    try {
+      await createCognitoUser(email);
+      setSuccess(t('overview.userCreated').replace('{email}', email));
+      setShowAddUserModal(false);
+      setNewUserEmail('');
+      await loadCognitoUsers();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setAddingUser(false);
+    }
+  };
+
+  const handleMakeAdmin = async (username: string, email: string) => {
+    clearMessages();
+    setPromotingUser(username);
+    try {
+      await addUserToAdminGroup(username);
+      setSuccess(t('overview.userPromoted').replace('{email}', email || username));
+      await loadCognitoUsers();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setPromotingUser('');
+    }
+  };
+
+  const handleRemoveAdmin = async (username: string, email: string) => {
+    clearMessages();
+    setDemotingUser(username);
+    try {
+      await removeUserFromAdminGroup(username);
+      setSuccess(t('overview.userDemoted').replace('{email}', email || username));
+      await loadCognitoUsers();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDemotingUser('');
+    }
+  };
+
+  const handleDeleteUser = async () => {
+    if (!deleteUserTarget) return;
+    const { username, email } = deleteUserTarget;
+    clearMessages();
+    setDeletingUser(username);
+    try {
+      await deleteCognitoUser(username);
+      setSuccess(t('overview.userDeleted').replace('{email}', email || username));
+      setDeleteUserTarget(null);
+      await loadCognitoUsers();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDeletingUser('');
+    }
+  };
 
   // Form state
   const [showForm, setShowForm] = useState(false);
@@ -1602,6 +1689,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
       loadUserIds();
       loadSettings();
     }
+    setError('');
+    setSuccess('');
   }, [activeTab, loadSessions, loadCognitoUsers, loadUserIds, loadSettings]);
 
   useEffect(() => {
@@ -1791,8 +1880,18 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
 
   return (
     <div className="admin-console">
-      {activeTab === 'overview' && (
+      {activeTab === 'overview' && (() => {
+        const cfg = getConfig();
+        const hint = currentEmail;
+        const withHint = (base: string | undefined) =>
+          base ? `${base.replace(/\/$/, '')}/${hint ? `?username=${encodeURIComponent(hint)}` : ''}` : '';
+        const chatUrl = withHint(cfg.chatbotUrl);
+        const simUrl = withHint(cfg.deviceSimulatorUrl);
+        const erpUrl = withHint(cfg.skillErpUrl);
+        return (
         <SpaceBetween size="l">
+          {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+          {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
           <Container
             header={
               <CloudscapeHeader variant="h1" description={t('overview.desc')}>
@@ -1805,8 +1904,172 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
               <Alert type="info">{t('overview.diagramPlaceholder')}</Alert>
             </SpaceBetween>
           </Container>
+          {(chatUrl || simUrl || erpUrl) && (
+            <Container
+              header={
+                <CloudscapeHeader variant="h2" description={t('overview.demosDesc')}>
+                  {t('overview.demosTitle')}
+                </CloudscapeHeader>
+              }
+            >
+              <SpaceBetween direction="horizontal" size="s">
+                {chatUrl && (
+                  <Button iconName="external" iconAlign="right" href={chatUrl} target="_blank">
+                    {t('overview.openChatbot')}
+                  </Button>
+                )}
+                {simUrl && (
+                  <Button iconName="external" iconAlign="right" href={simUrl} target="_blank">
+                    {t('overview.openDeviceSim')}
+                  </Button>
+                )}
+                {erpUrl && (
+                  <Button iconName="external" iconAlign="right" href={erpUrl} target="_blank">
+                    {t('overview.openSkillErp')}
+                  </Button>
+                )}
+              </SpaceBetween>
+            </Container>
+          )}
+          <Table
+            header={
+              <CloudscapeHeader
+                variant="h2"
+                description={t('overview.usersDesc')}
+                actions={
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
+                      {t('overview.refresh')}
+                    </Button>
+                    <Button variant="primary" onClick={() => { setNewUserEmail(''); setShowAddUserModal(true); }}>
+                      {t('overview.addUser')}
+                    </Button>
+                  </SpaceBetween>
+                }
+              >
+                {t('overview.usersTitle')}
+              </CloudscapeHeader>
+            }
+            loading={usersLoading}
+            loadingText={t('overview.loadingUsers')}
+            items={cognitoUsers}
+            trackBy="sub"
+            columnDefinitions={[
+              { id: 'email', header: t('overview.colEmail'), cell: (u) => u.email || u.username },
+              {
+                id: 'status',
+                header: t('overview.colStatus'),
+                cell: (u) => (
+                  <StatusIndicator type={u.status === 'CONFIRMED' ? 'success' : u.status === 'FORCE_CHANGE_PASSWORD' ? 'pending' : 'info'}>
+                    {u.status}
+                  </StatusIndicator>
+                ),
+              },
+              {
+                id: 'groups',
+                header: t('overview.colGroups'),
+                cell: (u) => (u.groups && u.groups.length > 0)
+                  ? <SpaceBetween direction="horizontal" size="xxs">{u.groups.map(g => <Badge key={g} color={g === 'admin' ? 'red' : 'blue'}>{g}</Badge>)}</SpaceBetween>
+                  : '-',
+              },
+              {
+                id: 'created',
+                header: t('overview.colCreated'),
+                cell: (u) => u.createdAt ? new Date(u.createdAt).toLocaleDateString() : '-',
+              },
+              {
+                id: 'actions',
+                header: t('overview.colActions'),
+                minWidth: 280,
+                cell: (u) => {
+                  const isAdmin = (u.groups || []).includes('admin');
+                  const isSelf = u.email && currentEmail && u.email.toLowerCase() === currentEmail.toLowerCase();
+                  return (
+                    <SpaceBetween direction="horizontal" size="xxs">
+                      {isAdmin ? (
+                        <Button
+                          disabled={!!isSelf}
+                          loading={demotingUser === u.username}
+                          onClick={() => handleRemoveAdmin(u.username, u.email)}
+                        >
+                          {t('overview.removeAdmin')}
+                        </Button>
+                      ) : (
+                        <Button
+                          loading={promotingUser === u.username}
+                          onClick={() => handleMakeAdmin(u.username, u.email)}
+                        >
+                          {t('overview.makeAdmin')}
+                        </Button>
+                      )}
+                      <Button
+                        disabled={!!isSelf}
+                        loading={deletingUser === u.username}
+                        onClick={() => setDeleteUserTarget({ username: u.username, email: u.email })}
+                      >
+                        {t('overview.deleteUser')}
+                      </Button>
+                    </SpaceBetween>
+                  );
+                },
+              },
+            ]}
+            variant="container"
+          />
+          <Modal
+            visible={!!deleteUserTarget}
+            onDismiss={() => setDeleteUserTarget(null)}
+            header={t('overview.deleteConfirmTitle')}
+            footer={
+              <CloudscapeBox float="right">
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button variant="link" onClick={() => setDeleteUserTarget(null)}>
+                    {t('overview.cancel')}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    loading={!!deletingUser}
+                    onClick={handleDeleteUser}
+                  >
+                    {t('overview.deleteUser')}
+                  </Button>
+                </SpaceBetween>
+              </CloudscapeBox>
+            }
+          >
+            <CloudscapeBox variant="p">
+              {t('overview.deleteConfirmBody').replace('{email}', deleteUserTarget?.email || deleteUserTarget?.username || '')}
+            </CloudscapeBox>
+          </Modal>
+          <Modal
+            visible={showAddUserModal}
+            onDismiss={() => setShowAddUserModal(false)}
+            header={t('overview.addUserModalTitle')}
+            footer={
+              <CloudscapeBox float="right">
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button variant="link" onClick={() => setShowAddUserModal(false)}>
+                    {t('overview.cancel')}
+                  </Button>
+                  <Button variant="primary" loading={addingUser} onClick={handleCreateUser}>
+                    {t('overview.addUserSubmit')}
+                  </Button>
+                </SpaceBetween>
+              </CloudscapeBox>
+            }
+          >
+            <FormField label={t('overview.addUserEmailLabel')}>
+              <Input
+                value={newUserEmail}
+                placeholder={t('overview.addUserEmailPlaceholder')}
+                onChange={({ detail }) => setNewUserEmail(detail.value)}
+                onKeyDown={({ detail }) => { if (detail.key === 'Enter') handleCreateUser(); }}
+              />
+            </FormField>
+          </Modal>
         </SpaceBetween>
-      )}
+        );
+      })()}
 
       {activeTab === 'identity' && (
         <Table
@@ -1948,7 +2211,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
         return (
       <>
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-      {success && <Alert type="success">{success}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
       <SpaceBetween size="s" direction="horizontal">
         <span style={{ alignSelf: 'center' }}>{t('skills.userScope')}</span>
@@ -2399,7 +2662,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
       {activeTab === 'sessions' && (
         <SpaceBetween size="l">
           {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-          {success && <Alert type="success">{success}</Alert>}
+          {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
           <Table
             header={
@@ -2496,7 +2759,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
       {activeTab === 'users' && (
         <SpaceBetween size="l">
           {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
-          {success && <Alert type="success">{success}</Alert>}
+          {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
           <Container header={<CloudscapeHeader variant="h3">{t('users.policyEngine')}</CloudscapeHeader>}>
             <SpaceBetween direction="horizontal" size="s">

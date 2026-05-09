@@ -23,6 +23,9 @@ export interface AuthTokens {
 
 interface CognitoIdTokenPayload {
   'cognito:groups'?: string[];
+  'cognito:username'?: string;
+  email?: string;
+  sub?: string;
   [key: string]: any;
 }
 
@@ -97,5 +100,15 @@ export async function getIsAdmin(): Promise<boolean> {
     return decoded['cognito:groups']?.includes('admin') ?? false;
   } catch {
     return false;
+  }
+}
+
+export async function getCurrentUserEmail(): Promise<string> {
+  try {
+    const token = await getIdToken();
+    const decoded = jwtDecode<CognitoIdTokenPayload>(token);
+    return decoded.email || decoded['cognito:username'] || '';
+  } catch {
+    return '';
   }
 }

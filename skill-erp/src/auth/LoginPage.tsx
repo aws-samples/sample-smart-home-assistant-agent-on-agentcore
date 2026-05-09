@@ -17,9 +17,19 @@ interface LoginPageProps {
 
 type Mode = 'signin' | 'signup' | 'confirm';
 
+function getInitialUsername(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('username') || params.get('email') || '';
+  } catch {
+    return '';
+  }
+}
+
 const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
   const [mode, setMode] = useState<Mode>('signin');
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(getInitialUsername);
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');

@@ -433,6 +433,9 @@ export class SmartHomeStack extends cdk.Stack {
     // /users (Cognito users)
     const usersApiResource = adminApi.root.addResource("users");
     usersApiResource.addMethod("GET", adminIntegration, authMethodOptions);
+    // POST /users — action-based dispatch (create user | add-to-admin); piggybacks
+    // on the existing /users resource to avoid new API Gateway methods (20KB cap).
+    usersApiResource.addMethod("POST", adminIntegration, authMethodOptions);
 
     // /users/{userId}/permissions
     const userIdPermResource = usersApiResource.addResource("{userId}");
@@ -549,11 +552,15 @@ export class SmartHomeStack extends cdk.Stack {
       resources: [`arn:aws:s3:::cdk-*-assets-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}/*`],
     }));
 
-    // Grant admin Lambda permissions for Cognito user listing
+    // Grant admin Lambda permissions for Cognito user listing + management
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         "cognito-idp:ListUsers",
         "cognito-idp:AdminListGroupsForUser",
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:AdminRemoveUserFromGroup",
+        "cognito-idp:AdminDeleteUser",
       ],
       resources: [userPool.userPoolArn],
     }));

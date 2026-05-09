@@ -408,6 +408,58 @@ export async function listCognitoUsers(): Promise<CognitoUserInfo[]> {
   return data.users || [];
 }
 
+export async function createCognitoUser(email: string): Promise<void> {
+  const headers = { ...(await authHeaders()), 'Content-Type': 'application/json' };
+  const res = await fetch(`${getBaseUrl()}/users`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'create', email }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create user (${res.status})`);
+  }
+}
+
+export async function addUserToAdminGroup(username: string): Promise<void> {
+  const headers = { ...(await authHeaders()), 'Content-Type': 'application/json' };
+  const res = await fetch(`${getBaseUrl()}/users`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'add-to-admin', username }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to add user to admin (${res.status})`);
+  }
+}
+
+export async function removeUserFromAdminGroup(username: string): Promise<void> {
+  const headers = { ...(await authHeaders()), 'Content-Type': 'application/json' };
+  const res = await fetch(`${getBaseUrl()}/users`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'remove-from-admin', username }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to remove admin (${res.status})`);
+  }
+}
+
+export async function deleteCognitoUser(username: string): Promise<void> {
+  const headers = { ...(await authHeaders()), 'Content-Type': 'application/json' };
+  const res = await fetch(`${getBaseUrl()}/users`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action: 'delete', username }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete user (${res.status})`);
+  }
+}
+
 export async function listGatewayTools(): Promise<GatewayTool[]> {
   const headers = await authHeaders();
   const res = await fetch(`${getBaseUrl()}/tools`, { headers });

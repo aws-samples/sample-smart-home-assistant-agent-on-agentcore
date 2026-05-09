@@ -8,6 +8,7 @@ interface AppConfig {
   region: string;
   chatbotUrl?: string;
   deviceSimulatorUrl?: string;
+  skillErpUrl?: string;
 }
 
 export function getConfig(): AppConfig {
@@ -21,5 +22,6 @@ export function getConfig(): AppConfig {
     region: 'us-east-1',
     chatbotUrl: '',
     deviceSimulatorUrl: '',
+    skillErpUrl: '',
   };
 }
