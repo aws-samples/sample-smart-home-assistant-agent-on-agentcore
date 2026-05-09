@@ -711,6 +711,10 @@ def main():
         # consent dialog. Risk is bounded because tool access is gated by the
         # agent's wrapper and the skill definitions in DynamoDB.
         existing_env["BYPASS_TOOL_CONSENT"] = "true"
+        # NOTE: do not set OTEL_SEMCONV_STABILITY_OPT_IN here. Strands' legacy
+        # gen_ai span-event convention is what AgentCore Online Evaluation's
+        # StrandsEventParser expects; opting into `gen_ai_latest_experimental`
+        # rewrites the event names and breaks evaluation.
         if gateway_arn:
             existing_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
         # Runtime auth mode: AWS_IAM (SigV4). The CUSTOM_JWT path on the
@@ -1356,7 +1360,9 @@ def main():
         ds_config = f"""window.__CONFIG__ = {{
   iotEndpoint: "{outputs['IoTEndpointOutput']}",
   region: "{REGION}",
-  cognitoIdentityPoolId: "{outputs['IdentityPoolId']}"
+  cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
+  cognitoUserPoolId: "{outputs['UserPoolId']}",
+  cognitoClientId: "{outputs['UserPoolClientId']}"
 }};"""
         print("Updating device simulator config.js...")
         s3.put_object(Bucket=ds_bucket, Key="config.js",

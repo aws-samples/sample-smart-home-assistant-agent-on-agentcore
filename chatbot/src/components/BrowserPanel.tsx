@@ -122,6 +122,29 @@ const DcvViewer: React.FC<DcvViewerProps> = ({ presignedUrl }) => {
   const [error, setError] = useState('');
   const connectionRef = useRef<any>(null);
   const layoutRequestedRef = useRef(false);
+  const outerRef = useRef<HTMLDivElement | null>(null);
+  const dcvDivRef = useRef<HTMLDivElement | null>(null);
+
+  // Fit the 1280×800 DCV canvas into whatever space the BrowserPanel gives
+  // us. The server still renders at native resolution (via
+  // requestDisplayLayout); we scale the DOM to fit. Clamped at 1× so wide
+  // panels don't upscale and blur.
+  useEffect(() => {
+    const outer = outerRef.current;
+    const target = dcvDivRef.current;
+    if (!outer || !target) return;
+    const apply = () => {
+      const w = outer.clientWidth;
+      const h = outer.clientHeight;
+      if (!w || !h) return;
+      const scale = Math.min(w / DCV_CANVAS_WIDTH, h / DCV_CANVAS_HEIGHT, 1);
+      target.style.transform = `scale(${scale})`;
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(outer);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -211,28 +234,36 @@ const DcvViewer: React.FC<DcvViewerProps> = ({ presignedUrl }) => {
 
   return (
     <div
+      ref={outerRef}
       style={{
         position: 'relative',
-        // Scroll wrapper: DCV renders at a fixed canvas size (see
-        // DCV_CANVAS_*), and this div scrolls when the panel is
-        // narrower/shorter than the canvas — both x and y.
+        // Fit-to-width wrapper: matches the DCV canvas aspect ratio so the
+        // scaled render occupies the whole area with no horizontal scroll.
+        // maxWidth caps at the native resolution so ultrawide panels don't
+        // blur the stream (scale clamped at 1×).
         width: '100%',
-        height: 'calc(100vh - 200px)',
-        minHeight: 400,
-        overflow: 'auto',
+        maxWidth: DCV_CANVAS_WIDTH,
+        aspectRatio: `${DCV_CANVAS_WIDTH} / ${DCV_CANVAS_HEIGHT}`,
+        maxHeight: 'calc(100vh - 200px)',
+        overflow: 'hidden',
         background: '#000',
         borderRadius: 4,
+        margin: '0 auto',
       }}
     >
       <div
+        ref={dcvDivRef}
         id={DCV_DIV_ID}
         style={{
-          // Fixed pixel size so the scroll wrapper sees a concrete content
-          // rect. The DCV SDK will paint into this div at the resolution
-          // we requested via requestDisplayLayout.
+          // DCV paints a canvas inside this div at the requested layout
+          // resolution (1280×800). The transform (set by the effect above)
+          // visually scales it to fit the wrapper — click coordinates are
+          // mapped by DCV via getBoundingClientRect, so scaling is
+          // transparent to input.
           width: DCV_CANVAS_WIDTH,
           height: DCV_CANVAS_HEIGHT,
           background: '#000',
+          transformOrigin: 'top left',
         }}
       />
       {status !== 'connected' && (
