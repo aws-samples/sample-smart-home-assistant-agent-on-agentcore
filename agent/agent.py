@@ -102,6 +102,41 @@ def load_user_settings(actor_id: str) -> dict:
     return {}
 
 
+def load_user_a2a_permissions(actor_id: str) -> dict[str, list[str]]:
+    """Return {registryRecordId: [allowed_skill_id, ...]} for this user.
+
+    Global grants (``__global__``) are merged with per-user grants; per-user
+    wins on the same recordId. Same merge semantics as ``load_skills_from_dynamodb``.
+    A missing row means "no grants"; the agent simply registers no A2A tools.
+    """
+    if not SKILLS_TABLE_NAME:
+        return {}
+    table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
+    merged: dict[str, list[str]] = {}
+
+    def _read(uid: str) -> dict:
+        if not uid or uid in ("default",):
+            return {}
+        try:
+            resp = table.get_item(Key={"userId": uid, "skillName": "__a2a_permissions__"})
+        except Exception as e:
+            logger.warning(f"A2A perms read failed for {uid}: {e}")
+            return {}
+        item = resp.get("Item") or {}
+        grants = item.get("a2aGrants") or {}
+        # DynamoDB can hand us sets; normalise to lists of str.
+        out: dict[str, list[str]] = {}
+        for rid, skills in grants.items():
+            if isinstance(skills, (set, list, tuple)):
+                out[rid] = sorted(str(s) for s in skills)
+        return out
+
+    merged.update(_read("__global__"))
+    if actor_id and actor_id != "__global__":
+        merged.update(_read(actor_id))
+    return merged
+
+
 def load_system_prompt(actor_id: str, agent_type: str) -> str | None:
     """Resolve the active system prompt for this user/agent from DynamoDB.
 
@@ -391,9 +426,46 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                 wrapped_tools.append(browse_web)
                 logger.info(f"browse_web registered for actor={actor_id}")
 
-            all_tools = non_scoped_tools + wrapped_tools + builtin_tools
+            # A2A tools — only when the deploy step patched the A2A envs into
+            # this runtime. Any failure here is soft: log and continue with no
+            # A2A tools so the main agent path stays healthy.
+            a2a_tools = []
+            if (
+                os.environ.get("A2A_M2M_SECRET_ARN")
+                and os.environ.get("A2A_COGNITO_TOKEN_URL")
+                and os.environ.get("REGISTRY_ID")
+            ):
+                try:
+                    from tools.a2a import build_a2a_tools
+                    from tools.a2a_auth import build_token_provider
+                    grants = load_user_a2a_permissions(actor_id)
+                    if grants:
+                        a2a_tools = build_a2a_tools(
+                            grants=grants,
+                            registry_id=os.environ["REGISTRY_ID"],
+                            token_provider=build_token_provider(),
+                        )
+                        logger.info(
+                            f"A2A tools registered: {len(a2a_tools)} for actor={actor_id}"
+                        )
+                except Exception as e:
+                    logger.warning(f"A2A tool registration failed (skipped): {e}")
 
-            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)
+            all_tools = non_scoped_tools + wrapped_tools + builtin_tools + a2a_tools
+
+            # When A2A tools are registered, append a short hint so the LLM
+            # knows to prefer the specialist over general knowledge. Non-A2A
+            # turns see the original system prompt untouched.
+            effective_system_prompt = user_system_prompt
+            if a2a_tools and effective_system_prompt:
+                effective_system_prompt = (
+                    effective_system_prompt
+                    + "\n\nYou also have access to specialist A2A agents via tools named `a2a_*`. "
+                    + "When the user's question maps to one of those specialists, prefer the corresponding "
+                    + "tool over general knowledge — each routes to a purpose-built agent with domain expertise."
+                )
+
+            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt)
             return str(agent(prompt))
     else:
         agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)

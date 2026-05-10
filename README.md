@@ -117,6 +117,20 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 5. 状态栏会显示 `PENDING / SUBMITTED / APPROVED / REJECTED`，可以随时编辑或删除
 6. 管理员在 **AgentCore Registry 控制台** 审批记录后，可在 **Admin Console → Skills → "Add approved skill from AgentCore Registry"** 将其导入技能目录
 
+### A2A 示例 Agent（可选，演示用）
+
+`a2a-agent-registry/` 下有 3 个独立部署的 A2A (Agent-to-Agent) 示例 agent，演示如何让 text agent 通过标准 A2A 协议委托给专家 agent：`energy-optimization-agent` / `home-security-agent` / `appliance-maintenance-agent`。
+
+- **`./deploy.sh` 不会部署它们** —— 保持基础系统精简。
+- 部署方式（依赖 `./deploy.sh` 已跑通）：
+  ```bash
+  cd a2a-agent-registry
+  python deploy.py                              # 全量
+  python deploy.py --agent energy-optimization  # 只部署一个
+  ```
+- Admin 在 **Admin Console → Users → Manage Permissions → A2A Agents** 区块按用户按 skill 授权；text agent 在下一次调用时加载。
+- 完整部署流程、测试提示词和逐步演示指南见 [`a2a-agent-registry/README.md`](a2a-agent-registry/README.md)。
+
 ### 添加管理员用户（可选）
 
 ```bash
@@ -455,6 +469,20 @@ Skill ERP is a self-service skills site for **regular end users** (no `admin` gr
 4. On save, the record is published to AgentCore Registry (`SmartHomeSkillsRegistry`) with `descriptorType=agentSkills` and auto-submitted for approval (`SubmitRegistryRecordForApproval`)
 5. Status column shows `PENDING / SUBMITTED / APPROVED / REJECTED` — you can keep editing or delete at any time
 6. After the curator approves the record in the AgentCore Registry console, an admin can import it into the skills catalog via **Admin Console → Skills → "Add approved skill from AgentCore Registry"**
+
+### A2A Sample Agents (optional, for demo)
+
+`a2a-agent-registry/` contains 3 independently deployable A2A (Agent-to-Agent) sample agents that show how the text agent can delegate to specialist agents over the standard A2A protocol: `energy-optimization-agent`, `home-security-agent`, `appliance-maintenance-agent`.
+
+- **`./deploy.sh` does NOT deploy them** — the base system stays minimal.
+- Deploy (requires `./deploy.sh` already done):
+  ```bash
+  cd a2a-agent-registry
+  python deploy.py                              # all three
+  python deploy.py --agent energy-optimization  # one only
+  ```
+- Grant access per user per skill in **Admin Console → Users → Manage Permissions → A2A Agents**; the text agent picks it up on the next invocation.
+- Full deploy flow, test prompts, and step-by-step demo walkthrough: [`a2a-agent-registry/README.md`](a2a-agent-registry/README.md).
 
 ### Add Admin Users (Optional)
 

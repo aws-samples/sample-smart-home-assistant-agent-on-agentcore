@@ -248,6 +248,11 @@ const en: Record<string, string> = {
   'users.permsUpdated': 'Permissions updated for {user}.',
   'users.modelUpdated': 'Model ID updated for {user}.',
 
+  // A2A permissions block inside the Manage Permissions modal
+  'users.a2a.sectionTitle': 'A2A Agents',
+  'users.a2a.none': 'No approved A2A agents in the registry.',
+  'users.a2a.grantedCount': '({n} / {total} skills granted)',
+
   // Integrations tab
   'integrations.title': 'Tool Integrations',
   'integrations.desc': 'Manage external tool sources connected to the AgentCore Gateway. Tools registered here become available to the agent and can be controlled via the Tool Access tab.',
@@ -418,6 +423,11 @@ const en: Record<string, string> = {
   'integrations.a2a.drawer.recordId': 'Record ID',
   'integrations.a2a.drawer.createdAt': 'Created',
   'integrations.a2a.drawer.updatedAt': 'Updated',
+
+  // Read-only access section inside the A2A drawer.
+  'integrations.a2a.access.title': 'Access',
+  'integrations.a2a.access.empty': 'Not granted to any user — open Users → Manage Permissions to grant access.',
+  'integrations.a2a.access.editHint': 'To change access, open Users → Manage Permissions.',
 
   'sessions.shell': 'Remote Shell',
 

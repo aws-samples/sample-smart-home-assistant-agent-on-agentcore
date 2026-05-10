@@ -11,3 +11,8 @@ aws-opentelemetry-distro>=0.10.0
 opentelemetry-exporter-otlp-proto-http
 browser-use>=0.1.40
 playwright>=1.50
+# A2A downstream client — version pin per docs/superpowers/specs A2A design.
+# 0.3.x provides A2ACardResolver / ClientFactory that work with the
+# Strands A2AServer runtimes in a2a-agent-registry/.
+a2a-sdk<1.0
+httpx>=0.28

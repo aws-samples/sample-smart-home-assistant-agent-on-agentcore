@@ -1,0 +1,32 @@
+{
+  "name": "energy-optimization-agent",
+  "description": "A specialist agent that advises on home energy savings, appliance scheduling, and electricity-tariff strategy.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/energy-optimization-agent"
+  },
+  "defaultModelId": "us.amazon.nova-lite-v1:0",
+  "skills": [
+    {
+      "id": "estimate_savings",
+      "name": "Estimate savings",
+      "description": "Estimate how much energy or money a specific behavior change (dimming, scheduling, device swap) would save the user.",
+      "tags": ["energy", "savings"],
+      "examples": [
+        "How much can I save by dimming LEDs at night?",
+        "What's the payback on switching my oven to convection mode?"
+      ]
+    },
+    {
+      "id": "tariff_analysis",
+      "name": "Tariff analysis",
+      "description": "Compare time-of-use vs. flat-rate tariffs for the user's typical usage pattern and recommend the better option.",
+      "tags": ["energy", "tariff"],
+      "examples": [
+        "Compare TOU vs flat rate for my usage",
+        "When should I run the rice cooker on a TOU plan?"
+      ]
+    }
+  ]
+}

@@ -17,4 +17,8 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http",
     "browser-use>=0.1.40",
     "playwright>=1.50",
+    # A2A downstream client (agent/tools/a2a.py). 0.3.x matches the Strands
+    # A2AServer runtimes published under a2a-agent-registry/.
+    "a2a-sdk<1.0",
+    "httpx>=0.28",
 ]

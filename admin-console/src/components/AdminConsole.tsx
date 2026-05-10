@@ -35,6 +35,11 @@ import {
   importRegistryRecords,
   listA2aAgents,
   A2AAgentRecord,
+  getUserA2APermissions,
+  updateUserA2APermissions,
+  listA2aGrantsForRecord,
+  A2AAvailableAgent,
+  A2AGrantSummary,
   getAgentPrompts,
   saveAgentPrompt,
   deleteAgentPrompt,
@@ -1438,6 +1443,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   const [a2aLoading, setA2aLoading] = useState(false);
   const [a2aError, setA2aError] = useState<string>('');
   const [a2aDrawer, setA2aDrawer] = useState<A2AAgentRecord | null>(null);
+  // Read-only "Access" section in the Integration Registry A2A drawer.
+  const [a2aDrawerGrants, setA2aDrawerGrants] = useState<A2AGrantSummary[] | null>(null);
+  const [a2aDrawerGrantsLoading, setA2aDrawerGrantsLoading] = useState(false);
 
   // Users tab
   const [cognitoUsers, setCognitoUsers] = useState<CognitoUserInfo[]>([]);
@@ -1449,6 +1457,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   const [policyMode, setPolicyMode] = useState<'ENFORCE' | 'LOG_ONLY'>('ENFORCE');
   const [policyModeSaving, setPolicyModeSaving] = useState(false);
   const [permOriginal, setPermOriginal] = useState<string[]>([]);
+
+  // A2A grants inside the Manage Permissions modal.
+  // userA2aGrants maps recordId → array of granted skillIds.
+  const [userA2aGrants, setUserA2aGrants] = useState<Record<string, string[]>>({});
+  const [userA2aGrantsOriginal, setUserA2aGrantsOriginal] = useState<Record<string, string[]>>({});
+  const [availableA2aAgents, setAvailableA2aAgents] = useState<A2AAvailableAgent[]>([]);
+  const [expandedA2aAgents, setExpandedA2aAgents] = useState<Record<string, boolean>>({});
 
   // File manager (shown when editing a skill)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
@@ -1607,6 +1622,27 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
         selections[tool.name] = initialAllowed.includes(tool.name);
       }
       setUserToolSelections(selections);
+
+      // A2A permissions load in parallel with tool perms. Failures are
+      // soft (log + show empty) so a Registry hiccup doesn't block the
+      // tool-permissions workflow.
+      try {
+        const a2a = await getUserA2APermissions(getActorId(user));
+        // Normalize to sorted lists for deterministic dirty checks.
+        const normGrants: Record<string, string[]> = {};
+        for (const [rid, skills] of Object.entries(a2a.a2aGrants || {})) {
+          normGrants[rid] = [...skills].sort();
+        }
+        setAvailableA2aAgents(a2a.availableAgents || []);
+        setUserA2aGrants(normGrants);
+        setUserA2aGrantsOriginal(normGrants);
+        setExpandedA2aAgents({});
+      } catch (err: any) {
+        console.warn('Failed to load A2A permissions', err);
+        setAvailableA2aAgents([]);
+        setUserA2aGrants({});
+        setUserA2aGrantsOriginal({});
+      }
     } catch (err: any) {
       setError(err.message);
     }
@@ -1622,6 +1658,19 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
         .map(([name]) => name);
       await updateUserPermissions(getActorId(selectedPermUser), selectedTools);
       setPermOriginal(selectedTools);
+
+      // Drop empty skill lists before sending; the server treats an empty map
+      // as "delete the row", which is what we want for a user with no grants.
+      const grantsToSend: Record<string, string[]> = {};
+      for (const [rid, skills] of Object.entries(userA2aGrants)) {
+        if (skills && skills.length > 0) {
+          grantsToSend[rid] = [...skills].sort();
+        }
+      }
+      await updateUserA2APermissions(getActorId(selectedPermUser), grantsToSend);
+      setUserA2aGrantsOriginal(grantsToSend);
+      setUserA2aGrants(grantsToSend);
+
       setSuccess(t('users.permsUpdated').replace('{user}', selectedPermUser.email || selectedPermUser.username || ''));
     } catch (err: any) {
       setError(err.message);
@@ -1634,6 +1683,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     setSelectedPermUser(null);
     setUserToolSelections({});
     setPermOriginal([]);
+    setUserA2aGrants({});
+    setUserA2aGrantsOriginal({});
+    setAvailableA2aAgents([]);
+    setExpandedA2aAgents({});
   };
 
   const permIsDirty = (() => {
@@ -1642,8 +1695,30 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
       .map(([k]) => k)
       .sort();
     const orig = [...permOriginal].sort();
-    return JSON.stringify(current) !== JSON.stringify(orig);
+    if (JSON.stringify(current) !== JSON.stringify(orig)) return true;
+    // Also compare A2A grants (ignore empty entries on either side).
+    const normalize = (g: Record<string, string[]>) => {
+      const out: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(g)) {
+        if (v && v.length > 0) out[k] = [...v].sort();
+      }
+      return out;
+    };
+    return (
+      JSON.stringify(normalize(userA2aGrants)) !==
+      JSON.stringify(normalize(userA2aGrantsOriginal))
+    );
   })();
+
+  const toggleA2aSkill = (recordId: string, skillId: string) => {
+    setUserA2aGrants((prev) => {
+      const existing = prev[recordId] || [];
+      const next = existing.includes(skillId)
+        ? existing.filter((s) => s !== skillId)
+        : [...existing, skillId];
+      return { ...prev, [recordId]: next };
+    });
+  };
 
   const handleSaveSettings = async () => {
     clearMessages();
@@ -1692,6 +1767,30 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     setError('');
     setSuccess('');
   }, [activeTab, loadSessions, loadCognitoUsers, loadUserIds, loadSettings]);
+
+  // Load the read-only "Access" summary whenever the A2A drawer opens.
+  useEffect(() => {
+    if (!a2aDrawer) {
+      setA2aDrawerGrants(null);
+      return;
+    }
+    let cancelled = false;
+    setA2aDrawerGrantsLoading(true);
+    listA2aGrantsForRecord(a2aDrawer.recordId)
+      .then((grants) => {
+        if (!cancelled) setA2aDrawerGrants(grants);
+      })
+      .catch((err) => {
+        console.warn('Failed to load A2A grants:', err);
+        if (!cancelled) setA2aDrawerGrants([]);
+      })
+      .finally(() => {
+        if (!cancelled) setA2aDrawerGrantsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [a2aDrawer]);
 
   useEffect(() => {
     if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
@@ -2856,6 +2955,62 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                   </>
                 )}
 
+                <div className="perm-section-header">
+                  <b>{t('users.a2a.sectionTitle')}</b>
+                </div>
+                {availableA2aAgents.length === 0 ? (
+                  <CloudscapeBox color="text-body-secondary" padding="s">
+                    {t('users.a2a.none')}
+                  </CloudscapeBox>
+                ) : (
+                  <div className="perm-a2a-list">
+                    {availableA2aAgents.map((agent) => {
+                      const granted = userA2aGrants[agent.recordId] || [];
+                      const expanded = !!expandedA2aAgents[agent.recordId];
+                      return (
+                        <div key={agent.recordId} className="perm-a2a-agent">
+                          <div
+                            className="perm-a2a-agent-header"
+                            onClick={() =>
+                              setExpandedA2aAgents((prev) => ({
+                                ...prev,
+                                [agent.recordId]: !prev[agent.recordId],
+                              }))
+                            }
+                          >
+                            <span className="perm-a2a-chevron">{expanded ? '▾' : '▸'}</span>
+                            <span className="perm-a2a-name">{agent.name}</span>
+                            <span className="perm-a2a-count">
+                              {t('users.a2a.grantedCount')
+                                .replace('{n}', String(granted.length))
+                                .replace('{total}', String(agent.skills.length))}
+                            </span>
+                          </div>
+                          {expanded && (
+                            <div className="perm-a2a-skills">
+                              {agent.skills.map((skill) => (
+                                <label key={skill.id} className="perm-a2a-skill-item">
+                                  <input
+                                    type="checkbox"
+                                    checked={granted.includes(skill.id)}
+                                    onChange={() =>
+                                      toggleA2aSkill(agent.recordId, skill.id)
+                                    }
+                                  />
+                                  <span className="perm-a2a-skill-id">{skill.id}</span>
+                                  <span className="perm-a2a-skill-desc">
+                                    {skill.description}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <SpaceBetween direction="horizontal" size="xs">
                   <Button onClick={handleCancelPermissions}>{t('users.cancel')}</Button>
                   <Button
@@ -3167,6 +3322,45 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                       <dt>{t('integrations.a2a.drawer.updatedAt')}</dt>
                       <dd>{a2aDrawer.updatedAt ? new Date(a2aDrawer.updatedAt).toLocaleString() : '-'}</dd>
                     </dl>
+
+                    {/* Read-only Access section: shows who has been granted
+                        which skills on this A2A agent. All writes go through
+                        Users → Manage Permissions. */}
+                    <div className="drawer-access-section">
+                      <b>{t('integrations.a2a.access.title')}</b>
+                      {a2aDrawerGrantsLoading ? (
+                        <CloudscapeBox color="text-body-secondary" padding="s">
+                          {t('common.loading')}
+                        </CloudscapeBox>
+                      ) : !a2aDrawerGrants || a2aDrawerGrants.length === 0 ? (
+                        <CloudscapeBox color="text-body-secondary" padding="s">
+                          {t('integrations.a2a.access.empty')}
+                        </CloudscapeBox>
+                      ) : (
+                        <ul className="drawer-access-list">
+                          {a2aDrawerGrants.map((g) => {
+                            // Backend writes DDB rows keyed by email (matching the
+                            // text agent's runtime key). Match that first; fall
+                            // back to sub for legacy rows.
+                            const userRow = cognitoUsers.find(
+                              (u) => u.email === g.userId || u.sub === g.userId,
+                            );
+                            const label =
+                              g.userId === '__global__'
+                                ? '__global__'
+                                : userRow?.email || g.userId;
+                            return (
+                              <li key={g.userId}>
+                                <strong>{label}</strong> → {g.skillIds.join(', ')}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                      <CloudscapeBox color="text-body-secondary" fontSize="body-s">
+                        {t('integrations.a2a.access.editHint')}
+                      </CloudscapeBox>
+                    </div>
                   </SpaceBetween>
                 </Modal>
               )}

@@ -1,0 +1,32 @@
+{
+  "name": "appliance-maintenance-agent",
+  "description": "A specialist agent that advises on smart-home appliance maintenance schedules and troubleshooting.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/appliance-maintenance-agent"
+  },
+  "defaultModelId": "us.amazon.nova-lite-v1:0",
+  "skills": [
+    {
+      "id": "maintenance_schedule",
+      "name": "Maintenance schedule",
+      "description": "Recommend routine-maintenance intervals (filter change, descaling, firmware update) for a specified appliance.",
+      "tags": ["appliance", "maintenance"],
+      "examples": [
+        "When should I replace my AC filter?",
+        "How often should I descale the rice cooker?"
+      ]
+    },
+    {
+      "id": "troubleshoot",
+      "name": "Troubleshoot",
+      "description": "Diagnose a reported appliance problem and give step-by-step troubleshooting guidance.",
+      "tags": ["appliance", "troubleshoot"],
+      "examples": [
+        "My dishwasher won't drain, what should I check?",
+        "Oven is preheating slower than usual — likely cause?"
+      ]
+    }
+  ]
+}

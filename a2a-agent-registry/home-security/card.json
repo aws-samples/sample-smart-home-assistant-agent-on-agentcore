@@ -1,0 +1,32 @@
+{
+  "name": "home-security-agent",
+  "description": "A specialist agent that assesses smart-home security posture and guides incident response.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/home-security-agent"
+  },
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "skills": [
+    {
+      "id": "risk_assessment",
+      "name": "Risk assessment",
+      "description": "Evaluate the user's stated smart-home setup and identify the biggest security gaps ranked by severity.",
+      "tags": ["security", "assessment"],
+      "examples": [
+        "What's my biggest security gap?",
+        "Review the security of my Wi-Fi cameras and door locks."
+      ]
+    },
+    {
+      "id": "incident_response",
+      "name": "Incident response",
+      "description": "Given a smart-home alert or observation, recommend immediate actions and follow-up steps.",
+      "tags": ["security", "incident"],
+      "examples": [
+        "Motion detected at 2am, what to do?",
+        "My smart lock shows a failed unlock attempt — steps?"
+      ]
+    }
+  ]
+}

@@ -248,6 +248,11 @@ const zh: Record<string, string> = {
   'users.permsUpdated': '{user} 的权限已更新。',
   'users.modelUpdated': '{user} 的模型 ID 已更新。',
 
+  // Manage Permissions 弹层中的 A2A 区块
+  'users.a2a.sectionTitle': 'A2A 智能体',
+  'users.a2a.none': 'Registry 中暂无已审批的 A2A 智能体。',
+  'users.a2a.grantedCount': '（已授权 {n} / {total} 个 skill）',
+
   // Integrations tab
   'integrations.title': '工具集成',
   'integrations.desc': '管理连接到 AgentCore 网关的外部工具源。在此注册的工具将可供智能体使用，并可通过工具权限选项卡进行控制。',
@@ -418,6 +423,11 @@ const zh: Record<string, string> = {
   'integrations.a2a.drawer.recordId': '记录 ID',
   'integrations.a2a.drawer.createdAt': '创建时间',
   'integrations.a2a.drawer.updatedAt': '更新时间',
+
+  // A2A drawer 中的只读 Access 区块
+  'integrations.a2a.access.title': '访问权限',
+  'integrations.a2a.access.empty': '尚未授予任何用户 —— 前往 Users → Manage Permissions 授权。',
+  'integrations.a2a.access.editHint': '如需修改访问权限，请前往 Users → Manage Permissions。',
 
   'sessions.shell': '远程 Shell',
 

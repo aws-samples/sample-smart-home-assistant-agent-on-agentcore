@@ -783,3 +783,91 @@ export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
   const data = await res.json();
   return data.records || [];
 }
+
+// ---------------------------------------------------------------------------
+// A2A Permissions (per-user grants: recordId → [skillId, ...])
+//
+// The server reuses /users/{userId}/permissions with ?action=a2a to keep the
+// admin Lambda's resource policy under the 20KB cap.
+// ---------------------------------------------------------------------------
+
+export interface A2AAvailableAgent {
+  recordId: string;
+  name: string;
+  description: string;
+  skills: Array<{ id: string; name: string; description: string }>;
+}
+
+export interface UserA2APermissions {
+  userId: string;
+  a2aGrants: { [recordId: string]: string[] };
+  availableAgents: A2AAvailableAgent[];
+  updatedAt?: string;
+}
+
+export interface A2AGrantSummary {
+  userId: string;
+  skillIds: string[];
+  updatedAt: string;
+}
+
+export async function getUserA2APermissions(
+  userId: string
+): Promise<UserA2APermissions> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=a2a`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(
+      body.error || `Failed to get A2A permissions (${res.status})`
+    );
+  }
+  const data = await res.json();
+  return {
+    userId: data.userId,
+    a2aGrants: data.a2aGrants || {},
+    availableAgents: data.availableAgents || [],
+    updatedAt: data.updatedAt,
+  };
+}
+
+export async function updateUserA2APermissions(
+  userId: string,
+  a2aGrants: { [recordId: string]: string[] }
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=a2a`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ a2aGrants }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    const detail = body.details ? `: ${(body.details as string[]).join('; ')}` : '';
+    throw new Error(
+      (body.error || `Failed to update A2A permissions (${res.status})`) + detail
+    );
+  }
+}
+
+export async function listA2aGrantsForRecord(
+  recordId: string
+): Promise<A2AGrantSummary[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?action=a2a-grants&recordId=${encodeURIComponent(recordId)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list A2A grants (${res.status})`);
+  }
+  const data = await res.json();
+  return data.grants || [];
+}

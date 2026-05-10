@@ -135,7 +135,25 @@ def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dyna
             "tags": form["tags"],
         })
 
+    # List once so we don't create duplicate placeholders on rerun. The
+    # Registry API accepts same-name records (distinct recordIds), so the
+    # earlier ConflictException path never fires — we have to filter by name
+    # ourselves. Skip seeding whenever a real or placeholder record with that
+    # name already exists (including APPROVED real ones from a2a-agent-registry/
+    # deploy.py — we don't want to add a placeholder alongside them).
+    existing_names: set[str] = set()
+    try:
+        paginator = ac_control.get_paginator("list_registry_records")
+        for page in paginator.paginate(registryId=registry_id, descriptorType="A2A", maxResults=50):
+            for rec in page.get("registryRecords", []):
+                existing_names.add(rec.get("name", ""))
+    except Exception as e:
+        print(f"  [a2a-seed] list existing records failed: {e}")
+
     for demo in demos:
+        if demo["name"] in existing_names:
+            print(f"  [a2a-seed] {demo['name']} already exists — skip")
+            continue
         try:
             resp = ac_control.create_registry_record(
                 registryId=registry_id,

@@ -1121,3 +1121,99 @@ a.btn {
 .ansi-fg-bright-magenta { color: #f6f; }
 .ansi-fg-bright-cyan { color: #6ff; }
 .ansi-fg-bright-white { color: #fff; }
+
+/* A2A Agents section inside the Manage Permissions modal */
+.perm-section-header {
+  margin-top: 16px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 13px;
+  color: #e0e0e0;
+}
+.perm-a2a-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.perm-a2a-agent {
+  border-radius: 8px;
+  background: rgba(74, 158, 255, 0.03);
+}
+.perm-a2a-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.perm-a2a-agent-header:hover {
+  background: rgba(74, 158, 255, 0.07);
+}
+.perm-a2a-chevron {
+  width: 12px;
+  color: #8888aa;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.perm-a2a-name {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  color: #e0e0e0;
+  flex-shrink: 0;
+}
+.perm-a2a-count {
+  font-size: 12px;
+  color: #8888aa;
+}
+.perm-a2a-skills {
+  padding: 4px 14px 10px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.perm-a2a-skill-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.perm-a2a-skill-item:hover {
+  background: rgba(74, 158, 255, 0.05);
+}
+.perm-a2a-skill-item input[type='checkbox'] {
+  margin-top: 2px;
+  accent-color: #4a9eff;
+  flex-shrink: 0;
+}
+.perm-a2a-skill-id {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: #e0e0e0;
+  min-width: 160px;
+  flex-shrink: 0;
+}
+.perm-a2a-skill-desc {
+  font-size: 12px;
+  color: #8888aa;
+  line-height: 1.4;
+  flex: 1;
+}
+
+/* Access section inside the A2A drawer (read-only listing of grants). */
+.drawer-access-section {
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.drawer-access-list {
+  margin: 8px 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: #e0e0e0;
+}
+.drawer-access-list li {
+  margin: 2px 0;
+}

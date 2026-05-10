@@ -25,6 +25,7 @@
 - [9.10. Remote Shell Commands per Session](#910-remote-shell-commands-per-session)
 - [9.11. Browser Use — Live Agent Web Automation](#911-browser-use--live-agent-web-automation)
 - [9.12. Observability and AgentCore Online Evaluation](#912-observability-and-agentcore-online-evaluation)
+- [9.13. A2A Sample Agents & Text Agent A2A Client](#913-a2a-sample-agents--text-agent-a2a-client)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -2292,10 +2293,187 @@ ownership-row scan.
 records after the registry is ensured to exist:
 `energy-optimization-agent`, `home-security-agent`,
 `appliance-maintenance-agent`. Each is created, ownership-rowed under the
-deploy-time admin user, and submitted for approval. Approval itself is
-manual (no control-plane approve API) — admins click Approve in the
-AgentCore Registry console to make them appear in the admin A2A Agents
-sub-tab.
+deploy-time admin user, and submitted for approval. These are *placeholder*
+records (endpoints point at `example.com`) and become real, invocable
+agents only after running the second-stage deploy in
+[`a2a-agent-registry/`](#913-a2a-sample-agents--text-agent-a2a-client).
+Approval is manual through the AWS Console → Bedrock AgentCore → Registry.
+(There is no `approve_registry_record` API, but the boto3-level
+`update_registry_record_status` does flip status — used by
+`a2a-agent-registry/approve_records.py` for test/dev only.) Approved
+records appear in the admin A2A Agents sub-tab.
+
+**Per-user A2A permissions.** Admins grant A2A skill access per user inside
+the existing Users → Manage Permissions modal (single write entry point;
+the Integration Registry drawer shows the same data read-only). Grants
+live in the skills table under a reserved sort key
+`__a2a_permissions__` — the row carries
+`a2aGrants = Map<String, List<String>>` (recordId → skillId list).
+`__global__` and per-user rows merge at agent runtime, with per-user
+winning on the same recordId. The Admin API reuses
+`/users/{userId}/permissions?action=a2a` and
+`/registry/records?action=a2a-grants&recordId=X` to stay under the admin
+Lambda's 20 KB resource-policy cap.
+
+### 9.13 A2A Sample Agents & Text Agent A2A Client
+
+The text agent calls downstream A2A agents as a standard **A2A client**:
+AgentCard discovery (`/.well-known/agent-card.json`) followed by JSON-RPC
+`message/send`. AgentCore Runtime's native A2A protocol mode
+(port 9000, `/` mount) hosts the downstream; the upstream text agent and
+the downstream specialist agents are independent AgentCore Runtimes.
+
+**Three sample agents** live under
+[`a2a-agent-registry/`](../a2a-agent-registry/README.md):
+
+| Name | Skills | Default model |
+|------|--------|---------------|
+| `energy-optimization-agent` | `estimate_savings`, `tariff_analysis` | Nova Lite |
+| `home-security-agent` | `risk_assessment`, `incident_response` | Claude Haiku 4.5 |
+| `appliance-maintenance-agent` | `maintenance_schedule`, `troubleshoot` | Nova Lite |
+
+Each agent echoes a marker token (`⟦A2A:<shortname>⟧`) on the first line
+of every reply so upstream orchestrators (and the e2e tests) can confirm
+the response really routed through the specialist.
+
+**Layout:**
+```
+a2a-agent-registry/
+├── common/            # Strands A2AServer + AgentCard builder (shared)
+├── energy-optimization/      agent.py + system_prompt.md + card.json + Dockerfile
+├── home-security/             ditto
+├── appliance-maintenance/     ditto
+├── deploy.py                  # independent deployer (no Docker required)
+└── teardown.py                # reverse cleanup
+```
+
+**Authentication.** OAuth2 client_credentials on a dedicated Cognito m2m
+app client (`smarthome-a2a-m2m`) with scope `a2a-server/invoke`; creds
+live in Secrets Manager. Every downstream Runtime is configured with
+`customJWTAuthorizer` pointing at the Cognito discovery URL; the text
+agent attaches `Authorization: Bearer <m2m JWT>` on every A2A call.
+
+**Deploy path.** `python a2a-agent-registry/deploy.py` runs the
+`agentcore` CLI (`agentcore create --protocol A2A`) to synthesize the
+per-agent CDK project, deploys via CodeBuild (no local Docker daemon),
+then patches each Runtime with env vars + CUSTOM_JWT authorizer +
+`serverProtocol: A2A` (the CLI drops these during `agentcore deploy`,
+same limitation observed for the main smarthome Runtime). Finally it
+seeds/refreshes the matching AgentCore Registry record with the real
+invocation URL. Supports `--agent <name>` for partial deploys and
+`--only` / `--skip` step filtering.
+
+**Text agent integration.** `agent.py` loads
+`__a2a_permissions__` at the start of each invocation, resolves each
+granted AgentCard from Registry, and registers one Strands tool per
+(recordId, skillId) pair — named `a2a_<agent_slug>_<skill_slug>` with
+the AgentCard description + examples as the tool doc. Invocation uses
+`a2a-sdk`'s `ClientFactory` with `streaming=False`; the single returned
+Task's `artifacts[0].parts` becomes the tool's return string.
+
+Unauthorized skills are **never registered**, which provides soft
+skill-level enforcement through LLM visibility (prompt injection can't
+call a tool the model doesn't know exists). A cooperative hint
+`X-A2A-Allowed-Skills` header is also sent for future hard-enforcement
+paths.
+
+**Feature flag.** The text agent activates A2A registration only when
+all three envs are present: `A2A_M2M_SECRET_ARN`, `A2A_COGNITO_TOKEN_URL`,
+`REGISTRY_ID`. Missing any → the invoke path skips A2A entirely, so the
+base smarthome system works with zero A2A setup. `deploy.py` step 8
+writes these envs into the text-agent Runtime.
+
+**`deploy.sh` does NOT deploy A2A samples.** The root one-click deploy
+keeps the base system minimal; A2A is an opt-in second-stage deploy. Run
+`python a2a-agent-registry/deploy.py` only when you want the three sample
+agents live. `deploy.sh` itself doesn't reference `a2a-agent-registry/`.
+
+**Record lifecycle.**
+
+| Actor | What it creates | Where | Status on create |
+|-------|-----------------|-------|------------------|
+| `setup-agentcore.py` (step 6 of `deploy.sh`) | 3 *placeholder* Registry records pointing at `https://example.com/a2a/...` | `SmartHomeSkillsRegistry` | `PENDING_APPROVAL` |
+| `a2a-agent-registry/deploy.py` | 3 AgentCore Runtimes (`sha2aenergy`, `sha2asecurity`, `sha2amaintenance`), Cognito m2m resource server + app client, Secrets Manager secret, Registry records with real invocation URLs | Separate resources per agent | `PENDING_APPROVAL` |
+| Admin (manual) | Approval flip to `APPROVED` via the AWS Console → Bedrock AgentCore → Registry | Same records | `APPROVED` |
+| `a2a-agent-registry/approve_records.py` | Test-only helper that flips records to APPROVED via `update_registry_record_status` | Same records | `APPROVED` |
+
+**Placeholder cleanup.** `setup-agentcore.py`'s A2A seed is idempotent by
+name — subsequent reruns skip records that already exist. On first
+`deploy.py` run the 3 placeholders created by `setup-agentcore.py` are
+found by name, deleted, then recreated with real invocation URLs. Net
+effect: the Registry ends up with exactly one record per sample agent,
+with the real URL. Re-running `deploy.py` is also idempotent (same logic
+paths).
+
+**Admin API key resolution.** `agent.py` reads the
+`__a2a_permissions__` row using `payload["userId"]`, which the chatbot
+sets to `email or cognito:username or sub` (email is almost always present).
+The Admin Console, however, passes the Cognito **sub** when writing
+grants. `admin-api`'s `_resolve_ddb_user_key` translates the path-param
+`{userId}` into the email the agent reads (sub → email via `list_users`
+filter; emails pass through unchanged; `__global__` bypasses lookup).
+Without this translation, grants written by the admin UI would never
+apply at runtime because they'd sit under a sub row while the agent
+reads by email. Covered by
+`cdk/lambda/admin-api/tests/test_a2a_permissions.py::test_put_resolves_sub_to_email_for_ddb_key`
+and siblings.
+
+**Cross-service assumptions baked in by live-deploy.**
+
+- **Port 9000 + mount `/`** for A2A — documented by
+  `bedrock-agentcore-starter-toolkit`; differs from HTTP agents (8080,
+  `/invocations`) and MCP agents (8000, `/mcp`).
+- **`agentcore deploy` resets custom runtime config.** The CLI clears
+  `environmentVariables`, `protocolConfiguration`, `authorizerConfiguration`,
+  `requestHeaderConfiguration`, and `filesystemConfigurations` when it
+  rewrites a Runtime. Both `setup-agentcore.py` (smarthome text runtime)
+  and `deploy.py` step 4/8 compensate by reapplying those fields via
+  `update_agent_runtime` after each `agentcore deploy`.
+  `deploy.py` step 8 preserves the text agent's existing
+  `requestHeaderConfiguration` (which allowlists the
+  `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` header the chatbot
+  uses to forward idTokens to the MCP gateway) and the session-storage
+  mount at `/mnt/workspace`.
+- **`pyproject.toml` is the source of truth for the text-agent deps**;
+  `requirements.txt` is not read by `agentcore deploy`. `a2a-sdk<1.0`
+  and `httpx` are declared in both `agent/pyproject.toml` and
+  `agent/requirements.txt` so both deploy paths install them.
+- **a2a-sdk version pin.** The Strands `A2AServer` upstream (used by
+  downstream sample agents) and `bedrock_agentcore.runtime.a2a.build_a2a_app`
+  both expect `a2a.server.apps.A2AStarletteApplication`, which only
+  exists in the 0.3.x line. `a2a-sdk` 1.0.x renamed the module and is
+  not yet compatible.
+
+**Flow:**
+
+```
+┌───── Chatbot (user) ─────────────────────────────────────┐
+│  "How much can I save by dimming LEDs at night?"        │
+└────────────────────┬─────────────────────────────────────┘
+                     │  POST /invocations + Bearer(idToken)
+                     ▼
+┌───── smarthome text agent (Strands on AgentCore) ────────┐
+│ invoke_agent():                                           │
+│   1. load __a2a_permissions__ (global + per-user merge)   │
+│   2. for each (recordId, [skillIds]):                     │
+│        GetRegistryRecord(recordId) → AgentCard            │
+│        register Strands tool per granted skill            │
+│   3. LLM picks a2a_energy_optimization_agent_estimate_… │
+│                     │                                      │
+│        M2MTokenProvider.__call__():                       │
+│          client_credentials grant → JWT (~1h TTL)         │
+└────────────────────┼─────────────────────────────────────┘
+                     │ A2A JSON-RPC message/send
+                     │ Authorization: Bearer <m2m JWT>
+                     │ X-A2A-Allowed-Skills: estimate_savings,tariff_analysis
+                     ▼
+┌───── Downstream A2A Runtime (energy-optimization) ───────┐
+│  AgentCore Runtime (protocol=A2A, port 9000, mount /)     │
+│  CUSTOM_JWT authorizer → Cognito discovery URL            │
+│  Strands.A2AServer + Bedrock model (Nova Lite)           │
+│  Task.artifacts[0].parts[0].text = "⟦A2A:energy…⟧ …"     │
+└──────────────────────────────────────────────────────────┘
+```
 
 ### 9.10 Remote Shell Commands per Session
 

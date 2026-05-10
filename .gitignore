@@ -10,6 +10,7 @@ cdk-outputs.json
 agentcore-state.json
 .agentcore-project/
 .agentcore-tmp/
+a2a-agent-registry/deployed-state.json
 .env
 *.pem
 *.key

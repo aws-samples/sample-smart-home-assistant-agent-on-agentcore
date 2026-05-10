@@ -956,6 +956,253 @@ def update_user_permissions(event):
 
 
 # ---------------------------------------------------------------------------
+# A2A Permissions (per-user grants keyed by Registry recordId → [skillId,…])
+#
+# Stored as a single row in the skills table:
+#   userId     = <sub> | "__global__"
+#   skillName  = "__a2a_permissions__"
+#   a2aGrants  = Map<String, List<String>>
+#
+# Uses the existing /users/{userId}/permissions resource with ?action=a2a so we
+# don't grow the admin Lambda's API Gateway resource policy past 20 KB. The
+# route table in handler() dispatches based on the action query param.
+# ---------------------------------------------------------------------------
+
+_A2A_PERMS_SK = "__a2a_permissions__"
+
+
+def _fetch_approved_a2a_cards() -> list[dict]:
+    """Return [{recordId, name, description, skills:[{id,name,description}]}, ...]
+    for every APPROVED A2A record in the configured registry."""
+    if not REGISTRY_ID:
+        return []
+    out = []
+    token = None
+    while True:
+        kwargs = {
+            "registryId": REGISTRY_ID,
+            "maxResults": 50,
+            "descriptorType": "A2A",
+            "status": "APPROVED",
+        }
+        if token:
+            kwargs["nextToken"] = token
+        resp = agentcore_control.list_registry_records(**kwargs)
+        for r in resp.get("registryRecords", []):
+            rid = r.get("recordId", "")
+            if not rid:
+                continue
+            try:
+                detail = agentcore_control.get_registry_record(
+                    registryId=REGISTRY_ID, recordId=rid
+                )
+                a2a = (detail.get("descriptors") or {}).get("a2a", {}) or {}
+                raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+                card = json.loads(raw) if raw else {}
+            except Exception as e:
+                logger.warning("GetRegistryRecord failed for %s: %s", rid, e)
+                continue
+            skills = [
+                {
+                    "id": s.get("id", ""),
+                    "name": s.get("name", s.get("id", "")),
+                    "description": s.get("description", ""),
+                }
+                for s in card.get("skills") or []
+            ]
+            out.append({
+                "recordId": rid,
+                "name": r.get("name", ""),
+                "description": r.get("description", ""),
+                "skills": skills,
+            })
+        token = resp.get("nextToken")
+        if not token:
+            break
+    return out
+
+
+def _resolve_ddb_user_key(user_id: str) -> str:
+    """Convert a UI-supplied identifier (Cognito sub, username, or email) into
+    the DDB row key the text agent uses at runtime.
+
+    agent.py reads per-user rows keyed by the value of payload["userId"], which
+    the chatbot derives as `email or cognito:username or sub` (first present).
+    Cognito users created via the default flow always have both an email and a
+    sub; the chatbot sends the email. Admin Console, though, works by sub (so
+    it can disambiguate users with the same email across pools). This helper
+    resolves sub → email so grants written here match what the agent reads.
+
+    ``__global__`` bypasses the lookup. Values that are already emails flow
+    through unchanged. Unknown subs fall back to the literal value so the
+    write still lands in a valid row even if Cognito is unreachable.
+    """
+    if not user_id or user_id == "__global__":
+        return user_id
+    if "@" in user_id:
+        return user_id  # already an email
+    # Try to resolve by sub via a narrow filter.
+    try:
+        resp = cognito_client.list_users(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Filter=f'sub = "{user_id}"',
+            Limit=1,
+        )
+        for u in resp.get("Users", []):
+            email = next(
+                (a["Value"] for a in u.get("Attributes", []) if a["Name"] == "email"),
+                "",
+            )
+            if email:
+                return email
+            return u.get("Username", user_id)
+    except Exception as e:
+        logger.warning("could not resolve sub %s to email: %s", user_id, e)
+    return user_id
+
+
+def get_user_a2a_permissions(event):
+    """GET /users/{userId}/permissions?action=a2a — return a user's A2A grants
+    plus the full catalog of APPROVED A2A agents so the UI renders in one round
+    trip."""
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    ddb_key = _resolve_ddb_user_key(user_id)
+
+    resp = table.get_item(Key={"userId": ddb_key, "skillName": _A2A_PERMS_SK})
+    item = resp.get("Item")
+    grants_raw = (item or {}).get("a2aGrants") or {}
+    # DynamoDB returns Sets/Lists; coerce to plain lists.
+    grants = {}
+    for rid, skills in grants_raw.items():
+        if isinstance(skills, (set, list, tuple)):
+            grants[rid] = sorted(str(s) for s in skills)
+
+    try:
+        available = _fetch_approved_a2a_cards()
+    except Exception as e:
+        logger.warning("Failed to fetch A2A agent catalog: %s", e)
+        available = []
+
+    return response(200, {
+        "userId": user_id,
+        "a2aGrants": grants,
+        "availableAgents": available,
+        "updatedAt": (item or {}).get("updatedAt", ""),
+    })
+
+
+def update_user_a2a_permissions(event):
+    """PUT /users/{userId}/permissions?action=a2a — replace a user's A2A grants.
+
+    Body: {"a2aGrants": {recordId: [skillId,...], ...}}. Empty map deletes the
+    row. Validates every recordId is APPROVED + A2A and every skillId is in the
+    card. Returns 400 on validation error, 200 on success."""
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    ddb_key = _resolve_ddb_user_key(user_id)
+
+    body = json.loads(event.get("body") or "{}")
+    grants_in = body.get("a2aGrants", {})
+    if not isinstance(grants_in, dict):
+        return response(400, {"error": "a2aGrants must be an object"})
+    # Normalise values to lists of strings.
+    grants: dict = {}
+    for rid, skills in grants_in.items():
+        if not isinstance(rid, str) or not rid:
+            return response(400, {"error": f"invalid recordId: {rid!r}"})
+        if not isinstance(skills, list):
+            return response(400, {"error": f"skills for {rid} must be a list"})
+        clean = [str(s) for s in skills if str(s).strip()]
+        if clean:
+            grants[rid] = sorted(set(clean))
+
+    # Validate each recordId against the approved catalog.
+    catalog = {c["recordId"]: c for c in _fetch_approved_a2a_cards()}
+    errors = []
+    for rid, skills in grants.items():
+        card = catalog.get(rid)
+        if not card:
+            errors.append(f"recordId {rid} is not an approved A2A record")
+            continue
+        valid_skill_ids = {s["id"] for s in card["skills"]}
+        bad = [s for s in skills if s not in valid_skill_ids]
+        if bad:
+            errors.append(
+                f"recordId {rid} does not offer skill(s) {bad}; valid: {sorted(valid_skill_ids)}"
+            )
+    if errors:
+        return response(400, {"error": "validation failed", "details": errors})
+
+    ts = now_iso()
+    if grants:
+        table.put_item(Item={
+            "userId": ddb_key,
+            "skillName": _A2A_PERMS_SK,
+            "a2aGrants": grants,
+            "updatedAt": ts,
+            "updatedBy": _caller_id(event),
+        })
+    else:
+        try:
+            table.delete_item(Key={"userId": ddb_key, "skillName": _A2A_PERMS_SK})
+        except Exception:
+            pass
+
+    return response(200, {
+        "userId": user_id,
+        "a2aGrants": grants,
+        "updatedAt": ts,
+    })
+
+
+def list_a2a_grants_for_record(event):
+    """GET /registry/records?action=a2a-grants&recordId=X — reverse lookup.
+
+    Returns every user who has this recordId in their __a2a_permissions__ row,
+    plus the skills they were granted, for the Integration Registry read view.
+    """
+    qs = event.get("queryStringParameters") or {}
+    record_id = qs.get("recordId", "")
+    if not record_id:
+        return response(400, {"error": "recordId query param is required"})
+
+    from boto3.dynamodb.conditions import Attr
+    grants = []
+    scan_kwargs = {
+        "FilterExpression": Attr("skillName").eq(_A2A_PERMS_SK),
+    }
+    try:
+        while True:
+            resp = table.scan(**scan_kwargs)
+            for item in resp.get("Items", []):
+                a2a_grants = item.get("a2aGrants") or {}
+                if record_id in a2a_grants:
+                    skills = a2a_grants[record_id]
+                    if isinstance(skills, (set, list, tuple)):
+                        skills = sorted(str(s) for s in skills)
+                    else:
+                        skills = []
+                    grants.append({
+                        "userId": item.get("userId", ""),
+                        "skillIds": skills,
+                        "updatedAt": item.get("updatedAt", ""),
+                    })
+            token = resp.get("LastEvaluatedKey")
+            if not token:
+                break
+            scan_kwargs["ExclusiveStartKey"] = token
+    except Exception as e:
+        return response(500, {"error": f"scan failed: {str(e)}"})
+
+    return response(200, {"recordId": record_id, "grants": grants})
+
+
+# ---------------------------------------------------------------------------
 # Memory Management
 # ---------------------------------------------------------------------------
 
@@ -1910,8 +2157,13 @@ def handler(event, context):
     if resource == "/memories/{actorId}" and method == "GET":
         return get_memory_records(event)
     if resource == "/users/{userId}/permissions" and method == "GET":
+        # action=a2a → A2A grants + approved catalog; else → legacy tool perms.
+        if (event.get("queryStringParameters") or {}).get("action") == "a2a":
+            return get_user_a2a_permissions(event)
         return get_user_permissions(event)
     if resource == "/users/{userId}/permissions" and method == "PUT":
+        if (event.get("queryStringParameters") or {}).get("action") == "a2a":
+            return update_user_a2a_permissions(event)
         return update_user_permissions(event)
 
     # Skill routes — also carry agent-prompt traffic on the {userId}/{skillName}
@@ -1967,6 +2219,8 @@ def handler(event, context):
         action = (event.get("queryStringParameters") or {}).get("action", "")
         if action == "a2a-list":
             return list_a2a_agents(event)
+        if action == "a2a-grants":
+            return list_a2a_grants_for_record(event)
         return list_registry_records(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)
