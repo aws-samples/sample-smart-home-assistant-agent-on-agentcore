@@ -354,6 +354,7 @@ Internet
 | iot-control Lambda | iot:Publish | `arn:...:topic/smarthome/*` |
 | iot-discovery Lambda | (none) | Returns mock device list |
 | admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
+| admin-api Lambda | dynamodb:Scan, GetItem, UpdateItem, DeleteItem | `arn:...:table/smarthome-runtime-sessions` |
 | admin-api Lambda | s3:GetObject, PutObject, DeleteObject, ListBucket | `arn:...:smarthome-skill-files-*` |
 | admin-api Lambda | cognito-idp:ListUsers, AdminListGroupsForUser | Cognito User Pool |
 | admin-api Lambda | bedrock-agentcore:ListActors, ListMemoryRecords | `*` (AgentCore Memory) |
@@ -361,6 +362,7 @@ Internet
 | admin-api Lambda | iam:PassRole, iam:PutRolePolicy | AgentCore roles |
 | AgentCore Runtime Role | bedrock:InvokeModel | Kimi-2.5 model |
 | AgentCore Runtime Role | dynamodb:Query, GetItem, Scan | `arn:...:table/smarthome-skills` |
+| AgentCore Runtime Role | dynamodb:PutItem, UpdateItem | `arn:...:table/smarthome-runtime-sessions` (records each per-login session) |
 
 ---
 
@@ -1444,7 +1446,7 @@ admin-console/
 | Build | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
 | Build | **Identity** | Registered-users table (Cognito User Pool) |
 | Deploy | **Instance Type** | Compute class configuration (MicroVM today, EC2 planned) |
-| Deploy | **Sessions** | Runtime session monitoring with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), **Remote Shell** button, and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears immediately. Remote Shell opens a modal that streams shell commands into the runtime container via `InvokeAgentRuntimeCommand` (see §9.10), including a row of example-command chips for common ops. |
+| Deploy | **Sessions** | Runtime session monitoring listing every per-login AgentCore Runtime session from the `smarthome-runtime-sessions` table (one row per login, not overwritten) with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), **Remote Shell** button, and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears immediately. Remote Shell opens a modal that streams shell commands into the runtime container via `InvokeAgentRuntimeCommand` (see §9.10), including a row of example-command chips for common ops. |
 | Assess | **Agent Guardrails** | Links to AgentCore Evaluator + Bedrock Guardrails consoles |
 | Assess | **Observability** | Link to CloudWatch Gen-AI Observability |
 | Assess | **Evaluations** | Link to AgentCore Evaluations console |
@@ -1456,6 +1458,7 @@ admin-console/
 |----------|-------------|
 | `smarthome-admin-console-{accountId}` S3 Bucket | Static assets |
 | `smarthome-skill-files-{accountId}` S3 Bucket | Skill directory files (scripts, references, assets) with CORS |
+| `smarthome-runtime-sessions` DynamoDB Table | Per-login AgentCore Runtime session log (PK `userId`, SK `"{kind}#{sessionId}"`). Backs the admin Sessions tab and redeploy-time invalidation. |
 | `smarthome-kb-docs-{accountId}` S3 Bucket | Knowledge base documents organized by scope prefix (`__shared__/`, `user@email/`) |
 | `smarthome-kb-vectors-{accountId}` S3 Vector bucket + `smarthome-kb-index` | Vector store for KB document embeddings (S3 Vectors, created imperatively by `setup-agentcore.py` — no CDK L1 construct exists yet) |
 | Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model, `storageConfiguration.type=S3_VECTORS` |
