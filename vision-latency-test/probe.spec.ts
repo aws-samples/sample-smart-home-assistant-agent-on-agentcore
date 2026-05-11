@@ -105,11 +105,12 @@ cog = boto3.client('cognito-idp', region_name=region)
 # Simpler: list sessions on the runtime and stop them all — the probe is single-user.
 dp = boto3.client('bedrock-agentcore', region_name=region)
 # AgentCore doesn't expose list_sessions directly on the dataplane for text runtime;
-# instead, read DynamoDB skills table which the agent writes on each invocation.
+# instead, read the runtime-sessions DynamoDB table that the agent writes on each invocation.
 import os
-ddb = boto3.resource('dynamodb', region_name=region).Table(os.environ.get('SKILLS_TABLE','smarthome-skills'))
-resp = ddb.scan(FilterExpression='skillName = :s',
-                ExpressionAttributeValues={':s': '__session_text__'},
+ddb = boto3.resource('dynamodb', region_name=region).Table(os.environ.get('SESSIONS_TABLE','smarthome-runtime-sessions'))
+resp = ddb.scan(FilterExpression='#k = :k',
+                ExpressionAttributeNames={'#k': 'kind'},
+                ExpressionAttributeValues={':k': 'text'},
                 ProjectionExpression='sessionId')
 count = 0
 for it in resp.get('Items', []):

@@ -18,6 +18,9 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "smarthome-skills")
+RUNTIME_SESSIONS_TABLE_NAME = os.environ.get(
+    "RUNTIME_SESSIONS_TABLE_NAME", "smarthome-runtime-sessions"
+)
 SKILL_FILES_BUCKET = os.environ.get("SKILL_FILES_BUCKET", "")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 VOICE_RUNTIME_ARN = os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
@@ -35,6 +38,7 @@ KB_DATA_SOURCE_ID = os.environ.get("KB_DATA_SOURCE_ID", "")
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
+runtime_sessions_table = dynamodb.Table(RUNTIME_SESSIONS_TABLE_NAME)
 s3_client = boto3.client("s3", region_name=REGION)
 agentcore_client = boto3.client("bedrock-agentcore", region_name=REGION)
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
@@ -554,27 +558,24 @@ def _fetch_token_totals_7d():
 
 
 def list_sessions(_event):
-    """GET /sessions — list all user sessions from DynamoDB, enriched with
-    past-7-day token totals pulled from CloudWatch Logs Insights."""
-    # Voice runtime writes __session_voice__, text runtime writes __session_text__.
-    # Both are surfaced in the admin Sessions list; a "kind" field lets the UI /
-    # future stop-session logic target the correct runtime ARN.
-    resp = table.scan(
-        FilterExpression="skillName = :sk_text OR skillName = :sk_voice",
-        ExpressionAttributeValues={
-            ":sk_text": "__session_text__",
-            ":sk_voice": "__session_voice__",
-        },
-    )
+    """GET /sessions — list every per-login AgentCore Runtime session in the
+    dedicated runtime-sessions table (one row per session, never overwritten),
+    enriched with past-7-day token totals from CloudWatch Logs Insights."""
     sessions = []
-    for item in resp.get("Items", []):
-        sk = item.get("skillName", "")
-        sessions.append({
-            "userId": item["userId"],
-            "sessionId": item.get("sessionId", ""),
-            "lastActiveAt": item.get("lastActiveAt", ""),
-            "kind": "voice" if sk == "__session_voice__" else "text",
-        })
+    scan_kwargs = {}
+    while True:
+        resp = runtime_sessions_table.scan(**scan_kwargs)
+        for item in resp.get("Items", []):
+            sessions.append({
+                "userId": item.get("userId", ""),
+                "sessionId": item.get("sessionId", ""),
+                "lastActiveAt": item.get("lastActiveAt", ""),
+                "kind": item.get("kind", "text"),
+            })
+        token = resp.get("LastEvaluatedKey")
+        if not token:
+            break
+        scan_kwargs["ExclusiveStartKey"] = token
     sessions.sort(key=lambda s: s.get("lastActiveAt", ""), reverse=True)
 
     token_totals = _fetch_token_totals_7d()
@@ -626,12 +627,14 @@ def stop_session(event):
 
     # Always clean up the DynamoDB record — whether the runtime session was
     # active (stopped_ok) or had already idle-expired (not_found). Stale
-    # records would otherwise linger in the admin list until the chatbot
-    # writes a new one on the user's next invocation.
+    # records would otherwise linger in the admin list forever because the
+    # runtime-sessions table is append-only per login.
     uid = _resolve_user_for_session(session_id, kind)
     if uid:
         try:
-            table.delete_item(Key={"userId": uid, "skillName": f"__session_{kind}__"})
+            runtime_sessions_table.delete_item(
+                Key={"userId": uid, "sessionKey": f"{kind}#{session_id}"}
+            )
         except Exception as e:
             logger.warning(f"stop_session: record delete skipped: {e}")
 
@@ -646,12 +649,11 @@ def _resolve_user_for_session(session_id: str, kind: str) -> str:
     Returns "" if not found — delete_item will then be a harmless no-op.
     """
     try:
-        scan_resp = table.scan(
-            FilterExpression="sessionId = :sid AND skillName = :sk",
-            ExpressionAttributeValues={
-                ":sid": session_id,
-                ":sk": f"__session_{kind}__",
-            },
+        # `kind` is a DynamoDB reserved word — alias via ExpressionAttributeNames.
+        scan_resp = runtime_sessions_table.scan(
+            FilterExpression="sessionId = :sid AND #k = :k",
+            ExpressionAttributeNames={"#k": "kind"},
+            ExpressionAttributeValues={":sid": session_id, ":k": kind},
             ProjectionExpression="userId",
         )
         items = scan_resp.get("Items", [])

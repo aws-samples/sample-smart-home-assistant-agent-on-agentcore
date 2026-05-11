@@ -78,6 +78,7 @@ import { getCurrentUserEmail } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
+import architectureDiagram from '../assets/architecture.drawio.png';
 
 export type ActiveTab =
   | 'overview'
@@ -2000,7 +2001,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
           >
             <SpaceBetween size="m">
               <CloudscapeBox variant="p">{t('overview.intro')}</CloudscapeBox>
-              <Alert type="info">{t('overview.diagramPlaceholder')}</Alert>
+              <img
+                src={architectureDiagram}
+                alt={t('overview.diagramAlt')}
+                style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
+              />
             </SpaceBetween>
           </Container>
           {(chatUrl || simUrl || erpUrl) && (

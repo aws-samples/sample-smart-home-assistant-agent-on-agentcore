@@ -2,6 +2,7 @@ const en: Record<string, string> = {
   // App
   'app.loading': 'Loading...',
   'app.title': 'Agent Harness Control Center',
+  'app.headerTitle': 'Agent Harness Control Center for Administrator',
   'app.signOut': 'Sign Out',
   'theme.light': 'Light',
   'theme.dark': 'Dark',
@@ -27,7 +28,7 @@ const en: Record<string, string> = {
   'overview.title': 'Smart Home Assistant Agent',
   'overview.desc': 'AI-driven smart home device control on AWS',
   'overview.intro': 'A full-stack application demonstrating AI agents that control IoT devices via natural language and voice. Built on Amazon Bedrock AgentCore, AWS IoT Core, and Cognito.',
-  'overview.diagramPlaceholder': 'Architecture diagram will be added here.',
+  'overview.diagramAlt': 'Smart Home Assistant architecture diagram',
   'overview.demosTitle': 'Demos',
   'overview.demosDesc': 'Open the three end-user apps in a new tab. Your sign-in email is pre-filled — enter your password once on each.',
   'overview.openChatbot': 'Open Chatbot',

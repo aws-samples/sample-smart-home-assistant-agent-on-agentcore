@@ -11,7 +11,7 @@ import RiceCooker from './components/RiceCooker';
 import Fan from './components/Fan';
 import Oven from './components/Oven';
 import LoginPage from './auth/LoginPage';
-import { getCurrentSession, getUserSub, ensureIotPolicyAttached, signOut, AuthTokens } from './auth/CognitoAuth';
+import { getCurrentSession, refreshSession, getUserSub, ensureIotPolicyAttached, signOut, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
 import { detectInitialTheme, setTheme, Theme } from './theme/applyTheme';
 
@@ -57,17 +57,24 @@ const App: React.FC = () => {
     mqtt.connect(idToken).catch((err) => console.error('MQTT connect failed:', err));
   };
 
-  // On load, check if there's a cached session.
+  // On load, refresh the cached Cognito session so MQTT + IoT policy attach
+  // start on a freshly-issued idToken. Fall back to the stored session if
+  // refresh fails.
   useEffect(() => {
-    getCurrentSession()
-      .then(async (tokens) => {
+    (async () => {
+      try {
+        let tokens: AuthTokens;
+        try { tokens = await refreshSession(); } catch { tokens = await getCurrentSession(); }
         const sub = await getUserSub();
         setUserSub(sub);
         setIsAuthenticated(true);
         await startMqtt(tokens.idToken);
-      })
-      .catch(() => setIsAuthenticated(false))
-      .finally(() => setIsLoading(false));
+      } catch {
+        setIsAuthenticated(false);
+      } finally {
+        setIsLoading(false);
+      }
+    })();
   }, []);
 
   const handleAuthenticated = async (tokens: AuthTokens) => {

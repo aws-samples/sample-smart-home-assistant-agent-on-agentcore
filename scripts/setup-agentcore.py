@@ -720,6 +720,13 @@ def main():
         # Add skills table name for dynamic skill loading from DynamoDB
         skills_table = outputs.get("SkillsTableName", "smarthome-skills")
         existing_env["SKILLS_TABLE_NAME"] = skills_table
+        # Dedicated table for per-login runtime sessions (text + voice). The
+        # agent appends one row per login here so the admin Sessions tab can
+        # render the full history instead of only the latest session.
+        runtime_sessions_table = outputs.get(
+            "RuntimeSessionsTableName", "smarthome-runtime-sessions"
+        )
+        existing_env["RUNTIME_SESSIONS_TABLE_NAME"] = runtime_sessions_table
         # Voice-mode env vars: Nova Sonic model + gateway ARN (welcome clip is
         # baked into the CodeZip, so no S3 path env var is needed).
         existing_env["NOVA_SONIC_MODEL_ID"] = "amazon.nova-2-sonic-v1:0"
@@ -771,7 +778,7 @@ def main():
             }],
         )
         ac.update_agent_runtime(**update_kwargs)
-        print(f"  Patched MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME={skills_table}")
+        print(f"  Patched MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME={skills_table}, RUNTIME_SESSIONS_TABLE_NAME={runtime_sessions_table}")
         print(f"  Runtime set to AWS_IAM auth (SigV4) for /invocations + /ws")
         print(f"  Session storage enabled at /mnt/workspace")
 
@@ -779,16 +786,18 @@ def main():
         # effect immediately. Without this, existing sessions keep serving
         # stale agent.py / voice_session.py code until they idle-timeout
         # (observed up to several minutes of drift after a redeploy).
-        # Text-runtime session IDs are tracked in DynamoDB under
-        # skillName="__session_text__" (voice uses "__session_voice__" in a
-        # later block). Agent writes via agent.py:_record_session.
+        # Runtime sessions live in a dedicated table (one row per login, not
+        # overwritten) with kind=text|voice + sessionId. Agent writes via
+        # agent.py:_record_session; voice writes via voice_session._record_voice_session.
         try:
             dataplane = boto3.client("bedrock-agentcore", region_name=REGION)
             ddb = boto3.resource("dynamodb", region_name=REGION)
-            table = ddb.Table(skills_table)
+            table = ddb.Table(runtime_sessions_table)
+            # `kind` is a DynamoDB reserved word — alias it.
             session_items = table.scan(
-                FilterExpression="skillName = :s",
-                ExpressionAttributeValues={":s": "__session_text__"},
+                FilterExpression="#k = :k",
+                ExpressionAttributeNames={"#k": "kind"},
+                ExpressionAttributeValues={":k": "text"},
                 ProjectionExpression="sessionId",
             ).get("Items", [])
             stopped = 0
@@ -818,10 +827,11 @@ def main():
             policy_statements = [
                 {
                     "Effect": "Allow",
-                    "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
+                    "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem", "dynamodb:UpdateItem"],
                     "Resource": [
                         f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
                         f"arn:aws:dynamodb:{REGION}:{account_id}:table/smarthome-browser-sessions",
+                        f"arn:aws:dynamodb:{REGION}:{account_id}:table/{runtime_sessions_table}",
                     ],
                 },
                 {
@@ -886,6 +896,10 @@ def main():
         existing_env = {}
     if "skills_table" not in dir():
         skills_table = outputs.get("SkillsTableName", "smarthome-skills")
+    if "runtime_sessions_table" not in dir():
+        runtime_sessions_table = outputs.get(
+            "RuntimeSessionsTableName", "smarthome-runtime-sessions"
+        )
     try:
         print("\n" + "=" * 60)
         print("  Creating voice runtime (smarthomevoice)...")
@@ -954,6 +968,7 @@ def main():
             voice_env["AWS_REGION"] = REGION
             voice_env["DISABLE_ADOT"] = "1"
             voice_env["SKILLS_TABLE_NAME"] = skills_table
+            voice_env["RUNTIME_SESSIONS_TABLE_NAME"] = runtime_sessions_table
             voice_env["NOVA_SONIC_MODEL_ID"] = "amazon.nova-2-sonic-v1:0"
             if gateway_arn:
                 voice_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
@@ -979,13 +994,14 @@ def main():
             print("  Voice runtime set to AWS_IAM + HTTP protocol + custom auth header allowlist")
 
             # Stop any active voice sessions so the fresh CodeZip takes effect.
-            # Voice sessions are tracked under skillName=__session_voice__.
+            # Voice sessions are tracked in the runtime-sessions table with kind='voice'.
             try:
                 v_dataplane = boto3.client("bedrock-agentcore", region_name=REGION)
-                v_table = boto3.resource("dynamodb", region_name=REGION).Table(skills_table)
+                v_table = boto3.resource("dynamodb", region_name=REGION).Table(runtime_sessions_table)
                 v_sessions = v_table.scan(
-                    FilterExpression="skillName = :s",
-                    ExpressionAttributeValues={":s": "__session_voice__"},
+                    FilterExpression="#k = :k",
+                    ExpressionAttributeNames={"#k": "kind"},
+                    ExpressionAttributeValues={":k": "voice"},
                     ProjectionExpression="sessionId",
                 ).get("Items", [])
                 v_stopped = 0
@@ -1016,8 +1032,11 @@ def main():
                     "Statement": [
                         {
                             "Effect": "Allow",
-                            "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem"],
-                            "Resource": f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                            "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+                            "Resource": [
+                                f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
+                                f"arn:aws:dynamodb:{REGION}:{account_id}:table/{runtime_sessions_table}",
+                            ],
                         },
                         {
                             "Effect": "Allow",
@@ -1121,6 +1140,9 @@ def main():
                 "GATEWAY_ID": gateway_id,
                 "MEMORY_ID": memory_id,
                 "BROWSER_SESSIONS_TABLE_NAME": "smarthome-browser-sessions",
+                "RUNTIME_SESSIONS_TABLE_NAME": outputs.get(
+                    "RuntimeSessionsTableName", "smarthome-runtime-sessions"
+                ),
             }
             # Preserve SKILL_FILES_BUCKET from CDK stack
             skill_files_bucket = outputs.get("SkillFilesBucketName", "")

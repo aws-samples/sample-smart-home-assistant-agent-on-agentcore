@@ -92,6 +92,26 @@ export async function getIdToken(): Promise<string> {
   return tokens.idToken;
 }
 
+/**
+ * Force a Cognito token refresh on page load/reload so the rest of the
+ * session (MQTT connect, IoT policy attach, etc.) runs on a newly-issued
+ * idToken.
+ */
+export function refreshSession(): Promise<AuthTokens> {
+  return new Promise((resolve, reject) => {
+    const userPool = getUserPool();
+    const currentUser = userPool.getCurrentUser();
+    if (!currentUser) { reject(new Error('No current user')); return; }
+    currentUser.getSession((err: Error | null, session: CognitoUserSession | null) => {
+      if (err || !session) { reject(err || new Error('No session')); return; }
+      currentUser.refreshSession(session.getRefreshToken(), (rerr, rsession) => {
+        if (rerr || !rsession) { reject(rerr || new Error('Refresh failed')); return; }
+        resolve(sessionToTokens(rsession));
+      });
+    });
+  });
+}
+
 /** Returns the Cognito User Pool `sub` claim for the current session — the
  *  same value the agent-side Lambda will read from the forwarded JWT. This
  *  is what the device-simulator uses to scope its MQTT subscriptions. */

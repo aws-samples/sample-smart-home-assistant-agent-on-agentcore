@@ -93,6 +93,34 @@ export async function getIdToken(): Promise<string> {
   return tokens.idToken;
 }
 
+/**
+ * Force a Cognito token refresh on page load/reload so the rest of the
+ * session runs on a newly-issued idToken.
+ */
+export function refreshSession(): Promise<AuthTokens> {
+  return new Promise((resolve, reject) => {
+    const userPool = getUserPool();
+    const currentUser = userPool.getCurrentUser();
+    if (!currentUser) {
+      reject(new Error('No current user'));
+      return;
+    }
+    currentUser.getSession((err: Error | null, session: CognitoUserSession | null) => {
+      if (err || !session) {
+        reject(err || new Error('No session'));
+        return;
+      }
+      currentUser.refreshSession(session.getRefreshToken(), (rerr, rsession) => {
+        if (rerr || !rsession) {
+          reject(rerr || new Error('Refresh failed'));
+          return;
+        }
+        resolve(sessionToTokens(rsession));
+      });
+    });
+  });
+}
+
 export async function getIsAdmin(): Promise<boolean> {
   try {
     const token = await getIdToken();

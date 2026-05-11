@@ -6,7 +6,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import LoginPage from './auth/LoginPage';
 import ChatInterface from './components/ChatInterface';
-import { getCurrentSession, signOut, AuthTokens } from './auth/CognitoAuth';
+import { getCurrentSession, refreshSession, signOut, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
 import { detectInitialTheme, setTheme, Theme } from './theme/applyTheme';
 
@@ -40,16 +40,14 @@ const App: React.FC = () => {
   }, [theme]);
 
   useEffect(() => {
-    getCurrentSession()
-      .then(() => {
-        setIsAuthenticated(true);
-      })
-      .catch(() => {
-        setIsAuthenticated(false);
-      })
-      .finally(() => {
-        setIsLoading(false);
-      });
+    // Refresh the Cognito token on page load/reload so the first request
+    // always runs on a freshly-issued idToken. If there's no stored session
+    // (or refresh fails, e.g. the refresh token expired) we fall through to
+    // the login page.
+    refreshSession()
+      .then(() => setIsAuthenticated(true))
+      .catch(() => getCurrentSession().then(() => setIsAuthenticated(true)).catch(() => setIsAuthenticated(false)))
+      .finally(() => setIsLoading(false));
   }, []);
 
   const handleAuthenticated = (_tokens: AuthTokens) => {

@@ -38,6 +38,10 @@ if not GATEWAY_URL:
 MODEL_ID = os.environ.get("MODEL_ID", "moonshotai.kimi-k2.5")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SKILLS_TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "")
+# Dedicated table for per-login AgentCore Runtime sessions (text + voice).
+# Writing here (sort key includes sessionId) preserves session history per
+# user so the admin Sessions tab can list all of them.
+RUNTIME_SESSIONS_TABLE_NAME = os.environ.get("RUNTIME_SESSIONS_TABLE_NAME", "")
 
 app = BedrockAgentCoreApp()
 
@@ -594,16 +598,26 @@ def _persist_vision_turn(session_id, actor_id, user_prompt, description, images,
 
 
 def _record_session(actor_id: str, session_id: str) -> None:
-    if not SKILLS_TABLE_NAME:
+    if not RUNTIME_SESSIONS_TABLE_NAME:
         return
     try:
         from datetime import datetime, timezone
-        _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
-            "userId": actor_id,
-            "skillName": "__session_text__",
-            "sessionId": session_id,
-            "lastActiveAt": datetime.now(timezone.utc).isoformat(),
-        })
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # `kind` is a DynamoDB reserved word — alias via ExpressionAttributeNames.
+        _get_dynamodb().Table(RUNTIME_SESSIONS_TABLE_NAME).update_item(
+            Key={"userId": actor_id, "sessionKey": f"text#{session_id}"},
+            UpdateExpression=(
+                "SET #k = :k, sessionId = :s, lastActiveAt = :la, "
+                "createdAt = if_not_exists(createdAt, :ca)"
+            ),
+            ExpressionAttributeNames={"#k": "kind"},
+            ExpressionAttributeValues={
+                ":k": "text",
+                ":s": session_id,
+                ":la": now_iso,
+                ":ca": now_iso,
+            },
+        )
     except Exception as e:
         logger.warning(f"Failed to record session: {e}")
 

@@ -41,6 +41,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 # loads).
 from agent import (  # noqa: E402
     SKILLS_TABLE_NAME,
+    RUNTIME_SESSIONS_TABLE_NAME,
     _get_dynamodb,
     load_skills_from_dynamodb,
     load_system_prompt,
@@ -197,18 +198,28 @@ else:
 
 
 def _record_voice_session(actor_id: str, session_id: str) -> None:
-    """Mirror agent._record_session for voice sessions, writing under a
-    distinct sort key so setup-agentcore.py can invalidate them against the
-    voice-runtime ARN (different from the text runtime's ARN)."""
-    if not SKILLS_TABLE_NAME:
+    """Mirror agent._record_session for voice sessions, writing kind='voice'
+    so setup-agentcore.py can invalidate them against the voice-runtime ARN
+    (different from the text runtime's ARN)."""
+    if not RUNTIME_SESSIONS_TABLE_NAME:
         return
     try:
-        _get_dynamodb().Table(SKILLS_TABLE_NAME).put_item(Item={
-            "userId": actor_id,
-            "skillName": "__session_voice__",
-            "sessionId": session_id,
-            "lastActiveAt": datetime.now(timezone.utc).isoformat(),
-        })
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # `kind` is a DynamoDB reserved word — alias via ExpressionAttributeNames.
+        _get_dynamodb().Table(RUNTIME_SESSIONS_TABLE_NAME).update_item(
+            Key={"userId": actor_id, "sessionKey": f"voice#{session_id}"},
+            UpdateExpression=(
+                "SET #k = :k, sessionId = :s, lastActiveAt = :la, "
+                "createdAt = if_not_exists(createdAt, :ca)"
+            ),
+            ExpressionAttributeNames={"#k": "kind"},
+            ExpressionAttributeValues={
+                ":k": "voice",
+                ":s": session_id,
+                ":la": now_iso,
+                ":ca": now_iso,
+            },
+        )
     except Exception as e:
         logger.warning(f"Failed to record voice session: {e}")
 

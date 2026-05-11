@@ -297,6 +297,21 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // DynamoDB - Runtime Sessions Table
+    // Tracks every AgentCore Runtime session (text + voice) per user. The
+    // sort key embeds the sessionId so each new per-login session adds a row
+    // instead of overwriting the last one — the admin Sessions tab renders
+    // the full history from this table.
+    // ========================
+    const runtimeSessionsTable = new dynamodb.Table(this, "RuntimeSessionsTable", {
+      tableName: "smarthome-runtime-sessions",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sessionKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
     // S3 - Skill Files (scripts, references, assets)
     // ========================
     const skillFilesBucket = new s3.Bucket(this, "SkillFilesBucket", {
@@ -330,12 +345,14 @@ export class SmartHomeStack extends cdk.Stack {
         AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
         COGNITO_USER_POOL_ID: userPool.userPoolId,
         BROWSER_SESSIONS_TABLE_NAME: browserSessionsTable.tableName,
+        RUNTIME_SESSIONS_TABLE_NAME: runtimeSessionsTable.tableName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
     skillsTable.grantReadWriteData(adminLambda);
     skillFilesBucket.grantReadWrite(adminLambda);
     browserSessionsTable.grantReadData(adminLambda);
+    runtimeSessionsTable.grantReadWriteData(adminLambda);
 
     // ========================
     // Lambda - User Init (Cognito Post-Confirmation trigger)
@@ -1052,6 +1069,7 @@ export class SmartHomeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, "AdminApiUrl", { value: adminApi.url });
     new cdk.CfnOutput(this, "SkillsTableName", { value: skillsTable.tableName });
+    new cdk.CfnOutput(this, "RuntimeSessionsTableName", { value: runtimeSessionsTable.tableName });
     new cdk.CfnOutput(this, "AdminConsoleBucketName", { value: adminBucket.bucketName });
     new cdk.CfnOutput(this, "AdminConsoleDistributionId", { value: adminDistribution.distributionId });
     new cdk.CfnOutput(this, "AdminConsoleUrl", {

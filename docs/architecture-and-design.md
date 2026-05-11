@@ -1089,7 +1089,7 @@ Each page load gets a **fresh runtime session ID** generated once in the chatbot
 
 **User identification:** The AgentCore Runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent process. To work around this, the chatbot passes the user's email in the POST body as `userId`, and the agent reads it from `payload.get("userId")`.
 
-**Session tracking:** On each invocation, the agent records `{userId, sessionId, lastActiveAt}` to DynamoDB. After the voice-runtime split (see [§9.7](#97-voice-mode-nova-sonic-bi-directional-streaming)) the records are split by sort key: `skillName = "__session_text__"` for the text runtime and `"__session_voice__"` for the voice runtime. The Admin Console's Sessions tab reads both keys and renders a `Kind` column so each row can be stopped against the right runtime ARN (admin-api `POST /sessions/{id}/stop?kind=text|voice`).
+**Session tracking:** On each invocation, the agent records `{userId, sessionId, kind, lastActiveAt}` to a dedicated DynamoDB table (`smarthome-runtime-sessions`, PK `userId`, SK `sessionKey = "{kind}#{sessionId}"`). Each per-login session gets its own row — no overwrites — so the Admin Console's Sessions tab can render the full per-user history. The `kind` attribute is `text` for text-runtime rows (written by `agent._record_session`) and `voice` for the voice runtime (written by `voice_session._record_voice_session`); the UI's `Kind` column maps to the correct runtime ARN when stopping (`POST /sessions/{id}/stop?kind=text|voice`). This table is independent of the `smarthome-skills` table — runtime sessions and skill storage are unrelated concerns.
 
 **Per-session 7-day token usage:** The Sessions tab also shows each session's total token consumption over the last 7 days. AgentCore Runtime exports Strands/ADOT spans to the CloudWatch Logs `aws/spans` log group; each `chat` span (emitted by `strands.telemetry.tracer`) carries both `attributes.session.id` and `attributes.gen_ai.usage.total_tokens`. The admin Lambda runs a CloudWatch Logs Insights query on `GET /sessions` that sums `total_tokens` grouped by `session.id` for the last 7 days and joins the result onto the DynamoDB session rows as `totalTokens7d`. The query is the backing dataset for the CloudWatch "GenAI Observability → Bedrock AgentCore → All sessions" dashboard, so the numbers match what an admin sees in that console view. Permissions: the admin Lambda gets `logs:StartQuery`/`logs:StopQuery` scoped to `log-group:aws/spans:*` plus `logs:GetQueryResults` (required at `*` since GetQueryResults doesn't support resource-level scoping).
 
@@ -1718,10 +1718,12 @@ environment, which gates the `agent.py` module-level
 long streams where per-event spans offer little triage value; skipping ADOT
 saves 100-300ms of voice cold-start cost.
 
-**Session key split.** The text runtime writes `skillName="__session_text__"`
-in DynamoDB; the voice path writes `__session_voice__`. Redeploy-time session
-invalidation (`setup-agentcore.py`) and admin stop-session both use the key
-to pick the correct runtime ARN.
+**Session key split.** Runtime sessions live in their own
+`smarthome-runtime-sessions` table (PK `userId`, SK `"{kind}#{sessionId}"`) —
+one row per login, never overwritten. The text runtime writes `kind="text"`;
+the voice path writes `kind="voice"`. Redeploy-time session invalidation
+(`setup-agentcore.py`) and admin stop-session both filter by `kind` to pick
+the correct runtime ARN.
 
 **Login warmup fans out to both runtimes.** The chatbot fetches Cognito /
 Identity Pool creds once, then issues two parallel SigV4-signed
@@ -1883,15 +1885,15 @@ to re-evaluate the workaround.
 container warm for several minutes of idle time. After a `agentcore deploy`
 the fresh CodeZip only reaches new sessions — existing sessions keep
 running the old code until they time out. `setup-agentcore.py` closes this
-gap automatically: after patching each runtime it scans DynamoDB's session
-records and calls `bedrock-agentcore:StopRuntimeSession` on each. Sessions
-are tracked under two sort keys after the voice split:
-`__session_text__` (written by `agent._record_session`) and
-`__session_voice__` (written by `voice_session._record_voice_session`). The
-script scans each key separately and routes the stop call to the matching
-runtime ARN — calling `StopRuntimeSession` on the wrong ARN returns
-`ResourceNotFoundException`. Admin-API's `POST /sessions/{id}/stop?kind=…`
-uses the same key → ARN mapping (see [§9.4](#94-admin-console-design)).
+gap automatically: after patching each runtime it scans the
+`smarthome-runtime-sessions` table and calls
+`bedrock-agentcore:StopRuntimeSession` on each. Each row carries
+`kind=text|voice` (written by `agent._record_session` and
+`voice_session._record_voice_session` respectively); the script filters by
+`kind` and routes the stop call to the matching runtime ARN — calling
+`StopRuntimeSession` on the wrong ARN returns `ResourceNotFoundException`.
+Admin-API's `POST /sessions/{id}/stop?kind=…` uses the same `kind` → ARN
+mapping (see [§9.4](#94-admin-console-design)).
 
 **Setup-agentcore additions:**
 

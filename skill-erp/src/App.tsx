@@ -9,7 +9,7 @@ import LoginPage from './auth/LoginPage';
 import SkillManager from './components/SkillManager';
 import A2AAgentsTab from './components/A2AAgentsTab';
 import { ErpTab } from './components/TabBar';
-import { getCurrentSession, signOut, getCurrentUserEmail, AuthTokens } from './auth/CognitoAuth';
+import { getCurrentSession, refreshSession, signOut, getCurrentUserEmail, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
 import { detectInitialTheme, setTheme, Theme } from './theme/applyTheme';
 import './App.css';
@@ -46,17 +46,19 @@ const App: React.FC = () => {
   }, [theme]);
 
   useEffect(() => {
-    getCurrentSession()
-      .then(async () => {
+    // Refresh the Cognito token on page load/reload so the rest of the
+    // session runs on a newly-issued idToken.
+    (async () => {
+      try {
+        try { await refreshSession(); } catch { await getCurrentSession(); }
         setIsAuthenticated(true);
         setEmail(await getCurrentUserEmail());
-      })
-      .catch(() => {
+      } catch {
         setIsAuthenticated(false);
-      })
-      .finally(() => {
+      } finally {
         setIsLoading(false);
-      });
+      }
+    })();
   }, []);
 
   const handleAuthenticated = async (_tokens: AuthTokens) => {

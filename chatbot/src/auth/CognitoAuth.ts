@@ -131,6 +131,37 @@ export async function getIdToken(): Promise<string> {
   return tokens.idToken;
 }
 
+/**
+ * Force a Cognito token refresh using the stored refresh token. Safe to call
+ * on page load / reload so the rest of the session runs on a freshly-issued
+ * idToken (1h TTL) instead of the tail end of a token that may be minutes
+ * away from expiry — which previously caused "request failed" after the
+ * first chat message when the token expired mid-turn.
+ */
+export function refreshSession(): Promise<AuthTokens> {
+  return new Promise((resolve, reject) => {
+    const userPool = getUserPool();
+    const currentUser = userPool.getCurrentUser();
+    if (!currentUser) {
+      reject(new Error('No current user'));
+      return;
+    }
+    currentUser.getSession((err: Error | null, session: CognitoUserSession | null) => {
+      if (err || !session) {
+        reject(err || new Error('No session'));
+        return;
+      }
+      currentUser.refreshSession(session.getRefreshToken(), (rerr, rsession) => {
+        if (rerr || !rsession) {
+          reject(rerr || new Error('Refresh failed'));
+          return;
+        }
+        resolve(sessionToTokens(rsession));
+      });
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Cognito Identity Pool credentials (federated from the User Pool session).
 // Used for SigV4-signing /invocations and /ws calls to the AgentCore Runtime.

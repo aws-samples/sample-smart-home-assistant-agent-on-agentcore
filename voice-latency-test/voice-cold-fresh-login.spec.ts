@@ -33,7 +33,7 @@
  *   PROBE_OUTPUT             default ./results/fresh-login.jsonl
  *   PROBE_INTER_RUN_MS       default 2000  (on top of ~15s runtime update wait)
  *   PROBE_PYTHON             default python3 — used to spawn AWS sidecar
- *   SKILLS_TABLE             default smarthome-skills
+ *   SESSIONS_TABLE             default smarthome-runtime-sessions
  */
 
 import { test, chromium, CDPSession, Page } from "@playwright/test";
@@ -51,7 +51,7 @@ const OUTPUT =
   process.env.PROBE_OUTPUT ??
   path.join(__dirname, "results", "fresh-login.jsonl");
 const INTER_RUN_MS = parseInt(process.env.PROBE_INTER_RUN_MS ?? "2000", 10);
-const SKILLS_TABLE = process.env.SKILLS_TABLE ?? "smarthome-skills";
+const SESSIONS_TABLE = process.env.SESSIONS_TABLE ?? "smarthome-runtime-sessions";
 const PROBE_PYTHON = process.env.PROBE_PYTHON ?? "python3";
 
 // Derive runtime ID from ARN. Format: arn:aws:bedrock-agentcore:<r>:<a>:runtime/<id>
@@ -98,13 +98,14 @@ function stopAllVoiceSessions(): { stopped: number; elapsedMs: number } {
 import os, boto3
 region = os.environ['AWS_REGION']
 arn = os.environ['VOICE_RUNTIME_ARN']
-table_name = os.environ['SKILLS_TABLE']
+table_name = os.environ['SESSIONS_TABLE']
 dp = boto3.client('bedrock-agentcore', region_name=region)
 ddb = boto3.resource('dynamodb', region_name=region)
 t = ddb.Table(table_name)
 items = t.scan(
-  FilterExpression='skillName = :s',
-  ExpressionAttributeValues={':s': '__session_voice__'},
+  FilterExpression='#k = :k',
+  ExpressionAttributeNames={'#k': 'kind'},
+  ExpressionAttributeValues={':k': 'voice'},
   ProjectionExpression='sessionId',
 ).get('Items', [])
 count = 0
@@ -122,7 +123,7 @@ print(count)
 `;
   const t0 = Date.now();
   const out = execFileSync(PROBE_PYTHON, ["-c", script], {
-    env: { ...process.env, AWS_REGION, VOICE_RUNTIME_ARN, SKILLS_TABLE },
+    env: { ...process.env, AWS_REGION, VOICE_RUNTIME_ARN, SESSIONS_TABLE },
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "inherit"],
   });

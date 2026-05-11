@@ -2,6 +2,7 @@ const zh: Record<string, string> = {
   // App
   'app.loading': '加载中...',
   'app.title': '智能体管控中心',
+  'app.headerTitle': '智能体管控中心（管理员）',
   'app.signOut': '退出登录',
   'theme.light': '浅色',
   'theme.dark': '深色',
@@ -27,7 +28,7 @@ const zh: Record<string, string> = {
   'overview.title': '智能家居助手 Agent',
   'overview.desc': '基于 AWS 的 AI 智能家居设备控制',
   'overview.intro': '一个全栈应用，演示 AI 代理如何通过自然语言和语音控制 IoT 设备。基于 Amazon Bedrock AgentCore、AWS IoT Core 和 Cognito 构建。',
-  'overview.diagramPlaceholder': '架构图将在此处添加。',
+  'overview.diagramAlt': '智能家居助手架构图',
   'overview.demosTitle': '演示入口',
   'overview.demosDesc': '在新标签页中打开三个终端用户应用。登录邮箱已预填，各应用首次进入时只需输入密码。',
   'overview.openChatbot': '打开聊天机器人',

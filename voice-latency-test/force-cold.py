@@ -19,12 +19,11 @@ container, masking the cold-start we're trying to measure.
 Usage:
   force-cold.py --region <r> --runtime-id <rt-id> [--skills-table smarthome-skills]
 
-Session IDs to stop are discovered from the DynamoDB skills table (same
-source that setup-agentcore.py uses during redeploy). Rows where
-skillName="__session_text__" map to the text runtime; "__session_voice__"
-rows map to the voice runtime. We stop both kinds — this script doesn't
-try to tell text-from-voice. If the runtime doesn't know a session, the
-API returns ResourceNotFoundException which we swallow.
+Session IDs to stop are discovered from the DynamoDB runtime-sessions table
+(same source that setup-agentcore.py uses during redeploy). Each row carries
+a `kind` of 'text' or 'voice'. We stop both kinds — this script doesn't try
+to tell text-from-voice. If the runtime doesn't know a session, the API
+returns ResourceNotFoundException which we swallow.
 """
 
 import argparse
@@ -36,7 +35,7 @@ import boto3
 def stop_all_sessions(
     dataplane,
     ddb,
-    skills_table: str,
+    sessions_table: str,
     runtime_arn: str,
 ) -> int:
     """Scan DDB for session rows and call stop_runtime_session on each.
@@ -44,35 +43,30 @@ def stop_all_sessions(
     Returns: number of sessions successfully stopped (ResourceNotFound and
     already-expired are treated as success).
     """
-    table = ddb.Table(skills_table)
+    table = ddb.Table(sessions_table)
     stopped = 0
-    for kind in ("__session_text__", "__session_voice__"):
-        try:
-            items = table.scan(
-                FilterExpression="skillName = :s",
-                ExpressionAttributeValues={":s": kind},
-                ProjectionExpression="sessionId",
-            ).get("Items", [])
-        except Exception as e:
-            print(f"  (skipping {kind} scan: {e})", flush=True)
+    try:
+        items = table.scan(ProjectionExpression="sessionId").get("Items", [])
+    except Exception as e:
+        print(f"  (skipping sessions scan: {e})", flush=True)
+        return 0
+    for item in items:
+        sid = item.get("sessionId")
+        if not sid:
             continue
-        for item in items:
-            sid = item.get("sessionId")
-            if not sid:
-                continue
-            try:
-                dataplane.stop_runtime_session(
-                    agentRuntimeArn=runtime_arn,
-                    runtimeSessionId=sid,
-                )
-                stopped += 1
-            except dataplane.exceptions.ResourceNotFoundException:
-                # Session already terminated/idle-expired on the runtime —
-                # we still wanted it gone, so count it as success.
-                stopped += 1
-            except Exception as e:
-                # Don't abort the cold run for one bad session; log and move on.
-                print(f"  warn: could not stop session {sid}: {e}", flush=True)
+        try:
+            dataplane.stop_runtime_session(
+                agentRuntimeArn=runtime_arn,
+                runtimeSessionId=sid,
+            )
+            stopped += 1
+        except dataplane.exceptions.ResourceNotFoundException:
+            # Session already terminated/idle-expired on the runtime —
+            # we still wanted it gone, so count it as success.
+            stopped += 1
+        except Exception as e:
+            # Don't abort the cold run for one bad session; log and move on.
+            print(f"  warn: could not stop session {sid}: {e}", flush=True)
     return stopped
 
 
@@ -81,7 +75,7 @@ def main() -> int:
     p.add_argument("--region", required=True)
     p.add_argument("--runtime-id", required=True, dest="runtime_id")
     p.add_argument("--timeout", type=int, default=300)
-    p.add_argument("--skills-table", default="smarthome-skills")
+    p.add_argument("--sessions-table", default="smarthome-runtime-sessions")
     args = p.parse_args()
 
     ac = boto3.client("bedrock-agentcore-control", region_name=args.region)
@@ -93,7 +87,7 @@ def main() -> int:
 
     # Step 1: stop live sessions so no warm container can serve the next invoke.
     print(f"Stopping sessions on {args.runtime_id}...", flush=True)
-    stopped = stop_all_sessions(dataplane, ddb, args.skills_table, runtime_arn)
+    stopped = stop_all_sessions(dataplane, ddb, args.sessions_table, runtime_arn)
     print(f"  Stopped {stopped} session(s)", flush=True)
 
     # Step 2: bump nonce. Rolls every container version forward; combined

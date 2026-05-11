@@ -27,7 +27,7 @@
  *   PROBE_ROUNDS             default 100
  *   PROBE_OUTPUT             default ./results/tokyo-cold-session.jsonl
  *   PROBE_INTER_RUN_MS       default 500
- *   SKILLS_TABLE             default smarthome-skills — used to enumerate
+ *   SESSIONS_TABLE           default smarthome-runtime-sessions — used to enumerate
  *                            active session IDs.
  */
 
@@ -46,7 +46,7 @@ const OUTPUT =
   process.env.PROBE_OUTPUT ??
   path.join(__dirname, "results", "tokyo-cold-session.jsonl");
 const INTER_RUN_MS = parseInt(process.env.PROBE_INTER_RUN_MS ?? "500", 10);
-const SKILLS_TABLE = process.env.SKILLS_TABLE ?? "smarthome-skills";
+const SESSIONS_TABLE = process.env.SESSIONS_TABLE ?? "smarthome-runtime-sessions";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -89,13 +89,14 @@ function stopAllVoiceSessions(): { stopped: number; elapsedMs: number } {
 import os, sys, json, boto3
 region = os.environ['AWS_REGION']
 arn = os.environ['VOICE_RUNTIME_ARN']
-table_name = os.environ['SKILLS_TABLE']
+table_name = os.environ['SESSIONS_TABLE']  # smarthome-runtime-sessions
 dp = boto3.client('bedrock-agentcore', region_name=region)
 ddb = boto3.resource('dynamodb', region_name=region)
 t = ddb.Table(table_name)
 items = t.scan(
-  FilterExpression='skillName = :s',
-  ExpressionAttributeValues={':s': '__session_voice__'},
+  FilterExpression='#k = :k',
+  ExpressionAttributeNames={'#k': 'kind'},
+  ExpressionAttributeValues={':k': 'voice'},
   ProjectionExpression='sessionId',
 ).get('Items', [])
 count = 0
@@ -118,7 +119,7 @@ print(count)
       ...process.env,
       AWS_REGION,
       VOICE_RUNTIME_ARN,
-      SKILLS_TABLE,
+      SESSIONS_TABLE,
     },
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "inherit"],
