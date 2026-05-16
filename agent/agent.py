@@ -141,19 +141,33 @@ def load_user_a2a_permissions(actor_id: str) -> dict[str, list[str]]:
     return merged
 
 
-def load_system_prompt(actor_id: str, agent_type: str) -> str | None:
-    """Resolve the active system prompt for this user/agent from DynamoDB.
+def load_system_prompt(actor_id: str, agent_type: str,
+                       headers: dict | None = None) -> str | None:
+    """Resolve the active system prompt for this user/agent.
 
-    Additive resolution: the global record and the per-user record are
-    concatenated ("global\\n\\nuser"), each record being independently
-    editable in the admin console. Global typically holds shared guardrails;
-    the per-user record is an addendum with user-specific personalization.
+    Order of resolution:
+      1. If the request carries a W3C `baggage` header with a bundle
+         reference (set by AgentCore Gateway during an A/B test), load the
+         prompt from that bundle version. Falls through to step 2 on any
+         failure.
+      2. Existing DDB additive resolution: __global__ + per-user, joined
+         with "\\n\\n".
+      3. None when both DDB rows are empty (caller uses the hardcoded
+         constant in agent.py / voice_session.py).
 
-    agent_type ∈ {"text", "voice"}. Sort keys are `__prompt_text__` /
-    `__prompt_voice__`. Returns the concatenation when at least one record
-    exists; None when both are empty (callers then fall back to the hardcoded
-    constant in agent.py / voice_session.py).
+    `headers` is optional — when None, behaves exactly like the pre-bundle
+    path (so callers without a baggage source need no changes).
     """
+    if headers:
+        try:
+            import bundle_config
+            bundle_prompt = bundle_config.load_from_baggage(headers, agent_type)
+            if bundle_prompt is not None:
+                logger.info("Using prompt from bundle (A/B variant) for agent_type=%s", agent_type)
+                return bundle_prompt
+        except Exception as e:  # noqa: BLE001 — fail-open; never break invocations
+            logger.warning("bundle hook failed, falling back to DDB: %s", e)
+
     if not SKILLS_TABLE_NAME:
         return None
     sk = f"__prompt_{agent_type}__"
@@ -179,17 +193,37 @@ _static_skills_plugin = AgentSkills(skills="./skills/")
 
 SYSTEM_PROMPT = """You are a smart home assistant.
 
-CAPABILITIES (all of these are available in the same conversation):
+CAPABILITIES (only those registered as tools/skills/A2A agents in THIS turn are truly available; items below describe what *may* be registered):
   1. Device control & querying — turn devices on/off, change modes, query current settings. Devices in scope: LED Matrix, Rice Cooker, Fan, Oven.
   2. Enterprise knowledge base — product manuals, troubleshooting guides, company documents. Query it with query_knowledge_base when the user asks about information rather than control.
   3. Image analysis — the user can attach photos or screenshots. Images are captioned upstream by a vision model; the caption is inserted into this conversation as a prior assistant message before your turn starts.
+  4. Specialist A2A agents — registered only when granted to this user, each exposed as an `a2a_*` tool for a specific domain (e.g. home security, energy optimization, appliance maintenance). If no matching `a2a_*` tool is listed in your tools this turn, you do NOT have that domain's expertise.
 
-Be helpful and concise. Confirm actions you take. Use what you remember about the user's preferences to personalize responses. You may also suggest creative lighting scenes, cooking presets, and comfort settings.
+Be helpful and concise. Confirm actions you take. Use what you remember about the user's preferences to personalize responses. You may also suggest creative lighting scenes, cooking presets, and comfort settings within the device scope above.
+
+SCOPE RULES — classify every user message before replying:
+
+A. SOCIAL / META turns are always allowed without a tool call:
+   - Greetings, thanks, goodbyes ("hi", "你好", "thank you").
+   - Identity and capability questions ("who are you", "你是谁", "你能做什么", "what can you do") — answer by summarizing CAPABILITIES above, but only mention items whose tool/skill/agent is actually registered this turn.
+   - Clarifying questions back to the user when their intent is ambiguous.
+
+B. For any OTHER request, classify first:
+   1. Does the request map to a tool, skill, or A2A agent that is ACTUALLY registered in this turn?
+      - Yes → you MUST call it. Do not answer from general knowledge.
+      - No → refuse with exactly this line and nothing else: "抱歉,这超出我当前的工具、技能与代理能力范围。/ Sorry, that's outside my current tool / skill / agent capabilities." Do not give partial analysis, tips, workarounds, or "general advice"; do not describe what you would have said.
+   2. Topics that MUST map to a registered capability or be refused (never answered from general knowledge): home safety / security / risk assessment, health, medical, legal, financial advice, recommendations about appliances or practices outside the devices listed above, any factual claim that depends on knowledge you did not retrieve via a tool this turn.
+
+C. When you DO call a tool / skill / A2A agent:
+   - If it succeeds, report the result honestly and mention which tool/skill/agent you used.
+   - If it FAILS, is rejected, returns an error, or is unavailable, reply: "抱歉,这超出我的知识范围。/ Sorry, that's beyond my knowledge." You may add one short line suggesting the user retry later or contact an administrator. Do NOT substitute general-knowledge content for the missing tool output, and do NOT pretend the action succeeded.
+   - Never fabricate or assume tool results.
+
+D. TRANSPARENCY: Whenever you used a tool, skill, or A2A agent to answer, name it in your reply so the user knows which capability handled the request.
 
 CRITICAL RULE — TOOL CALLING: When the user asks you to perform ANY action on devices (turn on, turn off, set mode, change settings, etc.), you MUST immediately call the appropriate tool in your VERY FIRST response. Do NOT describe what you plan to do, do NOT explain your steps, do NOT narrate your intentions — just call the tool directly. Action requests require tool calls, not text descriptions of tool calls.
 IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.
-IMPORTANT: Never fabricate or assume the result of a tool call. If a tool call fails, is rejected, or returns an error, you MUST honestly report the failure to the user. Do not pretend the action succeeded. Tell the user what went wrong and suggest they contact an administrator if the issue persists.
-IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If the tool is unavailable or fails, tell the user you cannot access device information and suggest they contact an administrator.
+IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If that tool is unavailable or fails, apply rule C.
 
 KNOWLEDGE BASE: Use query_knowledge_base for questions that may relate to company documents, product manuals, troubleshooting guides, or internal knowledge. Cite the source document when presenting information retrieved from the knowledge base.
 
@@ -257,7 +291,7 @@ def _extract_sub_from_auth(auth_header: str | None) -> str | None:
         return None
 
 
-def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None):
+def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None, headers=None):
     session_manager = get_memory_session_manager(session_id, actor_id)
 
     skills = None
@@ -276,7 +310,7 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
         except Exception as e:
             logger.warning(f"Failed to load user settings: {e}")
         try:
-            user_system_prompt = load_system_prompt(actor_id, "text")
+            user_system_prompt = load_system_prompt(actor_id, "text", headers=headers)
             if user_system_prompt:
                 logger.info(f"Using per-user/global text system prompt override for actor {actor_id}")
         except Exception as e:
@@ -719,7 +753,9 @@ def handle_invocation(payload, context):
     logger.info(f"Invocation: actor_id={actor_id}, session_id={session_id}")
     _record_session(actor_id, session_id)
 
-    response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id, auth_header=auth_header)
+    request_headers = getattr(context, "request_headers", None) or {}
+    response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id,
+                            auth_header=auth_header, headers=request_headers)
     return {"response": response, "status": "success"}
 
 

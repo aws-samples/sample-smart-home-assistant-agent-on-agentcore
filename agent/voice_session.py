@@ -496,8 +496,12 @@ async def handle_voice_session(
         return blocks
 
     def _load_prompt_override() -> Optional[str]:
+        # `rh` is captured from the enclosing handle_voice_session scope
+        # (set above where gw_headers are computed). Forwarded to enable
+        # bundle-hook resolution for voice A/B variants. Falls open on
+        # any error.
         try:
-            return load_system_prompt(actor_id, "voice")
+            return load_system_prompt(actor_id, "voice", headers=rh)
         except Exception as e:
             logger.warning(f"Voice WS: voice prompt override load failed, using default: {e}")
             return None
