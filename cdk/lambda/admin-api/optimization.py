@@ -140,6 +140,15 @@ def _validate_log_group(arn: str, agent_type: str) -> str | None:
     return None
 
 
+def _default_log_group_arn() -> str:
+    """Build the well-known aws/spans ARN for this region+account.
+    The runtime emits Strands/ADOT spans to a fixed log group; clients can
+    omit `logGroupArn` and we resolve it server-side."""
+    sts = boto3.client("sts", region_name=AWS_REGION)
+    account = sts.get_caller_identity()["Account"]
+    return f"arn:aws:logs:{AWS_REGION}:{account}:log-group:aws/spans"
+
+
 # --- Handlers: Recommendations ----------------------------------------------
 def start_recommendation(event):
     g = _preview_guard()
@@ -150,7 +159,7 @@ def start_recommendation(event):
     agent_type = body.get("agentType", "")
     if agent_type not in _VALID_AGENT_TYPES:
         return _resp(400, {"error": "ValidationException", "message": "agentType must be text|voice|tool_desc"})
-    log_group_arn = body.get("logGroupArn", "")
+    log_group_arn = body.get("logGroupArn") or _default_log_group_arn()
     err = _validate_log_group(log_group_arn, agent_type)
     if err:
         return _resp(400, {"error": "ValidationException", "message": err})

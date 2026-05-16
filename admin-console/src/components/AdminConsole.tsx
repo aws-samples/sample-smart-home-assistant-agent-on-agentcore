@@ -1592,11 +1592,10 @@ const GenerateRecommendationModal: React.FC<GenerateRecommendationModalProps> = 
   const submit = async () => {
     setSubmitting(true);
     try {
-      const region = (window as any).__SMARTHOME_REGION__ || 'us-west-2';
-      const account = (window as any).__SMARTHOME_ACCOUNT__ || '';
-      const logGroupArn = `arn:aws:logs:${region}:${account}:log-group:aws/spans:*`;
+      // Lambda resolves the log group ARN from STS account + AWS_REGION
+      // (`aws/spans` is the well-known span log group), so we omit it.
       await startRecommendation({
-        scope, agentType, evaluatorArn: evaluator, logGroupArn, startTime, endTime,
+        scope, agentType, evaluatorArn: evaluator, startTime, endTime,
       });
       onSubmitted();
     } catch (e: any) { setError(e.message); }

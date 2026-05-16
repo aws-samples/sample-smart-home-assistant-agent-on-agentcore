@@ -943,7 +943,7 @@ export interface StartRecommendationInput {
   scope: string;
   agentType: OptAgentType;
   evaluatorArn: string;
-  logGroupArn: string;
+  logGroupArn?: string;
   startTime: string;
   endTime: string;
   ruleFilter?: unknown;
