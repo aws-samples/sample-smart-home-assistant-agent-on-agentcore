@@ -14,6 +14,8 @@ from boto3.dynamodb.conditions import Key
 
 from agent_prompt_defaults import DEFAULTS as PROMPT_DEFAULTS
 
+import optimization  # AgentCore Optimization handlers; see optimization.py
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -2247,5 +2249,35 @@ def handler(event, context):
             return start_kb_sync(event)
         else:
             return response(400, {"error": f"Unknown KB action: {action}"})
+
+    # Optimization routes — see docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
+    # Uses one wildcard lambda:InvokeFunction permission on /optimization/* (set in CDK)
+    # so adding methods here doesn't grow the Lambda resource policy.
+    if resource == "/optimization/recommendations" and method == "GET":
+        return optimization.list_recommendations(event)
+    if resource == "/optimization/recommendations" and method == "POST":
+        return optimization.start_recommendation(event)
+    if resource == "/optimization/recommendations/{recId}" and method == "GET":
+        return optimization.get_recommendation(event)
+    if resource == "/optimization/recommendations/{recId}" and method == "DELETE":
+        return optimization.delete_recommendation(event)
+    if resource == "/optimization/recommendations/{recId}/apply" and method == "POST":
+        return optimization.apply_recommendation(event)
+    if resource == "/optimization/bundles" and method == "GET":
+        return optimization.list_bundles(event)
+    if resource == "/optimization/bundles" and method == "POST":
+        return optimization.create_bundle(event)
+    if resource == "/optimization/bundles/{bundleArn}" and method == "GET":
+        return optimization.get_bundle_versions(event)
+    if resource == "/optimization/bundles/{bundleArn}" and method == "DELETE":
+        return optimization.delete_bundle(event)
+    if resource == "/optimization/ab-tests" and method == "GET":
+        return optimization.list_ab_tests(event)
+    if resource == "/optimization/ab-tests" and method == "POST":
+        return optimization.start_ab_test(event)
+    if resource == "/optimization/ab-tests/{testId}" and method == "GET":
+        return optimization.get_ab_test(event)
+    if resource == "/optimization/ab-tests/{testId}/stop" and method == "POST":
+        return optimization.stop_ab_test(event)
 
     return response(400, {"error": f"Unknown route: {method} {resource}"})
