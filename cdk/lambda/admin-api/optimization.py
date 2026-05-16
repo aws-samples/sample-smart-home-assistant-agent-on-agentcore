@@ -67,8 +67,16 @@ def _caller_email(event) -> str:
 
 
 def _resp(code, body):
-    return {"statusCode": code, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(body, default=str)}
+    return {
+        "statusCode": code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+        },
+        "body": json.dumps(body, default=str),
+    }
 
 
 def _preview_guard():
