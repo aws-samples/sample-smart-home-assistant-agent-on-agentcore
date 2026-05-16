@@ -15,6 +15,7 @@
 - [8.9. Per-Login Session ID and Session Tracking](#89-per-login-session-id-and-session-tracking)
 - [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
 - [8.11. Image Input (Vision Bypass Path)](#811-image-input-vision-bypass-path)
+- [8.12. AgentCore Optimization (Recommendations, Bundles, A/B Tests)](#812-agentcore-optimization-recommendations-bundles--ab-tests)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
@@ -1141,7 +1142,7 @@ The text agent calls this inside `invoke_agent()` on every request; the voice ag
 
 **Defaults mirror.** The Lambda ships a local `agent_prompt_defaults.py` that duplicates the two hardcoded constants from `agent/agent.py` and `agent/voice_session.py`. The duplication is intentional: the admin Lambda and the agent runtime live in separate packages, and making the tab render "what the agent will use when no override exists" without a round-trip to the runtime is worth the copy. The module carries a short comment flagging that the constants must be updated in the same commit as the agent-side source of truth.
 
-**Evo integration stub.** Each editor card renders a disabled "Optimization Suggestions (AgentCore Evo)" block. AgentCore Evo does not yet exist in this codebase; the card is a visual placeholder so future work can wire up an optimization endpoint without a tab-layout change.
+**Cross-reference to AgentCore Optimization.** Each editor card renders an info Alert "Optimization Suggestions (AgentCore Optimization)" with a link "Open in Optimization tab →" that deep-links to `#/optimization`. The optimization workflow (recommendations, configuration bundles, A/B tests) is documented in §8.12 — applying a recommendation writes back into the same `__prompt_text__` / `__prompt_voice__` rows this section describes, so the two tabs share storage and an applied recommendation immediately becomes the effective prompt for subsequent invocations.
 
 **Image-awareness clause (text prompt).** The hardcoded text `SYSTEM_PROMPT` contains an `IMAGES IN THIS CONVERSATION:` section that tells Kimi image descriptions are injected into the conversation history as prior assistant messages (written by the vision bypass path in §8.11). Without this clause Kimi would respond to follow-up questions about past uploads by denying image access or fabricating contents. Admins editing the global prompt must keep this section when overriding, or follow-up turns referring to earlier images will regress.
 
@@ -1226,6 +1227,95 @@ POST /invocations
 | Server: per-image bad MIME or decoded >20 MB | Soft-reject in `caption_images`, warning lists indices, remaining images still captioned |
 | Vision model throttled / unavailable after one retry | Placeholder caption + `Note: vision service was unavailable…`, user still gets a reply |
 | Memory write fails after successful caption | Caption returned to user anyway; next turn simply won't see this one in memory (logged at WARN) |
+
+---
+
+### 8.12 AgentCore Optimization (Recommendations, Bundles & A/B Tests)
+
+Administrators can drive a data-driven prompt-improvement loop from the Admin Console's **Assess → Optimization** tab without redeploying the runtime image. The tab orchestrates three AgentCore Optimization (public preview) capabilities — **Recommendations**, **Configuration Bundles**, and **A/B Tests** — for both system prompts (text + voice) and gateway tool descriptions.
+
+```
+Admin Console (React)                              AWS
+┌─────────────────────────────────────────┐        ┌──────────────────────────────────┐
+│ Assess → Optimization (new tab)         │        │  bedrock-agentcore (data plane)  │
+│ ┌────────────┬─────────┬─────────────┐  │ HTTPS  │   start_recommendation           │
+│ │ Recs       │ Bundles │ A/B Tests   │  │◀─────▶ │   get_recommendation             │
+│ └────────────┴─────────┴─────────────┘  │  +     │   create_ab_test                 │
+│ Build → Agent System Prompts (existing) │  JWT   │   get_ab_test, update_ab_test    │
+│   └ "AgentCore Optimization" Alert      │        │                                  │
+│       → deep-link to new tab            │        │  bedrock-agentcore-control       │
+└─────────────────────────────────────────┘        │   create/update/get/list/        │
+          │                                         │     delete_configuration_bundle  │
+          ▼ /optimization/* (dedicated subtree,    │   get_configuration_bundle_version│
+          ▼  one wildcard Lambda permission)        │   update_gateway_target          │
+┌─────────────────────────────────────────┐        │                                  │
+│ admin-api Lambda (Python 3.13)          │◀──────▶│  DynamoDB smarthome-skills       │
+│  Dispatcher routes to optimization.py   │        │   (mirror rows for fast lists)   │
+│   ├ recommendations                     │        │                                  │
+│   ├ bundles                             │        │  CloudWatch Logs aws/spans       │
+│   └ ab_tests                            │        │   (trace source for recs)        │
+└─────────────────────────────────────────┘        └──────────────┬───────────────────┘
+                                                                  ▲
+                                                                  │  W3C baggage
+                                                                  │  (bundle ref)
+┌─────────────────────────────────────────┐        ┌──────────────────────────────────┐
+│ Chatbot (unchanged)                     │ ─────▶ │ AgentCore Gateway                │
+└─────────────────────────────────────────┘        │   ├ A/B split on sessionId       │
+                                                    │   └ injects baggage header       │
+                                                    └──────────────┬───────────────────┘
+                                                                   ▼
+                                                    ┌──────────────────────────────────┐
+                                                    │ AgentCore Runtime                │
+                                                    │  agent.py + voice_session.py    │
+                                                    │   ├ read baggage                 │
+                                                    │   ├ if bundle → load bundle      │
+                                                    │   └ else → DDB __prompt_*__      │
+                                                    └──────────────────────────────────┘
+```
+
+**Five moving pieces.**
+
+1. **Admin UI tab** — single page with three Cloudscape `Container`s (Recommendations, Bundles, A/B Tests) plus a shared **Scope + AgentType** filter. Polls non-terminal rows every 10 s. The existing Agent System Prompts tab keeps a small Alert that deep-links here, so admins discover the optimization flow from the prompt editor (§8.10).
+2. **Admin Lambda module** `cdk/lambda/admin-api/optimization.py` — three handler groups (`start_recommendation` / `list_recommendations` / `get_recommendation` / `delete_recommendation` / `apply_recommendation`; `list_bundles` / `create_bundle` / `get_bundle_versions` / `delete_bundle`; `start_ab_test` / `list_ab_tests` / `get_ab_test` / `stop_ab_test`). A module-level preview-availability probe (`PREVIEW_UNAVAILABLE = True` if boto3 doesn't yet recognise `StartRecommendation`) returns 501 `AgentCoreOptimizationUnavailable` from every handler so the UI renders a banner instead of a confusing 5xx.
+3. **DDB index rows** in the existing `smarthome-skills` table under reserved sort keys `__opt_rec_{id}__`, `__opt_bundle_{arn}__`, `__opt_abtest_{id}__`, partitioned by scope (`__global__` or user email). List views become a single DDB `Query`; transient AgentCore data (full prompt text, per-session scores, bundle payloads) is fetched on demand. Failed recs and A/B test rows carry a `__opt_expires` TTL attribute so DDB sweeps stale state.
+4. **Runtime bundle hook** — new `agent/bundle_config.py` parses the W3C `baggage` header (RFC 7230) for `bundle-arn` + `bundle-version-id`. `agent/agent.py:load_system_prompt` and `agent/voice_session.py` prepend a single check: if baggage carries a bundle reference (set by AgentCore Gateway during an A/B test), `GetConfigurationBundleVersion` returns the variant's prompt; otherwise the agent falls through to the existing DDB resolution path (§8.10). Fail-open at every layer — non-A/B traffic is bit-for-bit unchanged. Cold-start cost is paid lazily on first baggage-bearing request only.
+5. **IAM scoping** — admin Lambda gets the Optimization action set (Start/Get/List/Delete Recommendation, Create/Update/Get/List/Delete A/B Test, plus `bedrock-agentcore-control:*ConfigurationBundle*` and `UpdateGatewayTarget`). Both runtime execution roles get a single new grant: `bedrock-agentcore-control:GetConfigurationBundleVersion` on `arn:aws:bedrock-agentcore:{region}:{account}:configuration-bundle/*`.
+
+**Dedicated `/optimization/*` REST subtree, one wildcard permission.** Adding 13 methods via the standard `apigw.LambdaIntegration` would emit 13 per-method `AWS::Lambda::Permission` resources (~5–7 KB of policy growth) and eat most remaining headroom under the 20 KB Lambda resource-policy cap that §8.10 already documents. Instead the CDK uses plain `apigw.Integration` (which does NOT auto-emit a permission) plus **one** `addPermission` with `sourceArn=…/*/*/optimization/*`. Net policy growth: ~800 bytes total, flat regardless of how many methods we add under this subtree.
+
+**API surface** (all under Cognito JWT auth, admin group required):
+
+| Method + Path | Behavior |
+|---|---|
+| `POST /optimization/recommendations` | Start a recommendation. Body: `{scope, agentType, evaluatorArn, startTime, endTime}`. The Lambda resolves `logGroupArn` server-side (`arn:aws:logs:{region}:{account}:log-group:aws/spans` via `STS:GetCallerIdentity`) so the browser doesn't need to know the account — see "Lessons from E2E" below. Returns `{recommendationId, recommendationArn, status}` (202). |
+| `GET /optimization/recommendations?scope=…` | List from DDB, cached status. |
+| `GET /optimization/recommendations/{recId}` | Live `get_recommendation`; surfaces `recommendedSystemPrompt` / `tools[]` when COMPLETED, refreshes DDB row. |
+| `POST /optimization/recommendations/{recId}/apply` | Writes `__prompt_text__` / `__prompt_voice__` (text/voice) or `update_gateway_target` (tool_desc), then snapshots a configuration-bundle version. |
+| `DELETE /optimization/recommendations/{recId}` | `delete_recommendation` + DDB cleanup. |
+| `GET /optimization/bundles` / `POST` / `GET /{bundleArn}` / `DELETE /{bundleArn}` | List / create / get versions / delete. |
+| `POST /optimization/ab-tests` | Single-active rule per `agentType`. Body uses `controlBundle` / `treatmentBundle` (`{bundleArn, bundleVersion}` each), `variantWeights` (must sum 100), `onlineEvaluationConfigArn`, `durationDays ∈ {1,3,7,14}`. |
+| `GET /optimization/ab-tests` / `GET /{testId}` / `POST /{testId}/stop` | List / live results (per-variant mean, p-value, winner, CloudWatch dashboard deep-link) / stop. |
+
+**Plan-vs-real SDK corrections.** The plan was written against an early API draft; the live `bedrock-agentcore` model differs in three ways that the implementation reflects: (1) op is `CreateABTest` / `UpdateABTest(executionStatus="STOPPED")`, not `StartABTest` / `StopABTest`; (2) bundle ops are keyed by `bundleId` (not `bundleArn`), and a new version is `UpdateConfigurationBundle(parentVersionIds=[…])` (no standalone `CreateConfigurationBundleVersion`); (3) variants take `{name, weight, variantConfiguration: {configurationBundle: {bundleArn, bundleVersion}}}`, and evaluation is a single `onlineEvaluationConfigArn`, not a per-variant `evaluatorArn`.
+
+**Apply behavior — DDB and bundle, both at once.** Apply is the bridge between the experiment loop and the production prompt store. For text/voice it writes the optimized prompt into the existing `__prompt_*__` row (§8.10) so the change takes effect on the very next invocation, *and* creates a configuration-bundle version capturing the same value so the change has version history and is available as a treatment variant in a future A/B test. For tool descriptions it calls `UpdateGatewayTarget` per recommended tool plus a bundle snapshot. Failures on individual gateway-target updates are warn-and-continue — the bundle still records the intended state, and the admin can re-apply.
+
+**Why A/B tests are global-only.** A/B routing happens at the gateway and splits *all* sessions for a runtime. Per-user prompt addenda aren't a meaningful A/B candidate (single-user treatment never converges to a p-value). The Recommendations and Bundles tables still support per-user scope; only the A/B table is global-only. The UI grays out "Start A/B Test" for per-user recommendations with an explanatory tooltip.
+
+**Lessons from E2E.** Two non-obvious bugs surfaced during the live deploy and were fixed inline rather than discovered in production:
+
+- **CORS on success responses.** The new `/optimization/*` routes used a custom `_resp` helper that didn't include the `Access-Control-Allow-Origin` header that `index.py:response()` sets for every other admin handler. The browser saw 200 OK responses as generic "Failed to fetch" CORS failures even though the JSON body was valid. The fix mirrors the `index.py` headers in `optimization.py:_resp` so every status code carries the same CORS allowlist.
+- **Server-resolved `logGroupArn`.** The first iteration tried to build the trace-source ARN client-side as `arn:aws:logs:{region}:{account}:log-group:aws/spans:*`, but `window.__SMARTHOME_ACCOUNT__` is not exposed (the chatbot config does not include the account ID). The browser sent a malformed ARN with an empty account segment; AgentCore's validator rejected it. The fix makes `logGroupArn` an optional API field — when omitted the Lambda calls `sts:GetCallerIdentity` and builds the well-known `aws/spans` ARN itself. `sts:GetCallerIdentity` is implicitly granted to every IAM principal, so no policy change is needed.
+
+**Storage layout** (existing `smarthome-skills` DynamoDB table, reused the same way `__prompt_*__` reuses it):
+
+| userId (PK) | skillName (SK) | Fields |
+|---|---|---|
+| `__global__` or `{email}` | `__opt_rec_{id}__` | `recommendationArn`, `agentType`, `status` (cached), `evaluatorArn`, `logGroupArn`, `startTime`, `endTime`, `createdAt`, `createdBy`, `appliedAt?`, `appliedBundleVersionId?`, `__opt_expires?` (Unix-ts; set when status → FAILED, TTL = +7 days) |
+| `__global__` or `{email}` | `__opt_bundle_{arn}__` | `bundleArn`, `bundleName`, `latestVersionId`, `agentType`, `sourceRecommendationId?`, `createdAt` |
+| `__global__` | `__opt_abtest_{id}__` | `abTestArn`, `agentType`, `controlBundleArn` + `controlBundleVersion`, `treatmentBundleArn` + `treatmentBundleVersion`, `variantWeights`, `onlineEvaluationConfigArn`, `durationDays`, `autoStopAt`, `status` + `executionStatus` (cached), `createdAt`, `createdBy`, `stoppedAt?`, `winner?`, `__opt_expires?` (auto-stop + 30 days) |
+
+**Status caching rule.** List views show DDB-cached status. Detail views call `get_recommendation` / `get_ab_test` live and write the fresh status back. Same pattern as the Sessions tab. Winners are computed locally from `results.evaluatorMetrics[].variantResults[].isSignificant + mean > controlStats.mean` because the AgentCore API does not return a `winner` field directly.
 
 ---
 
