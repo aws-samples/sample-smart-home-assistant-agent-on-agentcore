@@ -487,3 +487,234 @@ def create_bundle(event):
     except ClientError as e:
         return _client_error_to_resp(e)
     return _resp(200, {"bundleArn": bundle_arn, "versionId": version_id})
+
+
+# --- Handlers: A/B Tests -----------------------------------------------------
+_VALID_DURATION_DAYS = (1, 3, 7, 14)
+
+
+def _write_abtest_row(test_id: str, fields: dict):
+    item = {
+        "userId": "__global__",
+        "skillName": opt_sk("abtest", test_id),
+        **fields,
+    }
+    auto_stop = fields.get("autoStopAt")
+    if auto_stop:
+        try:
+            ts = int(datetime.fromisoformat(auto_stop.replace("Z", "+00:00")).timestamp())
+            item["__opt_expires"] = ts + 30 * 86400
+        except ValueError:
+            pass
+    _ddb_table().put_item(Item=item)
+
+
+def _update_abtest_status(test_id: str, execution_status: str):
+    _ddb_table().update_item(
+        Key={"userId": "__global__", "skillName": opt_sk("abtest", test_id)},
+        UpdateExpression="SET executionStatus = :s, updatedAt = :u",
+        ExpressionAttributeValues={":s": execution_status, ":u": _now_iso()},
+    )
+
+
+def _finalize_abtest_row(test_id: str, execution_status: str, winner: str | None):
+    expr = "SET executionStatus = :s, stoppedAt = :t"
+    vals = {":s": execution_status, ":t": _now_iso()}
+    if winner:
+        expr += ", winner = :w"
+        vals[":w"] = winner
+    _ddb_table().update_item(
+        Key={"userId": "__global__", "skillName": opt_sk("abtest", test_id)},
+        UpdateExpression=expr,
+        ExpressionAttributeValues=vals,
+    )
+
+
+def _cloudwatch_dashboard_url(test_id: str) -> str:
+    return (
+        f"https://{AWS_REGION}.console.aws.amazon.com/cloudwatch/home?region={AWS_REGION}"
+        f"#dashboards:dashboard=GenAIObservability-BedrockAgentCore-ABTests"
+        f";filter=testId%3D{test_id}"
+    )
+
+
+def _compute_winner(results: dict | None) -> str | None:
+    """Pick the first variant where isSignificant=True and mean > control mean.
+    None if no significant winner."""
+    if not results:
+        return None
+    metrics = results.get("evaluatorMetrics") or []
+    for m in metrics:
+        control_mean = (m.get("controlStats") or {}).get("mean", 0)
+        for vr in m.get("variantResults") or []:
+            if vr.get("isSignificant") and (vr.get("mean") or 0) > control_mean:
+                return vr["variantName"]
+    return None
+
+
+def start_ab_test(event):
+    g = _preview_guard()
+    if g:
+        return g
+    body = json.loads(event.get("body") or "{}")
+    scope = body.get("scope", "__global__")
+    if scope != "__global__":
+        return _resp(400, {"error": "ValidationException",
+                           "message": "A/B tests are global-only; per-user scope is not supported"})
+    agent_type = body.get("agentType")
+    if agent_type not in _VALID_AGENT_TYPES:
+        return _resp(400, {"error": "ValidationException",
+                           "message": "agentType must be text|voice|tool_desc"})
+    duration_days = body.get("durationDays")
+    if duration_days not in _VALID_DURATION_DAYS:
+        return _resp(400, {"error": "ValidationException",
+                           "message": f"durationDays must be one of {_VALID_DURATION_DAYS}"})
+    weights = body.get("variantWeights", {})
+    if sum(weights.values()) != 100:
+        return _resp(400, {"error": "ValidationException",
+                           "message": "variantWeights must sum to 100"})
+
+    existing = _query_opt_rows("__global__", "abtest")
+    for r in existing:
+        if r.get("agentType") == agent_type and r.get("executionStatus") in ("NOT_STARTED", "RUNNING", "PAUSED"):
+            return _resp(409, {"error": "ConflictException",
+                               "message": f"An A/B test is already active for agentType={agent_type}"})
+
+    name = body.get("name") or f"abtest-{agent_type}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    auto_stop_at = (datetime.now(timezone.utc) + timedelta(days=duration_days)).isoformat().replace("+00:00", "Z")
+    control_b = body["controlBundle"]
+    treatment_b = body["treatmentBundle"]
+    gateway_arn = os.environ.get("GATEWAY_ARN", "")
+    role_arn = body.get("roleArn") or os.environ.get("AB_TEST_ROLE_ARN", "")
+    online_eval_arn = body["onlineEvaluationConfigArn"]
+    try:
+        resp = _agentcore_data().create_ab_test(
+            name=name,
+            gatewayArn=gateway_arn,
+            variants=[
+                {"name": "control", "weight": weights["control"],
+                 "variantConfiguration": {"configurationBundle": {
+                     "bundleArn": control_b["bundleArn"], "bundleVersion": control_b["bundleVersion"]}}},
+                {"name": "treatment", "weight": weights["treatment"],
+                 "variantConfiguration": {"configurationBundle": {
+                     "bundleArn": treatment_b["bundleArn"], "bundleVersion": treatment_b["bundleVersion"]}}},
+            ],
+            evaluationConfig={"onlineEvaluationConfigArn": online_eval_arn},
+            roleArn=role_arn,
+            enableOnCreate=True,
+        )
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    test_id = resp["abTestId"]
+    _write_abtest_row(test_id, {
+        "abTestArn": resp["abTestArn"],
+        "agentType": agent_type,
+        "controlBundleArn": control_b["bundleArn"],
+        "controlBundleVersion": control_b["bundleVersion"],
+        "treatmentBundleArn": treatment_b["bundleArn"],
+        "treatmentBundleVersion": treatment_b["bundleVersion"],
+        "variantWeights": weights,
+        "onlineEvaluationConfigArn": online_eval_arn,
+        "durationDays": duration_days,
+        "autoStopAt": auto_stop_at,
+        "status": resp["status"],
+        "executionStatus": resp["executionStatus"],
+        "createdAt": _now_iso(),
+        "createdBy": _caller_email(event),
+    })
+    return _resp(200, {
+        "testId": test_id,
+        "testArn": resp["abTestArn"],
+        "status": resp["status"],
+        "executionStatus": resp["executionStatus"],
+        "autoStopAt": auto_stop_at,
+    })
+
+
+def list_ab_tests(event):
+    g = _preview_guard()
+    if g:
+        return g
+    rows = _query_opt_rows("__global__", "abtest")
+    out = []
+    for r in rows:
+        parsed = parse_opt_sk(r["skillName"])
+        if not parsed or parsed[0] != "abtest":
+            continue
+        out.append({
+            "testId": parsed[1],
+            "agentType": r.get("agentType"),
+            "status": r.get("status"),
+            "executionStatus": r.get("executionStatus"),
+            "createdAt": r.get("createdAt"),
+            "autoStopAt": r.get("autoStopAt"),
+            "winner": r.get("winner"),
+        })
+    return _resp(200, out)
+
+
+def get_ab_test(event):
+    g = _preview_guard()
+    if g:
+        return g
+    test_id = (event.get("pathParameters") or {}).get("testId", "")
+    try:
+        full = _agentcore_data().get_ab_test(abTestId=test_id)
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    _update_abtest_status(test_id, full["executionStatus"])
+    results = full.get("results") or {}
+    metrics = results.get("evaluatorMetrics") or []
+    per_variant = []
+    p_value = None
+    significant = None
+    for m in metrics:
+        control = m.get("controlStats") or {}
+        per_variant.append({
+            "variantName": control.get("variantName", "control"),
+            "meanScore": control.get("mean"),
+            "sampleCount": control.get("sampleSize"),
+        })
+        for vr in m.get("variantResults") or []:
+            per_variant.append({
+                "variantName": vr.get("variantName"),
+                "meanScore": vr.get("mean"),
+                "sampleCount": vr.get("sampleSize"),
+            })
+            # First evaluator's first variant result wins for top-level p-value.
+            if p_value is None:
+                p_value = vr.get("pValue")
+                significant = vr.get("isSignificant")
+    out = {
+        "testId": test_id,
+        "status": full["status"],
+        "executionStatus": full["executionStatus"],
+        "perVariant": per_variant,
+        "pValue": p_value,
+        "significant": significant,
+        "winner": _compute_winner(results),
+        "cloudwatchDashboardUrl": _cloudwatch_dashboard_url(test_id),
+    }
+    return _resp(200, out)
+
+
+def stop_ab_test(event):
+    g = _preview_guard()
+    if g:
+        return g
+    test_id = (event.get("pathParameters") or {}).get("testId", "")
+    try:
+        resp = _agentcore_data().update_ab_test(abTestId=test_id, executionStatus="STOPPED")
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    # Compute winner from a follow-up GetABTest call (results are only on Get).
+    # Use broad exception handling: tests may not stub the follow-up Get, and
+    # finalization should still happen even if Get returns no results yet.
+    winner = None
+    try:
+        full = _agentcore_data().get_ab_test(abTestId=test_id)
+        winner = _compute_winner(full.get("results"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("get_ab_test after stop failed: %s", e)
+    _finalize_abtest_row(test_id, resp.get("executionStatus", "STOPPED"), winner)
+    return _resp(200, {"executionStatus": resp.get("executionStatus"), "winner": winner})
