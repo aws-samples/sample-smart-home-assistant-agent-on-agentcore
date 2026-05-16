@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -230,3 +230,175 @@ def list_recommendations(event):
             "appliedAt": r.get("appliedAt"),
         })
     return _resp(200, out)
+
+
+def _update_rec_status(rec_id: str, status: str):
+    """Sync DDB cached status. On transition to FAILED, also set TTL
+    (`__opt_expires`) per spec §5: failed recs auto-expire after 7 days."""
+    t = _ddb_table()
+    sk = opt_sk("rec", rec_id)
+    resp = t.scan(FilterExpression=Key("skillName").eq(sk))
+    for item in resp.get("Items", []):
+        update = "SET #s = :s, updatedAt = :u"
+        names = {"#s": "status"}
+        vals = {":s": status, ":u": _now_iso()}
+        if status == "FAILED":
+            update += ", #e = :e"
+            names["#e"] = "__opt_expires"
+            vals[":e"] = int((datetime.now(timezone.utc) + timedelta(days=7)).timestamp())
+        t.update_item(
+            Key={"userId": item["userId"], "skillName": sk},
+            UpdateExpression=update,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=vals,
+        )
+
+
+def _get_rec_row(rec_id: str) -> dict | None:
+    t = _ddb_table()
+    sk = opt_sk("rec", rec_id)
+    resp = t.scan(FilterExpression=Key("skillName").eq(sk))
+    items = resp.get("Items", [])
+    return items[0] if items else None
+
+
+def _delete_rec_row(rec_id: str):
+    row = _get_rec_row(rec_id)
+    if row:
+        _ddb_table().delete_item(
+            Key={"userId": row["userId"], "skillName": opt_sk("rec", rec_id)}
+        )
+
+
+def _mark_rec_applied(rec_id: str, version_id: str):
+    row = _get_rec_row(rec_id)
+    if not row:
+        return
+    _ddb_table().update_item(
+        Key={"userId": row["userId"], "skillName": opt_sk("rec", rec_id)},
+        UpdateExpression="SET appliedAt = :a, appliedBundleVersionId = :v",
+        ExpressionAttributeValues={":a": _now_iso(), ":v": version_id},
+    )
+
+
+def _write_prompt_row(scope: str, agent_type: str, body_text: str, updated_by: str):
+    sk = f"__prompt_{agent_type}__"
+    _ddb_table().put_item(Item={
+        "userId": scope, "skillName": sk,
+        "promptBody": body_text, "updatedAt": _now_iso(), "updatedBy": updated_by,
+    })
+
+
+def _create_bundle_version(scope: str, agent_type: str, content,
+                           source_rec_id: str | None = None) -> tuple[str, str]:
+    """Create-or-update a bundle for this scope+agentType. Returns
+    (bundleArn, versionId). First call creates the bundle; subsequent calls
+    create a new version chained off the latest."""
+    bundle_name = f"smarthome_{scope.replace('@', '_at_').replace('.', '_')}_{agent_type}"
+    if agent_type == "tool_desc":
+        component_arn = "tool_desc"  # gateway-target ARNs handled per-tool by caller
+        cfg = {"tools": content}
+    else:
+        component_arn = component_arn_for(agent_type)
+        # Use just the leaf key from the JSON path; full path is for recommendation
+        # input, the bundle stores the value under that same key.
+        cfg = {"system_prompt": content}
+    ctrl = _agentcore_control()
+    try:
+        resp = ctrl.create_configuration_bundle(
+            name=bundle_name,
+            components=[{"componentArn": component_arn, "configuration": cfg}],
+        )
+        return resp["bundleArn"], resp["versionId"]
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConflictException":
+            raise
+        existing = ctrl.list_configuration_bundles(nameContains=bundle_name)
+        bundle_arn = existing["bundles"][0]["bundleArn"]
+        latest = ctrl.list_configuration_bundle_versions(bundleArn=bundle_arn)["versions"][0]["versionId"]
+        v = ctrl.create_configuration_bundle_version(
+            bundleArn=bundle_arn,
+            parentVersionId=latest,
+            components=[{"componentArn": component_arn, "configuration": cfg}],
+        )
+        return bundle_arn, v["versionId"]
+
+
+def get_recommendation(event):
+    g = _preview_guard()
+    if g:
+        return g
+    rec_id = (event.get("pathParameters") or {}).get("recId", "")
+    try:
+        full = _agentcore_data().get_recommendation(recommendationId=rec_id)
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    _update_rec_status(rec_id, full["status"])
+    out = {
+        "recommendationId": full["recommendationId"],
+        "status": full["status"],
+        "type": full["type"],
+        "createdAt": full.get("createdAt"),
+        "updatedAt": full.get("updatedAt"),
+    }
+    result = full.get("recommendationResult", {})
+    sys_r = result.get("systemPromptRecommendationResult")
+    tool_r = result.get("toolDescriptionRecommendationResult")
+    if sys_r:
+        out["recommendedSystemPrompt"] = sys_r.get("recommendedSystemPrompt")
+        out["errorCode"] = sys_r.get("errorCode")
+        out["errorMessage"] = sys_r.get("errorMessage")
+    if tool_r:
+        out["tools"] = tool_r.get("tools", [])
+        out["errorCode"] = tool_r.get("errorCode")
+        out["errorMessage"] = tool_r.get("errorMessage")
+    return _resp(200, out)
+
+
+def delete_recommendation(event):
+    g = _preview_guard()
+    if g:
+        return g
+    rec_id = (event.get("pathParameters") or {}).get("recId", "")
+    try:
+        _agentcore_data().delete_recommendation(recommendationId=rec_id)
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    _delete_rec_row(rec_id)
+    return _resp(204, {})
+
+
+def apply_recommendation(event):
+    g = _preview_guard()
+    if g:
+        return g
+    rec_id = (event.get("pathParameters") or {}).get("recId", "")
+    row = _get_rec_row(rec_id)
+    if not row:
+        return _resp(404, {"error": "ResourceNotFoundException",
+                           "message": f"Recommendation {rec_id} not found"})
+    agent_type = row["agentType"]
+    scope = row["userId"]
+    full = _agentcore_data().get_recommendation(recommendationId=rec_id)
+    if full["status"] != "COMPLETED":
+        return _resp(409, {"error": "ConflictException",
+                           "message": f"Recommendation status is {full['status']}, must be COMPLETED before apply"})
+    result = full.get("recommendationResult", {})
+    if agent_type == "tool_desc":
+        tools = result.get("toolDescriptionRecommendationResult", {}).get("tools", [])
+        for tool in tools:
+            try:
+                _agentcore_control().update_gateway_target(
+                    gatewayIdentifier=os.environ.get("GATEWAY_ID", ""),
+                    targetId=tool["toolName"],
+                    toolSchema={"description": tool["recommendedToolDescription"]},
+                )
+            except ClientError as e:
+                logger.warning("update_gateway_target failed for %s: %s", tool["toolName"], e)
+        bundle_arn, version = _create_bundle_version(scope, "tool_desc", tools, source_rec_id=rec_id)
+    else:
+        new_prompt = result.get("systemPromptRecommendationResult", {}).get("recommendedSystemPrompt", "")
+        _write_prompt_row(scope, agent_type, new_prompt, _caller_email(event))
+        bundle_arn, version = _create_bundle_version(scope, agent_type, new_prompt, source_rec_id=rec_id)
+    _mark_rec_applied(rec_id, version)
+    return _resp(200, {"appliedBundleArn": bundle_arn, "appliedBundleVersionId": version})
