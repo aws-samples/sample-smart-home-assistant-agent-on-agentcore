@@ -300,28 +300,36 @@ def _create_bundle_version(scope: str, agent_type: str, content,
         cfg = {"tools": content}
     else:
         component_arn = component_arn_for(agent_type)
-        # Use just the leaf key from the JSON path; full path is for recommendation
-        # input, the bundle stores the value under that same key.
+        # Bundle stores the value under the JSON-path leaf (matches recommendation
+        # input which addresses `$.configuration.system_prompt`).
         cfg = {"system_prompt": content}
     ctrl = _agentcore_control()
+    components = [{"componentArn": component_arn, "configuration": cfg}]
     try:
         resp = ctrl.create_configuration_bundle(
-            name=bundle_name,
-            components=[{"componentArn": component_arn, "configuration": cfg}],
+            bundleName=bundle_name,
+            components=components,
         )
         return resp["bundleArn"], resp["versionId"]
     except ClientError as e:
         if e.response.get("Error", {}).get("Code") != "ConflictException":
             raise
-        existing = ctrl.list_configuration_bundles(nameContains=bundle_name)
-        bundle_arn = existing["bundles"][0]["bundleArn"]
-        latest = ctrl.list_configuration_bundle_versions(bundleArn=bundle_arn)["versions"][0]["versionId"]
-        v = ctrl.create_configuration_bundle_version(
-            bundleArn=bundle_arn,
-            parentVersionId=latest,
-            components=[{"componentArn": component_arn, "configuration": cfg}],
+        # Bundle already exists for this scope+agentType. Find it by name and
+        # call UpdateConfigurationBundle to roll a new version chained off the
+        # latest. (boto3 op is `update_configuration_bundle`; there is no
+        # standalone `create_configuration_bundle_version`.)
+        bundles = ctrl.list_configuration_bundles().get("bundles", [])
+        match = next((b for b in bundles if b.get("bundleName") == bundle_name), None)
+        if not match:
+            raise
+        bundle_id = match["bundleId"]
+        latest = ctrl.list_configuration_bundle_versions(bundleId=bundle_id)["versions"][0]["versionId"]
+        v = ctrl.update_configuration_bundle(
+            bundleId=bundle_id,
+            parentVersionIds=[latest],
+            components=components,
         )
-        return bundle_arn, v["versionId"]
+        return v["bundleArn"], v["versionId"]
 
 
 def get_recommendation(event):
@@ -402,3 +410,80 @@ def apply_recommendation(event):
         bundle_arn, version = _create_bundle_version(scope, agent_type, new_prompt, source_rec_id=rec_id)
     _mark_rec_applied(rec_id, version)
     return _resp(200, {"appliedBundleArn": bundle_arn, "appliedBundleVersionId": version})
+
+
+def _delete_bundle_row(bundle_arn: str):
+    sk = opt_sk("bundle", bundle_arn)
+    resp = _ddb_table().scan(FilterExpression=Key("skillName").eq(sk))
+    for item in resp.get("Items", []):
+        _ddb_table().delete_item(Key={"userId": item["userId"], "skillName": sk})
+
+
+def list_bundles(event):
+    g = _preview_guard()
+    if g:
+        return g
+    qs = event.get("queryStringParameters") or {}
+    scope = qs.get("scope", "__global__")
+    agent_type = qs.get("agentType")
+    rows = _query_opt_rows(scope, "bundle")
+    out = []
+    for r in rows:
+        if agent_type and r.get("agentType") != agent_type:
+            continue
+        out.append({
+            "bundleArn": r.get("bundleArn"),
+            "bundleName": r.get("bundleName"),
+            "latestVersionId": r.get("latestVersionId"),
+            "agentType": r.get("agentType"),
+            "sourceRecommendationId": r.get("sourceRecommendationId"),
+            "createdAt": r.get("createdAt"),
+        })
+    return _resp(200, out)
+
+
+def get_bundle_versions(event):
+    g = _preview_guard()
+    if g:
+        return g
+    bundle_arn = (event.get("pathParameters") or {}).get("bundleArn", "")
+    try:
+        resp = _agentcore_control().list_configuration_bundle_versions(bundleId=bundle_arn)
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    return _resp(200, {"versions": resp.get("versions", [])})
+
+
+def delete_bundle(event):
+    g = _preview_guard()
+    if g:
+        return g
+    bundle_arn = (event.get("pathParameters") or {}).get("bundleArn", "")
+    try:
+        _agentcore_control().delete_configuration_bundle(bundleId=bundle_arn)
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    _delete_bundle_row(bundle_arn)
+    return _resp(204, {})
+
+
+def create_bundle(event):
+    """POST /optimization/bundles — admin-initiated version creation."""
+    g = _preview_guard()
+    if g:
+        return g
+    body = json.loads(event.get("body") or "{}")
+    scope = body.get("scope", "__global__")
+    agent_type = body.get("agentType")
+    if agent_type not in _VALID_AGENT_TYPES:
+        return _resp(400, {"error": "ValidationException",
+                           "message": "agentType must be text|voice|tool_desc"})
+    content = body.get("systemPromptOrTools")
+    if not content:
+        return _resp(400, {"error": "ValidationException",
+                           "message": "systemPromptOrTools is required"})
+    try:
+        bundle_arn, version_id = _create_bundle_version(scope, agent_type, content)
+    except ClientError as e:
+        return _client_error_to_resp(e)
+    return _resp(200, {"bundleArn": bundle_arn, "versionId": version_id})
