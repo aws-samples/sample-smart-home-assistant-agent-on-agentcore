@@ -871,3 +871,161 @@ export async function listA2aGrantsForRecord(
   const data = await res.json();
   return data.grants || [];
 }
+
+// ---------------------------------------------------------------------------
+// AgentCore Optimization (recommendations, configuration bundles, A/B tests).
+// See docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
+// ---------------------------------------------------------------------------
+export type OptAgentType = 'text' | 'voice' | 'tool_desc';
+export type OptRecStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'DELETING';
+export type OptABExecutionStatus = 'NOT_STARTED' | 'PAUSED' | 'RUNNING' | 'STOPPED';
+export type OptABStatus =
+  | 'CREATING'
+  | 'ACTIVE'
+  | 'CREATE_FAILED'
+  | 'UPDATING'
+  | 'UPDATE_FAILED'
+  | 'DELETING'
+  | 'DELETE_FAILED'
+  | 'FAILED';
+
+export interface OptBundleRef {
+  bundleArn: string;
+  bundleVersion: string;
+}
+
+export interface OptRecommendation {
+  recommendationId: string;
+  recommendationArn?: string;
+  agentType: OptAgentType;
+  status: OptRecStatus;
+  evaluatorArn: string;
+  createdAt: string;
+  appliedAt?: string;
+  recommendedSystemPrompt?: string;
+  tools?: { toolName: string; recommendedToolDescription: string }[];
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface OptBundle {
+  bundleArn: string;
+  bundleName: string;
+  latestVersionId: string;
+  agentType: OptAgentType;
+  sourceRecommendationId?: string;
+  createdAt: string;
+}
+
+export interface OptABTestSummary {
+  testId: string;
+  testArn?: string;
+  agentType: OptAgentType;
+  status?: OptABStatus;
+  executionStatus: OptABExecutionStatus;
+  createdAt: string;
+  autoStopAt: string;
+  winner?: string;
+}
+
+export interface OptABTestDetail {
+  testId: string;
+  status: OptABStatus;
+  executionStatus: OptABExecutionStatus;
+  perVariant: { variantName: string; meanScore: number | null; sampleCount: number | null }[];
+  pValue: number | null;
+  significant: boolean | null;
+  winner: string | null;
+  cloudwatchDashboardUrl: string;
+}
+
+export interface StartRecommendationInput {
+  scope: string;
+  agentType: OptAgentType;
+  evaluatorArn: string;
+  logGroupArn: string;
+  startTime: string;
+  endTime: string;
+  ruleFilter?: unknown;
+  name?: string;
+}
+
+export interface StartABTestInput {
+  agentType: OptAgentType;
+  controlBundle: OptBundleRef;
+  treatmentBundle: OptBundleRef;
+  variantWeights: { control: number; treatment: number };
+  onlineEvaluationConfigArn: string;
+  durationDays: 1 | 3 | 7 | 14;
+  name?: string;
+  scope?: string;  // server enforces __global__; included for explicit error visibility
+  roleArn?: string;
+}
+
+async function optFetch<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}${path}`, {
+    method,
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({} as any));
+    const code = errBody.error || `HTTP_${res.status}`;
+    const msg = errBody.message || `${method} ${path} failed (${res.status})`;
+    throw new Error(`${code}: ${msg}`);
+  }
+  if (res.status === 204) return undefined as unknown as T;
+  return (await res.json()) as T;
+}
+
+export const startRecommendation = (input: StartRecommendationInput) =>
+  optFetch<{ recommendationId: string; recommendationArn: string; status: OptRecStatus }>(
+    'POST', '/optimization/recommendations', input,
+  );
+
+export const listRecommendations = (scope: string) =>
+  optFetch<OptRecommendation[]>(
+    'GET', `/optimization/recommendations?scope=${encodeURIComponent(scope)}`,
+  );
+
+export const getRecommendation = (recId: string) =>
+  optFetch<OptRecommendation>('GET', `/optimization/recommendations/${encodeURIComponent(recId)}`);
+
+export const deleteRecommendation = (recId: string) =>
+  optFetch<void>('DELETE', `/optimization/recommendations/${encodeURIComponent(recId)}`);
+
+export const applyRecommendation = (recId: string) =>
+  optFetch<{ appliedBundleArn: string; appliedBundleVersionId: string }>(
+    'POST', `/optimization/recommendations/${encodeURIComponent(recId)}/apply`,
+  );
+
+export const listBundles = (scope: string, agentType?: OptAgentType) => {
+  const qs = new URLSearchParams({ scope });
+  if (agentType) qs.set('agentType', agentType);
+  return optFetch<OptBundle[]>('GET', `/optimization/bundles?${qs.toString()}`);
+};
+
+export const getBundleVersions = (bundleArn: string) =>
+  optFetch<{ versions: { versionId: string; createdAt?: string; parentVersionId?: string; branch?: string }[] }>(
+    'GET', `/optimization/bundles/${encodeURIComponent(bundleArn)}`,
+  );
+
+export const deleteBundle = (bundleArn: string) =>
+  optFetch<void>('DELETE', `/optimization/bundles/${encodeURIComponent(bundleArn)}`);
+
+export const listABTests = () =>
+  optFetch<OptABTestSummary[]>('GET', '/optimization/ab-tests');
+
+export const startABTest = (input: StartABTestInput) =>
+  optFetch<{ testId: string; testArn: string; status: OptABStatus; executionStatus: OptABExecutionStatus; autoStopAt: string }>(
+    'POST', '/optimization/ab-tests', input,
+  );
+
+export const getABTest = (testId: string) =>
+  optFetch<OptABTestDetail>('GET', `/optimization/ab-tests/${encodeURIComponent(testId)}`);
+
+export const stopABTest = (testId: string) =>
+  optFetch<{ executionStatus: OptABExecutionStatus; winner?: string }>(
+    'POST', `/optimization/ab-tests/${encodeURIComponent(testId)}/stop`,
+  );
