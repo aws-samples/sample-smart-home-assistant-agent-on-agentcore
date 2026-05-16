@@ -864,6 +864,16 @@ def main():
                     ],
                     "Resource": "*",
                 },
+                {
+                    # AgentCore Optimization (preview): the runtime reads bundle
+                    # versions on-demand when an A/B test injects a baggage
+                    # reference into the request. Read-only; scoped to bundles.
+                    "Effect": "Allow",
+                    "Action": ["bedrock-agentcore-control:GetConfigurationBundleVersion"],
+                    "Resource": [
+                        f"arn:aws:bedrock-agentcore:{REGION}:{account_id}:configuration-bundle/*"
+                    ],
+                },
             ]
             # (No S3 permission needed — welcome clip is bundled into CodeZip.)
             policy_doc = json.dumps({
@@ -1055,6 +1065,16 @@ def main():
                             "Effect": "Allow",
                             "Action": ["bedrock:ListFoundationModels"],
                             "Resource": "*",
+                        },
+                        {
+                            # AgentCore Optimization (preview): voice runtime
+                            # also resolves bundle prompts when an A/B test
+                            # injects a baggage reference. Same scope as text.
+                            "Effect": "Allow",
+                            "Action": ["bedrock-agentcore-control:GetConfigurationBundleVersion"],
+                            "Resource": [
+                                f"arn:aws:bedrock-agentcore:{REGION}:{account_id}:configuration-bundle/*"
+                            ],
                         },
                     ],
                 })
