@@ -440,6 +440,39 @@ const en: Record<string, string> = {
   'optimization.recDetail': 'Recommendation detail',
   'optimization.recommendedPrompt': 'Recommended system prompt',
   'optimization.close': 'Close',
+  'optimization.bundlesTitleToolDesc': 'Tool Description Bundles',
+
+  // A/B routing toggle (target-based redesign).
+  'optimization.abToggle.label': 'A/B routing',
+  'optimization.abToggle.helpText':
+    'When enabled, all chatbot text traffic flows through the optimization gateway and can be split between control and treatment runtime endpoints. When disabled, traffic routes 100% to the control endpoint.',
+  'optimization.abToggle.on': 'Enabled',
+  'optimization.abToggle.off': 'Disabled',
+  'optimization.abToggle.lastChangedBy': 'Last changed at {at} by {by}.',
+  'optimization.abToggle.confirmStop':
+    'Stop running A/B test? Accumulated results will be preserved but no more sessions will be scored.',
+  'optimization.abToggle.enabledMsg': 'A/B routing enabled. You can now start an A/B test.',
+  'optimization.abToggle.disabledMsg': 'A/B routing disabled.',
+  'optimization.abToggle.disabledStoppedMsg': 'A/B routing disabled. Stopped test {id}.',
+  'optimization.abToggle.disabledStartHint': 'Enable A/B routing first to start a test.',
+
+  // Start A/B Test modal — target-based fields.
+  'optimization.startAB.controlEndpoint': 'Control endpoint',
+  'optimization.startAB.treatmentEndpoint': 'Treatment endpoint',
+  'optimization.startAB.evaluatorsNote':
+    'Per-variant evaluators are configured at deploy time (smarthome-control-online-eval and smarthome-treatment-online-eval). Both score Builtin.GoalSuccessRate and Builtin.Helpfulness.',
+  'optimization.startAB.sameEndpointError':
+    'Control and treatment must reference different endpoints.',
+
+  // Apply success messages.
+  'optimization.applyMessageTextOnly':
+    'Prompt updated. Both control and treatment endpoints now use the new prompt. To A/B test the new prompt against the previous one, run `agentcore add runtime-endpoint --version <prev>` to create a frozen baseline endpoint, then start an A/B test using that endpoint as the control.',
+  'optimization.applyMessageToolDesc': 'Applied — bundle version {version}',
+
+  // Tool description A/B explainer.
+  'optimization.toolDescAB.title': 'Tool description A/B testing is not automated yet',
+  'optimization.toolDescAB.body':
+    'Tool description recommendations apply directly to the tools gateway via UpdateGatewayTarget and take effect immediately for every chatbot session — there is no traffic split. Automating an A/B test for tool descriptions would require a second optimization gateway sitting in front of the tools gateway plus per-variant tools-gateway targets that fan out to two parallel sets of Lambda integrations. AgentCore currently exposes A/B traffic splitting only at the agent runtime layer (target-based) or via configuration bundles read by the agent runtime (config-bundle); neither pattern reaches MCP tool-description metadata served by a tools gateway. To validate a tool-description change today: apply the recommendation, observe its effect for a sample period, and roll back via the snapshot in Tool Description Bundles if needed.',
 
   'form.close': 'Close',
 

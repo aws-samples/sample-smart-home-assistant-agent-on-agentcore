@@ -937,6 +937,9 @@ export interface OptABTestDetail {
   significant: boolean | null;
   winner: string | null;
   cloudwatchDashboardUrl: string;
+  routingMode?: 'target-based';
+  controlEndpoint?: string;
+  treatmentEndpoint?: string;
 }
 
 export interface StartRecommendationInput {
@@ -951,15 +954,24 @@ export interface StartRecommendationInput {
 }
 
 export interface StartABTestInput {
-  agentType: OptAgentType;
-  controlBundle: OptBundleRef;
-  treatmentBundle: OptBundleRef;
+  // Target-based A/B routing (text agent only). Variants reference runtime
+  // endpoint qualifiers ("control" / "treatment") via gateway targets, not
+  // configuration bundle versions. See spec
+  // 2026-05-17-agentcore-optimization-target-based-design.md §4.2.
+  agentType: 'text';
+  controlEndpoint: string;
+  treatmentEndpoint: string;
   variantWeights: { control: number; treatment: number };
-  onlineEvaluationConfigArn: string;
   durationDays: 1 | 3 | 7 | 14;
   name?: string;
   scope?: string;  // server enforces __global__; included for explicit error visibility
   roleArn?: string;
+}
+
+export interface OptABToggle {
+  enabled: boolean;
+  updatedAt?: string;
+  updatedBy?: string;
 }
 
 async function optFetch<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -995,9 +1007,28 @@ export const getRecommendation = (recId: string) =>
 export const deleteRecommendation = (recId: string) =>
   optFetch<void>('DELETE', `/optimization/recommendations/${encodeURIComponent(recId)}`);
 
+export interface ApplyRecommendationResponse {
+  // text/voice apply: just confirms the prompt row was written. Bundle
+  // fields are absent for prompt agentTypes (target-based redesign).
+  applied?: boolean;
+  agentType?: OptAgentType;
+  scope?: string;
+  // tool_desc apply: still creates a configuration bundle for rollback.
+  appliedBundleArn?: string;
+  appliedBundleVersionId?: string;
+}
+
 export const applyRecommendation = (recId: string) =>
-  optFetch<{ appliedBundleArn: string; appliedBundleVersionId: string }>(
+  optFetch<ApplyRecommendationResponse>(
     'POST', `/optimization/recommendations/${encodeURIComponent(recId)}/apply`,
+  );
+
+export const getABToggle = () =>
+  optFetch<OptABToggle>('GET', '/optimization/ab-toggle');
+
+export const setABToggle = (enabled: boolean) =>
+  optFetch<{ enabled: boolean; stoppedTestId?: string }>(
+    'PUT', '/optimization/ab-toggle', { enabled },
   );
 
 export const listBundles = (scope: string, agentType?: OptAgentType) => {

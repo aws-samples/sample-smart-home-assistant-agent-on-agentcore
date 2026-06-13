@@ -566,6 +566,12 @@ export class SmartHomeStack extends cdk.Stack {
     abIdRes.addMethod("GET", optIntegration, authMethodOptions);
     abIdRes.addResource("stop").addMethod("POST", optIntegration, authMethodOptions);
 
+    // Global A/B routing toggle — see spec
+    // 2026-05-17-agentcore-optimization-target-based-design.md §4.1.
+    const abToggleRes = optRoot.addResource("ab-toggle");
+    abToggleRes.addMethod("GET", optIntegration, authMethodOptions);
+    abToggleRes.addMethod("PUT", optIntegration, authMethodOptions);
+
     // NOTE: Browser-session + workspace-file probing does NOT get its own
     // API Gateway path because the admin Lambda's auto-generated resource
     // policy is already at the 20 KB cap (see the similar note for prompt

@@ -73,6 +73,79 @@ def main():
     # Step 2: Clean up specific resources by ID (safety net if stack delete missed them)
     print(f"\n[2/3] Cleaning up tracked resources...")
     client = boto3.client("bedrock-agentcore-control", region_name=REGION)
+    data_client = boto3.client("bedrock-agentcore", region_name=REGION)
+
+    # ── AgentCore Optimization (target-based A/B routing) cleanup ────────
+    # Delete in order: A/B tests → per-variant online-eval configs →
+    # optimization gateway (targets cascade) → optimization IAM roles →
+    # toggle DDB row. Runtime endpoints (control/treatment) are removed by
+    # the existing list_agent_runtime_endpoints loop below.
+    print("  [opt-infra] Cleaning AgentCore Optimization resources…")
+    try:
+        for ab in data_client.list_ab_tests().get("abTests", []):
+            tid = ab["abTestId"]
+            try:
+                data_client.delete_ab_test(abTestId=tid)
+                print(f"  [opt-infra] Deleted A/B test {tid}")
+            except Exception as e:
+                print(f"  [opt-infra] Skipped A/B test {tid}: {e}")
+    except Exception as e:
+        print(f"  [opt-infra] list_ab_tests failed: {e}")
+
+    for cfg_name in ("smarthome_control_online_eval", "smarthome_treatment_online_eval"):
+        try:
+            for c in client.list_online_evaluation_configs().get("onlineEvaluationConfigs", []):
+                if c.get("onlineEvaluationConfigName") == cfg_name:
+                    client.delete_online_evaluation_config(
+                        onlineEvaluationConfigId=c["onlineEvaluationConfigId"]
+                    )
+                    print(f"  [opt-infra] Deleted online-eval {cfg_name}")
+                    break
+        except Exception as e:
+            print(f"  [opt-infra] Skipped online-eval {cfg_name}: {e}")
+
+    try:
+        for g in client.list_gateways().get("items", []):
+            if g.get("name") == "smarthome-optimization-gateway":
+                gw_id = g["gatewayId"]
+                for t in client.list_gateway_targets(
+                        gatewayIdentifier=gw_id).get("items", []):
+                    try:
+                        client.delete_gateway_target(
+                            gatewayIdentifier=gw_id, targetId=t["targetId"])
+                    except Exception:
+                        pass
+                client.delete_gateway(gatewayIdentifier=gw_id)
+                print(f"  [opt-infra] Deleted optimization gateway {gw_id}")
+                break
+    except Exception as e:
+        print(f"  [opt-infra] Skipped optimization gateway: {e}")
+
+    iam_client = boto3.client("iam")
+    for role_name in ("smarthome-abtest-execution-role",
+                      "smarthome-optimization-gateway-role",
+                      "smarthome-optimization-online-eval-role"):
+        try:
+            for p in iam_client.list_role_policies(RoleName=role_name).get("PolicyNames", []):
+                iam_client.delete_role_policy(RoleName=role_name, PolicyName=p)
+            iam_client.delete_role(RoleName=role_name)
+            print(f"  [opt-infra] Deleted IAM role {role_name}")
+        except iam_client.exceptions.NoSuchEntityException:
+            pass
+        except Exception as e:
+            print(f"  [opt-infra] Skipped IAM role {role_name}: {e}")
+
+    try:
+        ddb = boto3.resource("dynamodb", region_name=REGION).Table("smarthome-skills")
+        for sk in ("__opt_routing_enabled__", "__opt_abtest_enabled__"):  # last is legacy
+            ddb.delete_item(Key={"userId": "__global__", "skillName": sk})
+        # Per-test/bundle/rec rows keyed under various userIds — leave them
+        # (admins may want to inspect history). Stale rows are filtered
+        # server-side by the redesigned list handlers.
+        print("  [opt-infra] Cleared optimization toggle DDB row(s)")
+    except Exception as e:
+        print(f"  [opt-infra] Skipped DDB cleanup: {e}")
+
 
     for rt_id, label in ((runtime_id, "text"), (voice_runtime_id, "voice")):
         if not rt_id:

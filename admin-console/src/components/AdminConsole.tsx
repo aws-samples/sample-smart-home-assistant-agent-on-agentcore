@@ -52,11 +52,14 @@ import {
   listABTests,
   startABTest,
   stopABTest,
+  getABToggle,
+  setABToggle,
   OptAgentType,
   OptRecommendation,
   OptBundle,
   OptABTestSummary,
   OptABExecutionStatus,
+  OptABToggle,
   RegistryRecord,
   SkillItem,
   SkillInput,
@@ -87,6 +90,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
 import Textarea from '@cloudscape-design/components/textarea';
+import Toggle from '@cloudscape-design/components/toggle';
 import Modal from '@cloudscape-design/components/modal';
 import { getConfig } from '../config';
 import { getCurrentUserEmail } from '../auth/CognitoAuth';
@@ -1337,7 +1341,8 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
 
 // ---------------------------------------------------------------------------
 // Optimization Tab — AgentCore Optimization (recommendations, bundles, A/B).
-// See docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
+// See docs/superpowers/specs/2026-05-17-agentcore-optimization-target-based-design.md
+// for the target-based redesign (replaces the original config-bundle path).
 // ---------------------------------------------------------------------------
 
 const EVALUATORS = [
@@ -1345,6 +1350,11 @@ const EVALUATORS = [
   { value: 'arn:aws:bedrock-agentcore:::evaluator/Builtin.Helpfulness', label: 'Helpfulness' },
   { value: 'arn:aws:bedrock-agentcore:::evaluator/Builtin.Correctness', label: 'Correctness' },
 ];
+
+// AgentTypes the redesigned UI exposes. Voice was removed because the
+// optimization gateway proxies HTTP only — voice traffic stays on its
+// dedicated runtime via WSS direct-to-runtime. See spec §2.3.
+type OptUiAgentType = 'text' | 'tool_desc';
 
 interface OptimizationTabProps {
   error: string;
@@ -1359,12 +1369,14 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
 }) => {
   const { t } = useI18n();
   const [scope, setScope] = useState<string>('__global__');
-  const [agentType, setAgentType] = useState<OptAgentType>('text');
+  const [agentType, setAgentType] = useState<OptUiAgentType>('text');
   const [previewUnavailable, setPreviewUnavailable] = useState(false);
 
   const [recs, setRecs] = useState<OptRecommendation[]>([]);
   const [bundles, setBundles] = useState<OptBundle[]>([]);
   const [tests, setTests] = useState<OptABTestSummary[]>([]);
+  const [toggle, setToggle] = useState<OptABToggle>({ enabled: false });
+  const [toggleSaving, setToggleSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showGenModal, setShowGenModal] = useState(false);
   const [showABModal, setShowABModal] = useState(false);
@@ -1373,14 +1385,16 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, b, ab] = await Promise.all([
+      const [r, b, ab, tg] = await Promise.all([
         listRecommendations(scope),
-        listBundles(scope, agentType),
+        listBundles(scope, agentType as OptAgentType),
         listABTests(),
+        getABToggle(),
       ]);
       setRecs(r);
       setBundles(b);
       setTests(ab);
+      setToggle(tg);
       setPreviewUnavailable(false);
     } catch (e: any) {
       const msg = String(e?.message || e);
@@ -1420,6 +1434,30 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
     ...cognitoUsers.filter((u) => !!u.email).map((u) => ({ value: u.email!, label: u.email! })),
   ];
 
+  const hasRunningTest = tests.some((t) => t.executionStatus === 'RUNNING' || t.executionStatus === 'NOT_STARTED' || t.executionStatus === 'PAUSED');
+
+  const onToggleAB = async (next: boolean) => {
+    if (!next && hasRunningTest) {
+      const ok = window.confirm(t('optimization.abToggle.confirmStop'));
+      if (!ok) return;
+    }
+    setToggleSaving(true);
+    try {
+      const r = await setABToggle(next);
+      setSuccess(next
+        ? t('optimization.abToggle.enabledMsg')
+        : (r.stoppedTestId
+            ? t('optimization.abToggle.disabledStoppedMsg').replace('{id}', r.stoppedTestId)
+            : t('optimization.abToggle.disabledMsg'))
+      );
+      await loadAll();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setToggleSaving(false);
+    }
+  };
+
   return (
     <SpaceBetween size="l">
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
@@ -1430,27 +1468,49 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
           {t('optimization.title')}
         </CloudscapeHeader>
       }>
-        <SpaceBetween size="s" direction="horizontal">
-          <FormField label={t('optimization.scope')}>
-            <div style={{ minWidth: 240 }}>
-              <Select
-                selectedOption={scopeOptions.find((o) => o.value === scope) ?? scopeOptions[0]}
-                options={scopeOptions}
-                onChange={({ detail }) => setScope(detail.selectedOption.value as string)}
+        <SpaceBetween size="m">
+          {/* A/B Routing toggle (global). When ON, chatbot text traffic
+              flows through the dedicated optimization gateway and can be
+              split between control + treatment runtime endpoints. When
+              OFF, traffic routes 100% to the control endpoint. */}
+          <FormField label={t('optimization.abToggle.label')}
+                     description={t('optimization.abToggle.helpText')}>
+            <SpaceBetween size="xs" direction="horizontal">
+              <Toggle checked={toggle.enabled} disabled={toggleSaving}
+                      onChange={({ detail }) => onToggleAB(detail.checked)}>
+                {toggle.enabled ? t('optimization.abToggle.on') : t('optimization.abToggle.off')}
+              </Toggle>
+              {toggle.updatedAt && toggle.updatedBy && (
+                <CloudscapeBox color="text-status-inactive" fontSize="body-s">
+                  {t('optimization.abToggle.lastChangedBy')
+                    .replace('{at}', new Date(toggle.updatedAt).toLocaleString())
+                    .replace('{by}', toggle.updatedBy)}
+                </CloudscapeBox>
+              )}
+            </SpaceBetween>
+          </FormField>
+
+          <SpaceBetween size="s" direction="horizontal">
+            <FormField label={t('optimization.scope')}>
+              <div style={{ minWidth: 240 }}>
+                <Select
+                  selectedOption={scopeOptions.find((o) => o.value === scope) ?? scopeOptions[0]}
+                  options={scopeOptions}
+                  onChange={({ detail }) => setScope(detail.selectedOption.value as string)}
+                />
+              </div>
+            </FormField>
+            <FormField label={t('optimization.agentType')}>
+              <SegmentedControl
+                selectedId={agentType}
+                options={[
+                  { id: 'text', text: t('prompts.textAgent') },
+                  { id: 'tool_desc', text: t('optimization.toolDesc') },
+                ]}
+                onChange={({ detail }) => setAgentType(detail.selectedId as OptUiAgentType)}
               />
-            </div>
-          </FormField>
-          <FormField label={t('optimization.agentType')}>
-            <SegmentedControl
-              selectedId={agentType}
-              options={[
-                { id: 'text', text: t('prompts.textAgent') },
-                { id: 'voice', text: t('prompts.voiceAgent') },
-                { id: 'tool_desc', text: t('optimization.toolDesc') },
-              ]}
-              onChange={({ detail }) => setAgentType(detail.selectedId as OptAgentType)}
-            />
-          </FormField>
+            </FormField>
+          </SpaceBetween>
         </SpaceBetween>
       </Container>
 
@@ -1491,56 +1551,75 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
         />
       </Container>
 
-      <Container header={<CloudscapeHeader variant="h2">{t('optimization.bundlesTitle')}</CloudscapeHeader>}>
-        <Table
-          loading={loading}
-          items={bundles}
-          columnDefinitions={[
-            { id: 'name', header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
-            { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
-            { id: 'src', header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
-            { id: 'latest', header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
-            { id: 'created', header: t('optimization.col.created'), cell: (i: OptBundle) => new Date(i.createdAt).toLocaleString() },
-          ]}
-          empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.bundlesEmpty')}</CloudscapeBox>}
-        />
-      </Container>
+      {/* Tool description bundles — shown only when filter = tool_desc.
+          Includes the "A/B not automated yet" Alert explainer. */}
+      {agentType === 'tool_desc' && (
+        <>
+          <Alert type="info" header={t('optimization.toolDescAB.title')}>
+            {t('optimization.toolDescAB.body')}
+          </Alert>
+          <Container header={<CloudscapeHeader variant="h2">{t('optimization.bundlesTitle')}</CloudscapeHeader>}>
+            <Table
+              loading={loading}
+              items={bundles}
+              columnDefinitions={[
+                { id: 'name', header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
+                { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
+                { id: 'src', header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
+                { id: 'latest', header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
+                { id: 'created', header: t('optimization.col.created'), cell: (i: OptBundle) => new Date(i.createdAt).toLocaleString() },
+              ]}
+              empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.bundlesEmpty')}</CloudscapeBox>}
+            />
+          </Container>
+        </>
+      )}
 
-      <Container header={
-        <CloudscapeHeader variant="h2" actions={
-          <Button variant="primary"
-                  disabled={tests.some((t) => t.executionStatus === 'RUNNING' || t.executionStatus === 'NOT_STARTED' || t.executionStatus === 'PAUSED')}
-                  onClick={() => setShowABModal(true)}>
-            {t('optimization.startAB')}
-          </Button>
-        }>{t('optimization.abTitle')}</CloudscapeHeader>
-      }>
-        <Table
-          loading={loading}
-          items={tests}
-          columnDefinitions={[
-            { id: 'id', header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
-            { id: 'status', header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
-              <StatusIndicator type={
-                i.executionStatus === 'RUNNING' ? 'in-progress' :
-                i.executionStatus === 'STOPPED' ? 'stopped' :
-                'pending'
-              }>{i.executionStatus}</StatusIndicator>
-            },
-            { id: 'winner', header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
-            { id: 'auto', header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
-            { id: 'actions', header: '', cell: (i: OptABTestSummary) =>
-              <SpaceBetween size="xs" direction="horizontal">
-                {i.executionStatus === 'RUNNING' && <Button onClick={async () => {
-                  try { await stopABTest(i.testId); setSuccess(t('optimization.stopped')); loadAll(); }
-                  catch (e: any) { setError(e.message); }
-                }}>{t('optimization.stop')}</Button>}
-              </SpaceBetween>
-            },
-          ]}
-          empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.abEmpty')}</CloudscapeBox>}
-        />
-      </Container>
+      {/* A/B Tests — only shown for the text agent (target-based routing
+          path). When the global toggle is OFF the Start button is
+          disabled. */}
+      {agentType === 'text' && (
+        <Container header={
+          <CloudscapeHeader variant="h2" actions={
+            <Button variant="primary"
+                    disabled={!toggle.enabled || hasRunningTest}
+                    onClick={() => setShowABModal(true)}>
+              {t('optimization.startAB')}
+            </Button>
+          }>{t('optimization.abTitle')}</CloudscapeHeader>
+        }>
+          {!toggle.enabled && (
+            <Alert type="info">
+              {t('optimization.abToggle.disabledStartHint')}
+            </Alert>
+          )}
+          <Table
+            loading={loading}
+            items={tests}
+            columnDefinitions={[
+              { id: 'id', header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
+              { id: 'status', header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
+                <StatusIndicator type={
+                  i.executionStatus === 'RUNNING' ? 'in-progress' :
+                  i.executionStatus === 'STOPPED' ? 'stopped' :
+                  'pending'
+                }>{i.executionStatus}</StatusIndicator>
+              },
+              { id: 'winner', header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
+              { id: 'auto', header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
+              { id: 'actions', header: '', cell: (i: OptABTestSummary) =>
+                <SpaceBetween size="xs" direction="horizontal">
+                  {i.executionStatus === 'RUNNING' && <Button onClick={async () => {
+                    try { await stopABTest(i.testId); setSuccess(t('optimization.stopped')); loadAll(); }
+                    catch (e: any) { setError(e.message); }
+                  }}>{t('optimization.stop')}</Button>}
+                </SpaceBetween>
+              },
+            ]}
+            empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.abEmpty')}</CloudscapeBox>}
+          />
+        </Container>
+      )}
 
       {showGenModal && <GenerateRecommendationModal
         scope={scope} agentType={agentType}
@@ -1549,7 +1628,6 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
         setError={setError}
       />}
       {showABModal && <StartABTestModal
-        bundles={bundles} agentType={agentType}
         onClose={() => setShowABModal(false)}
         onSubmitted={() => { setShowABModal(false); loadAll(); }}
         setError={setError}
@@ -1560,7 +1638,14 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
         onApply={async () => {
           try {
             const r = await applyRecommendation(selectedRec.recommendationId);
-            setSuccess(`Applied — bundle version ${r.appliedBundleVersionId}`);
+            // Target-based redesign: text/voice apply just writes the
+            // __prompt_*__ DDB row. tool_desc still creates a bundle.
+            if (r.appliedBundleVersionId) {
+              setSuccess(t('optimization.applyMessageToolDesc')
+                .replace('{version}', r.appliedBundleVersionId));
+            } else {
+              setSuccess(t('optimization.applyMessageTextOnly'));
+            }
             setSelectedRec(null);
             loadAll();
           } catch (e: any) { setError(e.message); }
@@ -1572,7 +1657,7 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
 
 interface GenerateRecommendationModalProps {
   scope: string;
-  agentType: OptAgentType;
+  agentType: OptUiAgentType;
   onClose: () => void;
   onSubmitted: () => void;
   setError: (m: string) => void;
@@ -1636,38 +1721,43 @@ const GenerateRecommendationModal: React.FC<GenerateRecommendationModalProps> = 
 };
 
 interface StartABTestModalProps {
-  bundles: OptBundle[];
-  agentType: OptAgentType;
   onClose: () => void;
   onSubmitted: () => void;
   setError: (m: string) => void;
 }
 
-const StartABTestModal: React.FC<StartABTestModalProps> = ({ bundles, agentType, onClose, onSubmitted, setError }) => {
+const StartABTestModal: React.FC<StartABTestModalProps> = ({ onClose, onSubmitted, setError }) => {
   const { t } = useI18n();
-  const matching = bundles.filter((b) => b.agentType === agentType);
-  const [controlVersion, setControlVersion] = useState(matching[0]?.latestVersionId || '');
-  const [treatmentVersion, setTreatmentVersion] = useState(matching[1]?.latestVersionId || '');
-  const [split, setSplit] = useState<'50-50' | '90-10'>('50-50');
-  const [duration, setDuration] = useState<1 | 3 | 7 | 14>(7);
-  const [evaluator, setEvaluator] = useState(EVALUATORS[0].value);
+  // Target-based A/B routing — variants reference runtime endpoint
+  // qualifiers via gateway targets. setup-agentcore.py provisions the
+  // two endpoints `control` and `treatment` at deploy time; admins can
+  // repoint `treatment` to a different runtime version via the
+  // `agentcore add runtime-endpoint` CLI to compare versions.
+  const ENDPOINTS = [
+    { value: 'control', label: 'control' },
+    { value: 'treatment', label: 'treatment' },
+  ];
+  const [controlEp, setControlEp] = useState('control');
+  const [treatmentEp, setTreatmentEp] = useState('treatment');
+  const [split, setSplit] = useState<'50-50' | '80-20' | '90-10'>('50-50');
+  const [duration, setDuration] = useState<1 | 3 | 7 | 14>(1);
   const [submitting, setSubmitting] = useState(false);
 
-  const findBundleByVersion = (versionId: string) => matching.find((b) => b.latestVersionId === versionId);
-
   const submit = async () => {
-    const c = findBundleByVersion(controlVersion);
-    const t2 = findBundleByVersion(treatmentVersion);
-    if (!c || !t2) { setError('Select both control and treatment bundle versions.'); return; }
+    if (controlEp === treatmentEp) {
+      setError(t('optimization.startAB.sameEndpointError'));
+      return;
+    }
     setSubmitting(true);
     try {
-      const weights = split === '50-50' ? { control: 50, treatment: 50 } : { control: 90, treatment: 10 };
+      const weights = split === '50-50' ? { control: 50, treatment: 50 }
+                    : split === '80-20' ? { control: 80, treatment: 20 }
+                    : { control: 90, treatment: 10 };
       await startABTest({
-        agentType,
-        controlBundle: { bundleArn: c.bundleArn, bundleVersion: controlVersion },
-        treatmentBundle: { bundleArn: t2.bundleArn, bundleVersion: treatmentVersion },
+        agentType: 'text',
+        controlEndpoint: controlEp,
+        treatmentEndpoint: treatmentEp,
         variantWeights: weights,
-        onlineEvaluationConfigArn: evaluator,
         durationDays: duration,
       });
       onSubmitted();
@@ -1675,32 +1765,32 @@ const StartABTestModal: React.FC<StartABTestModalProps> = ({ bundles, agentType,
     finally { setSubmitting(false); }
   };
 
-  const versionOptions = matching.map((b) => ({
-    value: b.latestVersionId, label: `${b.bundleName} @ ${b.latestVersionId}`,
-  }));
-
   return (
     <Modal visible header={t('optimization.startAB')} onDismiss={onClose}>
       <SpaceBetween size="m">
-        <FormField label={t('optimization.controlVersion')}>
+        <FormField label={t('optimization.startAB.controlEndpoint')}>
           <Select
-            selectedOption={versionOptions.find((o) => o.value === controlVersion) ?? null}
-            options={versionOptions}
-            onChange={({ detail }) => setControlVersion(detail.selectedOption.value as string)}
+            selectedOption={ENDPOINTS.find((o) => o.value === controlEp) ?? ENDPOINTS[0]}
+            options={ENDPOINTS}
+            onChange={({ detail }) => setControlEp(detail.selectedOption.value as string)}
           />
         </FormField>
-        <FormField label={t('optimization.treatmentVersion')}>
+        <FormField label={t('optimization.startAB.treatmentEndpoint')}>
           <Select
-            selectedOption={versionOptions.find((o) => o.value === treatmentVersion) ?? null}
-            options={versionOptions}
-            onChange={({ detail }) => setTreatmentVersion(detail.selectedOption.value as string)}
+            selectedOption={ENDPOINTS.find((o) => o.value === treatmentEp) ?? ENDPOINTS[1]}
+            options={ENDPOINTS}
+            onChange={({ detail }) => setTreatmentEp(detail.selectedOption.value as string)}
           />
         </FormField>
         <FormField label={t('optimization.split')}>
           <SegmentedControl
             selectedId={split}
-            options={[{ id: '50-50', text: '50/50' }, { id: '90-10', text: '90/10 canary' }]}
-            onChange={({ detail }) => setSplit(detail.selectedId as '50-50' | '90-10')}
+            options={[
+              { id: '50-50', text: '50/50' },
+              { id: '80-20', text: '80/20' },
+              { id: '90-10', text: '90/10 canary' },
+            ]}
+            onChange={({ detail }) => setSplit(detail.selectedId as '50-50' | '80-20' | '90-10')}
           />
         </FormField>
         <FormField label={t('optimization.duration')}>
@@ -1710,16 +1800,10 @@ const StartABTestModal: React.FC<StartABTestModalProps> = ({ bundles, agentType,
             onChange={({ detail }) => setDuration(Number(detail.selectedOption.value) as 1 | 3 | 7 | 14)}
           />
         </FormField>
-        <FormField label={t('optimization.evaluator')}>
-          <Select
-            selectedOption={EVALUATORS.find((e) => e.value === evaluator) || EVALUATORS[0]}
-            options={EVALUATORS}
-            onChange={({ detail }) => setEvaluator(detail.selectedOption.value as string)}
-          />
-        </FormField>
+        <Alert type="info">{t('optimization.startAB.evaluatorsNote')}</Alert>
         <SpaceBetween direction="horizontal" size="xs">
           <Button variant="primary" loading={submitting} onClick={submit}
-                  disabled={!controlVersion || !treatmentVersion || controlVersion === treatmentVersion}>
+                  disabled={!controlEp || !treatmentEp || controlEp === treatmentEp}>
             {t('optimization.submit')}
           </Button>
           <Button onClick={onClose}>{t('optimization.cancel')}</Button>

@@ -440,6 +440,39 @@ const zh: Record<string, string> = {
   'optimization.recDetail': '建议详情',
   'optimization.recommendedPrompt': '推荐的系统提示词',
   'optimization.close': '关闭',
+  'optimization.bundlesTitleToolDesc': '工具描述配置包',
+
+  // A/B 路由开关(目标路由设计)
+  'optimization.abToggle.label': 'A/B 路由',
+  'optimization.abToggle.helpText':
+    '启用后,所有聊天机器人文本流量将通过优化网关,并可在控制组与处理组运行时端点之间分流。禁用时,流量 100% 路由到控制组端点。',
+  'optimization.abToggle.on': '已启用',
+  'optimization.abToggle.off': '已禁用',
+  'optimization.abToggle.lastChangedBy': '最后修改:{at} 由 {by}',
+  'optimization.abToggle.confirmStop':
+    '停止正在运行的 A/B 测试?已累积的结果将保留,但不会再评分新会话。',
+  'optimization.abToggle.enabledMsg': 'A/B 路由已启用。现在可以启动 A/B 测试。',
+  'optimization.abToggle.disabledMsg': 'A/B 路由已禁用。',
+  'optimization.abToggle.disabledStoppedMsg': 'A/B 路由已禁用,已停止测试 {id}。',
+  'optimization.abToggle.disabledStartHint': '请先启用 A/B 路由以启动测试。',
+
+  // Start A/B Test 弹窗 — 目标路由字段
+  'optimization.startAB.controlEndpoint': '控制组端点',
+  'optimization.startAB.treatmentEndpoint': '处理组端点',
+  'optimization.startAB.evaluatorsNote':
+    '每个变体的评估器在部署时配置(smarthome-control-online-eval 与 smarthome-treatment-online-eval)。两者均运行 Builtin.GoalSuccessRate 与 Builtin.Helpfulness。',
+  'optimization.startAB.sameEndpointError':
+    '控制组与处理组必须引用不同的端点。',
+
+  // 应用建议成功消息
+  'optimization.applyMessageTextOnly':
+    '提示词已更新。控制组与处理组端点都已使用新提示词。如需对比新旧提示词,请运行 `agentcore add runtime-endpoint --version <旧版本>` 创建一个固定基线端点,再以该端点作为控制组启动 A/B 测试。',
+  'optimization.applyMessageToolDesc': '已应用 — 配置包版本 {version}',
+
+  // 工具描述 A/B 说明
+  'optimization.toolDescAB.title': '工具描述的 A/B 测试尚未自动化',
+  'optimization.toolDescAB.body':
+    '工具描述建议通过 UpdateGatewayTarget 直接应用到工具网关,会立即对所有聊天会话生效——没有流量分配。要为工具描述实现自动化 A/B 测试,需要在工具网关前再放一个优化网关,并为每个变体配置并行的 Lambda 集成,这超出了当前 AgentCore 的支持范围。AgentCore 目前仅在代理运行时层(目标路由)或代理运行时读取的配置包(配置包路由)上提供 A/B 流量分配;两种模式都无法触达工具网关上的 MCP 工具描述元数据。当前验证工具描述变更的方法:应用建议、观察一段时间,如有需要可通过工具描述配置包的快照回滚。',
 
   'form.close': '关闭',
 

@@ -2253,31 +2253,45 @@ def handler(event, context):
     # Optimization routes — see docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
     # Uses one wildcard lambda:InvokeFunction permission on /optimization/* (set in CDK)
     # so adding methods here doesn't grow the Lambda resource policy.
-    if resource == "/optimization/recommendations" and method == "GET":
-        return optimization.list_recommendations(event)
-    if resource == "/optimization/recommendations" and method == "POST":
-        return optimization.start_recommendation(event)
-    if resource == "/optimization/recommendations/{recId}" and method == "GET":
-        return optimization.get_recommendation(event)
-    if resource == "/optimization/recommendations/{recId}" and method == "DELETE":
-        return optimization.delete_recommendation(event)
-    if resource == "/optimization/recommendations/{recId}/apply" and method == "POST":
-        return optimization.apply_recommendation(event)
-    if resource == "/optimization/bundles" and method == "GET":
-        return optimization.list_bundles(event)
-    if resource == "/optimization/bundles" and method == "POST":
-        return optimization.create_bundle(event)
-    if resource == "/optimization/bundles/{bundleArn}" and method == "GET":
-        return optimization.get_bundle_versions(event)
-    if resource == "/optimization/bundles/{bundleArn}" and method == "DELETE":
-        return optimization.delete_bundle(event)
-    if resource == "/optimization/ab-tests" and method == "GET":
-        return optimization.list_ab_tests(event)
-    if resource == "/optimization/ab-tests" and method == "POST":
-        return optimization.start_ab_test(event)
-    if resource == "/optimization/ab-tests/{testId}" and method == "GET":
-        return optimization.get_ab_test(event)
-    if resource == "/optimization/ab-tests/{testId}/stop" and method == "POST":
-        return optimization.stop_ab_test(event)
+    #
+    # Wrap dispatch in a try/except: optimization handlers throw on
+    # boto3 ParamValidationError before they reach their own ClientError
+    # branches, which yields a bare 500 with no CORS headers (browser
+    # surfaces it as a generic CORS error, masking the real cause).
+    if resource.startswith("/optimization/"):
+        try:
+            if resource == "/optimization/ab-toggle" and method == "GET":
+                return optimization.get_ab_toggle(event)
+            if resource == "/optimization/ab-toggle" and method == "PUT":
+                return optimization.put_ab_toggle(event)
+            if resource == "/optimization/recommendations" and method == "GET":
+                return optimization.list_recommendations(event)
+            if resource == "/optimization/recommendations" and method == "POST":
+                return optimization.start_recommendation(event)
+            if resource == "/optimization/recommendations/{recId}" and method == "GET":
+                return optimization.get_recommendation(event)
+            if resource == "/optimization/recommendations/{recId}" and method == "DELETE":
+                return optimization.delete_recommendation(event)
+            if resource == "/optimization/recommendations/{recId}/apply" and method == "POST":
+                return optimization.apply_recommendation(event)
+            if resource == "/optimization/bundles" and method == "GET":
+                return optimization.list_bundles(event)
+            if resource == "/optimization/bundles" and method == "POST":
+                return optimization.create_bundle(event)
+            if resource == "/optimization/bundles/{bundleArn}" and method == "GET":
+                return optimization.get_bundle_versions(event)
+            if resource == "/optimization/bundles/{bundleArn}" and method == "DELETE":
+                return optimization.delete_bundle(event)
+            if resource == "/optimization/ab-tests" and method == "GET":
+                return optimization.list_ab_tests(event)
+            if resource == "/optimization/ab-tests" and method == "POST":
+                return optimization.start_ab_test(event)
+            if resource == "/optimization/ab-tests/{testId}" and method == "GET":
+                return optimization.get_ab_test(event)
+            if resource == "/optimization/ab-tests/{testId}/stop" and method == "POST":
+                return optimization.stop_ab_test(event)
+        except Exception as e:  # noqa: BLE001 — surface error with CORS so browser shows it
+            logger.exception("Optimization handler error")
+            return optimization._resp(500, {"error": type(e).__name__, "message": str(e)})
 
     return response(400, {"error": f"Unknown route: {method} {resource}"})

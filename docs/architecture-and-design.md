@@ -255,13 +255,26 @@ Internet
     |         |
     |         +---> /config.js (runtime config from S3)
     |
-    +---> HTTPS: AgentCore Runtime
-    |         https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations
-    |         wss://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/ws
+    +---> HTTPS: AgentCore Optimization Gateway (chatbot text path — see §8.12)
+    |         https://{opt-gw-id}.gateway.bedrock-agentcore.{region}.amazonaws.com
+    |                /smarthome-control/invocations
     |         |
-    |         +---> Strands Agent (Kimi K2.5 text path + Nova Sonic voice path)
-    |         +---> Auth: AWS SigV4 (Cognito Identity Pool authenticated role)
-    |         +---> CORS: access-control-allow-origin: *
+    |         +---> Routes by gatewayFilter + active A/B test to runtime endpoint
+    |         |     "control" or "treatment" on the smarthome runtime.
+    |         +---> Auth: AWS SigV4 (Cognito Identity Pool authenticated role,
+    |               with bedrock-agentcore:InvokeGateway permission).
+    |
+    +---> WSS: AgentCore Runtime (voice WebSocket — direct, gateway can't proxy WS)
+    |         wss://bedrock-agentcore.{region}.amazonaws.com/runtimes/{voiceArn}/ws
+    |         |
+    |         +---> Strands BidiAgent (Nova Sonic) on `smarthomevoice` runtime
+    |         +---> Auth: AWS SigV4 presigned URL
+    |
+    +---> HTTPS: AgentCore Runtime (warmup ping, /ping health check)
+    |         https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{textArn}/invocations
+    |         |
+    |         +---> __warmup__ POST direct to text runtime (heats microVM ahead
+    |               of first chat turn; not used for real chat traffic anymore).
     |
     +---> CloudFront (Admin Console) ---> S3 Bucket (static assets)
     |         |
@@ -558,20 +571,23 @@ This approach avoids baking environment-specific values into the webpack bundle,
 
 ### 7.2 Message Architecture
 
-The chatbot communicates with the AgentCore Runtime via HTTP POST:
+The chatbot communicates with the AgentCore Runtime via HTTP POST through the **dedicated optimization gateway** (target-based A/B routing — see §8.12). The gateway forwards each request to one of two named runtime endpoints (`control` or `treatment`) on the smarthome runtime:
 
 ```
-Browser --HTTP POST--> AgentCore Runtime ---> Strands Agent (Kimi K2.5)
-                                           \-> Vision model (Claude Haiku 4.5)  [when images present]
+Browser --HTTP POST--> Optimization Gateway --[gateway target] --> Strands Agent (Kimi K2.5)
+                          (smarthome-control                       \-> Vision model when images present
+                           or smarthome-treatment)
 ```
 
 **HTTP POST Invocation:**
-- Endpoint: `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations`
-- Authentication: AWS SigV4 (service `bedrock-agentcore`), signed in the browser with temporary credentials from the Cognito Identity Pool authenticated role
-- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}` (fixed per user; signed into the request)
-- User ID: Passed in the POST body as `userId` (the runtime strips the `X-Amzn-Bedrock-AgentCore-Runtime-User-Id` header before forwarding to the agent)
-- Gateway idToken passthrough: `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken: {cognito_idToken}` header, forwarded by the agent as `Bearer` to the CUSTOM_JWT gateway MCP client
-- CORS: Fully supported (`access-control-allow-origin: *`)
+- Endpoint: `https://{opt-gw-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/smarthome-control/invocations` (always — the URL doesn't change with the A/B toggle state; the gateway routes by `gatewayFilter` + active A/B test config). When the optimization gateway URL isn't yet configured (transitional `config.js` from a pre-redesign deploy) the chatbot falls back to direct runtime invocation at `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations`.
+- Authentication: AWS SigV4 (service `bedrock-agentcore`), signed in the browser with temporary credentials from the Cognito Identity Pool authenticated role. The role needs `bedrock-agentcore:InvokeGateway` on the optimization gateway ARN (granted by `setup-agentcore.py`).
+- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}-{Date.now()}` — used by the gateway for sticky variant assignment during A/B tests.
+- User ID: Passed in the POST body as `userId`.
+- Gateway idToken passthrough: `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken: {cognito_idToken}` header, forwarded by the runtime to the agent and re-wrapped as `Bearer` on the **tools** gateway MCP client (per-user Cedar evaluation).
+- CORS: Fully supported.
+
+**Voice path is unchanged** — `wss://bedrock-agentcore.{region}.amazonaws.com/runtimes/{voiceArn}/ws` direct to the voice runtime. AgentCore Gateway proxies HTTP only, not WebSocket.
 
 **WebSocket (voice mode):** See §9.7 for the full flow. Same host, path `/ws`, signed via SigV4 presigned URL; session-id + AuthToken travel as signed query parameters because browsers can't set custom headers on a WebSocket handshake.
 
@@ -1230,93 +1246,202 @@ POST /invocations
 
 ---
 
-### 8.12 AgentCore Optimization (Recommendations, Bundles & A/B Tests)
+### 8.12 AgentCore Optimization (Recommendations + Target-Based A/B Routing)
 
-Administrators can drive a data-driven prompt-improvement loop from the Admin Console's **Assess → Optimization** tab without redeploying the runtime image. The tab orchestrates three AgentCore Optimization (public preview) capabilities — **Recommendations**, **Configuration Bundles**, and **A/B Tests** — for both system prompts (text + voice) and gateway tool descriptions.
+Administrators drive a data-driven prompt-improvement loop from the Admin Console's **Assess → Optimization** tab without redeploying the runtime image. The tab orchestrates AgentCore Optimization (public preview) **Recommendations** and **target-based A/B Tests** for the text agent's system prompt, plus the legacy **Configuration Bundle** path for tool descriptions.
+
+The original implementation was config-bundle-based (variants = different bundle versions on the same runtime, agent reads bundle via W3C baggage). It is replaced for prompts by the **target-based** pattern from the official AgentCore docs: variants reference different runtime-endpoint qualifiers via dedicated gateway targets. Target-based covers all change types (prompt, model, tool descriptions, code) and matches the chatbot's normal HTTP `/invocations` flow. See `docs/superpowers/specs/2026-05-17-agentcore-optimization-target-based-design.md` for the full design doc.
 
 ```
-Admin Console (React)                              AWS
-┌─────────────────────────────────────────┐        ┌──────────────────────────────────┐
-│ Assess → Optimization (new tab)         │        │  bedrock-agentcore (data plane)  │
-│ ┌────────────┬─────────┬─────────────┐  │ HTTPS  │   start_recommendation           │
-│ │ Recs       │ Bundles │ A/B Tests   │  │◀─────▶ │   get_recommendation             │
-│ └────────────┴─────────┴─────────────┘  │  +     │   create_ab_test                 │
-│ Build → Agent System Prompts (existing) │  JWT   │   get_ab_test, update_ab_test    │
-│   └ "AgentCore Optimization" Alert      │        │                                  │
-│       → deep-link to new tab            │        │  bedrock-agentcore-control       │
-└─────────────────────────────────────────┘        │   create/update/get/list/        │
-          │                                         │     delete_configuration_bundle  │
-          ▼ /optimization/* (dedicated subtree,    │   get_configuration_bundle_version│
-          ▼  one wildcard Lambda permission)        │   update_gateway_target          │
-┌─────────────────────────────────────────┐        │                                  │
-│ admin-api Lambda (Python 3.13)          │◀──────▶│  DynamoDB smarthome-skills       │
-│  Dispatcher routes to optimization.py   │        │   (mirror rows for fast lists)   │
-│   ├ recommendations                     │        │                                  │
-│   ├ bundles                             │        │  CloudWatch Logs aws/spans       │
-│   └ ab_tests                            │        │   (trace source for recs)        │
-└─────────────────────────────────────────┘        └──────────────┬───────────────────┘
-                                                                  ▲
-                                                                  │  W3C baggage
-                                                                  │  (bundle ref)
-┌─────────────────────────────────────────┐        ┌──────────────────────────────────┐
-│ Chatbot (unchanged)                     │ ─────▶ │ AgentCore Gateway                │
-└─────────────────────────────────────────┘        │   ├ A/B split on sessionId       │
-                                                    │   └ injects baggage header       │
-                                                    └──────────────┬───────────────────┘
-                                                                   ▼
-                                                    ┌──────────────────────────────────┐
-                                                    │ AgentCore Runtime                │
-                                                    │  agent.py + voice_session.py    │
-                                                    │   ├ read baggage                 │
-                                                    │   ├ if bundle → load bundle      │
-                                                    │   └ else → DDB __prompt_*__      │
-                                                    └──────────────────────────────────┘
+Admin Console (React)                                AWS
+┌─────────────────────────────────────────────┐    ┌──────────────────────────────────┐
+│ Assess → Optimization                       │    │ bedrock-agentcore (data plane)   │
+│ ┌────────────────────────────────────────┐  │    │  start/get/list/delete           │
+│ │ A/B Routing toggle (Global) [● ─ ──]   │  │    │    _recommendation               │
+│ │ Scope · AgentType: Text │ ToolDescs    │  │    │  create/get/list/update          │
+│ │ Recommendations                        │  │    │    _ab_test                      │
+│ │ Tool Description Bundles (when ToolD)  │  │ ── ▶│                                  │
+│ │ A/B Tests (when Text · disabled OFF)   │  │    │ bedrock-agentcore-control        │
+│ │ ToolDesc-A/B-not-automated Alert       │  │    │  create/get/list/update/delete   │
+│ └────────────────────────────────────────┘  │    │    _agent_runtime_endpoint       │
+└─────────────────────────────────────────────┘    │    _gateway, _gateway_target,    │
+        │                                           │    _online_evaluation_config,    │
+        ▼ /optimization/*  (one wildcard perm)     │    _configuration_bundle*         │
+┌─────────────────────────────────────────────┐    └──────────────┬───────────────────┘
+│ admin-api Lambda  optimization.py            │                   ▲
+│   ab-toggle (NEW): GET/PUT __opt_routing_…   │ ◀────── DDB ───── │
+│   recs · target-based ab-tests · bundles     │   smarthome-skills │
+│   apply: text→__prompt_text__ only           │                    │
+│          tool_desc→UpdateGatewayTarget+bundle│                    │
+└─────────────────────────────────────────────┘                    │
+                                                                    │
+Chatbot (text path)                                                 │
+┌─────────────────────────────────────────────┐                    │
+│ ChatInterface → SigV4 POST                  │                    │
+│   {gw-opt}/smarthome-control/invocations    │                    │
+│  (always, regardless of toggle state — the   │                    │
+│   gateway routes by gatewayFilter +          │                    │
+│   active A/B test, not by URL)              │                    │
+│ Voice path stays direct → wss://runtime/ws  │                    │
+└──────────────────┬──────────────────────────┘                    │
+                   ▼                                                │
+┌─────────────────────────────────────────────┐                    │
+│ Optimization Gateway  (NEW, dedicated)      │                    │
+│   smarthome-optimization-gateway-{id}        │                    │
+│   authorizerType=AWS_IAM                     │                    │
+│   Targets:                                   │                    │
+│     smarthome-control   → endpoint "control" │                    │
+│     smarthome-treatment → endpoint "treatment"│                   │
+│   No active test → 100% to smarthome-control │                    │
+│   Active test    → sticky session-id split   │                    │
+│                    per CreateABTest weights  │                    │
+└──────────────────┬──────────────────────────┘                    │
+                   ▼                                                │
+┌─────────────────────────────────────────────┐                    │
+│ smarthome runtime (existing)                │                    │
+│   2 named endpoints on the same runtime:     │                    │
+│     control / treatment (initially same ver) │                    │
+│   Each endpoint logs to its own log group:   │                    │
+│     /aws/.../{rt-id}-control                 │                    │
+│     /aws/.../{rt-id}-treatment               │                    │
+│   Both read __prompt_text__ at request time  │ ◀──────────────────┘
+└─────────────────────────────────────────────┘
+
+Tools Gateway  (existing — UNCHANGED)
+   smarthome-smarthomegateway-{id}, authorizerType=CUSTOM_JWT
+   Targets: SmartHomeDeviceControl, …Discovery, …KnowledgeBase
+   Both runtime endpoints call this for MCP tool calls. Tool-description
+   recommendations + bundles still target this gateway via UpdateGatewayTarget.
 ```
+
+**Why a separate optimization gateway.** The tools gateway uses `CUSTOM_JWT` for per-user Cedar policy. The optimization gateway needs `AWS_IAM` because the chatbot signs `bedrock-agentcore` SigV4 (matches the runtime's existing IAM auth flow), and target-based A/B routing applies to that surface. Running both auth modes on one gateway isn't supported. Lifecycle isolation is the secondary win — tool integrations don't churn when an experiment starts or stops.
+
+**Why "always go through the gateway."** Single chatbot code path. The toggle's effect lives entirely server-side: when OFF the gateway routes 100 % to `smarthome-control`; when ON the gateway splits per the active A/B test. Steady-state cost: ~50 ms gateway hop in exchange for zero chatbot routing complexity.
+
+**Voice path is unchanged.** AgentCore Gateway proxies HTTP `/invocations` only, not WebSocket `/ws`. Voice mode keeps signing the existing `wss://bedrock-agentcore.{region}.amazonaws.com/runtimes/{voice-arn}/ws` URL directly to the voice runtime. Voice prompts stay editable from the Agent Prompt tab; they just can't participate in A/B traffic splitting.
 
 **Five moving pieces.**
 
-1. **Admin UI tab** — single page with three Cloudscape `Container`s (Recommendations, Bundles, A/B Tests) plus a shared **Scope + AgentType** filter. Polls non-terminal rows every 10 s. The existing Agent System Prompts tab keeps a small Alert that deep-links here, so admins discover the optimization flow from the prompt editor (§8.10).
-2. **Admin Lambda module** `cdk/lambda/admin-api/optimization.py` — three handler groups (`start_recommendation` / `list_recommendations` / `get_recommendation` / `delete_recommendation` / `apply_recommendation`; `list_bundles` / `create_bundle` / `get_bundle_versions` / `delete_bundle`; `start_ab_test` / `list_ab_tests` / `get_ab_test` / `stop_ab_test`). A module-level preview-availability probe (`PREVIEW_UNAVAILABLE = True` if boto3 doesn't yet recognise `StartRecommendation`) returns 501 `AgentCoreOptimizationUnavailable` from every handler so the UI renders a banner instead of a confusing 5xx.
-3. **DDB index rows** in the existing `smarthome-skills` table under reserved sort keys `__opt_rec_{id}__`, `__opt_bundle_{arn}__`, `__opt_abtest_{id}__`, partitioned by scope (`__global__` or user email). List views become a single DDB `Query`; transient AgentCore data (full prompt text, per-session scores, bundle payloads) is fetched on demand. Failed recs and A/B test rows carry a `__opt_expires` TTL attribute so DDB sweeps stale state.
-4. **Runtime bundle hook** — new `agent/bundle_config.py` parses the W3C `baggage` header (RFC 7230) for `bundle-arn` + `bundle-version-id`. `agent/agent.py:load_system_prompt` and `agent/voice_session.py` prepend a single check: if baggage carries a bundle reference (set by AgentCore Gateway during an A/B test), `GetConfigurationBundleVersion` returns the variant's prompt; otherwise the agent falls through to the existing DDB resolution path (§8.10). Fail-open at every layer — non-A/B traffic is bit-for-bit unchanged. Cold-start cost is paid lazily on first baggage-bearing request only.
-5. **IAM scoping** — admin Lambda gets the Optimization action set (Start/Get/List/Delete Recommendation, Create/Update/Get/List/Delete A/B Test, plus `bedrock-agentcore-control:*ConfigurationBundle*` and `UpdateGatewayTarget`). Both runtime execution roles get a single new grant: `bedrock-agentcore-control:GetConfigurationBundleVersion` on `arn:aws:bedrock-agentcore:{region}:{account}:configuration-bundle/*`.
+1. **Admin UI tab** — Cloudscape `Container`s top-to-bottom: A/B Routing toggle (global) → Scope+AgentType filter (`text` | `tool_desc`) → Recommendations → Tool Description Bundles (only when `tool_desc`) → A/B Tests (only when `text`, button disabled when toggle OFF). Tool-desc view also renders a non-dismissible Alert "A/B testing is not automated yet" explaining why MCP tool descriptions can't be A/B-tested through the existing AgentCore primitives.
+2. **Admin Lambda module** `cdk/lambda/admin-api/optimization.py` — handler groups `start/list/get/delete/apply_recommendation`; `list/create/get/delete_bundle` (gated to `tool_desc`); `start/list/get/stop_ab_test` (target-based); `get/put_ab_toggle` (NEW). Module-level preview-availability probe (`PREVIEW_UNAVAILABLE`) returns 501 `AgentCoreOptimizationUnavailable` from every handler so the UI shows a banner instead of a confusing 5xx. Top-level dispatch wraps `/optimization/*` in try/except → `optimization._resp(500, …)` so unexpected exceptions still carry CORS headers.
+3. **DDB rows** in the existing `smarthome-skills` table under reserved sort keys, partitioned by scope (`__global__` or user email):
+   - `__opt_rec_{id}__` — recommendation index row.
+   - `__opt_bundle_{arn}__` — configuration-bundle mirror (now tool_desc only).
+   - `__opt_abtest_{id}__` — A/B test index row, including target-based fields (`routingMode`, `controlEndpoint`, `treatmentEndpoint`, `controlTarget`, `treatmentTarget`).
+   - `__opt_routing_enabled__` — global A/B routing toggle. Deliberately NOT under the `__opt_abtest_` prefix to avoid collision with the `abtest` opt-row kind in `_query_opt_rows("__global__", "abtest")`.
+4. **Dedicated optimization gateway + runtime endpoints**, provisioned at deploy time by `setup-agentcore.py:_ensure_optimization_infra()`: 2 named runtime endpoints (`control`, `treatment`) on the existing smarthome runtime, both initially pinned to the latest version; the gateway with `authorizerType=AWS_IAM`; 2 AgentCore-runtime gateway targets (`smarthome-control`, `smarthome-treatment`); 2 per-endpoint online-eval configs (`smarthome_control_online_eval`, `smarthome_treatment_online_eval`) each scoring **6 builtin evaluators** — `Builtin.GoalSuccessRate` + `Builtin.Helpfulness` (defaults from the helper) plus `Builtin.Correctness`, `Builtin.InstructionFollowing`, `Builtin.ToolSelectionAccuracy`, `Builtin.Conciseness` (added operationally for richer A/B signal). 3 supporting IAM roles (`smarthome-abtest-execution-role`, `smarthome-optimization-gateway-role`, `smarthome-optimization-online-eval-role`). All steps idempotent.
+5. **No more runtime baggage hook for prompts.** `agent/bundle_config.py` is retained but text-prompt apply no longer creates a bundle; both endpoints simply read `__prompt_text__` at request time. The bundle path stays alive only for `tool_desc` (rollback snapshot — `UpdateGatewayTarget` is the actual mechanism, the bundle is a versioned record of the pre-apply tool-desc payload).
 
-**Dedicated `/optimization/*` REST subtree, one wildcard permission.** Adding 13 methods via the standard `apigw.LambdaIntegration` would emit 13 per-method `AWS::Lambda::Permission` resources (~5–7 KB of policy growth) and eat most remaining headroom under the 20 KB Lambda resource-policy cap that §8.10 already documents. Instead the CDK uses plain `apigw.Integration` (which does NOT auto-emit a permission) plus **one** `addPermission` with `sourceArn=…/*/*/optimization/*`. Net policy growth: ~800 bytes total, flat regardless of how many methods we add under this subtree.
+**Dedicated `/optimization/*` REST subtree, one wildcard permission.** The CDK uses plain `apigw.Integration` (no auto-emitted `AWS::Lambda::Permission`) plus a single `addPermission` with `sourceArn=…/*/*/optimization/*`. Net policy growth: ~800 bytes total, flat regardless of how many methods we add — relevant because the admin Lambda's resource-based policy is already near the 20 KB cap.
 
 **API surface** (all under Cognito JWT auth, admin group required):
 
 | Method + Path | Behavior |
 |---|---|
-| `POST /optimization/recommendations` | Start a recommendation. Body: `{scope, agentType, evaluatorArn, startTime, endTime, name?, ruleFilter?, logGroupArn?}`. When `logGroupArn` is omitted the Lambda resolves it server-side (`arn:aws:logs:{region}:{account}:log-group:aws/spans` via `STS:GetCallerIdentity`) so the browser doesn't need to know the account — see "Lessons from E2E" below. A trailing `":*"` log-stream filter (common in CFN/UI ARNs) is auto-stripped before passing to AgentCore, which only accepts the bare log-group ARN. Returns `{recommendationId, recommendationArn, status}` (202). |
+| `GET` / `PUT /optimization/ab-toggle` | Read or set the global routing flag. PUT body `{enabled: bool}`. **Side effect on PUT OFF**: looks up any active `__opt_abtest_*__` row (executionStatus in `NOT_STARTED`/`RUNNING`/`PAUSED`), calls `UpdateABTest(executionStatus="STOPPED")`, finalizes the DDB mirror, and returns `stoppedTestId` in the response. **Side effect on PUT ON**: none — gateway already exists; no test starts until admin clicks Start A/B Test. |
+| `POST /optimization/recommendations` | Start a recommendation. Body: `{scope, agentType, evaluatorArn, startTime, endTime, name?, ruleFilter?, logGroupArn?, serviceName?}`. When `logGroupArn` is omitted the Lambda builds the **per-runtime** log group ARN (`/aws/bedrock-agentcore/runtimes/{rt-id}-DEFAULT` for text, `…{voice-rt-id}-DEFAULT` for voice). When `serviceName` is omitted it's derived from the runtime ARN as `{runtime_short}.DEFAULT`, matching the value AgentCore stamps on every runtime span. Returns `{recommendationId, recommendationArn, status}` (202). |
 | `GET /optimization/recommendations?scope=…` | List from DDB, cached status. |
 | `GET /optimization/recommendations/{recId}` | Live `get_recommendation`; surfaces `recommendedSystemPrompt` / `tools[]` when COMPLETED, refreshes DDB row. |
-| `POST /optimization/recommendations/{recId}/apply` | Writes `__prompt_text__` / `__prompt_voice__` (text/voice) or `update_gateway_target` (tool_desc), then snapshots a configuration-bundle version. |
+| `POST /optimization/recommendations/{recId}/apply` | **text/voice**: writes the optimized prompt to `__prompt_{type}__` only — no bundle. Both runtime endpoints (control + treatment) read this row at request time so the change takes effect on the very next invocation. To A/B test "new prompt vs old prompt", the admin must first deploy a new runtime version and repoint the `treatment` endpoint to it via the agentcore CLI; the prompt itself can't differ between endpoints. **tool_desc**: unchanged — calls `UpdateGatewayTarget` on the tools gateway and snapshots a configuration bundle for rollback. |
 | `DELETE /optimization/recommendations/{recId}` | `delete_recommendation` + DDB cleanup. |
-| `GET /optimization/bundles` / `POST` / `GET /{bundleArn}` / `DELETE /{bundleArn}` | List (currently always `[]` — see storage note below) / admin-initiated `POST {scope, agentType, systemPromptOrTools}` creates a new bundle version / get version chain (path param is named `{bundleArn}` for REST clarity but the value is passed to AgentCore as `bundleId`) / delete. |
-| `POST /optimization/ab-tests` | Single-active rule per `agentType`. Body uses `controlBundle` / `treatmentBundle` (`{bundleArn, bundleVersion}` each), `variantWeights` (must sum 100), `onlineEvaluationConfigArn`, `durationDays ∈ {1,3,7,14}`. The handler passes `enableOnCreate=True` so the test starts running on creation rather than requiring a separate start call. |
-| `GET /optimization/ab-tests` / `GET /{testId}` / `POST /{testId}/stop` | List / live results (per-variant mean, p-value, winner, CloudWatch dashboard deep-link) / stop. Stop calls `update_ab_test(executionStatus="STOPPED")` and then a follow-up `get_ab_test` to compute the final winner before persisting it. The dashboard URL is a static template pointing at `GenAIObservability-BedrockAgentCore-ABTests` filtered by test ID — that dashboard must exist in the account's CloudWatch console. |
+| `GET /optimization/bundles` / `POST` / `GET /{bundleArn}` / `DELETE /{bundleArn}` | List filtered server-side to `agentType=tool_desc`; `POST` rejects other agentTypes with 400. The legacy text/voice `__opt_bundle_*__` rows from the pre-redesign deploy stay in DDB but are invisible to the UI. |
+| `POST /optimization/ab-tests` | Refuses when toggle is OFF (400 `ToggleDisabled`); rejects `voice`/`tool_desc` agentTypes (400 `UnsupportedAgentType`); rejects per-user scope (400). Body: `{agentType: "text", controlEndpoint, treatmentEndpoint, variantWeights, durationDays}`. Single-active rule per `agentType`. The handler builds a target-based `CreateABTest`: `gatewayArn=OPTIMIZATION_GATEWAY_ARN`, `gatewayFilter.targetPaths=["/smarthome-control/*"]`, `evaluationConfig.perVariantOnlineEvaluationConfig=[{name:"C",arn:CONTROL_…},{name:"T1",arn:TREATMENT_…}]`, variants reference `target.name=smarthome-control`/`smarthome-treatment`. `enableOnCreate=True` so the test starts running immediately. |
+| `GET /optimization/ab-tests` / `GET /{testId}` / `POST /{testId}/stop` | List / live results (per-variant mean, p-value, winner, CloudWatch dashboard deep-link, `routingMode`, `controlEndpoint`, `treatmentEndpoint`) / stop. Stop → `update_ab_test(executionStatus="STOPPED")` + follow-up `get_ab_test` to compute the final winner. |
 
-**Plan-vs-real SDK corrections.** The plan was written against an early API draft; the live `bedrock-agentcore` model differs in three ways that the implementation reflects: (1) op is `CreateABTest` / `UpdateABTest(executionStatus="STOPPED")`, not `StartABTest` / `StopABTest`; (2) bundle ops are keyed by `bundleId` (not `bundleArn`), and a new version is `UpdateConfigurationBundle(parentVersionIds=[…])` (no standalone `CreateConfigurationBundleVersion`); (3) variants take `{name, weight, variantConfiguration: {configurationBundle: {bundleArn, bundleVersion}}}`, and evaluation is a single `onlineEvaluationConfigArn`, not a per-variant `evaluatorArn`.
+**Live-API constraints discovered during implementation.** The official boto3 model enforces several regexes and field shapes that the spec didn't anticipate:
 
-**Apply behavior — DDB and bundle, both at once.** Apply is the bridge between the experiment loop and the production prompt store. For text/voice it writes the optimized prompt into the existing `__prompt_*__` row (§8.10) so the change takes effect on the very next invocation, *and* creates a configuration-bundle version capturing the same value so the change has version history and is available as a treatment variant in a future A/B test. For tool descriptions it calls `UpdateGatewayTarget` per recommended tool, then snapshots the full `tools` list as a single bundle component (component ARN is the literal string `"tool_desc"` rather than a per-target ARN — the bundle exists for rollback/A-B selection, not for AgentCore-side per-target routing). Failures on individual gateway-target updates are warn-and-continue — the bundle still records the intended state, and the admin can re-apply.
+- **Variant names must match `(C|T1)`** (≤2 chars). Friendlier names like `"control"` / `"treatment"` 400 with `ValidationException`. The handler hardcodes `C` and `T1`.
+- **A/B test names regex `[a-zA-Z][a-zA-Z0-9_]{0,47}`** — no hyphens. Auto-name uses `abtest_{agent_type}_{YYYYMMDD_HHMMSS}`.
+- **Online-eval config names same regex** — `smarthome_control_online_eval` / `smarthome_treatment_online_eval` (underscores, not hyphens).
+- **`components` for `CreateConfigurationBundle` is a dict, not a list.** Shape: `{component_arn: {"configuration": {...}}}`. The earlier list-of-dicts produced `ParamValidationError` at boto3.
+- **`CreateGatewayTarget` for AgentCore-runtime targets needs `credentialProviderConfigurations=[{credentialProviderType: "GATEWAY_IAM_ROLE"}]`.** Same shape as MCP Lambda targets — without it the call fails with "Credential provider configurations is not defined".
+- **Gateway `CreateGateway` returns immediately but the gateway is in `CREATING` state for ~10–30s.** Calling `CreateGatewayTarget` during that window 400s with "Cannot perform operation … when gateway is in CREATING status". The setup helper polls `get_gateway` until `status` leaves `CREATING`.
+- **Chatbot SigV4 against `https://{gw}.gateway.bedrock-agentcore…/{target}/invocations` requires `bedrock-agentcore:InvokeGateway`** on the Cognito auth role — `InvokeAgentRuntime` alone returns 403. The setup script now grants both actions on the optimization gateway ARN.
+- **Recommendation API needs the per-runtime log group**, not `aws/spans`. The IAM template in the official docs grants `logs:StartQuery,GetQueryResults,FilterLogEvents,GetLogEvents` on `arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/runtimes/*` (note the leading slash). The admin Lambda's `logs:StartQuery` resource list was extended to cover `/aws/bedrock-agentcore/runtimes/*` in addition to the legacy `aws/spans` ARN.
+- **Toggle-row SK collision.** Originally the toggle was stored at `__opt_abtest_enabled__`, which `_query_opt_rows("__global__","abtest")` matched as `begins_with(__opt_abtest_)` and surfaced as a phantom test. Renamed to `__opt_routing_enabled__`. Teardown deletes both old and new SKs for migration safety.
 
-**Why A/B tests are global-only.** A/B routing happens at the gateway and splits *all* sessions for a runtime. Per-user prompt addenda aren't a meaningful A/B candidate (single-user treatment never converges to a p-value). The Recommendations and Bundles tables still support per-user scope; only the A/B table is global-only. The Lambda enforces this at the API (`POST /optimization/ab-tests` rejects non-`__global__` scope with 400). The UI today only gates the "Start A/B Test" button by the active-test rule (disabled while another test is RUNNING / NOT_STARTED / PAUSED for this `agentType`); a per-user-recommendation tooltip is a TODO.
+**`apply_recommendation` behavior — by agent type.**
 
-**Lessons from E2E.** Two non-obvious bugs surfaced during the live deploy and were fixed inline rather than discovered in production:
+- **text / voice** — writes only the `__prompt_{type}__` DDB row. No bundle. Both `control` and `treatment` runtime endpoints pick it up on the next invocation (they read the same DDB row, no caching). Returns `{applied: true, agentType, scope}`.
+- **tool_desc** — unchanged. Calls `UpdateGatewayTarget` on the **tools gateway** for each recommended tool, then snapshots the full `tools` list as a single bundle component (component ARN is the literal string `"tool_desc"`). The bundle exists for rollback only — there is no AgentCore-side per-target A/B routing path that would consume it. Failures on individual gateway-target updates are warn-and-continue. Returns `{appliedBundleArn, appliedBundleVersionId}`.
 
-- **CORS on success responses.** The new `/optimization/*` routes used a custom `_resp` helper that didn't include the `Access-Control-Allow-Origin` header that `index.py:response()` sets for every other admin handler. The browser saw 200 OK responses as generic "Failed to fetch" CORS failures even though the JSON body was valid. The fix mirrors the `index.py` headers in `optimization.py:_resp` so every status code carries the same CORS allowlist.
-- **Server-resolved `logGroupArn`.** The first iteration tried to build the trace-source ARN client-side as `arn:aws:logs:{region}:{account}:log-group:aws/spans:*`, but `window.__SMARTHOME_ACCOUNT__` is not exposed (the chatbot config does not include the account ID). The browser sent a malformed ARN with an empty account segment; AgentCore's validator rejected it. The fix makes `logGroupArn` an optional API field — when omitted the Lambda calls `sts:GetCallerIdentity` and builds the well-known `aws/spans` ARN itself. `sts:GetCallerIdentity` is implicitly granted to every IAM principal, so no policy change is needed.
+**Why tool-description A/B testing is not automated.** The Optimization tab renders an info Alert in the tool-desc view explaining the gap: AgentCore A/B routing applies at the **agent runtime layer** (target-based, switching runtime endpoints) or via **bundles read by the agent runtime** (config-bundle, BeforeModelCallEvent hook). Neither path reaches MCP tool-description metadata served by a tools gateway. Automating it would require either two complete tools-gateway surfaces (two parallel sets of Lambda integrations) — which collapses back into runtime-level A/B — or per-request dual-MCP-client logic in the agent code, which is custom application logic, not an AgentCore feature. The current workflow for tool-desc is "apply → observe → roll back via the Tool Description Bundles snapshot if needed."
 
 **Storage layout** (existing `smarthome-skills` DynamoDB table, reused the same way `__prompt_*__` reuses it):
 
 | userId (PK) | skillName (SK) | Fields |
 |---|---|---|
-| `__global__` or `{email}` | `__opt_rec_{id}__` | `recommendationArn`, `agentType`, `status` (cached), `evaluatorArn`, `logGroupArn`, `startTime`, `endTime`, `createdAt`, `createdBy`, `appliedAt?`, `appliedBundleVersionId?`, `__opt_expires?` (Unix-ts; set when status → FAILED, TTL = +7 days) |
-| `__global__` | `__opt_abtest_{id}__` | `abTestArn`, `agentType`, `controlBundleArn` + `controlBundleVersion`, `treatmentBundleArn` + `treatmentBundleVersion`, `variantWeights`, `onlineEvaluationConfigArn`, `durationDays`, `autoStopAt`, `status` + `executionStatus` (cached), `createdAt`, `createdBy`, `stoppedAt?`, `winner?`, `__opt_expires?` (auto-stop + 30 days) |
-
-**Bundles are read live from AgentCore.** `__opt_bundle_*__` rows are reserved in the SK namespace but the current implementation does not write them — `_create_bundle_version` calls `CreateConfigurationBundle` / `UpdateConfigurationBundle` on AgentCore directly and returns the new `(bundleArn, versionId)` to the apply path. `GET /optimization/bundles` therefore returns `[]` today; the UI's Bundles container is informational. Wiring up the DDB mirror (so the list shows previously-created bundles without an extra round-trip) is a follow-up.
+| `__global__` | `__opt_routing_enabled__` | `value: bool`, `updatedAt`, `updatedBy` |
+| `__global__` or `{email}` | `__opt_rec_{id}__` | `recommendationArn`, `agentType`, `status` (cached), `evaluatorArn`, `logGroupArn`, `startTime`, `endTime`, `createdAt`, `createdBy`, `appliedAt?`, `appliedBundleVersionId?`, `__opt_expires?` (TTL) |
+| `__global__` | `__opt_abtest_{id}__` | `abTestArn`, `agentType`, `routingMode: "target-based"`, `controlEndpoint`, `treatmentEndpoint`, `controlTarget`, `treatmentTarget`, `variantWeights`, `controlOnlineEvalArn`, `treatmentOnlineEvalArn`, `durationDays`, `autoStopAt`, `status` + `executionStatus` (cached), `createdAt`, `createdBy`, `stoppedAt?`, `winner?`, `__opt_expires?` (auto-stop + 30 days) |
+| `__global__` | `__opt_bundle_{arn}__` | tool_desc only — `bundleArn`, `bundleName`, `latestVersionId`, `agentType: "tool_desc"`, `sourceRecommendationId?`, timestamps |
 
 **Status caching rule.** List views show DDB-cached status. Detail views call `get_recommendation` / `get_ab_test` live and write the fresh status back. Same pattern as the Sessions tab. Winners are computed locally from `results.evaluatorMetrics[].variantResults[].isSignificant + mean > controlStats.mean` because the AgentCore API does not return a `winner` field directly.
+
+**Chatbot config injection** (`scripts/setup-agentcore.py` writes these to `chatbot/config.js` post-deploy):
+
+```js
+window.__CONFIG__ = {
+  ...,
+  agentRuntimeArn: "arn:…runtime/smarthome_smarthome-…",  // kept for voice WSS
+  voiceAgentRuntimeArn: "arn:…runtime/smarthomevoice_…",   // voice WSS direct
+  optimizationGatewayUrl:                                   // NEW — text path
+    "https://smarthome-optimization-gateway-{id}.gateway.bedrock-agentcore.{region}.amazonaws.com",
+  optimizationDefaultTarget: "smarthome-control",           // NEW
+};
+```
+
+`chatbot/src/voice/sigv4.ts` exports `signedGatewayInvocationsFetch({gatewayUrl, targetName, …})` for the gateway path; `signedInvocationsFetch` is retained for the warmup ping (which warms the runtime microVM directly). `ChatInterface.tsx` picks the gateway helper when `optimizationGatewayUrl` is set, otherwise falls back to the runtime helper (transitional safety for old `config.js`).
+
+#### 8.12.1 Operating an A/B test — running playbook
+
+The setup deploys the optimization infrastructure but stops short of producing **different** behavior between the two endpoints. To run an A/B test that actually compares two configurations, four practical findings from live runs apply:
+
+**1. The two endpoints start identical.** `setup-agentcore.py` creates both `control` and `treatment` runtime endpoints pinned to the same `agentRuntimeVersion` (whatever was current at deploy time). An A/B test against this state runs but every evaluator returns p≈1.0 because the variants are byte-identical. To produce a real signal: edit `agent.py` (e.g. change `SYSTEM_PROMPT`, `MODEL_ID`, or any code path), run `agentcore deploy` from `.agentcore-project/smarthome/` to get a new runtime version, then `UpdateAgentRuntimeEndpoint(endpointName="treatment", agentRuntimeVersion=<new>)` to repoint **only** treatment. Control stays on the old version. Revert the local `agent.py` afterward so future deploys don't accidentally promote the treatment prompt to baseline.
+
+**2. `agentcore deploy` resets several runtime fields**, then auto-bumps the version when you call `UpdateAgentRuntime` to restore them. Specifically, `environmentVariables`, `requestHeaderConfiguration` (the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` allowlist), `protocolConfiguration`, `authorizerConfiguration`, and `filesystemConfigurations` are all stripped by `agentcore deploy` and must be reapplied via `update_agent_runtime`. Each `update_agent_runtime` call creates a **new** version, so the deploy → restore sequence produces v_N (deploy) and then v_{N+1} (restore). Pin treatment to v_{N+1}, since v_N is missing the env vars/header allowlist and would 401 against the gateway. The setup script handles this for the initial deploy via `_ensure_optimization_infra`; ad-hoc treatment redeploys must replay the same restore logic.
+
+**3. The DDB `__prompt_text__` row overrides the runtime's hardcoded `SYSTEM_PROMPT`.** Per §8.10, the agent reads `(__global__, __prompt_text__)` and `({user}, __prompt_text__)` at every invocation and concatenates them with the hardcoded constant. If a previous Apply Recommendation step wrote a `__global__` `__prompt_text__` row, **both** runtime versions read that row instead of their own baked-in prompt — meaning the A/B variants again behave identically regardless of which version each endpoint is pinned to. To isolate the runtime-version difference for an A/B test, delete the `__global__` `__prompt_text__` row (save its contents first if you want to restore later) before driving traffic. Alternatively, edit it so it carries instructions you want to test.
+
+**4. Online-eval results need ≥ sessionTimeoutMinutes + ~10–15 min after the last session.** AgentCore aggregates results only after each session crosses the configured `sessionTimeoutMinutes` idle window AND after the eval pipeline catches up. The default `sessionTimeoutMinutes=5` adds a 5-minute floor; lowering it to **1 minute** shrinks the wait for small-scale tests. A common pitfall: stop the test too early (e.g. ~5 min after last session) and the `results` field is permanently `None` because the aggregator never runs to completion against a STOPPED test. The minimum safe stop time is `last_session + sessionTimeoutMinutes + 10 minutes`. `setup-agentcore.py` provisions both per-variant online-eval configs at `sessionTimeoutMinutes=5` by default; reducing them is a deliberate operator action via `update_online_evaluation_config`.
+
+**5. Image-only turns are unevaluable.** Vision-bypass (§8.11) calls `bedrock-runtime.converse` directly without going through Strands, so no `strands.telemetry.tracer` `chat` span is emitted for that turn. The online-eval pipeline filters by "supported scope names" and silently records a `ValidationException: No spans with supported scope names found for traces: []` for any session whose only chat-span is the vision call. Drive **text-only** prompts when running an A/B test if you want every session counted.
+
+**6. The runbook in practice** (replicated as `tests/abtest-runbook.md`):
+
+```
+1. Lower sessionTimeoutMinutes on both eval configs (5 → 1):
+     update_online_evaluation_config(rule.sessionConfig.sessionTimeoutMinutes=1)
+2. Edit agent.py SYSTEM_PROMPT (or MODEL_ID, or behavior) → treatment variant.
+3. Sync agent/ → .agentcore-project/smarthome/app/smarthome/, then
+   `agentcore deploy` from .agentcore-project/smarthome/. Note new version v_N.
+4. Snapshot runtime config; call update_agent_runtime to replay env vars +
+   requestHeaderConfiguration + filesystemConfigurations. New version v_{N+1}.
+5. update_agent_runtime_endpoint(name=treatment, agentRuntimeVersion=v_{N+1}).
+   Verify: control.liveVersion < treatment.liveVersion.
+6. Revert agent.py so the local source matches control behavior.
+7. Delete the __global__ __prompt_text__ DDB row (if present).
+8. Spot-check: invoke {gw}/smarthome-control vs {gw}/smarthome-treatment with
+   the same prompt + different session-ids. Outputs must visibly differ.
+9. PUT /optimization/ab-toggle {enabled:true} (if not already on).
+10. POST /optimization/ab-tests with desired weights + durationDays.
+11. Drive N text-only sessions, ≥70 s apart, fresh session-id each.
+12. Wait (last-session-time + 16 min) before reading results or stopping.
+13. POST /optimization/ab-tests/{id}/stop. Read winner from response.
+```
+
+**Sample run** (from this branch): n=30, control v212 (verbose baseline) vs treatment v217 (brevity-tuned prompt; identical otherwise):
+
+| Evaluator | Control μ (n=19) | Treatment μ (n=11) | Δ% | p-value | sig |
+|---|---|---|---|---|---|
+| Conciseness | 0.053 | **0.864** | **+1540.9%** | **0.0000** | ✓ |
+| Correctness | 0.947 | 1.000 | +5.6% | 0.591 | ✗ |
+| GoalSuccessRate | 0.947 | 1.000 | +5.6% | 0.757 | ✗ |
+| Helpfulness | 0.823 | 0.830 | +0.8% | 0.982 | ✗ |
+| InstructionFollowing | 0.947 | 0.818 | -13.6% | 0.533 | ✗ |
+| ToolSelectionAccuracy | 1.000 | 0.969 | -3.1% | 0.604 | ✗ |
+
+`POST /ab-tests/{id}/stop` returned `{executionStatus: "STOPPED", winner: "T1"}` — admin Lambda's `_compute_winner` correctly picked T1 because at least one evaluator (Conciseness) had `isSignificant=True` and `treatment.mean > control.mean`. With identical prompts (the misconfigured baseline) all six evaluators had `p > 0.5` and winner stayed `null` regardless of sample size.
 
 ---
 

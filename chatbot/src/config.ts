@@ -9,6 +9,13 @@ interface AppConfig {
   // string means the deploy hasn't been run post-split yet; the chatbot
   // falls back to agentRuntimeArn for voice in that transition case.
   voiceAgentRuntimeArn: string;
+  // Text chat HTTP path goes through the dedicated optimization gateway
+  // (target-based A/B routing). When unset (transitional state until the
+  // first post-redesign deploy) the chatbot falls back to direct
+  // runtime invocation. Voice WSS is NOT routed through this gateway —
+  // AgentCore Gateway only proxies HTTP, not WebSocket.
+  optimizationGatewayUrl: string;
+  optimizationDefaultTarget: string;
   adminApiUrl: string;
   region: string;
 }
@@ -22,6 +29,8 @@ export function getConfig(): AppConfig {
     cognitoIdentityPoolId: raw.cognitoIdentityPoolId ?? '',
     agentRuntimeArn: raw.agentRuntimeArn ?? '',
     voiceAgentRuntimeArn: raw.voiceAgentRuntimeArn ?? '',
+    optimizationGatewayUrl: raw.optimizationGatewayUrl ?? '',
+    optimizationDefaultTarget: raw.optimizationDefaultTarget ?? 'smarthome-control',
     adminApiUrl: raw.adminApiUrl ?? '',
     region: raw.region ?? 'us-west-2',
   };

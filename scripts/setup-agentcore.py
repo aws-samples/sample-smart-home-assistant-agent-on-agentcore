@@ -15,6 +15,9 @@ import sys
 import time
 import os
 import shutil
+import uuid
+from datetime import datetime, timezone
+
 import boto3
 
 STACK_NAME = "SmartHomeAssistantStack"
@@ -219,6 +222,280 @@ def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dyna
             print(f"  [a2a-seed] {demo['name']}: created + submitted ({record_id})")
         except Exception as e:
             print(f"  [a2a-seed] {demo['name']}: submit-for-approval failed — {e}")
+
+
+# ─── AgentCore Optimization (target-based A/B routing) ───────────────────────
+# Provisioned at deploy time — see docs/superpowers/specs/
+# 2026-05-17-agentcore-optimization-target-based-design.md.
+
+def _runtime_short(runtime_id: str) -> str:
+    """smarthome_smarthome-ee97ToCthI → smarthome_smarthome (drop the suffix)."""
+    if "-" not in runtime_id:
+        return runtime_id
+    base, _, _ = runtime_id.rpartition("-")
+    return base or runtime_id
+
+
+def _ensure_runtime_endpoint(ac_control, runtime_id: str, name: str, version: str) -> str:
+    """Create or look up a named runtime endpoint. Returns the endpoint ARN.
+    On re-runs the existing endpoint's version pinning is preserved (admin
+    may have repointed `treatment` via the CLI)."""
+    try:
+        resp = ac_control.create_agent_runtime_endpoint(
+            agentRuntimeId=runtime_id,
+            name=name,
+            agentRuntimeVersion=str(version),
+            description=f"AgentCore Optimization {name} variant",
+        )
+        return resp["agentRuntimeEndpointArn"]
+    except ac_control.exceptions.ConflictException:
+        existing = ac_control.get_agent_runtime_endpoint(
+            agentRuntimeId=runtime_id, endpointName=name)
+        return existing["agentRuntimeEndpointArn"]
+
+
+def _ensure_role(iam, name: str, trust_service: str, inline_policy: dict, description: str) -> str:
+    """Create-or-update an IAM role with the given trust policy and inline policy."""
+    trust = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": trust_service},
+            "Action": "sts:AssumeRole",
+        }],
+    }
+    try:
+        r = iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust),
+                            Description=description)
+        arn = r["Role"]["Arn"]
+        print(f"  [opt-infra] Created IAM role {name}")
+    except iam.exceptions.EntityAlreadyExistsException:
+        arn = iam.get_role(RoleName=name)["Role"]["Arn"]
+    # Always overwrite the inline policy so drift gets corrected on every run.
+    iam.put_role_policy(RoleName=name, PolicyName="Default",
+                        PolicyDocument=json.dumps(inline_policy))
+    return arn
+
+
+def _ensure_gateway(ac_control, name: str, role_arn: str, authorizer_type: str = "AWS_IAM"):
+    """Create-or-look-up a gateway by name. Returns (gateway_id, gateway_arn).
+    Blocks until status leaves CREATING so subsequent CreateGatewayTarget
+    calls don't ValidationException."""
+    paginator = ac_control.get_paginator("list_gateways")
+    found_id = None
+    for page in paginator.paginate():
+        for g in page.get("items", []):
+            if g.get("name") == name:
+                found_id = g["gatewayId"]
+                break
+        if found_id:
+            break
+    if found_id is None:
+        resp = ac_control.create_gateway(
+            name=name, roleArn=role_arn, authorizerType=authorizer_type,
+            description="AgentCore Optimization gateway (target-based A/B routing)",
+        )
+        found_id = resp["gatewayId"]
+        print(f"  [opt-infra] Created gateway {name} = {found_id}")
+    # Poll until READY (typically <30s for fresh creates).
+    for _ in range(60):
+        full = ac_control.get_gateway(gatewayIdentifier=found_id)
+        status = full.get("status", "")
+        if status not in ("CREATING", "UPDATING"):
+            return full["gatewayId"], full["gatewayArn"]
+        time.sleep(2)
+    full = ac_control.get_gateway(gatewayIdentifier=found_id)
+    return full["gatewayId"], full["gatewayArn"]
+
+
+def _ensure_gateway_target(ac_control, gateway_id: str, name: str,
+                           runtime_arn: str, qualifier: str):
+    """Create-or-look-up an AgentCore-runtime gateway target."""
+    paginator = ac_control.get_paginator("list_gateway_targets")
+    for page in paginator.paginate(gatewayIdentifier=gateway_id):
+        for t in page.get("items", []):
+            if t.get("name") == name:
+                return t["targetId"]
+    resp = ac_control.create_gateway_target(
+        gatewayIdentifier=gateway_id, name=name,
+        targetConfiguration={"http": {"agentcoreRuntime": {
+            "arn": runtime_arn, "qualifier": qualifier,
+        }}},
+        # Same pattern as the tools-gateway Lambda targets: gateway uses
+        # its own IAM role to invoke the runtime endpoint.
+        credentialProviderConfigurations=[
+            {"credentialProviderType": "GATEWAY_IAM_ROLE"},
+        ],
+    )
+    print(f"  [opt-infra] Created gateway target {name} → {qualifier}")
+    return resp["targetId"]
+
+
+def _ensure_online_eval_config(ac_control, name: str, log_group: str,
+                               service_name: str, role_arn: str) -> str:
+    """Create-or-look-up an online-eval config. Returns its ARN."""
+    paginator = ac_control.get_paginator("list_online_evaluation_configs")
+    for page in paginator.paginate():
+        for c in page.get("onlineEvaluationConfigs", []):
+            if c.get("onlineEvaluationConfigName") == name:
+                return c["onlineEvaluationConfigArn"]
+    resp = ac_control.create_online_evaluation_config(
+        onlineEvaluationConfigName=name,
+        description=f"Per-variant online eval for AgentCore Optimization ({name})",
+        dataSourceConfig={"cloudWatchLogs": {
+            "logGroupNames": [log_group],
+            "serviceNames": [service_name],
+        }},
+        evaluators=[
+            {"evaluatorId": "Builtin.GoalSuccessRate"},
+            {"evaluatorId": "Builtin.Helpfulness"},
+        ],
+        rule={
+            "samplingConfig": {"samplingPercentage": 100.0},
+            "sessionConfig": {"sessionTimeoutMinutes": 5},
+        },
+        evaluationExecutionRoleArn=role_arn,
+        enableOnCreate=True,
+        clientToken=str(uuid.uuid4()),
+    )
+    print(f"  [opt-infra] Created online-eval config {name}")
+    return resp["onlineEvaluationConfigArn"]
+
+
+def _ensure_optimization_infra(runtime_id: str, runtime_arn: str,
+                               account: str, region: str) -> dict:
+    """Provision the dedicated optimization gateway + runtime endpoints +
+    online-eval configs + supporting IAM roles. Idempotent."""
+    print("Provisioning AgentCore Optimization infrastructure…")
+    ac_control = boto3.client("bedrock-agentcore-control", region_name=region)
+    iam = boto3.client("iam", region_name=region)
+
+    # 1. Two named runtime endpoints, both initially pinned to the latest version.
+    rt_info = ac_control.get_agent_runtime(agentRuntimeId=runtime_id)
+    latest_version = rt_info.get("agentRuntimeVersion") or "1"
+    control_ep_arn = _ensure_runtime_endpoint(ac_control, runtime_id, "control", latest_version)
+    treatment_ep_arn = _ensure_runtime_endpoint(ac_control, runtime_id, "treatment", latest_version)
+
+    # 2. A/B-test execution role (full agentcore + agentcore-control + logs +
+    #    bedrock for evaluator LLM calls). Per the canonical sample notebook.
+    ab_role_arn = _ensure_role(
+        iam, name="smarthome-abtest-execution-role",
+        trust_service="bedrock-agentcore.amazonaws.com",
+        description="Execution role for AgentCore A/B tests",
+        inline_policy={
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": [
+                    "bedrock-agentcore:*", "bedrock-agentcore-control:*",
+                ], "Resource": "*"},
+                {"Effect": "Allow", "Action": [
+                    "logs:DescribeLogGroups", "logs:DescribeIndexPolicies",
+                    "logs:PutIndexPolicy", "logs:StartQuery", "logs:GetQueryResults",
+                    "logs:StopQuery", "logs:FilterLogEvents", "logs:GetLogEvents",
+                    "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
+                ], "Resource": "*"},
+                {"Effect": "Allow", "Action": ["bedrock:InvokeModel", "bedrock:Retrieve"],
+                 "Resource": "*"},
+            ],
+        },
+    )
+
+    # 3. Gateway role (forwards to runtime endpoints).
+    gw_role_arn = _ensure_role(
+        iam, name="smarthome-optimization-gateway-role",
+        trust_service="bedrock-agentcore.amazonaws.com",
+        description="IAM role for the AgentCore Optimization gateway",
+        inline_policy={
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:InvokeAgentRuntimeForUser",
+                ],
+                "Resource": [
+                    f"arn:aws:bedrock-agentcore:{region}:{account}:runtime/{runtime_id}",
+                    f"arn:aws:bedrock-agentcore:{region}:{account}:runtime/{runtime_id}/runtime-endpoint/*",
+                ],
+            }],
+        },
+    )
+
+    # 4. Online-eval execution role.
+    online_eval_role_arn = _ensure_role(
+        iam, name="smarthome-optimization-online-eval-role",
+        trust_service="bedrock-agentcore.amazonaws.com",
+        description="Execution role for per-variant online evaluation configs",
+        inline_policy={
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": [
+                    "logs:DescribeLogGroups", "logs:DescribeIndexPolicies",
+                    "logs:PutIndexPolicy", "logs:StartQuery", "logs:GetQueryResults",
+                    "logs:StopQuery", "logs:FilterLogEvents", "logs:GetLogEvents",
+                    "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
+                ], "Resource": "*"},
+                {"Effect": "Allow", "Action": ["bedrock:InvokeModel"], "Resource": "*"},
+            ],
+        },
+    )
+
+    # 5. Optimization gateway.
+    opt_gw_id, opt_gw_arn = _ensure_gateway(
+        ac_control, name="smarthome-optimization-gateway",
+        role_arn=gw_role_arn, authorizer_type="AWS_IAM",
+    )
+
+    # 6. Two AgentCore-runtime gateway targets.
+    _ensure_gateway_target(ac_control, opt_gw_id, "smarthome-control",
+                           runtime_arn=runtime_arn, qualifier="control")
+    _ensure_gateway_target(ac_control, opt_gw_id, "smarthome-treatment",
+                           runtime_arn=runtime_arn, qualifier="treatment")
+
+    # 7. Per-endpoint online-eval configs. Each endpoint emits spans to its
+    #    own log group (suffixed with the endpoint name).
+    short = _runtime_short(runtime_id)
+    # AgentCore name regex `[a-zA-Z][a-zA-Z0-9_]{0,47}` rejects hyphens, so
+    # use underscores. Spec called these "smarthome-{control,treatment}-online-eval"
+    # but the constraint forces an underscore form.
+    control_eval_arn = _ensure_online_eval_config(
+        ac_control, name="smarthome_control_online_eval",
+        log_group=f"/aws/bedrock-agentcore/runtimes/{runtime_id}-control",
+        service_name=f"{short}.control",
+        role_arn=online_eval_role_arn,
+    )
+    treatment_eval_arn = _ensure_online_eval_config(
+        ac_control, name="smarthome_treatment_online_eval",
+        log_group=f"/aws/bedrock-agentcore/runtimes/{runtime_id}-treatment",
+        service_name=f"{short}.treatment",
+        role_arn=online_eval_role_arn,
+    )
+
+    # 8. Initialize the toggle DDB row to false (only if missing).
+    ddb = boto3.resource("dynamodb", region_name=region).Table("smarthome-skills")
+    toggle_sk = "__opt_routing_enabled__"
+    existing = ddb.get_item(
+        Key={"userId": "__global__", "skillName": toggle_sk}
+    ).get("Item")
+    if not existing:
+        ddb.put_item(Item={
+            "userId": "__global__",
+            "skillName": toggle_sk,
+            "value": False,
+            "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "updatedBy": "setup-agentcore.py",
+        })
+        print(f"  [opt-infra] Initialized {toggle_sk} = false")
+
+    return {
+        "OPTIMIZATION_GATEWAY_ID": opt_gw_id,
+        "OPTIMIZATION_GATEWAY_ARN": opt_gw_arn,
+        "CONTROL_ENDPOINT_ARN": control_ep_arn,
+        "TREATMENT_ENDPOINT_ARN": treatment_ep_arn,
+        "CONTROL_ONLINE_EVAL_ARN": control_eval_arn,
+        "TREATMENT_ONLINE_EVAL_ARN": treatment_eval_arn,
+        "AB_TEST_ROLE_ARN": ab_role_arn,
+    }
 
 
 def main():
@@ -1141,6 +1418,50 @@ def main():
         except Exception as e:
             print(f"  Warning: Failed to grant runtime-invoke to auth role: {e}")
 
+    # AgentCore Optimization (target-based A/B routing): provision the
+    # dedicated optimization gateway + 2 endpoints + 2 online-eval configs
+    # + supporting IAM roles, before patching the admin Lambda's env so all
+    # the new ARNs land in one update.
+    opt_infra = {}
+    if runtime_arn and runtime_id:
+        try:
+            opt_infra = _ensure_optimization_infra(
+                runtime_id=runtime_id, runtime_arn=runtime_arn,
+                account=account_id, region=REGION,
+            )
+            print(f"  [opt-infra] Optimization gateway: {opt_infra['OPTIMIZATION_GATEWAY_ID']}")
+
+            # Extend Cognito auth-role IAM grant so chatbot can SigV4-invoke
+            # the optimization gateway. AgentCore Gateway's runtime
+            # invocation maps to the dedicated `InvokeGateway` action
+            # (separate from `InvokeAgentRuntime`).
+            if cognito_auth_role_arn:
+                try:
+                    iam_client = boto3.client("iam", region_name=REGION)
+                    opt_gw_arn = opt_infra["OPTIMIZATION_GATEWAY_ARN"]
+                    iam_client.put_role_policy(
+                        RoleName=cognito_auth_role_arn.split("/")[-1],
+                        PolicyName="AgentCoreOptimizationGatewayInvoke",
+                        PolicyDocument=json.dumps({
+                            "Version": "2012-10-17",
+                            "Statement": [{
+                                "Effect": "Allow",
+                                "Action": [
+                                    "bedrock-agentcore:InvokeGateway",
+                                    "bedrock-agentcore:InvokeAgentRuntime",
+                                ],
+                                "Resource": [opt_gw_arn, f"{opt_gw_arn}/*"],
+                            }],
+                        }),
+                    )
+                    print(f"  [opt-infra] Granted optimization-gateway invoke to Cognito auth role")
+                except Exception as e:
+                    print(f"  [opt-infra] Warning: failed to grant gateway invoke to auth role: {e}")
+        except Exception as e:
+            print(f"  [opt-infra] Warning: provisioning failed: {e}")
+            print("  [opt-infra] Admin Console Optimization tab will show "
+                  "ConfigurationError until this resolves.")
+
     # Patch admin Lambda with runtime ARN (needed for stop-runtime-session)
     if runtime_arn:
         try:
@@ -1164,6 +1485,9 @@ def main():
                     "RuntimeSessionsTableName", "smarthome-runtime-sessions"
                 ),
             }
+            # Merge optimization infra ARNs (empty dict on failure → admin
+            # Lambda will return 500 ConfigurationError on /optimization/*).
+            admin_env.update(opt_infra)
             # Preserve SKILL_FILES_BUCKET from CDK stack
             skill_files_bucket = outputs.get("SkillFilesBucketName", "")
             if skill_files_bucket:
@@ -1430,6 +1754,14 @@ def main():
         _invalidate(outputs.get("DeviceSimDistributionId", ""))
 
     if runtime_arn:
+        # Chatbot text path now goes through the optimization gateway
+        # (target-based A/B routing). Voice path stays direct on the
+        # voice runtime — the gateway doesn't proxy WebSocket.
+        opt_gw_id = opt_infra.get("OPTIMIZATION_GATEWAY_ID", "")
+        opt_gw_url = (
+            f"https://{opt_gw_id}.gateway.bedrock-agentcore.{REGION}.amazonaws.com"
+            if opt_gw_id else ""
+        )
         chatbot_config = f"""window.__CONFIG__ = {{
   cognitoUserPoolId: "{outputs['UserPoolId']}",
   cognitoClientId: "{outputs['UserPoolClientId']}",
@@ -1437,6 +1769,8 @@ def main():
   cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
   agentRuntimeArn: "{runtime_arn}",
   voiceAgentRuntimeArn: "{voice_runtime_arn}",
+  optimizationGatewayUrl: "{opt_gw_url}",
+  optimizationDefaultTarget: "smarthome-control",
   adminApiUrl: "{outputs.get('AdminApiUrl', '')}",
   region: "{REGION}"
 }};"""

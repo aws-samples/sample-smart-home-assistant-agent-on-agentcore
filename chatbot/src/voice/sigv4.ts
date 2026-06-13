@@ -34,12 +34,19 @@ function encodedArnPath(agentRuntimeArn: string, suffix: 'invocations' | 'ws'): 
 }
 
 /**
- * Build and execute a SigV4-signed POST /invocations call. Returns the raw
- * fetch Response so the caller can stream / parse as it wishes.
+ * Build and execute a SigV4-signed POST /invocations call against the
+ * AgentCore Runtime endpoint directly. Returns the raw fetch Response.
  *
  * `extraHeaders` lets us pass through the user's idToken as a custom header
  * (X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken) for the agent → gateway
  * per-user Cedar passthrough.
+ *
+ * NOTE: For the smarthome chatbot's text path, prefer
+ * `signedGatewayInvocationsFetch` — text traffic now flows through the
+ * dedicated optimization gateway so AgentCore A/B tests can split it
+ * (target-based routing). This helper is still used for the warmup ping
+ * (which warms the runtime microVM directly) and for other clients that
+ * don't go through the optimization gateway.
  */
 export async function signedInvocationsFetch(params: {
   agentRuntimeArn: string;
@@ -52,26 +59,64 @@ export async function signedInvocationsFetch(params: {
   const { agentRuntimeArn, region, credentials, sessionId, body, extraHeaders = {} } = params;
   const host = runtimeHost(region);
   const path = encodedArnPath(agentRuntimeArn, 'invocations');
-  const bodyStr = JSON.stringify(body);
+  return doSignedPost({ host, path, region, credentials, sessionId, body, extraHeaders });
+}
 
+/**
+ * SigV4-signed POST against an AgentCore Gateway target's /invocations
+ * endpoint. The gateway URL has the form
+ *   `https://{gw-id}.gateway.bedrock-agentcore.{region}.amazonaws.com`
+ * and the target name is appended to build the full path:
+ *   `/{target-name}/invocations`.
+ *
+ * The gateway forwards each session-id-sticky request to one of its
+ * configured AgentCore-runtime targets. When an A/B test is RUNNING the
+ * gateway splits traffic between control + treatment runtime endpoints
+ * (see ab-testing-target-based docs). When no A/B test is active it
+ * routes 100 % to the path-matched target.
+ */
+export async function signedGatewayInvocationsFetch(params: {
+  gatewayUrl: string;       // https://{gw-id}.gateway.bedrock-agentcore.{region}.amazonaws.com
+  targetName: string;       // e.g. "smarthome-control"
+  region: string;
+  credentials: AwsCredentialIdentity;
+  sessionId: string;
+  body: unknown;
+  extraHeaders?: Record<string, string>;
+}): Promise<Response> {
+  const { gatewayUrl, targetName, region, credentials, sessionId, body, extraHeaders = {} } = params;
+  const u = new URL(gatewayUrl);
+  const host = u.hostname;
+  const path = `/${targetName}/invocations`;
+  return doSignedPost({ host, path, region, credentials, sessionId, body, extraHeaders });
+}
+
+async function doSignedPost(p: {
+  host: string;
+  path: string;
+  region: string;
+  credentials: AwsCredentialIdentity;
+  sessionId: string;
+  body: unknown;
+  extraHeaders: Record<string, string>;
+}): Promise<Response> {
+  const bodyStr = JSON.stringify(p.body);
   const req = new HttpRequest({
     method: 'POST',
     protocol: 'https:',
-    hostname: host,
-    path,
+    hostname: p.host,
+    path: p.path,
     headers: {
-      host,
+      host: p.host,
       'content-type': 'application/json',
-      'x-amzn-bedrock-agentcore-runtime-session-id': sessionId,
-      ...Object.fromEntries(Object.entries(extraHeaders).map(([k, v]) => [k.toLowerCase(), v])),
+      'x-amzn-bedrock-agentcore-runtime-session-id': p.sessionId,
+      ...Object.fromEntries(Object.entries(p.extraHeaders).map(([k, v]) => [k.toLowerCase(), v])),
     },
     body: bodyStr,
   });
-
-  const signer = makeSigner(credentials, region);
+  const signer = makeSigner(p.credentials, p.region);
   const signed = await signer.sign(req);
-
-  return fetch(`https://${host}${path}`, {
+  return fetch(`https://${p.host}${p.path}`, {
     method: 'POST',
     headers: signed.headers as Record<string, string>,
     body: bodyStr,
