@@ -145,28 +145,19 @@ def load_system_prompt(actor_id: str, agent_type: str,
                        headers: dict | None = None) -> str | None:
     """Resolve the active system prompt for this user/agent.
 
-    Order of resolution:
-      1. If the request carries a W3C `baggage` header with a bundle
-         reference (set by AgentCore Gateway during an A/B test), load the
-         prompt from that bundle version. Falls through to step 2 on any
-         failure.
-      2. Existing DDB additive resolution: __global__ + per-user, joined
-         with "\\n\\n".
-      3. None when both DDB rows are empty (caller uses the hardcoded
-         constant in agent.py / voice_session.py).
+    Mode-aware. On the bundles runtime (ENABLE_BUNDLE_HOOK=1), this function
+    returns None so the agent falls back to its hardcoded SYSTEM_PROMPT
+    constant; the BeforeModelCallEvent hook (registered in create_agent) is
+    the ONLY prompt source on that runtime, replacing system_prompt at
+    model-call time from W3C baggage.
 
-    `headers` is optional — when None, behaves exactly like the pre-bundle
-    path (so callers without a baggage source need no changes).
+    On the default runtime, this is the §8.10 additive resolution:
+      1. Read (__global__, __prompt_{type}__) → returns "" if missing.
+      2. Read (actor_id,    __prompt_{type}__) → returns "" if missing.
+      3. Concatenate non-empty parts with "\\n\\n". None when both empty.
     """
-    if headers:
-        try:
-            import bundle_config
-            bundle_prompt = bundle_config.load_from_baggage(headers, agent_type)
-            if bundle_prompt is not None:
-                logger.info("Using prompt from bundle (A/B variant) for agent_type=%s", agent_type)
-                return bundle_prompt
-        except Exception as e:  # noqa: BLE001 — fail-open; never break invocations
-            logger.warning("bundle hook failed, falling back to DDB: %s", e)
+    if os.environ.get("ENABLE_BUNDLE_HOOK") == "1":
+        return None
 
     if not SKILLS_TABLE_NAME:
         return None
