@@ -82,3 +82,28 @@ def test_bundles_runtime_ignores_headers(monkeypatch):
     assert result is None
     lfb.assert_not_called()
     get_db.assert_not_called()
+
+
+def test_create_agent_registers_hook_when_env_set(monkeypatch):
+    """ENABLE_BUNDLE_HOOK=1 → create_agent() registers the bundle hook."""
+    monkeypatch.setenv("ENABLE_BUNDLE_HOOK", "1")
+    import importlib
+    import agent.agent as agent
+    importlib.reload(agent)
+
+    with patch("bundle_config.register_before_model_call_hook") as reg:
+        agent.create_agent(headers={"baggage": "x=y"})
+
+    assert reg.called
+
+
+def test_create_agent_does_not_register_hook_when_env_unset():
+    """Default runtime never registers the hook."""
+    import importlib
+    import agent.agent as agent
+    importlib.reload(agent)
+
+    with patch("bundle_config.register_before_model_call_hook") as reg:
+        agent.create_agent(headers={"baggage": "x=y"})
+
+    reg.assert_not_called()

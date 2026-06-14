@@ -224,7 +224,8 @@ KNOWLEDGE BASE: Use query_knowledge_base for questions that may relate to compan
 IMAGES IN THIS CONVERSATION: When the user references an image they uploaded ("the image I just sent", "the photo", "上一张图片", "这张图"), rely on the image description that appears earlier in the conversation as a prior assistant message — that is the vision model's caption. Do NOT say "I cannot see images" or "I don't have image access"; the description is already in your context. If no image description is present, say so honestly and ask the user to re-upload. Never fabricate image contents; never invent colors, modes, or details that are not stated in a prior image description."""
 
 
-def create_agent(tools=None, session_manager=None, skills=None, model_id=None, system_prompt=None):
+def create_agent(tools=None, session_manager=None, skills=None, model_id=None,
+                 system_prompt=None, headers=None):
     model = BedrockModel(
         model_id=model_id or MODEL_ID,
         region_name=AWS_REGION,
@@ -247,7 +248,16 @@ def create_agent(tools=None, session_manager=None, skills=None, model_id=None, s
     if session_manager:
         agent_kwargs["session_manager"] = session_manager
 
-    return Agent(**agent_kwargs)
+    agent = Agent(**agent_kwargs)
+
+    if os.environ.get("ENABLE_BUNDLE_HOOK") == "1":
+        try:
+            import bundle_config
+            bundle_config.register_before_model_call_hook(agent, headers)
+        except Exception as e:  # noqa: BLE001 — never break invocations
+            logger.warning("failed to register bundle hook: %s", e)
+
+    return agent
 
 
 def get_mcp_tools(mcp_client):
@@ -497,10 +507,10 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                     + "tool over general knowledge — each routes to a purpose-built agent with domain expertise."
                 )
 
-            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt)
+            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt, headers=headers)
             return str(agent(prompt))
     else:
-        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt)
+        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt, headers=headers)
         return str(agent(prompt))
 
 
