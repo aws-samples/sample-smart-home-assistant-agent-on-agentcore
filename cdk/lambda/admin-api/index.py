@@ -670,9 +670,10 @@ def _resolve_user_for_session(session_id: str, kind: str) -> str:
 
 def create_cognito_user(event):
     """POST /users with body {action: 'create', email}.
-    Uses AdminCreateUser with the default invitation flow — Cognito emails the
-    user a temporary password and they set their own on first sign-in. Same
-    effect as clicking 'Create user' in the Cognito User Pool console."""
+    Creates the user with MessageAction=SUPPRESS (no invite email), then
+    immediately sets a randomly generated 16-char permanent password. The
+    password is returned in the response — admin shows it once to the
+    user, who can sign in directly without a forced password change."""
     if not COGNITO_USER_POOL_ID:
         return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
     body = json.loads(event.get("body") or "{}")
@@ -680,6 +681,29 @@ def create_cognito_user(event):
     if not email or "@" not in email:
         return response(400, {"error": "Valid email required"})
     try:
+        # 16-char password mixing upper / lower / digit / symbol — satisfies
+        # any reasonable Cognito password policy without a custom check.
+        import secrets, string
+        alphabet_upper = string.ascii_uppercase
+        alphabet_lower = string.ascii_lowercase
+        alphabet_digit = string.digits
+        alphabet_symbol = "!@#$%^&*"
+        # Guarantee at least one of each class, then fill with mixed chars.
+        guaranteed = [
+            secrets.choice(alphabet_upper),
+            secrets.choice(alphabet_lower),
+            secrets.choice(alphabet_digit),
+            secrets.choice(alphabet_symbol),
+        ]
+        pool = alphabet_upper + alphabet_lower + alphabet_digit + alphabet_symbol
+        rest = [secrets.choice(pool) for _ in range(12)]
+        chars = guaranteed + rest
+        # Shuffle (Fisher-Yates via secrets.randbelow).
+        for i in range(len(chars) - 1, 0, -1):
+            j = secrets.randbelow(i + 1)
+            chars[i], chars[j] = chars[j], chars[i]
+        password = "".join(chars)
+
         resp = cognito_client.admin_create_user(
             UserPoolId=COGNITO_USER_POOL_ID,
             Username=email,
@@ -687,12 +711,23 @@ def create_cognito_user(event):
                 {"Name": "email", "Value": email},
                 {"Name": "email_verified", "Value": "true"},
             ],
-            DesiredDeliveryMediums=["EMAIL"],
+            MessageAction="SUPPRESS",
+        )
+        cognito_client.admin_set_user_password(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=email,
+            Password=password,
+            Permanent=True,
         )
         u = resp.get("User", {})
         return response(200, {
             "username": u.get("Username"),
-            "status": u.get("UserStatus"),
+            "email": email,
+            # Status will be CONFIRMED after AdminSetUserPassword(Permanent=True),
+            # but the AdminCreateUser response captured the pre-set value.
+            # Return CONFIRMED explicitly so the UI doesn't have to refresh.
+            "status": "CONFIRMED",
+            "password": password,
         })
     except cognito_client.exceptions.UsernameExistsException:
         return response(409, {"error": f"User {email} already exists"})

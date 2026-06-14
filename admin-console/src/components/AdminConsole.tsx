@@ -1877,6 +1877,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   const [demotingUser, setDemotingUser] = useState('');
   const [deletingUser, setDeletingUser] = useState('');
   const [deleteUserTarget, setDeleteUserTarget] = useState<{ username: string; email: string } | null>(null);
+  const [createdUser, setCreatedUser] = useState<{ email: string; password: string } | null>(null);
   const { t } = useI18n();
 
   useEffect(() => {
@@ -1884,7 +1885,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'overview') {
+    if (activeTab === 'overview' || activeTab === 'identity') {
       loadCognitoUsers();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1896,10 +1897,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     clearMessages();
     setAddingUser(true);
     try {
-      await createCognitoUser(email);
-      setSuccess(t('overview.userCreated').replace('{email}', email));
+      const created = await createCognitoUser(email);
       setShowAddUserModal(false);
       setNewUserEmail('');
+      setCreatedUser({ email: created.email, password: created.password });
       await loadCognitoUsers();
     } catch (err: any) {
       setError(err.message);
@@ -2509,17 +2510,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     }
   };
 
-  const handleAddUserScope = () => {
-    const newUser = prompt(t('skills.promptUserId'));
-    if (newUser && newUser.trim()) {
-      const trimmed = newUser.trim();
-      if (!userIds.includes(trimmed)) {
-        setUserIds((prev) => [...prev, trimmed]);
-      }
-      setSelectedUserId(trimmed);
-    }
-  };
-
   return (
     <div className="admin-console">
       {activeTab === 'overview' && (() => {
@@ -2583,14 +2573,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                 variant="h2"
                 description={t('overview.usersDesc')}
                 actions={
-                  <SpaceBetween direction="horizontal" size="xs">
-                    <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
-                      {t('overview.refresh')}
-                    </Button>
-                    <Button variant="primary" onClick={() => { setNewUserEmail(''); setShowAddUserModal(true); }}>
-                      {t('overview.addUser')}
-                    </Button>
-                  </SpaceBetween>
+                  <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
+                    {t('overview.refresh')}
+                  </Button>
                 }
               >
                 {t('overview.usersTitle')}
@@ -2687,32 +2672,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
               {t('overview.deleteConfirmBody').replace('{email}', deleteUserTarget?.email || deleteUserTarget?.username || '')}
             </CloudscapeBox>
           </Modal>
-          <Modal
-            visible={showAddUserModal}
-            onDismiss={() => setShowAddUserModal(false)}
-            header={t('overview.addUserModalTitle')}
-            footer={
-              <CloudscapeBox float="right">
-                <SpaceBetween direction="horizontal" size="xs">
-                  <Button variant="link" onClick={() => setShowAddUserModal(false)}>
-                    {t('overview.cancel')}
-                  </Button>
-                  <Button variant="primary" loading={addingUser} onClick={handleCreateUser}>
-                    {t('overview.addUserSubmit')}
-                  </Button>
-                </SpaceBetween>
-              </CloudscapeBox>
-            }
-          >
-            <FormField label={t('overview.addUserEmailLabel')}>
-              <Input
-                value={newUserEmail}
-                placeholder={t('overview.addUserEmailPlaceholder')}
-                onChange={({ detail }) => setNewUserEmail(detail.value)}
-                onKeyDown={({ detail }) => { if (detail.key === 'Enter') handleCreateUser(); }}
-              />
-            </FormField>
-          </Modal>
         </SpaceBetween>
         );
       })()}
@@ -2720,7 +2679,21 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
       {activeTab === 'identity' && (
         <Table
           header={
-            <CloudscapeHeader variant="h2" description={t('identity.desc')}>
+            <CloudscapeHeader
+              variant="h2"
+              description={t('identity.desc')}
+              actions={
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
+                    {t('overview.refresh')}
+                  </Button>
+                  <Button variant="primary"
+                          onClick={() => { setNewUserEmail(''); setShowAddUserModal(true); }}>
+                    {t('overview.addUser')}
+                  </Button>
+                </SpaceBetween>
+              }
+            >
               {t('identity.title')}
             </CloudscapeHeader>
           }
@@ -2868,7 +2841,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
             options={userScopeOptions}
           />
         </div>
-        <Button onClick={handleAddUserScope}>{t('skills.addUser')}</Button>
         <div style={{ flex: 1 }} />
         <Button onClick={handleOpenRegistryModal}>{t('registry.addFromRegistry')}</Button>
         <Button variant="primary" onClick={handleCreate}>{t('skills.createSkill')}</Button>
@@ -3994,6 +3966,74 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
           />
         );
       })()}
+
+      {/* Add User modal — shared across tabs (rendered once in Identity flow) */}
+      <Modal
+        visible={showAddUserModal}
+        onDismiss={() => setShowAddUserModal(false)}
+        header={t('overview.addUserModalTitle')}
+        footer={
+          <CloudscapeBox float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setShowAddUserModal(false)}>
+                {t('overview.cancel')}
+              </Button>
+              <Button variant="primary" loading={addingUser} onClick={handleCreateUser}>
+                {t('overview.addUserSubmit')}
+              </Button>
+            </SpaceBetween>
+          </CloudscapeBox>
+        }
+      >
+        <FormField label={t('overview.addUserEmailLabel')}>
+          <Input
+            value={newUserEmail}
+            placeholder={t('overview.addUserEmailPlaceholder')}
+            onChange={({ detail }) => setNewUserEmail(detail.value)}
+            onKeyDown={({ detail }) => { if (detail.key === 'Enter') handleCreateUser(); }}
+          />
+        </FormField>
+      </Modal>
+
+      {/* Show generated password after successful user creation */}
+      <Modal
+        visible={!!createdUser}
+        onDismiss={() => setCreatedUser(null)}
+        header={t('identity.userCreatedTitle')}
+        footer={
+          <CloudscapeBox float="right">
+            <Button variant="primary" onClick={() => setCreatedUser(null)}>
+              {t('overview.cancel')}
+            </Button>
+          </CloudscapeBox>
+        }
+      >
+        {createdUser && (
+          <SpaceBetween size="m">
+            <Alert type="warning">
+              {t('identity.userCreatedWarn')}
+            </Alert>
+            <FormField label={t('overview.colEmail')}>
+              <Input value={createdUser.email} readOnly />
+            </FormField>
+            <FormField label={t('identity.passwordLabel')}>
+              <SpaceBetween size="xs" direction="horizontal">
+                <div style={{ flex: 1, minWidth: 280 }}>
+                  <Input value={createdUser.password} readOnly />
+                </div>
+                <Button iconName="copy"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(createdUser.password)
+                            .then(() => setSuccess(t('identity.passwordCopied')))
+                            .catch(() => {});
+                        }}>
+                  {t('identity.copyPassword')}
+                </Button>
+              </SpaceBetween>
+            </FormField>
+          </SpaceBetween>
+        )}
+      </Modal>
     </div>
   );
 };

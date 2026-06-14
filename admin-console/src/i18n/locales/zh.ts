@@ -63,6 +63,11 @@ const zh: Record<string, string> = {
   'identity.title': '已注册用户',
   'identity.desc': 'Cognito 用户池中所有已注册的用户。',
   'identity.colCreated': '创建时间',
+  'identity.userCreatedTitle': '用户已创建',
+  'identity.userCreatedWarn': '该密码仅显示一次。请复制并通过其它渠道告知该用户——之后无法再次查看。',
+  'identity.passwordLabel': '永久密码',
+  'identity.copyPassword': '复制',
+  'identity.passwordCopied': '已复制密码到剪贴板',
 
   // 实例类型
   'instanceType.title': '计算实例类型',

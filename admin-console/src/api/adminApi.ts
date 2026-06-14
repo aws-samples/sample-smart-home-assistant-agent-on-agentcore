@@ -408,7 +408,16 @@ export async function listCognitoUsers(): Promise<CognitoUserInfo[]> {
   return data.users || [];
 }
 
-export async function createCognitoUser(email: string): Promise<void> {
+export interface CreatedCognitoUser {
+  username: string;
+  email: string;
+  status: string;
+  /** Permanent password generated server-side. Show to admin once; they
+   *  hand it to the user out-of-band. */
+  password: string;
+}
+
+export async function createCognitoUser(email: string): Promise<CreatedCognitoUser> {
   const headers = { ...(await authHeaders()), 'Content-Type': 'application/json' };
   const res = await fetch(`${getBaseUrl()}/users`, {
     method: 'POST',
@@ -419,6 +428,7 @@ export async function createCognitoUser(email: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to create user (${res.status})`);
   }
+  return res.json();
 }
 
 export async function addUserToAdminGroup(username: string): Promise<void> {

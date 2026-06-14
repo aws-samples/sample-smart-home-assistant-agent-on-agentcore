@@ -63,6 +63,11 @@ const en: Record<string, string> = {
   'identity.title': 'Registered Users',
   'identity.desc': 'All users registered in the Cognito User Pool.',
   'identity.colCreated': 'Created',
+  'identity.userCreatedTitle': 'User created',
+  'identity.userCreatedWarn': "This password is shown only once. Copy it and share with the user out-of-band — you won't see it again.",
+  'identity.passwordLabel': 'Permanent password',
+  'identity.copyPassword': 'Copy',
+  'identity.passwordCopied': 'Password copied to clipboard',
 
   // Instance Type page
   'instanceType.title': 'Compute Instance Type',
