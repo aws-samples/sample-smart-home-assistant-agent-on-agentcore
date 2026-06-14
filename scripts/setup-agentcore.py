@@ -509,12 +509,13 @@ def _ensure_bundles_runtime(primary_runtime_id: str, primary_runtime_arn: str,
     """
     ac = boto3.client("bedrock-agentcore-control", region_name=region)
 
-    # Mirror everything from the primary runtime: same image, same role,
-    # same network/auth/protocol/headers/filesystem config — so the two
-    # runtimes are byte-identical at the agent business-code level. The
-    # only diverging field is environmentVariables.ENABLE_BUNDLE_HOOK.
+    # Mirror everything from the primary runtime: same artifact (whether
+    # container image or S3 code-zip), same role, same network/auth/
+    # protocol/headers/filesystem config — so the two runtimes are
+    # byte-identical at the agent business-code level. The only diverging
+    # field is environmentVariables.ENABLE_BUNDLE_HOOK.
     primary = ac.get_agent_runtime(agentRuntimeId=primary_runtime_id)
-    container_uri = primary["agentRuntimeArtifact"]["containerConfiguration"]["containerUri"]
+    primary_artifact = primary["agentRuntimeArtifact"]
     role_arn = primary["roleArn"]
     network = primary["networkConfiguration"]
     auth = primary.get("authorizerConfiguration")
@@ -539,7 +540,7 @@ def _ensure_bundles_runtime(primary_runtime_id: str, primary_runtime_arn: str,
     bundles_env["ENABLE_BUNDLE_HOOK"] = "1"
 
     base_kwargs = dict(
-        agentRuntimeArtifact={"containerConfiguration": {"containerUri": container_uri}},
+        agentRuntimeArtifact=primary_artifact,
         networkConfiguration=network,
         roleArn=role_arn,
         environmentVariables=bundles_env,
