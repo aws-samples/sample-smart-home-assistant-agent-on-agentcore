@@ -17,6 +17,40 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 STATE_FILE = os.path.join(PROJECT_ROOT, "agentcore-state.json")
 
 
+def _delete_bundles_runtime_by_name(client) -> None:
+    """Look up and delete the bundles runtime ('smarthome-bundles') if it
+    exists. Idempotent — silent no-op when the runtime is absent (e.g.
+    teardown after a deploy that never created the bundles runtime)."""
+    target_name = "smarthome-bundles"
+    paginator = client.get_paginator("list_agent_runtimes")
+    rt_id = None
+    for page in paginator.paginate():
+        for rt in page.get("agentRuntimes", []):
+            if rt.get("agentRuntimeName") == target_name:
+                rt_id = rt["agentRuntimeId"]
+                break
+        if rt_id:
+            break
+    if not rt_id:
+        print("  [bundles-runtime] Not present, skipping")
+        return
+    print(f"  [bundles-runtime] Deleting {target_name} runtimeId={rt_id}")
+    try:
+        eps = client.list_agent_runtime_endpoints(agentRuntimeId=rt_id).get("agentRuntimeEndpoints", [])
+        for ep in eps:
+            try:
+                client.delete_agent_runtime_endpoint(
+                    agentRuntimeId=rt_id,
+                    agentRuntimeEndpointId=ep["agentRuntimeEndpointId"],
+                )
+            except Exception as e:
+                print(f"  [bundles-runtime] endpoint delete warn: {e}")
+        client.delete_agent_runtime(agentRuntimeId=rt_id)
+        print("  [bundles-runtime] Deleted")
+    except Exception as e:
+        print(f"  [bundles-runtime] delete warn: {e}")
+
+
 def run(cmd):
     print(f"  $ {cmd}")
     subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -146,6 +180,8 @@ def main():
     except Exception as e:
         print(f"  [opt-infra] Skipped DDB cleanup: {e}")
 
+    # Bundles runtime (§8.13) — looked up by name, no ID in saved state.
+    _delete_bundles_runtime_by_name(client)
 
     for rt_id, label in ((runtime_id, "text"), (voice_runtime_id, "voice")):
         if not rt_id:
