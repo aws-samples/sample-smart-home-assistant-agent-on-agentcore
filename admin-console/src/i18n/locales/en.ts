@@ -492,6 +492,8 @@ const en: Record<string, string> = {
   'optimization.tenantEnv.modalAddTitle': 'Add tenant override',
   'optimization.tenantEnv.modalEditTitle': 'Edit tenant override',
   'optimization.tenantEnv.modalEmailLabel': 'Tenant email',
+  'optimization.tenantEnv.modalEmailPlaceholder': 'Choose a user',
+  'optimization.tenantEnv.noUsers': 'No users available',
   'optimization.tenantEnv.modalModeLabel': 'Mode',
   'optimization.tenantEnv.modalSave': 'Save',
   'optimization.tenantEnv.modalCancel': 'Cancel',

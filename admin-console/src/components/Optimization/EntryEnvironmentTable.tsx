@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import Table from '@cloudscape-design/components/table';
@@ -6,14 +6,14 @@ import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Modal from '@cloudscape-design/components/modal';
 import FormField from '@cloudscape-design/components/form-field';
-import Input from '@cloudscape-design/components/input';
 import Select from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Alert from '@cloudscape-design/components/alert';
 import { useI18n } from '../../i18n';
 import {
-  listTenantEnvs, putTenantEnv, deleteTenantEnv,
+  listTenantEnvs, putTenantEnv, deleteTenantEnv, listCognitoUsers,
   TenantEnvOverride, EntryEnvironmentMode, PerUserPromptWillBeMaskedError,
+  CognitoUserInfo,
 } from '../../api/adminApi';
 
 const MODE_OPTIONS: { value: EntryEnvironmentMode; labelKey: string }[] = [
@@ -40,11 +40,17 @@ export function EntryEnvironmentTable() {
   const [modeInput, setModeInput] = useState<EntryEnvironmentMode>('default');
   const [saving, setSaving] = useState(false);
   const [maskConfirmOpen, setMaskConfirmOpen] = useState<string | null>(null);
+  const [users, setUsers] = useState<CognitoUserInfo[]>([]);
 
   const refresh = async () => {
     setLoading(true);
     try {
-      setItems(await listTenantEnvs());
+      const [overrides, allUsers] = await Promise.all([
+        listTenantEnvs(),
+        listCognitoUsers().catch(() => [] as CognitoUserInfo[]),
+      ]);
+      setItems(overrides);
+      setUsers(allUsers);
       setError(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'failed');
@@ -54,6 +60,19 @@ export function EntryEnvironmentTable() {
   };
 
   useEffect(() => { refresh(); }, []);
+
+  // In Add mode: omit emails that already have an override (avoid duplicate
+  // PUTs that are technically allowed but confusing — admins should Edit
+  // those rows). In Edit mode: only the row being edited is shown.
+  const userOptions = useMemo(() => {
+    const taken = new Set(items.map(i => i.email));
+    const rows = users
+      .map(u => u.email || u.username)
+      .filter(Boolean)
+      .filter(email => editTarget ? email === editTarget.email : !taken.has(email))
+      .sort();
+    return rows.map(email => ({ value: email, label: email }));
+  }, [users, items, editTarget]);
 
   const openAdd = () => {
     setEditTarget(null);
@@ -145,7 +164,8 @@ export function EntryEnvironmentTable() {
               <Button onClick={() => setModalOpen(false)}>
                 {t('optimization.tenantEnv.modalCancel')}
               </Button>
-              <Button variant="primary" loading={saving} onClick={() => submit(false)}>
+              <Button variant="primary" loading={saving} disabled={!emailInput}
+                      onClick={() => submit(false)}>
                 {t('optimization.tenantEnv.modalSave')}
               </Button>
             </SpaceBetween>
@@ -153,10 +173,17 @@ export function EntryEnvironmentTable() {
         }
       >
         <FormField label={t('optimization.tenantEnv.modalEmailLabel')}>
-          <Input
-            value={emailInput}
-            onChange={({ detail }) => setEmailInput(detail.value)}
+          <Select
             disabled={!!editTarget}
+            placeholder={t('optimization.tenantEnv.modalEmailPlaceholder')}
+            selectedOption={emailInput
+              ? { value: emailInput, label: emailInput }
+              : null}
+            options={userOptions}
+            empty={t('optimization.tenantEnv.noUsers')}
+            filteringType="auto"
+            onChange={({ detail }) =>
+              setEmailInput(detail.selectedOption?.value || '')}
           />
         </FormField>
         <FormField label={t('optimization.tenantEnv.modalModeLabel')}>

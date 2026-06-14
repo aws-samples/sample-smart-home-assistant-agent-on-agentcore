@@ -492,6 +492,8 @@ const zh: Record<string, string> = {
   'optimization.tenantEnv.modalAddTitle': '添加租户覆盖',
   'optimization.tenantEnv.modalEditTitle': '编辑租户覆盖',
   'optimization.tenantEnv.modalEmailLabel': '租户邮箱',
+  'optimization.tenantEnv.modalEmailPlaceholder': '选择租户',
+  'optimization.tenantEnv.noUsers': '暂无可选用户',
   'optimization.tenantEnv.modalModeLabel': '模式',
   'optimization.tenantEnv.modalSave': '保存',
   'optimization.tenantEnv.modalCancel': '取消',
