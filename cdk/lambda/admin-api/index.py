@@ -2175,6 +2175,12 @@ def handler(event, context):
     # the Agent Prompt tab doesn't need new API Gateway methods (the admin
     # Lambda's resource policy is already near the 20 KB cap).
     if resource == "/skills" and method == "GET":
+        qs = event.get("queryStringParameters") or {}
+        if qs.get("tenantEnv") == "1":
+            import tenant_env
+            if qs.get("userId"):
+                return tenant_env.get_tenant_env(event)
+            return tenant_env.list_tenant_envs(event)
         return list_skills(event)
     if resource == "/skills" and method == "POST":
         body_obj = json.loads(event.get("body") or "{}")
@@ -2185,16 +2191,28 @@ def handler(event, context):
         return list_users(event)
     if resource == "/skills/{userId}/{skillName}" and method == "GET":
         sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk == "__tenant_env__":
+            import tenant_env
+            return tenant_env.get_tenant_env({**event, "queryStringParameters": {
+                "tenantEnv": "1",
+                "userId": (event.get("pathParameters") or {}).get("userId", ""),
+            }})
         if sk.startswith("__prompt_"):
             return get_prompt_record(event)
         return get_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "PUT":
         sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk == "__tenant_env__":
+            import tenant_env
+            return tenant_env.put_tenant_env(event)
         if sk.startswith("__prompt_"):
             return save_prompt_record(event)
         return update_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "DELETE":
         sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk == "__tenant_env__":
+            import tenant_env
+            return tenant_env.delete_tenant_env(event)
         if sk.startswith("__prompt_"):
             return delete_prompt_record(event)
         return delete_skill(event)

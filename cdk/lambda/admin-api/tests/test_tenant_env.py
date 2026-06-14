@@ -111,3 +111,26 @@ def test_delete_removes_row():
     assert resp["statusCode"] == 200
     table.delete_item.assert_called_once_with(
         Key={"userId": "__global__", "skillName": "__tenant_env_alice@x.com__"})
+
+
+def test_index_dispatches_get_when_query_flag_set():
+    import index, tenant_env
+    with patch.object(tenant_env, "list_tenant_envs", return_value={"statusCode": 200, "body": "{}"}) as h:
+        event = {"resource": "/skills", "httpMethod": "GET",
+                 "queryStringParameters": {"tenantEnv": "1"},
+                 "pathParameters": {}, "body": None,
+                 "requestContext": {"authorizer": {"claims": {"email": "x@y", "cognito:groups": "admin"}}}}
+        index.handler(event, None)
+    h.assert_called_once()
+
+
+def test_index_dispatches_put_for_tenant_env_sk():
+    import index, tenant_env
+    with patch.object(tenant_env, "put_tenant_env", return_value={"statusCode": 200, "body": "{}"}) as h:
+        event = {"resource": "/skills/{userId}/{skillName}", "httpMethod": "PUT",
+                 "queryStringParameters": None,
+                 "pathParameters": {"userId": "alice@x.com", "skillName": "__tenant_env__"},
+                 "body": '{"mode":"default"}',
+                 "requestContext": {"authorizer": {"claims": {"email": "x@y", "cognito:groups": "admin"}}}}
+        index.handler(event, None)
+    h.assert_called_once()
