@@ -97,6 +97,7 @@ import { getCurrentUserEmail } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
+import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
 import architectureDiagram from '../assets/architecture.drawio.png';
 
 export type ActiveTab =
@@ -1460,6 +1461,7 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
 
   return (
     <SpaceBetween size="l">
+      <EntryEnvironmentTable />
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
       {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
