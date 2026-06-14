@@ -644,6 +644,9 @@ export class SmartHomeStack extends cdk.Stack {
         "cognito-idp:ListUsers",
         "cognito-idp:AdminListGroupsForUser",
         "cognito-idp:AdminCreateUser",
+        // Set the user's password as Permanent right after AdminCreateUser
+        // so they can sign in directly without a forced password change.
+        "cognito-idp:AdminSetUserPassword",
         "cognito-idp:AdminAddUserToGroup",
         "cognito-idp:AdminRemoveUserFromGroup",
         "cognito-idp:AdminDeleteUser",
