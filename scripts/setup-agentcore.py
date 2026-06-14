@@ -498,6 +498,75 @@ def _ensure_optimization_infra(runtime_id: str, runtime_arn: str,
     }
 
 
+def _ensure_bundles_runtime(primary_runtime_id: str, primary_runtime_arn: str,
+                            region: str) -> dict:
+    """Provision the bundles runtime — same container image as the primary
+    runtime, plus ENABLE_BUNDLE_HOOK=1 so the agent registers a Strands
+    BeforeModelCallEvent hook that overrides system_prompt from W3C
+    baggage. Idempotent: creates on first run, updates on subsequent runs.
+
+    Returns: {"runtimeId": ..., "runtimeArn": ...}
+    """
+    ac = boto3.client("bedrock-agentcore-control", region_name=region)
+
+    # Mirror everything from the primary runtime: same image, same role,
+    # same network/auth/protocol/headers/filesystem config — so the two
+    # runtimes are byte-identical at the agent business-code level. The
+    # only diverging field is environmentVariables.ENABLE_BUNDLE_HOOK.
+    primary = ac.get_agent_runtime(agentRuntimeId=primary_runtime_id)
+    container_uri = primary["agentRuntimeArtifact"]["containerConfiguration"]["containerUri"]
+    role_arn = primary["roleArn"]
+    network = primary["networkConfiguration"]
+    auth = primary.get("authorizerConfiguration")
+    proto = primary.get("protocolConfiguration")
+    headers_cfg = primary.get("requestHeaderConfiguration")
+    fs_cfg = primary.get("filesystemConfigurations")
+
+    bundles_name = "smarthome-bundles"
+
+    # Look up existing
+    paginator = ac.get_paginator("list_agent_runtimes")
+    found_id = None
+    for page in paginator.paginate():
+        for rt in page.get("agentRuntimes", []):
+            if rt.get("agentRuntimeName") == bundles_name:
+                found_id = rt["agentRuntimeId"]
+                break
+        if found_id:
+            break
+
+    bundles_env = dict(primary.get("environmentVariables", {}))
+    bundles_env["ENABLE_BUNDLE_HOOK"] = "1"
+
+    base_kwargs = dict(
+        agentRuntimeArtifact={"containerConfiguration": {"containerUri": container_uri}},
+        networkConfiguration=network,
+        roleArn=role_arn,
+        environmentVariables=bundles_env,
+    )
+    if auth:
+        base_kwargs["authorizerConfiguration"] = auth
+    if proto:
+        base_kwargs["protocolConfiguration"] = proto
+    if headers_cfg:
+        base_kwargs["requestHeaderConfiguration"] = headers_cfg
+    if fs_cfg:
+        base_kwargs["filesystemConfigurations"] = fs_cfg
+
+    if found_id is None:
+        resp = ac.create_agent_runtime(agentRuntimeName=bundles_name, **base_kwargs)
+        rt_id = resp["agentRuntimeId"]
+        rt_arn = resp["agentRuntimeArn"]
+        print(f"  [bundles-runtime] Created {bundles_name} runtimeId={rt_id}")
+    else:
+        rt_id = found_id
+        ac.update_agent_runtime(agentRuntimeId=rt_id, **base_kwargs)
+        rt_arn = ac.get_agent_runtime(agentRuntimeId=rt_id)["agentRuntimeArn"]
+        print(f"  [bundles-runtime] Updated {bundles_name} runtimeId={rt_id}")
+
+    return {"runtimeId": rt_id, "runtimeArn": rt_arn}
+
+
 def main():
     print("=" * 60)
     print("  AgentCore Setup (Gateway + Lambda Target + Runtime + Observability + Eval)")
@@ -1423,6 +1492,7 @@ def main():
     # + supporting IAM roles, before patching the admin Lambda's env so all
     # the new ARNs land in one update.
     opt_infra = {}
+    bundles_info = {}
     if runtime_arn and runtime_id:
         try:
             opt_infra = _ensure_optimization_infra(
@@ -1461,6 +1531,45 @@ def main():
             print(f"  [opt-infra] Warning: provisioning failed: {e}")
             print("  [opt-infra] Admin Console Optimization tab will show "
                   "ConfigurationError until this resolves.")
+
+        # Bundles runtime (§8.13). Same image as primary, ENABLE_BUNDLE_HOOK=1
+        # so it registers a BeforeModelCallEvent hook overriding system_prompt
+        # from W3C baggage. Used when a tenant is in 'ab-bundles' mode.
+        try:
+            bundles_info = _ensure_bundles_runtime(
+                primary_runtime_id=runtime_id,
+                primary_runtime_arn=runtime_arn,
+                region=REGION,
+            )
+            print(f"  [bundles-runtime] ARN: {bundles_info['runtimeArn']}")
+        except Exception as e:
+            print(f"  [bundles-runtime] Warning: provisioning failed: {e}")
+            bundles_info = {"runtimeArn": ""}
+
+        # Extend Cognito auth-role IAM grant to cover the bundles runtime.
+        if cognito_auth_role_arn and bundles_info.get("runtimeArn"):
+            try:
+                iam_client = boto3.client("iam", region_name=REGION)
+                bundles_arn = bundles_info["runtimeArn"]
+                iam_client.put_role_policy(
+                    RoleName=cognito_auth_role_arn.split("/")[-1],
+                    PolicyName="AgentCoreBundlesRuntimeInvoke",
+                    PolicyDocument=json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Action": [
+                                "bedrock-agentcore:InvokeAgentRuntime",
+                                "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                                "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                            ],
+                            "Resource": [bundles_arn, f"{bundles_arn}/*"],
+                        }],
+                    }),
+                )
+                print(f"  [bundles-runtime] Granted invoke to Cognito auth role")
+            except Exception as e:
+                print(f"  [bundles-runtime] Warning: IAM grant failed: {e}")
 
     # Patch admin Lambda with runtime ARN (needed for stop-runtime-session)
     if runtime_arn:
@@ -1768,6 +1877,7 @@ def main():
   cognitoDomain: "{outputs['CognitoDomain']}",
   cognitoIdentityPoolId: "{outputs['IdentityPoolId']}",
   agentRuntimeArn: "{runtime_arn}",
+  bundlesRuntimeArn: "{bundles_info.get('runtimeArn', '')}",
   voiceAgentRuntimeArn: "{voice_runtime_arn}",
   optimizationGatewayUrl: "{opt_gw_url}",
   optimizationDefaultTarget: "smarthome-control",
