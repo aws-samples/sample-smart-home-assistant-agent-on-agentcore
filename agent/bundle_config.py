@@ -85,3 +85,38 @@ def load_from_baggage(headers: dict, agent_type: str) -> str | None:
     if not isinstance(val, str):
         return None
     return val
+
+
+def register_before_model_call_hook(agent, headers: dict | None) -> None:
+    """Register a Strands BeforeModelCallEvent hook that overrides
+    `system_prompt` from W3C baggage. No-op when baggage is missing or
+    the bundle does not resolve. See AgentCore A/B testing config-bundle
+    docs for the contract.
+
+    The hook captures `headers` at registration time (per-request agent
+    construction guarantees fresh headers per invocation).
+    """
+    from strands.hooks import BeforeModelCallEvent  # type: ignore
+
+    captured_headers = headers or {}
+
+    def _on_before_model_call(event):
+        try:
+            prompt = load_from_baggage(captured_headers, "text")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("bundle hook resolve failed: %s", e)
+            return
+        if not isinstance(prompt, str) or not prompt:
+            return
+        # Strands exposes the model-call kwargs on event.kwargs; mutate in place
+        # so the underlying model.converse picks up the new system_prompt.
+        if hasattr(event, "kwargs") and isinstance(event.kwargs, dict):
+            event.kwargs["system_prompt"] = prompt
+
+    # Strands' hook registration API: agent.hooks.add_callback(EventCls, fn)
+    # (newer versions) or agent.hooks.register(EventCls, fn) (older).
+    register_fn = getattr(agent.hooks, "add_callback", None) or getattr(agent.hooks, "register", None)
+    if register_fn is None:
+        logger.warning("agent.hooks has no add_callback/register; skipping hook")
+        return
+    register_fn(BeforeModelCallEvent, _on_before_model_call)
