@@ -1060,3 +1060,81 @@ export const stopABTest = (testId: string) =>
   optFetch<{ executionStatus: OptABExecutionStatus; winner?: string }>(
     'POST', `/optimization/ab-tests/${encodeURIComponent(testId)}/stop`,
   );
+
+export type EntryEnvironmentMode = 'default' | 'ab-bundles' | 'ab-targets';
+
+export interface TenantEnvOverride {
+  email: string;
+  mode: EntryEnvironmentMode;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export async function listTenantEnvs(): Promise<TenantEnvOverride[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/skills?tenantEnv=1`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list tenant environments (${res.status})`);
+  }
+  const data = await res.json();
+  return data.overrides || [];
+}
+
+export async function getTenantEnv(email: string): Promise<{ mode: EntryEnvironmentMode; updatedAt?: string; updatedBy?: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills?tenantEnv=1&userId=${encodeURIComponent(email)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get tenant environment (${res.status})`);
+  }
+  return res.json();
+}
+
+export class PerUserPromptWillBeMaskedError extends Error {
+  constructor(public email: string, message: string) {
+    super(message);
+    this.name = 'PerUserPromptWillBeMaskedError';
+  }
+}
+
+export async function putTenantEnv(
+  email: string,
+  mode: EntryEnvironmentMode,
+  acknowledgeMaskedOverride = false,
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(email)}/__tenant_env__`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ mode, acknowledgeMaskedOverride }),
+    }
+  );
+  if (res.status === 409) {
+    const body = await res.json();
+    if (body.error === 'PerUserPromptWillBeMasked') {
+      throw new PerUserPromptWillBeMaskedError(email, body.message);
+    }
+  }
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to set tenant environment (${res.status})`);
+  }
+}
+
+export async function deleteTenantEnv(email: string): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(email)}/__tenant_env__`,
+    { method: 'DELETE', headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to delete tenant environment (${res.status})`);
+  }
+}
