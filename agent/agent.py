@@ -147,9 +147,12 @@ def load_system_prompt(actor_id: str, agent_type: str,
 
     Mode-aware. On the bundles runtime (ENABLE_BUNDLE_HOOK=1), this function
     returns None so the agent falls back to its hardcoded SYSTEM_PROMPT
-    constant; the BeforeModelCallEvent hook (registered in create_agent) is
-    the ONLY prompt source on that runtime, replacing system_prompt at
-    model-call time from W3C baggage.
+    constant. A separate BeforeModelCallEvent hook will be registered by
+    create_agent on that runtime (see bundle_config) to override
+    system_prompt at model-call time from the request's W3C baggage header.
+    Until that hook lands the bundles runtime simply uses the hardcoded
+    constant. Keeping the two paths in different functions makes each
+    runtime's prompt-resolution behavior single-purpose.
 
     On the default runtime, this is the §8.10 additive resolution:
       1. Read (__global__, __prompt_{type}__) → returns "" if missing.
