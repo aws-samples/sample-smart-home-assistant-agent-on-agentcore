@@ -474,6 +474,32 @@ const zh: Record<string, string> = {
   'optimization.toolDescAB.body':
     '工具描述建议通过 UpdateGatewayTarget 直接应用到工具网关,会立即对所有聊天会话生效——没有流量分配。要为工具描述实现自动化 A/B 测试,需要在工具网关前再放一个优化网关,并为每个变体配置并行的 Lambda 集成,这超出了当前 AgentCore 的支持范围。AgentCore 目前仅在代理运行时层(目标路由)或代理运行时读取的配置包(配置包路由)上提供 A/B 流量分配;两种模式都无法触达工具网关上的 MCP 工具描述元数据。当前验证工具描述变更的方法:应用建议、观察一段时间,如有需要可通过工具描述配置包的快照回滚。',
 
+  // 入口环境部分
+  'optimization.tenantEnv.sectionTitle': '入口环境',
+  'optimization.tenantEnv.description': '按租户配置 chatbot 流量进入哪个运行时 / A/B 测试环境。',
+  'optimization.tenantEnv.defaultLabel': '未配置租户的默认:',
+  'optimization.tenantEnv.defaultValueRuntime': 'Runtime 默认',
+  'optimization.tenantEnv.addOverride': '添加租户覆盖',
+  'optimization.tenantEnv.columnEmail': '邮箱',
+  'optimization.tenantEnv.columnMode': '模式',
+  'optimization.tenantEnv.columnUpdatedBy': '更新者',
+  'optimization.tenantEnv.columnActions': '操作',
+  'optimization.tenantEnv.edit': '编辑',
+  'optimization.tenantEnv.remove': '删除',
+  'optimization.tenantEnv.modeDefault': 'Runtime 默认',
+  'optimization.tenantEnv.modeAbBundles': 'A/B Bundles',
+  'optimization.tenantEnv.modeAbTargets': 'A/B Targets',
+  'optimization.tenantEnv.modalAddTitle': '添加租户覆盖',
+  'optimization.tenantEnv.modalEditTitle': '编辑租户覆盖',
+  'optimization.tenantEnv.modalEmailLabel': '租户邮箱',
+  'optimization.tenantEnv.modalModeLabel': '模式',
+  'optimization.tenantEnv.modalSave': '保存',
+  'optimization.tenantEnv.modalCancel': '取消',
+  'optimization.tenantEnv.confirmMaskTitle': '切换到 A/B Bundles 将屏蔽该租户的 per-user prompt',
+  'optimization.tenantEnv.confirmMaskBody': 'A/B Bundles 模式下 bundle prompt 会替换 additive prompt。该 per-user override 保留在 DDB 中,切回 Default 或 A/B Targets 后会重新生效。',
+  'optimization.tenantEnv.confirmMaskConfirm': '确认并切换',
+  'optimization.tenantEnv.propagationNote': '配置在 1 分钟内生效。',
+
   'form.close': '关闭',
 
   'integrations.sub.overview': '概览',

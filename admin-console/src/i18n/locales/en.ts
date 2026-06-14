@@ -474,6 +474,32 @@ const en: Record<string, string> = {
   'optimization.toolDescAB.body':
     'Tool description recommendations apply directly to the tools gateway via UpdateGatewayTarget and take effect immediately for every chatbot session — there is no traffic split. Automating an A/B test for tool descriptions would require a second optimization gateway sitting in front of the tools gateway plus per-variant tools-gateway targets that fan out to two parallel sets of Lambda integrations. AgentCore currently exposes A/B traffic splitting only at the agent runtime layer (target-based) or via configuration bundles read by the agent runtime (config-bundle); neither pattern reaches MCP tool-description metadata served by a tools gateway. To validate a tool-description change today: apply the recommendation, observe its effect for a sample period, and roll back via the snapshot in Tool Description Bundles if needed.',
 
+  // Entry Environment section.
+  'optimization.tenantEnv.sectionTitle': 'Entry Environment',
+  'optimization.tenantEnv.description': 'Per-tenant routing of chatbot traffic to runtime / A/B test environments.',
+  'optimization.tenantEnv.defaultLabel': 'Default for unconfigured tenants:',
+  'optimization.tenantEnv.defaultValueRuntime': 'Runtime Default',
+  'optimization.tenantEnv.addOverride': 'Add tenant override',
+  'optimization.tenantEnv.columnEmail': 'Email',
+  'optimization.tenantEnv.columnMode': 'Mode',
+  'optimization.tenantEnv.columnUpdatedBy': 'Updated by',
+  'optimization.tenantEnv.columnActions': 'Actions',
+  'optimization.tenantEnv.edit': 'Edit',
+  'optimization.tenantEnv.remove': 'Remove',
+  'optimization.tenantEnv.modeDefault': 'Runtime Default',
+  'optimization.tenantEnv.modeAbBundles': 'A/B Bundles',
+  'optimization.tenantEnv.modeAbTargets': 'A/B Targets',
+  'optimization.tenantEnv.modalAddTitle': 'Add tenant override',
+  'optimization.tenantEnv.modalEditTitle': 'Edit tenant override',
+  'optimization.tenantEnv.modalEmailLabel': 'Tenant email',
+  'optimization.tenantEnv.modalModeLabel': 'Mode',
+  'optimization.tenantEnv.modalSave': 'Save',
+  'optimization.tenantEnv.modalCancel': 'Cancel',
+  'optimization.tenantEnv.confirmMaskTitle': 'Switching to A/B Bundles will mask the per-user prompt',
+  'optimization.tenantEnv.confirmMaskBody': "In A/B Bundles mode the bundle's prompt replaces the additive prompt. The per-user override stays in DDB and re-activates if you switch back to Default or A/B Targets.",
+  'optimization.tenantEnv.confirmMaskConfirm': 'Confirm and switch',
+  'optimization.tenantEnv.propagationNote': 'Changes propagate within 1 minute.',
+
   'form.close': 'Close',
 
   'integrations.sub.overview': 'Overview',
