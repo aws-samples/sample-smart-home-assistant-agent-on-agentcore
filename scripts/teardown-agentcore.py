@@ -18,10 +18,10 @@ STATE_FILE = os.path.join(PROJECT_ROOT, "agentcore-state.json")
 
 
 def _delete_bundles_runtime_by_name(client) -> None:
-    """Look up and delete the bundles runtime ('smarthome-bundles') if it
+    """Look up and delete the bundles runtime ('smarthome_bundles') if it
     exists. Idempotent — silent no-op when the runtime is absent (e.g.
     teardown after a deploy that never created the bundles runtime)."""
-    target_name = "smarthome-bundles"
+    target_name = "smarthome_bundles"
     paginator = client.get_paginator("list_agent_runtimes")
     rt_id = None
     for page in paginator.paginate():

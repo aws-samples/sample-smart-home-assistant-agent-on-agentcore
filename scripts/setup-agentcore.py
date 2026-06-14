@@ -523,7 +523,7 @@ def _ensure_bundles_runtime(primary_runtime_id: str, primary_runtime_arn: str,
     headers_cfg = primary.get("requestHeaderConfiguration")
     fs_cfg = primary.get("filesystemConfigurations")
 
-    bundles_name = "smarthome-bundles"
+    bundles_name = "smarthome_bundles"
 
     # Look up existing
     paginator = ac.get_paginator("list_agent_runtimes")
