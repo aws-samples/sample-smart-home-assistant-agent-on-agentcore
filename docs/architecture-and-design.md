@@ -16,6 +16,7 @@
 - [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
 - [8.11. Image Input (Vision Bypass Path)](#811-image-input-vision-bypass-path)
 - [8.12. AgentCore Optimization (Recommendations, Bundles, A/B Tests)](#812-agentcore-optimization-recommendations-bundles--ab-tests)
+- [8.13. Per-Tenant Entry Environment](#813-per-tenant-entry-environment)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
@@ -1401,7 +1402,7 @@ The setup deploys the optimization infrastructure but stops short of producing *
 
 **2. `agentcore deploy` resets several runtime fields**, then auto-bumps the version when you call `UpdateAgentRuntime` to restore them. Specifically, `environmentVariables`, `requestHeaderConfiguration` (the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` allowlist), `protocolConfiguration`, `authorizerConfiguration`, and `filesystemConfigurations` are all stripped by `agentcore deploy` and must be reapplied via `update_agent_runtime`. Each `update_agent_runtime` call creates a **new** version, so the deploy → restore sequence produces v_N (deploy) and then v_{N+1} (restore). Pin treatment to v_{N+1}, since v_N is missing the env vars/header allowlist and would 401 against the gateway. The setup script handles this for the initial deploy via `_ensure_optimization_infra`; ad-hoc treatment redeploys must replay the same restore logic.
 
-**3. The DDB `__prompt_text__` row overrides the runtime's hardcoded `SYSTEM_PROMPT`.** Per §8.10, the agent reads `(__global__, __prompt_text__)` and `({user}, __prompt_text__)` at every invocation and concatenates them with the hardcoded constant. If a previous Apply Recommendation step wrote a `__global__` `__prompt_text__` row, **both** runtime versions read that row instead of their own baked-in prompt — meaning the A/B variants again behave identically regardless of which version each endpoint is pinned to. To isolate the runtime-version difference for an A/B test, delete the `__global__` `__prompt_text__` row (save its contents first if you want to restore later) before driving traffic. Alternatively, edit it so it carries instructions you want to test.
+**3. The DDB `__prompt_text__` row overrides the runtime's hardcoded `SYSTEM_PROMPT`.** Per §8.10, the agent reads `(__global__, __prompt_text__)` and `({user}, __prompt_text__)` at every invocation and concatenates them with the hardcoded constant. If a previous Apply Recommendation step wrote a `__global__` `__prompt_text__` row, **both** runtime versions read that row instead of their own baked-in prompt — meaning the A/B variants again behave identically regardless of which version each endpoint is pinned to. To isolate the runtime-version difference for an A/B test, delete the `__global__` `__prompt_text__` row (save its contents first if you want to restore later) before driving traffic. Alternatively, edit it so it carries instructions you want to test. Since the introduction of `ab-bundles` mode (§8.13), this row-deletion workaround is only needed for `ab-targets`-mode tests; bundles-mode tests leave it untouched.
 
 **4. Online-eval results need ≥ sessionTimeoutMinutes + ~10–15 min after the last session.** AgentCore aggregates results only after each session crosses the configured `sessionTimeoutMinutes` idle window AND after the eval pipeline catches up. The default `sessionTimeoutMinutes=5` adds a 5-minute floor; lowering it to **1 minute** shrinks the wait for small-scale tests. A common pitfall: stop the test too early (e.g. ~5 min after last session) and the `results` field is permanently `None` because the aggregator never runs to completion against a STOPPED test. The minimum safe stop time is `last_session + sessionTimeoutMinutes + 10 minutes`. `setup-agentcore.py` provisions both per-variant online-eval configs at `sessionTimeoutMinutes=5` by default; reducing them is a deliberate operator action via `update_online_evaluation_config`.
 
@@ -1420,7 +1421,7 @@ The setup deploys the optimization infrastructure but stops short of producing *
 5. update_agent_runtime_endpoint(name=treatment, agentRuntimeVersion=v_{N+1}).
    Verify: control.liveVersion < treatment.liveVersion.
 6. Revert agent.py so the local source matches control behavior.
-7. Delete the __global__ __prompt_text__ DDB row (if present).
+7. (Targets mode only.) If you want to isolate runtime-version differences, ensure no __global__ __prompt_text__ row would shadow the difference. **Prefer using `ab-bundles` mode (§8.13) when the only thing you want to compare is global prompt text** — bundles bypass DDB at the model-call level via a `BeforeModelCallEvent` hook, so production prompt rows stay intact during the test.
 8. Spot-check: invoke {gw}/smarthome-control vs {gw}/smarthome-treatment with
    the same prompt + different session-ids. Outputs must visibly differ.
 9. PUT /optimization/ab-toggle {enabled:true} (if not already on).
@@ -1442,6 +1443,56 @@ The setup deploys the optimization infrastructure but stops short of producing *
 | ToolSelectionAccuracy | 1.000 | 0.969 | -3.1% | 0.604 | ✗ |
 
 `POST /ab-tests/{id}/stop` returned `{executionStatus: "STOPPED", winner: "T1"}` — admin Lambda's `_compute_winner` correctly picked T1 because at least one evaluator (Conciseness) had `isSignificant=True` and `treatment.mean > control.mean`. With identical prompts (the misconfigured baseline) all six evaluators had `p > 0.5` and winner stayed `null` regardless of sample size.
+
+### 8.13 Per-Tenant Entry Environment
+
+Each tenant has an `entryEnvironment` selecting which AgentCore surface
+the chatbot connects to. Stored in DDB as
+`(__global__, __tenant_env_{email}__) → {mode, updatedAt, updatedBy}`.
+Missing row resolves to `default`.
+
+| Mode | Chatbot URL | Server-side prompt source | Per-user prompt | A/B dimension |
+|---|---|---|---|---|
+| `default` | runtime SigV4 (primary) | DDB additive (§8.10) | ✓ | None |
+| `ab-bundles` | runtime SigV4 (bundles runtime) | `BeforeModelCallEvent` hook reads bundle from baggage, bypasses DDB | ✗ (masked — UI confirms) | Global prompt text |
+| `ab-targets` | optimization gateway → control/treatment endpoints | DDB additive on each endpoint | ✓ | Runtime version (model + code + prompt) |
+
+**Two runtimes, one image.** Primary runtime (`smarthome-{id}`) and bundles
+runtime (`smarthome-bundles`) share an ECR image. They differ only in the
+`ENABLE_BUNDLE_HOOK` env var: when `=1`, `agent.py:load_system_prompt`
+returns None (no DDB) and `create_agent` registers a Strands
+`BeforeModelCallEvent` hook that reads the W3C `baggage` header and
+overrides `system_prompt` on each model call. When unset, DDB additive
+resolution per §8.10.
+
+**Why two runtimes.** The hook registers globally on the Strands `Agent`;
+there is no per-request "skip" path. One runtime would have to either
+always-hook (breaking per-user prompts) or never-hook (breaking the
+bundles-A/B path). Two runtimes keeps each surface single-purpose.
+
+**Admin Console.** "Entry Environment" section above the A/B Routing
+toggle on the Optimization tab. Add/edit modal accepts a tenant email and
+mode. Switching to `ab-bundles` while a per-user `__prompt_text__` row
+exists produces a 409 `PerUserPromptWillBeMasked`; the UI shows a confirm
+dialog and re-submits with `acknowledgeMaskedOverride: true`.
+
+**Chatbot.** `ChatInterface.tsx` calls `getTenantMode(userEmail)` (60-sec
+TTL cache) before each send and selects the URL accordingly. Cache miss
+or fetch failure falls back to `default`. Mode changes propagate within
+60 seconds; no forced reconnect, no WebSocket push.
+
+**API surface** (piggybacks on `/skills` to stay under the admin Lambda's
+20 KB resource-policy cap — same trick §8.10 uses for `__prompt_*__`):
+
+| Method + Path | Behavior |
+|---|---|
+| `GET /skills?tenantEnv=1` | List all overrides. |
+| `GET /skills?tenantEnv=1&userId={email}` | Single tenant's mode (default if no row). |
+| `PUT /skills/{email}/__tenant_env__` | Upsert; 409 if `ab-bundles` would mask an existing per-user prompt and `acknowledgeMaskedOverride` is not set. |
+| `DELETE /skills/{email}/__tenant_env__` | Remove override → tenant falls back to `default`. |
+
+**Voice path is unchanged.** The mode applies only to text `/invocations`.
+Voice keeps its WSS direct-to-runtime path.
 
 ---
 
