@@ -19,6 +19,7 @@
 - [8.13. Per-Tenant Entry Environment](#813-per-tenant-entry-environment)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
+- [9.4.1. User Provisioning (Identity Tab)](#941-user-provisioning-identity-tab)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
 - [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
 - [9.7. Voice Mode (Nova Sonic Bi-directional Streaming)](#97-voice-mode-nova-sonic-bi-directional-streaming)
@@ -1457,8 +1458,11 @@ Missing row resolves to `default`.
 | `ab-bundles` | runtime SigV4 (bundles runtime) | `BeforeModelCallEvent` hook reads bundle from baggage, bypasses DDB | ✗ (masked — UI confirms) | Global prompt text |
 | `ab-targets` | optimization gateway → control/treatment endpoints | DDB additive on each endpoint | ✓ | Runtime version (model + code + prompt) |
 
-**Two runtimes, one image.** Primary runtime (`smarthome-{id}`) and bundles
-runtime (`smarthome-bundles`) share an ECR image. They differ only in the
+**Two runtimes, one image.** Primary runtime (`smarthome_smarthome-{id}`)
+and bundles runtime (`smarthome_bundles-{id}`) share an ECR image. The
+underscore in `smarthome_bundles` is mandatory — AgentCore's
+`agentRuntimeName` regex is `[a-zA-Z][a-zA-Z0-9_]{0,47}`, so hyphens 400
+on `CreateAgentRuntime`. They differ only in the
 `ENABLE_BUNDLE_HOOK` env var: when `=1`, `agent.py:load_system_prompt`
 returns None (no DDB) and `create_agent` registers a Strands
 `BeforeModelCallEvent` hook that reads the W3C `baggage` header and
@@ -1471,10 +1475,17 @@ always-hook (breaking per-user prompts) or never-hook (breaking the
 bundles-A/B path). Two runtimes keeps each surface single-purpose.
 
 **Admin Console.** "Entry Environment" section above the A/B Routing
-toggle on the Optimization tab. Add/edit modal accepts a tenant email and
-mode. Switching to `ab-bundles` while a per-user `__prompt_text__` row
-exists produces a 409 `PerUserPromptWillBeMasked`; the UI shows a confirm
-dialog and re-submits with `acknowledgeMaskedOverride: true`.
+toggle on the Optimization tab. The Add/edit modal's tenant field is a
+**Cloudscape Select with autosuggest filtering** populated from
+`listCognitoUsers()` (the `GET /users` endpoint shared with the Identity
+tab) — admins pick from the existing user pool rather than free-typing
+emails, which prevents typos that would create dangling override rows for
+non-existent users. In Add mode the dropdown hides users that already
+have an override (use Edit instead); in Edit mode the field is locked to
+the row being edited. Switching to `ab-bundles` while a per-user
+`__prompt_text__` row exists produces a 409 `PerUserPromptWillBeMasked`;
+the UI shows a confirm dialog and re-submits with
+`acknowledgeMaskedOverride: true`.
 
 **Chatbot.** `ChatInterface.tsx` calls `getTenantMode(userEmail)` (60-sec
 TTL cache) before each send and selects the URL accordingly. Cache miss
@@ -1731,7 +1742,49 @@ admin-console/
 | Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model, `storageConfiguration.type=S3_VECTORS` |
 | `smarthome-kb-query` Lambda | Gateway target for agent KB retrieval with JWT-based user identity extraction |
 | CloudFront Distribution | HTTPS CDN |
-| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `voiceAgentRuntimeArn`, `cognitoUserPoolId`, `cognitoClientId`, `cognitoIdentityPoolId`, `region`, `chatbotUrl`, `deviceSimulatorUrl`, `skillErpUrl` |
+| `config.js` (written by setup script) | Injects `adminApiUrl`, `agentRuntimeArn`, `bundlesRuntimeArn`, `voiceAgentRuntimeArn`, `optimizationGatewayUrl`, `optimizationDefaultTarget`, `cognitoUserPoolId`, `cognitoClientId`, `cognitoIdentityPoolId`, `region`, `chatbotUrl`, `deviceSimulatorUrl`, `skillErpUrl`. The `bundlesRuntimeArn` field is consumed by the chatbot's per-tenant routing (§8.13) — empty string when the bundles runtime hasn't been provisioned yet, in which case any tenant configured for `ab-bundles` mode falls back to `default`. |
+
+### 9.4.1 User Provisioning (Identity Tab)
+
+User CRUD lives in the **Identity** tab (left nav under "Build"). The
+table lists every Cognito user with email, status, group membership,
+created-at, and the Cognito sub. The `+ Add User` button (header
+actions, alongside Refresh) opens a modal that accepts a single email
+field; on submit:
+
+1. Admin Lambda calls `cognito-idp:AdminCreateUser` with
+   `MessageAction=SUPPRESS` (no invitation email — the system does not
+   need to round-trip through the user's mailbox).
+2. Lambda generates a **16-char permanent password** locally with
+   `secrets.choice` over (upper, lower, digit, symbol) — guarantees one
+   of each class then fills the rest from the union pool, then a
+   Fisher-Yates shuffle. Returned in the response body.
+3. Lambda calls `cognito-idp:AdminSetUserPassword` with
+   `Permanent=True`, so the user can sign in directly with the
+   generated password — no `FORCE_CHANGE_PASSWORD` challenge.
+4. The admin console shows a "User created" modal one time with the
+   email, the permanent password (read-only with a Copy button), and a
+   warning that the password will not be shown again. Admin shares it
+   with the user out-of-band (Slack, email, ticket, etc.).
+
+The `+ Add User` button used to live on the Overview tab's user table
+and on the Skills tab's user-scope row. Both have been removed —
+Identity is the single entry point for creating users so admins know
+where to look.
+
+**Why permanent passwords instead of the email-invite flow.** The system
+runs in environments where the user's email may be on an external
+domain the admin doesn't control (e.g. a customer's corp email).
+Cognito's default invite flow emails a one-time temp password and
+forces a change on first login — that adds two failure points (email
+delivery and the JS-SDK challenge dance) for a feature that's used
+maybe a handful of times per deployment. The out-of-band-share approach
+is operationally simpler.
+
+**IAM.** The admin Lambda's role gets `cognito-idp:AdminSetUserPassword`
+in addition to the standard `AdminCreateUser` / `AdminListGroupsForUser`
+/ `ListUsers` / `AdminAddUserToGroup` / `AdminRemoveUserFromGroup` /
+`AdminDeleteUser` actions, all scoped to the user pool ARN.
 
 ### 9.5 Per-User Tool Permission Management
 
