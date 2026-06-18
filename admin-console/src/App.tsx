@@ -201,6 +201,7 @@ const App: React.FC = () => {
         { type: 'link' as const, text: t('nav.agentGuardrails'), href: '#/guardrails' },
         { type: 'link' as const, text: t('tab.observability'), href: '#/observability' },
         { type: 'link' as const, text: t('tab.evaluations'), href: '#/evaluations' },
+        { type: 'link' as const, text: t('tab.optimization'), href: '#/optimization' },
       ],
     },
     { type: 'divider' as const },

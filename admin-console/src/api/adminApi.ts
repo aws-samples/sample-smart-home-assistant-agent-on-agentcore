@@ -408,7 +408,16 @@ export async function listCognitoUsers(): Promise<CognitoUserInfo[]> {
   return data.users || [];
 }
 
-export async function createCognitoUser(email: string): Promise<void> {
+export interface CreatedCognitoUser {
+  username: string;
+  email: string;
+  status: string;
+  /** Permanent password generated server-side. Show to admin once; they
+   *  hand it to the user out-of-band. */
+  password: string;
+}
+
+export async function createCognitoUser(email: string): Promise<CreatedCognitoUser> {
   const headers = { ...(await authHeaders()), 'Content-Type': 'application/json' };
   const res = await fetch(`${getBaseUrl()}/users`, {
     method: 'POST',
@@ -419,6 +428,7 @@ export async function createCognitoUser(email: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to create user (${res.status})`);
   }
+  return res.json();
 }
 
 export async function addUserToAdminGroup(username: string): Promise<void> {
@@ -870,4 +880,271 @@ export async function listA2aGrantsForRecord(
   }
   const data = await res.json();
   return data.grants || [];
+}
+
+// ---------------------------------------------------------------------------
+// AgentCore Optimization (recommendations, configuration bundles, A/B tests).
+// See docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
+// ---------------------------------------------------------------------------
+export type OptAgentType = 'text' | 'voice' | 'tool_desc';
+export type OptRecStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'DELETING';
+export type OptABExecutionStatus = 'NOT_STARTED' | 'PAUSED' | 'RUNNING' | 'STOPPED';
+export type OptABStatus =
+  | 'CREATING'
+  | 'ACTIVE'
+  | 'CREATE_FAILED'
+  | 'UPDATING'
+  | 'UPDATE_FAILED'
+  | 'DELETING'
+  | 'DELETE_FAILED'
+  | 'FAILED';
+
+export interface OptBundleRef {
+  bundleArn: string;
+  bundleVersion: string;
+}
+
+export interface OptRecommendation {
+  recommendationId: string;
+  recommendationArn?: string;
+  agentType: OptAgentType;
+  status: OptRecStatus;
+  evaluatorArn: string;
+  createdAt: string;
+  appliedAt?: string;
+  recommendedSystemPrompt?: string;
+  tools?: { toolName: string; recommendedToolDescription: string }[];
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface OptBundle {
+  bundleArn: string;
+  bundleName: string;
+  latestVersionId: string;
+  agentType: OptAgentType;
+  sourceRecommendationId?: string;
+  createdAt: string;
+}
+
+export interface OptABTestSummary {
+  testId: string;
+  testArn?: string;
+  agentType: OptAgentType;
+  status?: OptABStatus;
+  executionStatus: OptABExecutionStatus;
+  createdAt: string;
+  autoStopAt: string;
+  winner?: string;
+}
+
+export interface OptABTestDetail {
+  testId: string;
+  status: OptABStatus;
+  executionStatus: OptABExecutionStatus;
+  perVariant: { variantName: string; meanScore: number | null; sampleCount: number | null }[];
+  pValue: number | null;
+  significant: boolean | null;
+  winner: string | null;
+  cloudwatchDashboardUrl: string;
+  routingMode?: 'target-based';
+  controlEndpoint?: string;
+  treatmentEndpoint?: string;
+}
+
+export interface StartRecommendationInput {
+  scope: string;
+  agentType: OptAgentType;
+  evaluatorArn: string;
+  logGroupArn?: string;
+  startTime: string;
+  endTime: string;
+  ruleFilter?: unknown;
+  name?: string;
+}
+
+export interface StartABTestInput {
+  // Target-based A/B routing (text agent only). Variants reference runtime
+  // endpoint qualifiers ("control" / "treatment") via gateway targets, not
+  // configuration bundle versions. See spec
+  // 2026-05-17-agentcore-optimization-target-based-design.md §4.2.
+  agentType: 'text';
+  controlEndpoint: string;
+  treatmentEndpoint: string;
+  variantWeights: { control: number; treatment: number };
+  durationDays: 1 | 3 | 7 | 14;
+  name?: string;
+  scope?: string;  // server enforces __global__; included for explicit error visibility
+  roleArn?: string;
+}
+
+export interface OptABToggle {
+  enabled: boolean;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+async function optFetch<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}${path}`, {
+    method,
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({} as any));
+    const code = errBody.error || `HTTP_${res.status}`;
+    const msg = errBody.message || `${method} ${path} failed (${res.status})`;
+    throw new Error(`${code}: ${msg}`);
+  }
+  if (res.status === 204) return undefined as unknown as T;
+  return (await res.json()) as T;
+}
+
+export const startRecommendation = (input: StartRecommendationInput) =>
+  optFetch<{ recommendationId: string; recommendationArn: string; status: OptRecStatus }>(
+    'POST', '/optimization/recommendations', input,
+  );
+
+export const listRecommendations = (scope: string) =>
+  optFetch<OptRecommendation[]>(
+    'GET', `/optimization/recommendations?scope=${encodeURIComponent(scope)}`,
+  );
+
+export const getRecommendation = (recId: string) =>
+  optFetch<OptRecommendation>('GET', `/optimization/recommendations/${encodeURIComponent(recId)}`);
+
+export const deleteRecommendation = (recId: string) =>
+  optFetch<void>('DELETE', `/optimization/recommendations/${encodeURIComponent(recId)}`);
+
+export interface ApplyRecommendationResponse {
+  // text/voice apply: just confirms the prompt row was written. Bundle
+  // fields are absent for prompt agentTypes (target-based redesign).
+  applied?: boolean;
+  agentType?: OptAgentType;
+  scope?: string;
+  // tool_desc apply: still creates a configuration bundle for rollback.
+  appliedBundleArn?: string;
+  appliedBundleVersionId?: string;
+}
+
+export const applyRecommendation = (recId: string) =>
+  optFetch<ApplyRecommendationResponse>(
+    'POST', `/optimization/recommendations/${encodeURIComponent(recId)}/apply`,
+  );
+
+export const getABToggle = () =>
+  optFetch<OptABToggle>('GET', '/optimization/ab-toggle');
+
+export const setABToggle = (enabled: boolean) =>
+  optFetch<{ enabled: boolean; stoppedTestId?: string }>(
+    'PUT', '/optimization/ab-toggle', { enabled },
+  );
+
+export const listBundles = (scope: string, agentType?: OptAgentType) => {
+  const qs = new URLSearchParams({ scope });
+  if (agentType) qs.set('agentType', agentType);
+  return optFetch<OptBundle[]>('GET', `/optimization/bundles?${qs.toString()}`);
+};
+
+export const getBundleVersions = (bundleArn: string) =>
+  optFetch<{ versions: { versionId: string; createdAt?: string; parentVersionId?: string; branch?: string }[] }>(
+    'GET', `/optimization/bundles/${encodeURIComponent(bundleArn)}`,
+  );
+
+export const deleteBundle = (bundleArn: string) =>
+  optFetch<void>('DELETE', `/optimization/bundles/${encodeURIComponent(bundleArn)}`);
+
+export const listABTests = () =>
+  optFetch<OptABTestSummary[]>('GET', '/optimization/ab-tests');
+
+export const startABTest = (input: StartABTestInput) =>
+  optFetch<{ testId: string; testArn: string; status: OptABStatus; executionStatus: OptABExecutionStatus; autoStopAt: string }>(
+    'POST', '/optimization/ab-tests', input,
+  );
+
+export const getABTest = (testId: string) =>
+  optFetch<OptABTestDetail>('GET', `/optimization/ab-tests/${encodeURIComponent(testId)}`);
+
+export const stopABTest = (testId: string) =>
+  optFetch<{ executionStatus: OptABExecutionStatus; winner?: string }>(
+    'POST', `/optimization/ab-tests/${encodeURIComponent(testId)}/stop`,
+  );
+
+export type EntryEnvironmentMode = 'default' | 'ab-bundles' | 'ab-targets';
+
+export interface TenantEnvOverride {
+  email: string;
+  mode: EntryEnvironmentMode;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export async function listTenantEnvs(): Promise<TenantEnvOverride[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/skills?tenantEnv=1`, { headers });
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to list tenant environments (${res.status})`);
+  }
+  const data = await res.json();
+  return data.overrides || [];
+}
+
+export async function getTenantEnv(email: string): Promise<{ mode: EntryEnvironmentMode; updatedAt?: string; updatedBy?: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills?tenantEnv=1&userId=${encodeURIComponent(email)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get tenant environment (${res.status})`);
+  }
+  return res.json();
+}
+
+export class PerUserPromptWillBeMaskedError extends Error {
+  constructor(public email: string, message: string) {
+    super(message);
+    this.name = 'PerUserPromptWillBeMaskedError';
+  }
+}
+
+export async function putTenantEnv(
+  email: string,
+  mode: EntryEnvironmentMode,
+  acknowledgeMaskedOverride = false,
+): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(email)}/__tenant_env__`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ mode, acknowledgeMaskedOverride }),
+    }
+  );
+  if (res.status === 409) {
+    const body = await res.json();
+    if (body.error === 'PerUserPromptWillBeMasked') {
+      throw new PerUserPromptWillBeMaskedError(email, body.message);
+    }
+  }
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to set tenant environment (${res.status})`);
+  }
+}
+
+export async function deleteTenantEnv(email: string): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(email)}/__tenant_env__`,
+    { method: 'DELETE', headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to delete tenant environment (${res.status})`);
+  }
 }

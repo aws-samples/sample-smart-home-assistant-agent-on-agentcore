@@ -14,9 +14,10 @@ import { getConfig } from '../config';
 import { getIdToken, getAwsCredentials } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { VoiceClient } from '../voice/VoiceClient';
-import { signedInvocationsFetch, presignWsUrl } from '../voice/sigv4';
+import { signedInvocationsFetch, signedGatewayInvocationsFetch, presignWsUrl } from '../voice/sigv4';
 import BrowserPanel from './BrowserPanel';
 import { fetchActiveBrowserSession, BrowserSessionInfo } from '../api/browserSessions';
+import { getTenantMode } from '../api/tenantEnv';
 
 const CUSTOM_AUTH_HEADER = 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken';
 
@@ -373,14 +374,46 @@ const ChatInterface: React.FC = () => {
       const body: Record<string, unknown> = { prompt: text, userId };
       if (images) body.images = images;
 
-      const response = await signedInvocationsFetch({
-        agentRuntimeArn: config.agentRuntimeArn,
-        region: config.region,
-        credentials: creds,
-        sessionId,
-        body,
-        extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
-      });
+      // Per-tenant entry environment (§8.13). Each tenant is in one of:
+      //   default      → direct SigV4 to primary runtime, DDB additive prompts
+      //   ab-bundles   → direct SigV4 to bundles runtime (BeforeModelCallEvent
+      //                  hook overrides system_prompt from baggage)
+      //   ab-targets   → optimization gateway (target-based runtime-version A/B)
+      // Cache miss / fetch failure falls back to 'default' (see api/tenantEnv).
+      const mode = await getTenantMode(userId);
+
+      let response: Response;
+      if (mode === 'ab-targets' && config.optimizationGatewayUrl) {
+        response = await signedGatewayInvocationsFetch({
+          gatewayUrl: config.optimizationGatewayUrl,
+          targetName: config.optimizationDefaultTarget,
+          region: config.region,
+          credentials: creds,
+          sessionId,
+          body,
+          extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
+        });
+      } else if (mode === 'ab-bundles' && config.bundlesRuntimeArn) {
+        response = await signedInvocationsFetch({
+          agentRuntimeArn: config.bundlesRuntimeArn,
+          region: config.region,
+          credentials: creds,
+          sessionId,
+          body,
+          extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
+        });
+      } else {
+        // 'default' mode (or unconfigured / config field empty for the
+        // selected non-default mode → safe fallback to primary runtime).
+        response = await signedInvocationsFetch({
+          agentRuntimeArn: config.agentRuntimeArn,
+          region: config.region,
+          credentials: creds,
+          sessionId,
+          body,
+          extraHeaders: { [CUSTOM_AUTH_HEADER]: token },
+        });
+      }
 
       if (!response.ok) {
         const errBody = await response.text();

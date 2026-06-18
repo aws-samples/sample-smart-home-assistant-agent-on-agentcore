@@ -214,7 +214,46 @@ AgentCore SDK 的数据集是 scenarios 列表,每个 scenario 可单轮或多�
 
 ## 6. 自动化提示词与工具描述优化
 
-AWS 即将推出 **AgentCore Evo**,用于自动提升 agent 的 **system prompt** 与 **tool description** 质量。本方案在 Admin Console → Agent Prompt tab 预留了 "Optimization Suggestions (AgentCore Evo)" UI 占位卡,等官方 API 上线后直接接入。
+通过 **Admin Console → Assess → Optimization** 页面,管理员可以基于真实运行轨迹自动优化 system prompt 与 gateway tool description。底层调用 AWS **AgentCore Optimization**(公开预览)的三大能力:**Recommendations**(LLM 生成的优化建议)、**Configuration Bundles**(可版本化的配置快照)、**A/B Tests**(线上流量分流 + 在线评估)。完整设计见 `docs/architecture-and-design.md` §8.12。
+
+### 6.1 工作流概览
+
+```
+            Generate                Apply                  Start A/B Test
+agent traces ────────▶ Recommendation ─────▶ Bundle version ─────▶ Live traffic split
+   (aws/spans)          (system prompt /        (DDB __prompt_*__         (Gateway routes
+                         tool description)       + AgentCore bundle)       sessions sticky-by-id)
+                                                          │                       │
+                                                          ▼                       ▼
+                                                   Effective on next        Online evaluator
+                                                     invocation              p-value / winner
+```
+
+- **Recommendations** — Lambda 调用 `start_recommendation`,把 `aws/spans` 中过去 N 天的 trace + 一个 evaluator(默认 `Builtin.GoalSuccessRate`)交给 AgentCore,数分钟后返回优化后的 prompt 或 tool description。
+- **Apply** — 一键写回到现有的 `__prompt_text__` / `__prompt_voice__` DynamoDB 行(下次 invocation 就生效),同时创建一个新的 Configuration Bundle 版本作为审计 + 回滚 + A/B 候选。
+- **Configuration Bundles** — AgentCore 端的不可变版本链。每次 Apply 自动产生一个新版本;A/B Test 直接引用版本 ID。
+- **A/B Tests** — `create_ab_test` 在 Gateway 上按 sessionId 粘性分流。在线评估打分;`get_ab_test` 返回 per-variant mean / sample size / p-value / 是否显著。Stop 即调用 `update_ab_test(executionStatus="STOPPED")`。
+
+### 6.2 管理员操作步骤
+
+1. **生成建议**:Optimization → Recommendations → **Generate Recommendation**。选择 Evaluator(GoalSuccessRate / Helpfulness / Correctness)+ trace 时间范围 + scope(global 或某个用户) + agent type(text / voice / tool_desc)。提交后状态由 PENDING → IN_PROGRESS → COMPLETED / FAILED(轨迹不足时正常返回 FAILED)。
+2. **审阅 + 应用**:点击 **View** 打开侧抽屉,左右对比当前 prompt 与推荐 prompt;tool_desc 类型则展示每个工具的新描述。点击 **Apply** 一键应用,UI 会同步生成 bundle 版本号 toast。
+3. **启动 A/B(可选)**:Optimization → A/B Tests → **Start A/B Test**。选择 control bundle 版本(应用前的当前版本)和 treatment bundle 版本(刚应用产生的新版本),设置流量比 50/50 或 90/10、运行时长 1/3/7/14 天。系统强制单 agentType 同时仅一个 RUNNING 测试。
+4. **观察 + 收敛**:列表行实时显示 p-value 与 winner;**View in CloudWatch** 跳转 GenAI Observability 仪表盘看每个 session 的轨迹。当结果显著后,**Stop**;若 winner 是 treatment,则保留当前 prompt;若 winner 是 control,Apply 控制版本回滚。
+
+### 6.3 与 Agent System Prompts 页的关系
+
+Agent System Prompts 页(§5 / Build → Prompt)的每张编辑卡顶部保留了一条信息提示:"Optimization Suggestions (AgentCore Optimization)" + 一个 "Open in Optimization tab →" 链接。两个页面共用 `__prompt_text__` / `__prompt_voice__` 存储,Apply 写入即对 Prompt 编辑器立即可见。
+
+### 6.4 区域可用性
+
+AgentCore Optimization 当前为公开预览,部分区域尚未开放。Lambda 在导入时探测 `bedrock-agentcore.StartRecommendation` 操作模型;如果 boto3 不识别,优化页所有 API 返回 501 `AgentCoreOptimizationUnavailable`,UI 显示一条单独的 banner 而不是错误,等服务在该区域上线后无需改动即可恢复。
+
+### 6.5 故障排查
+
+- **"No sessions found in the specified time window"** — 选择的 trace 时间窗口内没有匹配的 Strands span(常见于刚部署、还没产生用户会话或选了未来日期)。扩大时间窗口或先在聊天机器人里跑几个真实 turn 再生成。
+- **CORS / Failed to fetch** — 已修复;若再次出现,确认管理员控制台 CloudFront 已失效缓存(`aws cloudfront create-invalidation --distribution-id ...`)且新 bundle 已上线。
+- **A/B 启动 409 Conflict** — 同一个 agentType 已经有 RUNNING 测试,先 Stop 旧的再启动新的。
 
 ---
 

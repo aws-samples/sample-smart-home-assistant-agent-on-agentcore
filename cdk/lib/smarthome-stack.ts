@@ -528,6 +528,50 @@ export class SmartHomeStack extends cdk.Stack {
     kbResource.addMethod("GET", adminIntegration, authMethodOptions);
     kbResource.addMethod("POST", adminIntegration, authMethodOptions);
 
+    // Optimization routes — see docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
+    // Uses plain apigw.Integration + ONE wildcard lambda:InvokeFunction
+    // permission on /optimization/* so the admin Lambda's resource policy
+    // grows by ~800 bytes total (not ~5-7 KB for per-method auto-permissions).
+    // See §8.10 for the 20 KB cap background.
+    const optIntegration = new apigw.Integration({
+      type: apigw.IntegrationType.AWS_PROXY,
+      integrationHttpMethod: "POST",
+      uri: `arn:aws:apigateway:${this.region}:lambda:path/2015-03-31/functions/${adminLambda.functionArn}/invocations`,
+    });
+    adminLambda.addPermission("AdminApiOptimizationInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${adminApi.restApiId}/*/*/optimization/*`,
+    });
+
+    const optRoot = adminApi.root.addResource("optimization");
+    const recsRes = optRoot.addResource("recommendations");
+    recsRes.addMethod("GET", optIntegration, authMethodOptions);
+    recsRes.addMethod("POST", optIntegration, authMethodOptions);
+    const recIdRes = recsRes.addResource("{recId}");
+    recIdRes.addMethod("GET", optIntegration, authMethodOptions);
+    recIdRes.addMethod("DELETE", optIntegration, authMethodOptions);
+    recIdRes.addResource("apply").addMethod("POST", optIntegration, authMethodOptions);
+
+    const bundlesRes = optRoot.addResource("bundles");
+    bundlesRes.addMethod("GET", optIntegration, authMethodOptions);
+    bundlesRes.addMethod("POST", optIntegration, authMethodOptions);
+    const bundleArnRes = bundlesRes.addResource("{bundleArn}");
+    bundleArnRes.addMethod("GET", optIntegration, authMethodOptions);
+    bundleArnRes.addMethod("DELETE", optIntegration, authMethodOptions);
+
+    const abRes = optRoot.addResource("ab-tests");
+    abRes.addMethod("GET", optIntegration, authMethodOptions);
+    abRes.addMethod("POST", optIntegration, authMethodOptions);
+    const abIdRes = abRes.addResource("{testId}");
+    abIdRes.addMethod("GET", optIntegration, authMethodOptions);
+    abIdRes.addResource("stop").addMethod("POST", optIntegration, authMethodOptions);
+
+    // Global A/B routing toggle — see spec
+    // 2026-05-17-agentcore-optimization-target-based-design.md §4.1.
+    const abToggleRes = optRoot.addResource("ab-toggle");
+    abToggleRes.addMethod("GET", optIntegration, authMethodOptions);
+    abToggleRes.addMethod("PUT", optIntegration, authMethodOptions);
+
     // NOTE: Browser-session + workspace-file probing does NOT get its own
     // API Gateway path because the admin Lambda's auto-generated resource
     // policy is already at the 20 KB cap (see the similar note for prompt
@@ -541,6 +585,31 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock-agentcore:StopRuntimeSession",
         "bedrock-agentcore:ListActors",
         "bedrock-agentcore:ListMemoryRecords",
+      ],
+      resources: ["*"],
+    }));
+
+    // AgentCore Optimization (preview) — recommendations, configuration bundles, A/B tests.
+    // Resource-level conditions are not yet supported by the preview service; tighten when GA ships.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock-agentcore:StartRecommendation",
+        "bedrock-agentcore:GetRecommendation",
+        "bedrock-agentcore:ListRecommendations",
+        "bedrock-agentcore:DeleteRecommendation",
+        "bedrock-agentcore:CreateABTest",
+        "bedrock-agentcore:GetABTest",
+        "bedrock-agentcore:UpdateABTest",
+        "bedrock-agentcore:ListABTests",
+        "bedrock-agentcore:DeleteABTest",
+        "bedrock-agentcore-control:CreateConfigurationBundle",
+        "bedrock-agentcore-control:UpdateConfigurationBundle",
+        "bedrock-agentcore-control:GetConfigurationBundle",
+        "bedrock-agentcore-control:GetConfigurationBundleVersion",
+        "bedrock-agentcore-control:ListConfigurationBundles",
+        "bedrock-agentcore-control:ListConfigurationBundleVersions",
+        "bedrock-agentcore-control:DeleteConfigurationBundle",
+        "bedrock-agentcore-control:UpdateGatewayTarget",
       ],
       resources: ["*"],
     }));
@@ -575,6 +644,9 @@ export class SmartHomeStack extends cdk.Stack {
         "cognito-idp:ListUsers",
         "cognito-idp:AdminListGroupsForUser",
         "cognito-idp:AdminCreateUser",
+        // Set the user's password as Permanent right after AdminCreateUser
+        // so they can sign in directly without a forced password change.
+        "cognito-idp:AdminSetUserPassword",
         "cognito-idp:AdminAddUserToGroup",
         "cognito-idp:AdminRemoveUserFromGroup",
         "cognito-idp:AdminDeleteUser",

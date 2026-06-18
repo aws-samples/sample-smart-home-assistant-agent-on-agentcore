@@ -14,6 +14,8 @@ from boto3.dynamodb.conditions import Key
 
 from agent_prompt_defaults import DEFAULTS as PROMPT_DEFAULTS
 
+import optimization  # AgentCore Optimization handlers; see optimization.py
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -668,9 +670,10 @@ def _resolve_user_for_session(session_id: str, kind: str) -> str:
 
 def create_cognito_user(event):
     """POST /users with body {action: 'create', email}.
-    Uses AdminCreateUser with the default invitation flow — Cognito emails the
-    user a temporary password and they set their own on first sign-in. Same
-    effect as clicking 'Create user' in the Cognito User Pool console."""
+    Creates the user with MessageAction=SUPPRESS (no invite email), then
+    immediately sets a randomly generated 16-char permanent password. The
+    password is returned in the response — admin shows it once to the
+    user, who can sign in directly without a forced password change."""
     if not COGNITO_USER_POOL_ID:
         return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
     body = json.loads(event.get("body") or "{}")
@@ -678,6 +681,29 @@ def create_cognito_user(event):
     if not email or "@" not in email:
         return response(400, {"error": "Valid email required"})
     try:
+        # 16-char password mixing upper / lower / digit / symbol — satisfies
+        # any reasonable Cognito password policy without a custom check.
+        import secrets, string
+        alphabet_upper = string.ascii_uppercase
+        alphabet_lower = string.ascii_lowercase
+        alphabet_digit = string.digits
+        alphabet_symbol = "!@#$%^&*"
+        # Guarantee at least one of each class, then fill with mixed chars.
+        guaranteed = [
+            secrets.choice(alphabet_upper),
+            secrets.choice(alphabet_lower),
+            secrets.choice(alphabet_digit),
+            secrets.choice(alphabet_symbol),
+        ]
+        pool = alphabet_upper + alphabet_lower + alphabet_digit + alphabet_symbol
+        rest = [secrets.choice(pool) for _ in range(12)]
+        chars = guaranteed + rest
+        # Shuffle (Fisher-Yates via secrets.randbelow).
+        for i in range(len(chars) - 1, 0, -1):
+            j = secrets.randbelow(i + 1)
+            chars[i], chars[j] = chars[j], chars[i]
+        password = "".join(chars)
+
         resp = cognito_client.admin_create_user(
             UserPoolId=COGNITO_USER_POOL_ID,
             Username=email,
@@ -685,12 +711,23 @@ def create_cognito_user(event):
                 {"Name": "email", "Value": email},
                 {"Name": "email_verified", "Value": "true"},
             ],
-            DesiredDeliveryMediums=["EMAIL"],
+            MessageAction="SUPPRESS",
+        )
+        cognito_client.admin_set_user_password(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=email,
+            Password=password,
+            Permanent=True,
         )
         u = resp.get("User", {})
         return response(200, {
             "username": u.get("Username"),
-            "status": u.get("UserStatus"),
+            "email": email,
+            # Status will be CONFIRMED after AdminSetUserPassword(Permanent=True),
+            # but the AdminCreateUser response captured the pre-set value.
+            # Return CONFIRMED explicitly so the UI doesn't have to refresh.
+            "status": "CONFIRMED",
+            "password": password,
         })
     except cognito_client.exceptions.UsernameExistsException:
         return response(409, {"error": f"User {email} already exists"})
@@ -2173,6 +2210,12 @@ def handler(event, context):
     # the Agent Prompt tab doesn't need new API Gateway methods (the admin
     # Lambda's resource policy is already near the 20 KB cap).
     if resource == "/skills" and method == "GET":
+        qs = event.get("queryStringParameters") or {}
+        if qs.get("tenantEnv") == "1":
+            import tenant_env
+            if qs.get("userId"):
+                return tenant_env.get_tenant_env(event)
+            return tenant_env.list_tenant_envs(event)
         return list_skills(event)
     if resource == "/skills" and method == "POST":
         body_obj = json.loads(event.get("body") or "{}")
@@ -2183,16 +2226,28 @@ def handler(event, context):
         return list_users(event)
     if resource == "/skills/{userId}/{skillName}" and method == "GET":
         sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk == "__tenant_env__":
+            import tenant_env
+            return tenant_env.get_tenant_env({**event, "queryStringParameters": {
+                "tenantEnv": "1",
+                "userId": (event.get("pathParameters") or {}).get("userId", ""),
+            }})
         if sk.startswith("__prompt_"):
             return get_prompt_record(event)
         return get_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "PUT":
         sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk == "__tenant_env__":
+            import tenant_env
+            return tenant_env.put_tenant_env(event)
         if sk.startswith("__prompt_"):
             return save_prompt_record(event)
         return update_skill(event)
     if resource == "/skills/{userId}/{skillName}" and method == "DELETE":
         sk = (event.get("pathParameters") or {}).get("skillName", "")
+        if sk == "__tenant_env__":
+            import tenant_env
+            return tenant_env.delete_tenant_env(event)
         if sk.startswith("__prompt_"):
             return delete_prompt_record(event)
         return delete_skill(event)
@@ -2247,5 +2302,49 @@ def handler(event, context):
             return start_kb_sync(event)
         else:
             return response(400, {"error": f"Unknown KB action: {action}"})
+
+    # Optimization routes — see docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
+    # Uses one wildcard lambda:InvokeFunction permission on /optimization/* (set in CDK)
+    # so adding methods here doesn't grow the Lambda resource policy.
+    #
+    # Wrap dispatch in a try/except: optimization handlers throw on
+    # boto3 ParamValidationError before they reach their own ClientError
+    # branches, which yields a bare 500 with no CORS headers (browser
+    # surfaces it as a generic CORS error, masking the real cause).
+    if resource.startswith("/optimization/"):
+        try:
+            if resource == "/optimization/ab-toggle" and method == "GET":
+                return optimization.get_ab_toggle(event)
+            if resource == "/optimization/ab-toggle" and method == "PUT":
+                return optimization.put_ab_toggle(event)
+            if resource == "/optimization/recommendations" and method == "GET":
+                return optimization.list_recommendations(event)
+            if resource == "/optimization/recommendations" and method == "POST":
+                return optimization.start_recommendation(event)
+            if resource == "/optimization/recommendations/{recId}" and method == "GET":
+                return optimization.get_recommendation(event)
+            if resource == "/optimization/recommendations/{recId}" and method == "DELETE":
+                return optimization.delete_recommendation(event)
+            if resource == "/optimization/recommendations/{recId}/apply" and method == "POST":
+                return optimization.apply_recommendation(event)
+            if resource == "/optimization/bundles" and method == "GET":
+                return optimization.list_bundles(event)
+            if resource == "/optimization/bundles" and method == "POST":
+                return optimization.create_bundle(event)
+            if resource == "/optimization/bundles/{bundleArn}" and method == "GET":
+                return optimization.get_bundle_versions(event)
+            if resource == "/optimization/bundles/{bundleArn}" and method == "DELETE":
+                return optimization.delete_bundle(event)
+            if resource == "/optimization/ab-tests" and method == "GET":
+                return optimization.list_ab_tests(event)
+            if resource == "/optimization/ab-tests" and method == "POST":
+                return optimization.start_ab_test(event)
+            if resource == "/optimization/ab-tests/{testId}" and method == "GET":
+                return optimization.get_ab_test(event)
+            if resource == "/optimization/ab-tests/{testId}/stop" and method == "POST":
+                return optimization.stop_ab_test(event)
+        except Exception as e:  # noqa: BLE001 — surface error with CORS so browser shows it
+            logger.exception("Optimization handler error")
+            return optimization._resp(500, {"error": type(e).__name__, "message": str(e)})
 
     return response(400, {"error": f"Unknown route: {method} {resource}"})

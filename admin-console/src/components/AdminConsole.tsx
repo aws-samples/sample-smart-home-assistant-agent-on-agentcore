@@ -43,6 +43,23 @@ import {
   getAgentPrompts,
   saveAgentPrompt,
   deleteAgentPrompt,
+  startRecommendation,
+  listRecommendations,
+  getRecommendation,
+  deleteRecommendation,
+  applyRecommendation,
+  listBundles,
+  listABTests,
+  startABTest,
+  stopABTest,
+  getABToggle,
+  setABToggle,
+  OptAgentType,
+  OptRecommendation,
+  OptBundle,
+  OptABTestSummary,
+  OptABExecutionStatus,
+  OptABToggle,
   RegistryRecord,
   SkillItem,
   SkillInput,
@@ -58,6 +75,7 @@ import {
   AgentType,
   PromptRecord,
 } from '../api/adminApi';
+import Link from '@cloudscape-design/components/link';
 import Alert from '@cloudscape-design/components/alert';
 import Badge from '@cloudscape-design/components/badge';
 import CloudscapeBox from '@cloudscape-design/components/box';
@@ -72,12 +90,14 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
 import Textarea from '@cloudscape-design/components/textarea';
+import Toggle from '@cloudscape-design/components/toggle';
 import Modal from '@cloudscape-design/components/modal';
 import { getConfig } from '../config';
 import { getCurrentUserEmail } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
+import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
 import architectureDiagram from '../assets/architecture.drawio.png';
 
 export type ActiveTab =
@@ -94,6 +114,7 @@ export type ActiveTab =
   | 'guardrails'
   | 'observability'
   | 'evaluations'
+  | 'optimization'
   | 'knowledgeBase';
 
 interface ActorRow {
@@ -627,8 +648,14 @@ const PromptEditorCard: React.FC<PromptEditorCardProps> = ({
             </details>
           )}
 
-          <Alert type="info" header={t('prompts.evoCardTitle')}>
-            {t('prompts.evoCardComingSoon')}
+          <Alert type="info" header={t('prompts.optimizationCardTitle')}>
+            {t('prompts.optimizationCardDesc')}{' '}
+            <Link onFollow={(e) => {
+              e.preventDefault();
+              window.location.hash = '#/optimization';
+            }} href="#/optimization">
+              {t('prompts.optimizationCardLink')}
+            </Link>
           </Alert>
         </SpaceBetween>
       </Container>
@@ -1314,6 +1341,521 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
 };
 
 // ---------------------------------------------------------------------------
+// Optimization Tab — AgentCore Optimization (recommendations, bundles, A/B).
+// See docs/superpowers/specs/2026-05-17-agentcore-optimization-target-based-design.md
+// for the target-based redesign (replaces the original config-bundle path).
+// ---------------------------------------------------------------------------
+
+const EVALUATORS = [
+  { value: 'arn:aws:bedrock-agentcore:::evaluator/Builtin.GoalSuccessRate', label: 'GoalSuccessRate' },
+  { value: 'arn:aws:bedrock-agentcore:::evaluator/Builtin.Helpfulness', label: 'Helpfulness' },
+  { value: 'arn:aws:bedrock-agentcore:::evaluator/Builtin.Correctness', label: 'Correctness' },
+];
+
+// AgentTypes the redesigned UI exposes. Voice was removed because the
+// optimization gateway proxies HTTP only — voice traffic stays on its
+// dedicated runtime via WSS direct-to-runtime. See spec §2.3.
+type OptUiAgentType = 'text' | 'tool_desc';
+
+interface OptimizationTabProps {
+  error: string;
+  success: string;
+  setError: (m: string) => void;
+  setSuccess: (m: string) => void;
+  cognitoUsers: CognitoUserInfo[];
+}
+
+const OptimizationTab: React.FC<OptimizationTabProps> = ({
+  error, success, setError, setSuccess, cognitoUsers,
+}) => {
+  const { t } = useI18n();
+  const [scope, setScope] = useState<string>('__global__');
+  const [agentType, setAgentType] = useState<OptUiAgentType>('text');
+  const [previewUnavailable, setPreviewUnavailable] = useState(false);
+
+  const [recs, setRecs] = useState<OptRecommendation[]>([]);
+  const [bundles, setBundles] = useState<OptBundle[]>([]);
+  const [tests, setTests] = useState<OptABTestSummary[]>([]);
+  const [toggle, setToggle] = useState<OptABToggle>({ enabled: false });
+  const [toggleSaving, setToggleSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [showGenModal, setShowGenModal] = useState(false);
+  const [showABModal, setShowABModal] = useState(false);
+  const [selectedRec, setSelectedRec] = useState<OptRecommendation | null>(null);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [r, b, ab, tg] = await Promise.all([
+        listRecommendations(scope),
+        listBundles(scope, agentType as OptAgentType),
+        listABTests(),
+        getABToggle(),
+      ]);
+      setRecs(r);
+      setBundles(b);
+      setTests(ab);
+      setToggle(tg);
+      setPreviewUnavailable(false);
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      if (msg.includes('AgentCoreOptimizationUnavailable')) {
+        setPreviewUnavailable(true);
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [scope, agentType, setError]);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Polling: refresh non-terminal rows every 10s.
+  useEffect(() => {
+    const transient = ['NOT_STARTED', 'PAUSED', 'RUNNING'] as const;
+    const hasTransient =
+      recs.some((r) => r.status === 'PENDING' || r.status === 'IN_PROGRESS') ||
+      tests.some((t) => (transient as readonly OptABExecutionStatus[]).includes(t.executionStatus));
+    if (!hasTransient) return;
+    const id = setInterval(() => { loadAll(); }, 10000);
+    return () => clearInterval(id);
+  }, [recs, tests, loadAll]);
+
+  if (previewUnavailable) {
+    return (
+      <Alert type="warning" header={t('optimization.previewUnavailableTitle')}>
+        {t('optimization.previewUnavailableDesc')}
+      </Alert>
+    );
+  }
+
+  const scopeOptions = [
+    { value: '__global__', label: t('prompts.globalScope') },
+    ...cognitoUsers.filter((u) => !!u.email).map((u) => ({ value: u.email!, label: u.email! })),
+  ];
+
+  const hasRunningTest = tests.some((t) => t.executionStatus === 'RUNNING' || t.executionStatus === 'NOT_STARTED' || t.executionStatus === 'PAUSED');
+
+  const onToggleAB = async (next: boolean) => {
+    if (!next && hasRunningTest) {
+      const ok = window.confirm(t('optimization.abToggle.confirmStop'));
+      if (!ok) return;
+    }
+    setToggleSaving(true);
+    try {
+      const r = await setABToggle(next);
+      setSuccess(next
+        ? t('optimization.abToggle.enabledMsg')
+        : (r.stoppedTestId
+            ? t('optimization.abToggle.disabledStoppedMsg').replace('{id}', r.stoppedTestId)
+            : t('optimization.abToggle.disabledMsg'))
+      );
+      await loadAll();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setToggleSaving(false);
+    }
+  };
+
+  return (
+    <SpaceBetween size="l">
+      <EntryEnvironmentTable />
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
+
+      <Container header={
+        <CloudscapeHeader variant="h2" description={t('optimization.desc')}>
+          {t('optimization.title')}
+        </CloudscapeHeader>
+      }>
+        <SpaceBetween size="m">
+          {/* A/B Routing toggle (global). When ON, chatbot text traffic
+              flows through the dedicated optimization gateway and can be
+              split between control + treatment runtime endpoints. When
+              OFF, traffic routes 100% to the control endpoint. */}
+          <FormField label={t('optimization.abToggle.label')}
+                     description={t('optimization.abToggle.helpText')}>
+            <SpaceBetween size="xs" direction="horizontal">
+              <Toggle checked={toggle.enabled} disabled={toggleSaving}
+                      onChange={({ detail }) => onToggleAB(detail.checked)}>
+                {toggle.enabled ? t('optimization.abToggle.on') : t('optimization.abToggle.off')}
+              </Toggle>
+              {toggle.updatedAt && toggle.updatedBy && (
+                <CloudscapeBox color="text-status-inactive" fontSize="body-s">
+                  {t('optimization.abToggle.lastChangedBy')
+                    .replace('{at}', new Date(toggle.updatedAt).toLocaleString())
+                    .replace('{by}', toggle.updatedBy)}
+                </CloudscapeBox>
+              )}
+            </SpaceBetween>
+          </FormField>
+
+          <SpaceBetween size="s" direction="horizontal">
+            <FormField label={t('optimization.scope')}>
+              <div style={{ minWidth: 240 }}>
+                <Select
+                  selectedOption={scopeOptions.find((o) => o.value === scope) ?? scopeOptions[0]}
+                  options={scopeOptions}
+                  onChange={({ detail }) => setScope(detail.selectedOption.value as string)}
+                />
+              </div>
+            </FormField>
+            <FormField label={t('optimization.agentType')}>
+              <SegmentedControl
+                selectedId={agentType}
+                options={[
+                  { id: 'text', text: t('prompts.textAgent') },
+                  { id: 'tool_desc', text: t('optimization.toolDesc') },
+                ]}
+                onChange={({ detail }) => setAgentType(detail.selectedId as OptUiAgentType)}
+              />
+            </FormField>
+          </SpaceBetween>
+        </SpaceBetween>
+      </Container>
+
+      <Container header={
+        <CloudscapeHeader variant="h2" actions={
+          <Button variant="primary" onClick={() => setShowGenModal(true)}>
+            {t('optimization.generate')}
+          </Button>
+        }>{t('optimization.recsTitle')}</CloudscapeHeader>
+      }>
+        <Table
+          loading={loading}
+          items={recs}
+          columnDefinitions={[
+            { id: 'id', header: t('optimization.col.name'), cell: (i: OptRecommendation) => i.recommendationId },
+            { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptRecommendation) => i.agentType },
+            { id: 'eval', header: t('optimization.col.evaluator'), cell: (i: OptRecommendation) => i.evaluatorArn.split('/').pop() || '' },
+            { id: 'status', header: t('optimization.col.status'), cell: (i: OptRecommendation) =>
+              <StatusIndicator type={i.status === 'COMPLETED' ? 'success' : i.status === 'FAILED' ? 'error' : 'in-progress'}>{i.status}</StatusIndicator>
+            },
+            { id: 'created', header: t('optimization.col.created'), cell: (i: OptRecommendation) => new Date(i.createdAt).toLocaleString() },
+            { id: 'applied', header: t('optimization.col.applied'), cell: (i: OptRecommendation) => i.appliedAt ? new Date(i.appliedAt).toLocaleString() : '—' },
+            { id: 'actions', header: '', cell: (i: OptRecommendation) =>
+              <SpaceBetween size="xs" direction="horizontal">
+                <Button onClick={async () => {
+                  try { setSelectedRec(await getRecommendation(i.recommendationId)); }
+                  catch (e: any) { setError(e.message); }
+                }}>{t('optimization.view')}</Button>
+                <Button onClick={async () => {
+                  if (!window.confirm(t('optimization.confirmDelete'))) return;
+                  try { await deleteRecommendation(i.recommendationId); setSuccess(t('optimization.deleted')); loadAll(); }
+                  catch (e: any) { setError(e.message); }
+                }}>{t('optimization.delete')}</Button>
+              </SpaceBetween>
+            },
+          ]}
+          empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.recsEmpty')}</CloudscapeBox>}
+        />
+      </Container>
+
+      {/* Tool description bundles — shown only when filter = tool_desc.
+          Includes the "A/B not automated yet" Alert explainer. */}
+      {agentType === 'tool_desc' && (
+        <>
+          <Alert type="info" header={t('optimization.toolDescAB.title')}>
+            {t('optimization.toolDescAB.body')}
+          </Alert>
+          <Container header={<CloudscapeHeader variant="h2">{t('optimization.bundlesTitle')}</CloudscapeHeader>}>
+            <Table
+              loading={loading}
+              items={bundles}
+              columnDefinitions={[
+                { id: 'name', header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
+                { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
+                { id: 'src', header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
+                { id: 'latest', header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
+                { id: 'created', header: t('optimization.col.created'), cell: (i: OptBundle) => new Date(i.createdAt).toLocaleString() },
+              ]}
+              empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.bundlesEmpty')}</CloudscapeBox>}
+            />
+          </Container>
+        </>
+      )}
+
+      {/* A/B Tests — only shown for the text agent (target-based routing
+          path). When the global toggle is OFF the Start button is
+          disabled. */}
+      {agentType === 'text' && (
+        <Container header={
+          <CloudscapeHeader variant="h2" actions={
+            <Button variant="primary"
+                    disabled={!toggle.enabled || hasRunningTest}
+                    onClick={() => setShowABModal(true)}>
+              {t('optimization.startAB')}
+            </Button>
+          }>{t('optimization.abTitle')}</CloudscapeHeader>
+        }>
+          {!toggle.enabled && (
+            <Alert type="info">
+              {t('optimization.abToggle.disabledStartHint')}
+            </Alert>
+          )}
+          <Table
+            loading={loading}
+            items={tests}
+            columnDefinitions={[
+              { id: 'id', header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
+              { id: 'status', header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
+                <StatusIndicator type={
+                  i.executionStatus === 'RUNNING' ? 'in-progress' :
+                  i.executionStatus === 'STOPPED' ? 'stopped' :
+                  'pending'
+                }>{i.executionStatus}</StatusIndicator>
+              },
+              { id: 'winner', header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
+              { id: 'auto', header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
+              { id: 'actions', header: '', cell: (i: OptABTestSummary) =>
+                <SpaceBetween size="xs" direction="horizontal">
+                  {i.executionStatus === 'RUNNING' && <Button onClick={async () => {
+                    try { await stopABTest(i.testId); setSuccess(t('optimization.stopped')); loadAll(); }
+                    catch (e: any) { setError(e.message); }
+                  }}>{t('optimization.stop')}</Button>}
+                </SpaceBetween>
+              },
+            ]}
+            empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.abEmpty')}</CloudscapeBox>}
+          />
+        </Container>
+      )}
+
+      {showGenModal && <GenerateRecommendationModal
+        scope={scope} agentType={agentType}
+        onClose={() => setShowGenModal(false)}
+        onSubmitted={() => { setShowGenModal(false); loadAll(); }}
+        setError={setError}
+      />}
+      {showABModal && <StartABTestModal
+        onClose={() => setShowABModal(false)}
+        onSubmitted={() => { setShowABModal(false); loadAll(); }}
+        setError={setError}
+      />}
+      {selectedRec && <RecommendationDetailDrawer
+        rec={selectedRec}
+        onClose={() => setSelectedRec(null)}
+        onApply={async () => {
+          try {
+            const r = await applyRecommendation(selectedRec.recommendationId);
+            // Target-based redesign: text/voice apply just writes the
+            // __prompt_*__ DDB row. tool_desc still creates a bundle.
+            if (r.appliedBundleVersionId) {
+              setSuccess(t('optimization.applyMessageToolDesc')
+                .replace('{version}', r.appliedBundleVersionId));
+            } else {
+              setSuccess(t('optimization.applyMessageTextOnly'));
+            }
+            setSelectedRec(null);
+            loadAll();
+          } catch (e: any) { setError(e.message); }
+        }}
+      />}
+    </SpaceBetween>
+  );
+};
+
+interface GenerateRecommendationModalProps {
+  scope: string;
+  agentType: OptUiAgentType;
+  onClose: () => void;
+  onSubmitted: () => void;
+  setError: (m: string) => void;
+}
+
+const GenerateRecommendationModal: React.FC<GenerateRecommendationModalProps> = ({
+  scope, agentType, onClose, onSubmitted, setError,
+}) => {
+  const { t } = useI18n();
+  const [evaluator, setEvaluator] = useState(EVALUATORS[0].value);
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000);
+  const [startTime, setStartTime] = useState(sevenDaysAgo.toISOString());
+  const [endTime, setEndTime] = useState(now.toISOString());
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    setSubmitting(true);
+    try {
+      // Lambda resolves the log group ARN from STS account + AWS_REGION
+      // (`aws/spans` is the well-known span log group), so we omit it.
+      await startRecommendation({
+        scope, agentType, evaluatorArn: evaluator, startTime, endTime,
+      });
+      onSubmitted();
+    } catch (e: any) { setError(e.message); }
+    finally { setSubmitting(false); }
+  };
+
+  return (
+    <Modal visible header={t('optimization.generate')} onDismiss={onClose}>
+      <SpaceBetween size="m">
+        <FormField label={t('optimization.evaluator')}>
+          <Select
+            selectedOption={EVALUATORS.find((e) => e.value === evaluator) || EVALUATORS[0]}
+            options={EVALUATORS}
+            onChange={({ detail }) => setEvaluator(detail.selectedOption.value as string)}
+          />
+        </FormField>
+        <FormField label={t('optimization.startTime')}>
+          <Input
+            value={startTime.slice(0, 16)}
+            onChange={({ detail }) => setStartTime(new Date(detail.value).toISOString())}
+            type="text"
+          />
+        </FormField>
+        <FormField label={t('optimization.endTime')}>
+          <Input
+            value={endTime.slice(0, 16)}
+            onChange={({ detail }) => setEndTime(new Date(detail.value).toISOString())}
+            type="text"
+          />
+        </FormField>
+        <SpaceBetween direction="horizontal" size="xs">
+          <Button variant="primary" loading={submitting} onClick={submit}>{t('optimization.submit')}</Button>
+          <Button onClick={onClose}>{t('optimization.cancel')}</Button>
+        </SpaceBetween>
+      </SpaceBetween>
+    </Modal>
+  );
+};
+
+interface StartABTestModalProps {
+  onClose: () => void;
+  onSubmitted: () => void;
+  setError: (m: string) => void;
+}
+
+const StartABTestModal: React.FC<StartABTestModalProps> = ({ onClose, onSubmitted, setError }) => {
+  const { t } = useI18n();
+  // Target-based A/B routing — variants reference runtime endpoint
+  // qualifiers via gateway targets. setup-agentcore.py provisions the
+  // two endpoints `control` and `treatment` at deploy time; admins can
+  // repoint `treatment` to a different runtime version via the
+  // `agentcore add runtime-endpoint` CLI to compare versions.
+  const ENDPOINTS = [
+    { value: 'control', label: 'control' },
+    { value: 'treatment', label: 'treatment' },
+  ];
+  const [controlEp, setControlEp] = useState('control');
+  const [treatmentEp, setTreatmentEp] = useState('treatment');
+  const [split, setSplit] = useState<'50-50' | '80-20' | '90-10'>('50-50');
+  const [duration, setDuration] = useState<1 | 3 | 7 | 14>(1);
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    if (controlEp === treatmentEp) {
+      setError(t('optimization.startAB.sameEndpointError'));
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const weights = split === '50-50' ? { control: 50, treatment: 50 }
+                    : split === '80-20' ? { control: 80, treatment: 20 }
+                    : { control: 90, treatment: 10 };
+      await startABTest({
+        agentType: 'text',
+        controlEndpoint: controlEp,
+        treatmentEndpoint: treatmentEp,
+        variantWeights: weights,
+        durationDays: duration,
+      });
+      onSubmitted();
+    } catch (e: any) { setError(e.message); }
+    finally { setSubmitting(false); }
+  };
+
+  return (
+    <Modal visible header={t('optimization.startAB')} onDismiss={onClose}>
+      <SpaceBetween size="m">
+        <FormField label={t('optimization.startAB.controlEndpoint')}>
+          <Select
+            selectedOption={ENDPOINTS.find((o) => o.value === controlEp) ?? ENDPOINTS[0]}
+            options={ENDPOINTS}
+            onChange={({ detail }) => setControlEp(detail.selectedOption.value as string)}
+          />
+        </FormField>
+        <FormField label={t('optimization.startAB.treatmentEndpoint')}>
+          <Select
+            selectedOption={ENDPOINTS.find((o) => o.value === treatmentEp) ?? ENDPOINTS[1]}
+            options={ENDPOINTS}
+            onChange={({ detail }) => setTreatmentEp(detail.selectedOption.value as string)}
+          />
+        </FormField>
+        <FormField label={t('optimization.split')}>
+          <SegmentedControl
+            selectedId={split}
+            options={[
+              { id: '50-50', text: '50/50' },
+              { id: '80-20', text: '80/20' },
+              { id: '90-10', text: '90/10 canary' },
+            ]}
+            onChange={({ detail }) => setSplit(detail.selectedId as '50-50' | '80-20' | '90-10')}
+          />
+        </FormField>
+        <FormField label={t('optimization.duration')}>
+          <Select
+            selectedOption={{ value: String(duration), label: `${duration}d` }}
+            options={[1, 3, 7, 14].map((d) => ({ value: String(d), label: `${d}d` }))}
+            onChange={({ detail }) => setDuration(Number(detail.selectedOption.value) as 1 | 3 | 7 | 14)}
+          />
+        </FormField>
+        <Alert type="info">{t('optimization.startAB.evaluatorsNote')}</Alert>
+        <SpaceBetween direction="horizontal" size="xs">
+          <Button variant="primary" loading={submitting} onClick={submit}
+                  disabled={!controlEp || !treatmentEp || controlEp === treatmentEp}>
+            {t('optimization.submit')}
+          </Button>
+          <Button onClick={onClose}>{t('optimization.cancel')}</Button>
+        </SpaceBetween>
+      </SpaceBetween>
+    </Modal>
+  );
+};
+
+interface RecommendationDetailDrawerProps {
+  rec: OptRecommendation;
+  onClose: () => void;
+  onApply: () => void;
+}
+
+const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({ rec, onClose, onApply }) => {
+  const { t } = useI18n();
+  return (
+    <Modal visible size="large" header={`${t('optimization.recDetail')} — ${rec.recommendationId}`} onDismiss={onClose}>
+      <SpaceBetween size="m">
+        <CloudscapeBox>
+          <strong>Agent:</strong> {rec.agentType} · <strong>Status:</strong> {rec.status}
+        </CloudscapeBox>
+        {rec.recommendedSystemPrompt && (
+          <FormField label={t('optimization.recommendedPrompt')}>
+            <pre style={{ background: '#151515', color: '#eaeaea', padding: 12, maxHeight: 360, overflow: 'auto' }}>
+              {rec.recommendedSystemPrompt}
+            </pre>
+          </FormField>
+        )}
+        {rec.tools && rec.tools.length > 0 && (
+          <Table
+            items={rec.tools}
+            columnDefinitions={[
+              { id: 'name', header: 'Tool', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.toolName },
+              { id: 'desc', header: 'Recommended description', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.recommendedToolDescription },
+            ]}
+          />
+        )}
+        {rec.errorMessage && <Alert type="error">{rec.errorMessage}</Alert>}
+        <SpaceBetween direction="horizontal" size="xs">
+          {rec.status === 'COMPLETED' && <Button variant="primary" onClick={onApply}>{t('optimization.apply')}</Button>}
+          <Button onClick={onClose}>{t('optimization.close')}</Button>
+        </SpaceBetween>
+      </SpaceBetween>
+    </Modal>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Main AdminConsole component
 // ---------------------------------------------------------------------------
 interface AdminConsoleProps {
@@ -1335,6 +1877,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   const [demotingUser, setDemotingUser] = useState('');
   const [deletingUser, setDeletingUser] = useState('');
   const [deleteUserTarget, setDeleteUserTarget] = useState<{ username: string; email: string } | null>(null);
+  const [createdUser, setCreatedUser] = useState<{ email: string; password: string } | null>(null);
   const { t } = useI18n();
 
   useEffect(() => {
@@ -1342,7 +1885,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'overview') {
+    if (activeTab === 'overview' || activeTab === 'identity') {
       loadCognitoUsers();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1354,10 +1897,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     clearMessages();
     setAddingUser(true);
     try {
-      await createCognitoUser(email);
-      setSuccess(t('overview.userCreated').replace('{email}', email));
+      const created = await createCognitoUser(email);
       setShowAddUserModal(false);
       setNewUserEmail('');
+      setCreatedUser({ email: created.email, password: created.password });
       await loadCognitoUsers();
     } catch (err: any) {
       setError(err.message);
@@ -1967,17 +2510,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
     }
   };
 
-  const handleAddUserScope = () => {
-    const newUser = prompt(t('skills.promptUserId'));
-    if (newUser && newUser.trim()) {
-      const trimmed = newUser.trim();
-      if (!userIds.includes(trimmed)) {
-        setUserIds((prev) => [...prev, trimmed]);
-      }
-      setSelectedUserId(trimmed);
-    }
-  };
-
   return (
     <div className="admin-console">
       {activeTab === 'overview' && (() => {
@@ -2041,14 +2573,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
                 variant="h2"
                 description={t('overview.usersDesc')}
                 actions={
-                  <SpaceBetween direction="horizontal" size="xs">
-                    <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
-                      {t('overview.refresh')}
-                    </Button>
-                    <Button variant="primary" onClick={() => { setNewUserEmail(''); setShowAddUserModal(true); }}>
-                      {t('overview.addUser')}
-                    </Button>
-                  </SpaceBetween>
+                  <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
+                    {t('overview.refresh')}
+                  </Button>
                 }
               >
                 {t('overview.usersTitle')}
@@ -2145,32 +2672,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
               {t('overview.deleteConfirmBody').replace('{email}', deleteUserTarget?.email || deleteUserTarget?.username || '')}
             </CloudscapeBox>
           </Modal>
-          <Modal
-            visible={showAddUserModal}
-            onDismiss={() => setShowAddUserModal(false)}
-            header={t('overview.addUserModalTitle')}
-            footer={
-              <CloudscapeBox float="right">
-                <SpaceBetween direction="horizontal" size="xs">
-                  <Button variant="link" onClick={() => setShowAddUserModal(false)}>
-                    {t('overview.cancel')}
-                  </Button>
-                  <Button variant="primary" loading={addingUser} onClick={handleCreateUser}>
-                    {t('overview.addUserSubmit')}
-                  </Button>
-                </SpaceBetween>
-              </CloudscapeBox>
-            }
-          >
-            <FormField label={t('overview.addUserEmailLabel')}>
-              <Input
-                value={newUserEmail}
-                placeholder={t('overview.addUserEmailPlaceholder')}
-                onChange={({ detail }) => setNewUserEmail(detail.value)}
-                onKeyDown={({ detail }) => { if (detail.key === 'Enter') handleCreateUser(); }}
-              />
-            </FormField>
-          </Modal>
         </SpaceBetween>
         );
       })()}
@@ -2178,7 +2679,21 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
       {activeTab === 'identity' && (
         <Table
           header={
-            <CloudscapeHeader variant="h2" description={t('identity.desc')}>
+            <CloudscapeHeader
+              variant="h2"
+              description={t('identity.desc')}
+              actions={
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
+                    {t('overview.refresh')}
+                  </Button>
+                  <Button variant="primary"
+                          onClick={() => { setNewUserEmail(''); setShowAddUserModal(true); }}>
+                    {t('overview.addUser')}
+                  </Button>
+                </SpaceBetween>
+              }
+            >
               {t('identity.title')}
             </CloudscapeHeader>
           }
@@ -2326,7 +2841,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
             options={userScopeOptions}
           />
         </div>
-        <Button onClick={handleAddUserScope}>{t('skills.addUser')}</Button>
         <div style={{ flex: 1 }} />
         <Button onClick={handleOpenRegistryModal}>{t('registry.addFromRegistry')}</Button>
         <Button variant="primary" onClick={handleCreate}>{t('skills.createSkill')}</Button>
@@ -2756,6 +3270,16 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
           error={error}
           success={success}
           clearMessages={clearMessages}
+          setError={setError}
+          setSuccess={setSuccess}
+          cognitoUsers={cognitoUsers}
+        />
+      )}
+
+      {activeTab === 'optimization' && (
+        <OptimizationTab
+          error={error}
+          success={success}
           setError={setError}
           setSuccess={setSuccess}
           cognitoUsers={cognitoUsers}
@@ -3442,6 +3966,74 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
           />
         );
       })()}
+
+      {/* Add User modal — shared across tabs (rendered once in Identity flow) */}
+      <Modal
+        visible={showAddUserModal}
+        onDismiss={() => setShowAddUserModal(false)}
+        header={t('overview.addUserModalTitle')}
+        footer={
+          <CloudscapeBox float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setShowAddUserModal(false)}>
+                {t('overview.cancel')}
+              </Button>
+              <Button variant="primary" loading={addingUser} onClick={handleCreateUser}>
+                {t('overview.addUserSubmit')}
+              </Button>
+            </SpaceBetween>
+          </CloudscapeBox>
+        }
+      >
+        <FormField label={t('overview.addUserEmailLabel')}>
+          <Input
+            value={newUserEmail}
+            placeholder={t('overview.addUserEmailPlaceholder')}
+            onChange={({ detail }) => setNewUserEmail(detail.value)}
+            onKeyDown={({ detail }) => { if (detail.key === 'Enter') handleCreateUser(); }}
+          />
+        </FormField>
+      </Modal>
+
+      {/* Show generated password after successful user creation */}
+      <Modal
+        visible={!!createdUser}
+        onDismiss={() => setCreatedUser(null)}
+        header={t('identity.userCreatedTitle')}
+        footer={
+          <CloudscapeBox float="right">
+            <Button variant="primary" onClick={() => setCreatedUser(null)}>
+              {t('overview.cancel')}
+            </Button>
+          </CloudscapeBox>
+        }
+      >
+        {createdUser && (
+          <SpaceBetween size="m">
+            <Alert type="warning">
+              {t('identity.userCreatedWarn')}
+            </Alert>
+            <FormField label={t('overview.colEmail')}>
+              <Input value={createdUser.email} readOnly />
+            </FormField>
+            <FormField label={t('identity.passwordLabel')}>
+              <SpaceBetween size="xs" direction="horizontal">
+                <div style={{ flex: 1, minWidth: 280 }}>
+                  <Input value={createdUser.password} readOnly />
+                </div>
+                <Button iconName="copy"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(createdUser.password)
+                            .then(() => setSuccess(t('identity.passwordCopied')))
+                            .catch(() => {});
+                        }}>
+                  {t('identity.copyPassword')}
+                </Button>
+              </SpaceBetween>
+            </FormField>
+          </SpaceBetween>
+        )}
+      </Modal>
     </div>
   );
 };
