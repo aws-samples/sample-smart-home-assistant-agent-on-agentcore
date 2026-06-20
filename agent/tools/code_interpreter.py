@@ -43,6 +43,25 @@ REGION_ENV = "AWS_REGION"
 IDENTIFIER_ENV = "AGENTCORE_CODE_INTERPRETER_IDENTIFIER"
 DEFAULT_IDENTIFIER = "aws.codeinterpreter.v1"
 
+# Run once per fresh sandbox (before any user code) to keep chart output clean.
+# The sandbox's only CJK font is DroidSansFallback (CJK-only, NO Latin/digits),
+# matplotlib 3.9 here does NOT do per-glyph fallback across font.sans-serif, and
+# the sandbox has no internet to fetch a combined font — so mixed CJK+Latin
+# chart text cannot be rendered. The skill therefore instructs the model to
+# write chart labels in English/ASCII (see SKILL.md); here we just suppress the
+# benign "Glyph missing" UserWarnings (e.g. if the model slips an emoji into a
+# title) so they don't clutter the streamed output. axes.unicode_minus=False
+# keeps the minus sign as ASCII '-'.
+_MPL_BOOTSTRAP = (
+    "import warnings as _w; _w.filterwarnings("
+    "'ignore', message='Glyph .* missing from font', category=UserWarning)\n"
+    "try:\n"
+    "    import matplotlib as _mpl\n"
+    "    _mpl.rcParams['axes.unicode_minus'] = False\n"
+    "except Exception:\n"
+    "    pass\n"
+)
+
 # Per-process cache: agent_session_id -> _Run. The runtime keeps the process
 # warm across turns of the same session, so the sandbox (and its variable
 # state) is reused until the AgentCore idle timeout reaps it.
@@ -126,6 +145,15 @@ def _get_run(user_id: str, agent_session_id: str) -> "_Run":
                 name=f"code-{agent_session_id[:20]}",
                 session_timeout_seconds=SESSION_TIMEOUT_S,
             )
+            # Configure matplotlib for CJK + clean output before any user code.
+            # Best-effort: a failure here must not block the actual run.
+            try:
+                client.invoke("executeCode", {
+                    "code": _MPL_BOOTSTRAP, "language": "python",
+                    "clearContext": False,
+                })
+            except Exception as e:
+                logger.warning("matplotlib bootstrap failed (non-fatal): %s", e)
         run = _Run(client, ddb_session_id=f"code-{int(now)}-{os.urandom(3).hex()}")
         _RUNS[agent_session_id] = run
     run.last_ts = now
