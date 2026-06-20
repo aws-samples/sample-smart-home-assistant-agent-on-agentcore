@@ -34,15 +34,32 @@ const ChartImage: React.FC<{ agentSessionId: string | null; relPath: string }> =
   useEffect(() => {
     if (!agentSessionId) return;
     let cancelled = false;
+    // The chart is written into /mnt/workspace by the agent invocation, but
+    // we read it from a SEPARATE InvokeAgentRuntimeCommand microVM. Session
+    // storage isn't always synced to the read side at the instant the DDB row
+    // (with charts[]) becomes visible to our poll, so a single fetch can race
+    // the write and return "not a regular file". Retry with backoff — the file
+    // reliably appears within a few seconds — and only surface an error once
+    // every attempt has been exhausted.
+    const delaysMs = [0, 1000, 2000, 3000, 5000];
     (async () => {
-      try {
-        const full = `${WORKSPACE_ROOT}/${agentSessionId}/${relPath}`;
-        const file = await fetchWorkspaceFile(agentSessionId, full);
+      const full = `${WORKSPACE_ROOT}/${agentSessionId}/${relPath}`;
+      let lastErr = 'chart load failed';
+      for (let i = 0; i < delaysMs.length; i++) {
+        if (delaysMs[i] > 0) {
+          await new Promise((r) => setTimeout(r, delaysMs[i]));
+        }
         if (cancelled) return;
-        setSrc(`data:${file.mime};base64,${file.base64}`);
-      } catch (e: any) {
-        if (!cancelled) setErr(e?.message ?? 'chart load failed');
+        try {
+          const file = await fetchWorkspaceFile(agentSessionId, full);
+          if (cancelled) return;
+          setSrc(`data:${file.mime};base64,${file.base64}`);
+          return;
+        } catch (e: any) {
+          lastErr = e?.message ?? 'chart load failed';
+        }
       }
+      if (!cancelled) setErr(lastErr);
     })();
     return () => { cancelled = true; };
   }, [agentSessionId, relPath]);
@@ -144,6 +161,15 @@ const CodeInterpreterTab: React.FC<{
     );
   }
 
+  // Charts must be read from the workspace of the session the run actually
+  // executed under — that path is recorded on the row as agentSessionId. The
+  // `agentSessionId` PROP is the CURRENT login's session id, which only
+  // matches the row for a run started in this very login; after any reload (or
+  // when viewing a row from an earlier login) it points at an empty/nonexistent
+  // workspace dir and every chart fetch fails with "not a regular file". Prefer
+  // the row's own id, falling back to the prop for older rows that lack it.
+  const chartSessionId = session.agentSessionId || agentSessionId;
+
   return (
     <SpaceBetween size="s">
       <Box variant="p">
@@ -153,7 +179,7 @@ const CodeInterpreterTab: React.FC<{
         <StatusIndicator type="error">{session.lastError}</StatusIndicator>
       )}
       {session.steps.map((s) => (
-        <StepCard key={s.index} step={s} agentSessionId={agentSessionId} />
+        <StepCard key={s.index} step={s} agentSessionId={chartSessionId} />
       ))}
     </SpaceBetween>
   );
