@@ -1074,6 +1074,9 @@ def main():
             "RuntimeSessionsTableName", "smarthome-runtime-sessions"
         )
         existing_env["RUNTIME_SESSIONS_TABLE_NAME"] = runtime_sessions_table
+        # Code Interpreter session table — execute_python writes per-run code +
+        # streamed output + chart paths here for the chatbot's CodeInterpreter tab.
+        existing_env["CODE_SESSIONS_TABLE_NAME"] = "smarthome-code-sessions"
         # Voice-mode env vars: Nova Sonic model + gateway ARN (welcome clip is
         # baked into the CodeZip, so no S3 path env var is needed).
         existing_env["NOVA_SONIC_MODEL_ID"] = "amazon.nova-2-sonic-v1:0"
@@ -1178,6 +1181,7 @@ def main():
                     "Resource": [
                         f"arn:aws:dynamodb:{REGION}:{account_id}:table/{skills_table}",
                         f"arn:aws:dynamodb:{REGION}:{account_id}:table/smarthome-browser-sessions",
+                        f"arn:aws:dynamodb:{REGION}:{account_id}:table/smarthome-code-sessions",
                         f"arn:aws:dynamodb:{REGION}:{account_id}:table/{runtime_sessions_table}",
                     ],
                 },

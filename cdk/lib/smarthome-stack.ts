@@ -297,6 +297,22 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // DynamoDB - Code Interpreter Sessions Table
+    // The execute_python tool appends one row per code-execution run with the
+    // submitted code, streamed stdout/stderr, and chart paths; the chatbot
+    // polls /sessions?action=code-active to render the CodeInterpreter tab
+    // live. Same shape/lifecycle as the browser-sessions table (ttl 1h).
+    // ========================
+    const codeSessionsTable = new dynamodb.Table(this, "CodeSessionsTable", {
+      tableName: "smarthome-code-sessions",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sessionId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
     // DynamoDB - Runtime Sessions Table
     // Tracks every AgentCore Runtime session (text + voice) per user. The
     // sort key embeds the sessionId so each new per-login session adds a row
@@ -345,6 +361,7 @@ export class SmartHomeStack extends cdk.Stack {
         AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
         COGNITO_USER_POOL_ID: userPool.userPoolId,
         BROWSER_SESSIONS_TABLE_NAME: browserSessionsTable.tableName,
+        CODE_SESSIONS_TABLE_NAME: codeSessionsTable.tableName,
         RUNTIME_SESSIONS_TABLE_NAME: runtimeSessionsTable.tableName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
@@ -352,6 +369,7 @@ export class SmartHomeStack extends cdk.Stack {
     skillsTable.grantReadWriteData(adminLambda);
     skillFilesBucket.grantReadWrite(adminLambda);
     browserSessionsTable.grantReadData(adminLambda);
+    codeSessionsTable.grantReadData(adminLambda);
     runtimeSessionsTable.grantReadWriteData(adminLambda);
 
     // ========================

@@ -55,6 +55,7 @@ const en: Record<string, string> = {
   'chat.group.knowledge': 'Knowledge base',
   'chat.group.weather': 'Weather',
   'chat.group.browser': 'Live web browser',
+  'chat.group.code': 'Code interpreter',
   'chat.group.vision': 'Image analysis',
 
   // Knowledge base chips (answered from enterprise KB documents)
@@ -80,6 +81,16 @@ const en: Record<string, string> = {
   'chat.chip.browser.wiki.prompt': 'Open the Python (programming language) Wikipedia page and summarize the first three sections.',
   'chat.chip.browser.httpbin': 'Show the browser\u2019s public IP',
   'chat.chip.browser.httpbin.prompt': 'Open https://httpbin.org/ip and tell me the IP address shown.',
+
+  // Code interpreter chips (code-interpreter skill \u2192 execute_python tool)
+  'chat.chip.code.energy': 'Analyze home energy & chart it',
+  'chat.chip.code.energy.prompt': 'Synthesize a realistic week of hourly energy readings for my LED matrix, rice cooker, fan, and oven, then with pandas compute daily kWh per device, and with matplotlib plot the daily total kWh trend and each device\u2019s share of total consumption. Run the code and show the charts.',
+  'chat.chip.code.thermostat': 'Optimize AC schedule for cheapest bill',
+  'chat.chip.code.thermostat.prompt': 'Given a time-of-use price curve (off-peak 0.12, mid 0.20, peak 0.38 $/kWh) and a comfort band of 22\u201326\u00b0C, compute an optimal 24-hour AC schedule that minimizes cost while staying in the comfort band. Run the code, report the % saved versus a flat always-on baseline, and plot the price curve with the chosen schedule.',
+  'chat.chip.code.anomaly': 'Detect anomalies in fan telemetry',
+  'chat.chip.code.anomaly.prompt': 'Synthesize 7 days of per-minute fan power readings with a few injected spikes, run rolling-window Z-score anomaly detection to flag abnormal points, and plot the series with the anomalies highlighted. Run the code and summarize when the anomalies occurred.',
+  'chat.chip.code.montecarlo': 'Simulate next month\u2019s electricity bill',
+  'chat.chip.code.montecarlo.prompt': 'Run a Monte-Carlo simulation (10,000 trials) of my next monthly electricity bill given uncertain daily usage across my devices, then plot the bill distribution histogram and report the mean and 90% confidence interval. Run the code and show the chart.',
 
   // Vision chip \u2014 reminds users they can attach an image via the paperclip
   'chat.chip.vision.describe': 'Describe an image (use paperclip first)',
@@ -119,6 +130,16 @@ const en: Record<string, string> = {
   'browserPanel.collapse': 'Collapse',
   'browserPanel.maximize': 'Maximize',
   'browserPanel.restore': 'Restore',
+
+  // Code Interpreter panel
+  'codePanel.title': 'CodeInterpreter',
+  'codePanel.task': 'Task',
+  'codePanel.step': 'Step',
+  'codePanel.running': 'Running',
+  'codePanel.done': 'Done',
+  'codePanel.failed': 'Failed',
+  'codePanel.executing': 'Executing…',
+  'codePanel.noActive': 'No code is running. Try a Code interpreter example to see live execution here.',
 };
 
 export default en;
