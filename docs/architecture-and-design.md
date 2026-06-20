@@ -29,6 +29,7 @@
 - [9.11. Browser Use — Live Agent Web Automation](#911-browser-use--live-agent-web-automation)
 - [9.12. Observability and AgentCore Online Evaluation](#912-observability-and-agentcore-online-evaluation)
 - [9.13. A2A Sample Agents & Text Agent A2A Client](#913-a2a-sample-agents--text-agent-a2a-client)
+- [9.14. Code Interpreter — Live Agent Code Execution](#914-code-interpreter--live-agent-code-execution)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -50,6 +51,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws`; finalized transcripts persisted to the same AgentCore Memory the text agent uses |
 | AI Agent (vision) | Claude Haiku 4.5 default (per-user multimodal model override) via Bedrock Converse | Captions uploaded images; captions injected as prior assistant messages so the text agent can answer follow-up questions |
 | AI Agent (browser) | `browser-use` + AgentCore Browser Tool (`aws.browser.v1`) driven by the text agent's `browse_web` Strands tool | Live web automation when the user asks something that needs a real site (product search, news, Wikipedia). Chatbot renders the live DCV stream + a Take/Release Control button; per-step screenshots land in the agent session's `/mnt/workspace/<sid>/browser/` (see §9.11). |
+| AI Agent (code) | `code-interpreter` + AgentCore Code Interpreter (`aws.codeinterpreter.v1`) driven by the text agent's `execute_python` Strands tool | Live Python execution for data analysis, optimization, simulation, and charting over smart-home telemetry. Chatbot's right-side panel auto-opens a "CodeInterpreter" tab rendering each block's code + streamed stdout/stderr + inline matplotlib charts; charts land in `/mnt/workspace/<sid>/code/` (see §9.14). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
 | Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Control Center with AWS-Console-style left-nav: Discover (Overview, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations). Supports light/dark themes. |
 | Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AgentCore Registry for curator approval |
@@ -772,8 +774,10 @@ agent/
 │   └── session.py        # AgentCoreMemorySessionManager factory (follows agentcore CLI pattern)
 ├── tools/
 │   ├── device_control.py # Fallback tool for local dev (Lambda invocation via boto3)
-│   └── browser_use.py    # `browse_web` Strands tool — drives AgentCore Browser Tool
-│                          # via `browser-use` + DCV (see §9.11)
+│   ├── browser_use.py    # `browse_web` Strands tool — drives AgentCore Browser Tool
+│   │                      # via `browser-use` + DCV (see §9.11)
+│   └── code_interpreter.py # `execute_python` Strands tool — runs Python in the
+│                          # AgentCore Code Interpreter sandbox (see §9.14)
 ├── skills/
 │   ├── led-control/      # SKILL.md with LED-specific instructions
 │   ├── rice-cooker-control/
@@ -782,7 +786,8 @@ agent/
 │   ├── all-devices-on/   # Discovers devices then turns them on sequentially
 │   ├── weather-lookup/   # Open-Meteo geocoder + forecast via http_request (reference skill)
 │   ├── user-feedback/    # Persists JSON records under /mnt/workspace/feedback/ via file_write (reference skill)
-│   └── browser-use/      # Auto-routes live-web queries to `browse_web` (see §9.11)
+│   ├── browser-use/      # Auto-routes live-web queries to `browse_web` (see §9.11)
+│   └── code-interpreter/ # Auto-routes data-analysis/charting to `execute_python` (see §9.14)
 ├── tests/                # pytest unit tests (excluded from CodeZip deploy)
 ├── pyproject.toml        # Dependencies for AgentCore CodeZip packaging
 └── Dockerfile            # Optional, for local container testing
@@ -3135,6 +3140,151 @@ Memory's long-term summaries — keyed on `actor_id = sub`, not
 Warmup requests additionally send `X-Amzn-Trace-Id: Root=...;Sampled=0`
 so the short-circuit `__warmup__` turn is not sampled into `aws/spans`
 alongside the real agent turns.
+
+### 9.14 Code Interpreter — Live Agent Code Execution
+
+The agent can write and run Python in a secure **AgentCore Code Interpreter**
+sandbox and stream the execution to the user step by step — code, streaming
+stdout/stderr, and any charts it produces. This is the data-analysis sibling of
+§9.11 Browser Use: a gated skill registers a Strands tool, the tool writes
+progress to a dedicated DynamoDB table, and the chatbot polls that table to
+render a live right-side panel tab.
+
+**User-visible flow.** The user clicks a "Code interpreter" suggestion chip
+(*"Analyze home energy & chart it"*, *"Optimize AC schedule for cheapest
+bill"*, *"Detect anomalies in fan telemetry"*, *"Simulate next month's
+electricity bill"*) or asks any question better answered by computing than by
+reasoning. The model writes Python and calls `execute_python(code, title)` once
+per block; the chatbot's right-side panel **auto-opens on the CodeInterpreter
+tab** and renders each block as a card (syntax-highlighted code → streamed
+output → inline charts). Variables persist across blocks within a turn
+(`clearContext: False`), so a multi-block analysis builds up naturally.
+
+**Architecture:**
+
+```
+┌──────── Chatbot (React) ──────────────────────────────┐
+│  ChatInterface                                        │
+│   └─ BrowserPanel (right column) — third tab:         │
+│       "CodeInterpreter" (rail + expanded tab)         │
+│       CodeInterpreterTab renders session.steps[]:     │
+│         • code  → ```python fence (react-markdown)    │
+│         • stdout/stderr → monospace, grows as polled  │
+│         • charts[] → <img>, loaded from workspace     │
+│  Polling loop (1.5 s while agent is typing):          │
+│    GET /sessions?action=code-active&userId=X →        │
+│    {sessionId, agentSessionId, status, title,         │
+│     steps:[{index,title,code,stdout,stderr,exitCode,  │
+│             charts:[relPath],status}]}                │
+│    On first row for the turn → auto-expand on "code". │
+│  Chart load (no Lambda hop):                          │
+│    InvokeAgentRuntimeCommand reads                    │
+│    /mnt/workspace/<row.agentSessionId>/<relPath>      │
+│    (NOT the current login session id — see below)     │
+└──────────────┬────────────────────────────────────────┘
+               │ GET /sessions?action=code-active  (admin Lambda)
+               │ SigV4 (Identity Pool creds) for chart reads
+               ▼
+┌──────── Text Agent Runtime (Strands) ──────────────────┐
+│  agent.py registers `execute_python` iff the user's    │
+│  effective skill set includes "code-interpreter".      │
+│  Closure pins user_id + agent_session_id (LLM can't    │
+│  forge them — same guarantee as browse_web).           │
+│                                                        │
+│  tools/code_interpreter.run_execute_python(code,title):│
+│    1. Reuse/lazily start a CodeInterpreter sandbox per │
+│       agent_session_id (cached, warm across a turn);   │
+│       a >90 s gap starts a fresh "run" (new DDB row).  │
+│    2. On a fresh sandbox, run a one-time bootstrap      │
+│       (suppress benign glyph warnings, ASCII minus).   │
+│    3. PutItem smarthome-code-sessions status="running" │
+│       with the new step appended.                      │
+│    4. client.invoke("executeCode", {code, language,    │
+│       clearContext:False}); drain response["stream"],  │
+│       accumulating structuredContent stdout/stderr;     │
+│       re-PutItem so the poll sees output grow.         │
+│    5. Scan the sandbox for new chart files, copy each  │
+│       into /mnt/workspace/<sid>/code/step-NNN.png and  │
+│       record charts[]; final PutItem status idle/failed.│
+│    6. Return a short text summary (stdout tail + chart │
+│       count) for the model to paraphrase.              │
+└──────────────┬────────────────────────────────────────┘
+               │ invoke_code_interpreter (data plane)
+               ▼
+┌──────── AgentCore Code Interpreter ────────────────────┐
+│  • aws.codeinterpreter.v1 — managed Python sandbox     │
+│    (pandas, numpy, matplotlib, scipy, scikit-learn,    │
+│     seaborn, statsmodels, plotly, sympy, PIL, openpyxl,│
+│     networkx pre-installed; NO internet).              │
+│  • Streaming results: response["stream"] yields events │
+│    with result.structuredContent (stdout/stderr/        │
+│    exitCode/executionTime) consumed incrementally.     │
+└────────────────────────────────────────────────────────┘
+```
+
+**Core design choices:**
+
+- **Gated skill = permission control.** `execute_python` is registered only
+  when `"code-interpreter"` is in the user's effective skill set (global +
+  per-user merge, §8.7). Admins grant/revoke it per user via the skills table,
+  exactly like `browser-use`.
+- **Per-run DynamoDB table, polled — no streaming side-channel.** The
+  AgentCore runtime's `/invocations` response streams the *model's* tokens, not
+  arbitrary tool side-channels, so the tool persists each block's code + output
+  to `smarthome-code-sessions` (PK `userId`, SK `sessionId`, `ttl` 1 h) and the
+  chatbot polls `GET /sessions?action=code-active` (admin Lambda public-dispatch
+  branch, piggybacked on `/sessions` to dodge the 20 KB resource-policy cap —
+  same trick as §9.11). stdout/stderr are capped (~10 KB/step) so the item
+  stays well under the 400 KB DynamoDB cap; charts are referenced by path, not
+  embedded.
+- **Charts read from the run's OWN session id, not the live login.** The agent
+  writes charts into `/mnt/workspace/<agent_session_id>/code/`, and the chatbot
+  reads them via `InvokeAgentRuntimeCommand` using **`row.agentSessionId`** —
+  the id the run executed under (recorded on the DDB row) — not the current
+  login's `loginSessionIdRef` (which regenerates a new
+  `user-session-{sub}-{ts}` on every page load, §8.9). Reading from the live id
+  works only for a run started in the current login; after any reload or when
+  viewing an older row it points at an empty workspace dir and every chart fetch
+  fails permanently with `not a regular file`. `CodeInterpreterTab` also retries
+  the fetch with backoff to absorb genuine read-after-write lag between the
+  writing invocation and the separate `InvokeAgentRuntimeCommand` read microVM.
+
+**Chart text must be ASCII — the sandbox cannot render CJK.** Investigation of
+the live `aws.codeinterpreter.v1` sandbox found that its only CJK-capable font
+is `DroidSansFallback`, which contains **no Latin/digit glyphs** (it is a pure
+CJK fallback font meant to be paired with a Latin font), matplotlib 3.9 there
+does **not** perform per-glyph fallback across `font.sans-serif` (verified:
+rendering "电" with `["DejaVu Sans","Droid Sans Fallback"]` is pixel-identical
+to DejaVu-only tofu), and the sandbox has **no internet** to install a combined
+font. Mixed CJK+Latin chart text is therefore unrenderable. The
+`code-interpreter` SKILL.md instructs the model to write all in-chart text
+(titles, axes, legends, annotations) in **English/ASCII regardless of
+conversation language**, while the chat reply stays in the user's language. The
+per-session matplotlib bootstrap only suppresses the benign "Glyph missing"
+warnings and forces an ASCII minus sign — the earlier attempt to fix CJK via a
+font-list fallback chain was proven ineffective and removed.
+
+**Deployment.** Fully wired into the standard `./deploy.sh` for a fresh account:
+
+- **CDK** (`cdk/lib/smarthome-stack.ts`): creates the `smarthome-code-sessions`
+  table, adds `CODE_SESSIONS_TABLE_NAME` to the admin Lambda env, and grants
+  the admin Lambda read access.
+- **`scripts/setup-agentcore.py`**: injects `CODE_SESSIONS_TABLE_NAME` into the
+  runtime env and adds the table to the runtime role's DynamoDB grant. The
+  Code Interpreter data-plane APIs are already covered by the runtime role's
+  `bedrock-agentcore:*` grant (§9.11), and the `/mnt/workspace` session-storage
+  mount it requires for chart files is already configured there.
+- **`scripts/07-seed-skills.sh`** (`seed-skills.py`): auto-discovers
+  `agent/skills/code-interpreter/SKILL.md` and seeds it as a `__global__` skill.
+  **The runtime loads skill instructions from DynamoDB, not from the CodeZip**,
+  so any SKILL.md edit only takes effect after re-running this step — re-seeding
+  skills is a required deploy step, not optional. (`deploy.sh` runs it as step 7
+  after `setup-agentcore.py` at step 6.)
+
+**Dependencies.** No new agent Python dependencies — the sandbox ships the
+scientific stack. The chatbot reuses its existing `react-markdown` dependency
+for code syntax rendering and the §9.10/§9.11 `InvokeAgentRuntimeCommand`
+workspace-read path for charts; no new frontend packages.
 
 ---
 
