@@ -837,16 +837,47 @@ def main():
     # --------------------------------------------------------
     print("\n[8/8] Deploying AgentCore resources...")
     r = run("agentcore deploy -y --verbose", cwd=project_dir)
-    if r.returncode != 0:
-        raise Exception("agentcore deploy failed — check log above")
 
     # --------------------------------------------------------
     # Post-deploy: fetch IDs from AgentCore CFN stack outputs
     # --------------------------------------------------------
+    # IMPORTANT: do NOT abort solely on a non-zero `agentcore deploy` return.
+    # The CLI exits non-zero on a benign POST-success quirk — it validates its
+    # local `agentcore/.cli/deployed-state.json` after the CloudFormation
+    # deploy completes and rejects empty gatewayArn fields ("Too small:
+    # expected string to have >=1 characters"). The AWS resources are fully
+    # deployed and the stack is CREATE/UPDATE_COMPLETE in that case; only the
+    # local state file failed schema validation. Aborting here used to skip ALL
+    # the post-deploy patching below (admin Lambda env, runtime env vars, IAM
+    # grants), leaving MEMORY_ID / REGISTRY_ID / AGENT_RUNTIME_ARN as
+    # PLACEHOLDER_SET_BY_SETUP_SCRIPT and breaking the admin console.
+    #
+    # So: treat the CFN stack as the source of truth. If the stack reached a
+    # *_COMPLETE state and exposes the expected outputs, continue regardless of
+    # the CLI return code; only fail when the stack itself is missing/failed.
     print("\nFetching deployed resource info...")
     cf = boto3.client("cloudformation", region_name=REGION)
     ac_stack_name = "AgentCore-smarthome-default"
-    ac_resp = cf.describe_stacks(StackName=ac_stack_name)
+    try:
+        ac_resp = cf.describe_stacks(StackName=ac_stack_name)
+        stack_status = ac_resp["Stacks"][0].get("StackStatus", "")
+    except Exception as e:
+        raise Exception(
+            f"agentcore deploy failed and stack {ac_stack_name} is not "
+            f"queryable ({e}). Check the deploy log above."
+        )
+    if not stack_status.endswith("_COMPLETE"):
+        raise Exception(
+            f"agentcore deploy failed — stack {ac_stack_name} status="
+            f"{stack_status}. Check the deploy log above."
+        )
+    if r.returncode != 0:
+        print(
+            f"  NOTE: `agentcore deploy` returned {r.returncode}, but stack "
+            f"{ac_stack_name} is {stack_status}. This is the known benign "
+            f"deployed-state.json validation quirk — continuing with "
+            f"post-deploy patching (env vars, IAM grants)."
+        )
     ac_outputs = {o["OutputKey"]: o["OutputValue"] for o in ac_resp["Stacks"][0].get("Outputs", [])}
 
     gateway_id = gateway_url = runtime_id = runtime_arn = ""
@@ -1307,12 +1338,28 @@ def main():
 
         print("\n  Deploying smarthomevoice runtime...")
         r = run("agentcore deploy -y --verbose", cwd=voice_project_dir)
-        if r.returncode != 0:
-            raise Exception("agentcore deploy smarthomevoice failed")
 
-        # Fetch voice runtime IDs from its CFN stack
+        # Same benign-non-zero handling as the text runtime (see the long note
+        # at the text `agentcore deploy` above): the CLI can exit non-zero on a
+        # post-success deployed-state.json validation quirk while the CFN stack
+        # is fully *_COMPLETE. Trust the stack, not the return code, so the
+        # voice env/IAM patching below still runs.
         voice_ac_stack = "AgentCore-smarthomevoice-default"
         voice_ac_resp = cf.describe_stacks(StackName=voice_ac_stack)
+        voice_stack_status = voice_ac_resp["Stacks"][0].get("StackStatus", "")
+        if not voice_stack_status.endswith("_COMPLETE"):
+            raise Exception(
+                f"agentcore deploy smarthomevoice failed — stack "
+                f"{voice_ac_stack} status={voice_stack_status}"
+            )
+        if r.returncode != 0:
+            print(
+                f"  NOTE: voice `agentcore deploy` returned {r.returncode}, but "
+                f"stack {voice_ac_stack} is {voice_stack_status} — known benign "
+                f"deployed-state.json quirk, continuing."
+            )
+
+        # Fetch voice runtime IDs from its CFN stack
         voice_ac_outputs = {o["OutputKey"]: o["OutputValue"]
                             for o in voice_ac_resp["Stacks"][0].get("Outputs", [])}
         for key, val in voice_ac_outputs.items():
@@ -1586,7 +1633,20 @@ def main():
                 if k.startswith("MEMORY_") and k.endswith("_ID"):
                     memory_id = v
                     break
-            admin_env = {
+            # Start from the Lambda's CURRENT env and merge our patched values
+            # on top, rather than replacing wholesale. update_function_configuration
+            # replaces the entire Variables map, so building a fresh dict would
+            # silently drop any CDK-provided var this block doesn't enumerate
+            # (e.g. CODE_SESSIONS_TABLE_NAME, future additions). Merging keeps
+            # CDK's vars and only overrides the post-deploy-resolved ones.
+            try:
+                current_admin_env = lambda_client.get_function_configuration(
+                    FunctionName="smarthome-admin-api"
+                ).get("Environment", {}).get("Variables", {})
+            except Exception:
+                current_admin_env = {}
+            admin_env = dict(current_admin_env)
+            admin_env.update({
                 "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
                 "AGENT_RUNTIME_ARN": runtime_arn,
                 "VOICE_AGENT_RUNTIME_ARN": voice_runtime_arn,
@@ -1598,7 +1658,7 @@ def main():
                 "RUNTIME_SESSIONS_TABLE_NAME": outputs.get(
                     "RuntimeSessionsTableName", "smarthome-runtime-sessions"
                 ),
-            }
+            })
             # Merge optimization infra ARNs (empty dict on failure → admin
             # Lambda will return 500 ConfigurationError on /optimization/*).
             admin_env.update(opt_infra)

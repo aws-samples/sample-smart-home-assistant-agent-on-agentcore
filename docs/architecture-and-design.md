@@ -1677,6 +1677,45 @@ A key design challenge: React apps need environment-specific values (API endpoin
 3. **Runtime**: `index.html` loads `<script src="/config.js">` before the app bundle
 4. **Result**: Same build artifact works for any environment
 
+**Post-deploy Lambda env patching (and the CDK-redeploy hazard).** Several
+backend env values are only known *after* `scripts/setup-agentcore.py` creates
+the AgentCore resources — `AGENT_RUNTIME_ARN`, `VOICE_AGENT_RUNTIME_ARN`,
+`MEMORY_ID`, `GATEWAY_ID`, `REGISTRY_ID`, `KB_ID`, optimization ARNs. The CDK
+stack seeds these as `PLACEHOLDER_SET_BY_SETUP_SCRIPT` (or omits them), and
+`setup-agentcore.py` patches the real values into the **admin** and
+**skill-erp** Lambdas via `update_function_configuration` at the end of its run.
+
+Two failure modes this creates, both fixed:
+
+- **Wholesale env replacement dropped CDK-provided vars.** The admin-Lambda
+  patch originally built a fresh `Variables` map; because
+  `update_function_configuration` *replaces* the entire map, any var only set by
+  CDK (e.g. `CODE_SESSIONS_TABLE_NAME`, §9.14) was silently dropped. The patch
+  now **reads the current env and merges** its resolved values on top, so
+  CDK-provided vars always survive (the user-init and skill-erp patches already
+  did this).
+- **Re-running `cdk deploy` after setup resets the patched Lambdas.** A later
+  `cdk deploy` (e.g. to add a table) rewrites the admin Lambda's env back to the
+  CDK placeholders. If `setup-agentcore.py` is not re-run — or it aborts before
+  its patch block — the admin console then shows `MEMORY_ID not configured`, an
+  A2A `ValidationException` (registryId `PLACEHOLDER...` fails the ARN-segment
+  regex), etc. Fix: re-run `setup-agentcore.py` (or at minimum its Lambda-patch
+  block) after any standalone `cdk deploy`.
+
+**`agentcore deploy` returns non-zero on a benign post-success quirk.** The
+AgentCore CLI validates its local `agentcore/.cli/deployed-state.json` *after*
+the CloudFormation deploy completes and rejects empty `gatewayArn` fields
+("Too small: expected string to have >=1 characters"), exiting non-zero even
+though the stack is `*_COMPLETE` and all resources are live. `setup-agentcore.py`
+used to `raise` on that return code, skipping **all** post-deploy patching
+(Lambda envs, runtime env vars, IAM grants) — the exact cause of the broken
+admin console above and of the text runtime losing its env. Both the text and
+voice deploy steps now **trust the CloudFormation stack status, not the CLI
+return code**: they continue when the stack reached a `*_COMPLETE` state and
+only abort when the stack itself is missing or failed. A fresh `./deploy.sh`
+therefore completes the post-deploy patching even when the CLI reports the
+benign state-file error.
+
 ### 9.4 Admin Console Design
 
 The admin console (branded **Agent Harness Control Center** / 智能体管控中心) is an independent React + TypeScript frontend app for managing the agent harness. It uses **Cloudscape Design System** (the same component library AWS uses for the AWS Console) with light/dark theme support; the main layout is Cloudscape `AppLayout` + `TopNavigation` + `SideNavigation`. Deployment follows the same pattern as the device simulator and chatbot (S3 + CloudFront + `config.js` injection).
@@ -2819,6 +2858,16 @@ commands useful for agent-runtime ops: list uploaded images under
 running processes, print agent env vars, tail recent logs, print
 Python + installed packages. Clicking a chip drops the command into the
 textarea so admins can tweak it before running.
+
+**Commands are wrapped in `bash -c`.** The runtime's
+`InvokeAgentRuntimeCommand` execs the command directly (no shell), so shell
+syntax — pipes, `&&`, redirects (`2>/dev/null`), globs — arrives as literal
+`argv` and fails (e.g. `ls -la /mnt/skills/ 2>/dev/null && echo --- && ...`
+made `ls` choke with `unrecognized option '---'`). `agentcoreCommand.ts`
+therefore wraps every command in `bash -c '<command>'` with POSIX-safe
+single-quoting before sending it, so the example chips and any admin-typed
+shell one-liners run as intended — the same trick
+`chatbot/src/api/workspaceFiles.ts` uses for its `ls`/`base64` probes.
 
 **Browser talks to AgentCore directly.** The modal calls
 `bedrock-agentcore:InvokeAgentRuntimeCommand` via
