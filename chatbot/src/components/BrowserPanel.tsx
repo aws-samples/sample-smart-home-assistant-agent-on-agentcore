@@ -20,15 +20,20 @@ import { useI18n } from '../i18n';
 import { BrowserSessionInfo } from '../api/browserSessions';
 import { listWorkspace, fetchWorkspaceFile, WorkspaceEntry } from '../api/workspaceFiles';
 import { takeControl, releaseControl } from '../api/browserControl';
+import { CodeSessionInfo } from '../api/codeSessions';
+import CodeInterpreterTab from './CodeInterpreterTab';
+
+export type PanelTab = 'live' | 'files' | 'code';
 
 interface Props {
   session: BrowserSessionInfo | null;
+  codeSession: CodeSessionInfo | null;
   agentSessionId: string | null;
   // Expanded state lives in the parent so the panel can reopen on a
   // specific tab without remounting the file-browser / DCV viewer.
   expanded: boolean;
-  activeTab: 'live' | 'files';
-  onExpand: (tab: 'live' | 'files') => void;
+  activeTab: PanelTab;
+  onExpand: (tab: PanelTab) => void;
   onCollapse: () => void;
 }
 
@@ -38,7 +43,7 @@ interface Props {
 // from collapsing — see ChatInterface state split between open/tab).
 interface RailProps {
   t: (k: string) => string;
-  onOpen: (tab: 'live' | 'files') => void;
+  onOpen: (tab: PanelTab) => void;
 }
 
 const CollapsedRail: React.FC<RailProps> = ({ t, onOpen }) => (
@@ -55,6 +60,7 @@ const CollapsedRail: React.FC<RailProps> = ({ t, onOpen }) => (
     {([
       { id: 'live', label: t('browserPanel.title') },
       { id: 'files', label: t('browserPanel.files') },
+      { id: 'code', label: t('codePanel.title') },
     ] as const).map(({ id, label }) => (
       <button
         key={id}
@@ -72,7 +78,7 @@ const CollapsedRail: React.FC<RailProps> = ({ t, onOpen }) => (
           cursor: 'pointer',
           fontSize: 14,
           color: 'var(--color-text-body-default, #16191f)',
-          borderBottom: id === 'live' ? '1px solid #e0e0e0' : 'none',
+          borderBottom: id !== 'code' ? '1px solid #e0e0e0' : 'none',
         }}
       >
         {label}
@@ -278,7 +284,7 @@ const DcvViewer: React.FC<DcvViewerProps> = ({ presignedUrl }) => {
   );
 };
 
-const BrowserPanel: React.FC<Props> = ({ session, agentSessionId, expanded, activeTab, onExpand, onCollapse }) => {
+const BrowserPanel: React.FC<Props> = ({ session, codeSession, agentSessionId, expanded, activeTab, onExpand, onCollapse }) => {
   const { t } = useI18n();
   const initialPath = useMemo(
     () => (agentSessionId ? `${WORKSPACE_ROOT}/${agentSessionId}` : WORKSPACE_ROOT),
@@ -484,10 +490,17 @@ const BrowserPanel: React.FC<Props> = ({ session, agentSessionId, expanded, acti
       <div style={{ marginTop: 12 }}>
         <Tabs
           activeTabId={activeTab}
-          onChange={({ detail }) => onExpand(detail.activeTabId as 'live' | 'files')}
+          onChange={({ detail }) => onExpand(detail.activeTabId as PanelTab)}
           tabs={[
             { id: 'live', label: t('browserPanel.liveView'), content: liveView },
             { id: 'files', label: t('browserPanel.files'), content: filesTab },
+            {
+              id: 'code',
+              label: t('codePanel.title'),
+              content: (
+                <CodeInterpreterTab session={codeSession} agentSessionId={agentSessionId} />
+              ),
+            },
           ]}
         />
       </div>

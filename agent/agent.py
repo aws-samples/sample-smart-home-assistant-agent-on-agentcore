@@ -468,6 +468,33 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                 wrapped_tools.append(browse_web)
                 logger.info(f"browse_web registered for actor={actor_id}")
 
+            # Code Interpreter tool: registered only when the effective skill
+            # set includes "code-interpreter". The closure pins user_id and
+            # agent_session_id (neither appears in the LLM-facing schema), so
+            # the model cannot forge identity — same guarantee as browse_web.
+            if "code-interpreter" in skill_names:
+                from tools.code_interpreter import run_execute_python as _run_exec
+                _ci_user = actor_id
+                _ci_session = session_id
+
+                @strands_tool
+                def execute_python(code: str, title: str = "") -> str:
+                    """Run Python in a secure sandbox and return its output.
+                    The user watches the code, streaming output, and any charts
+                    live in the CodeInterpreter side panel. State persists across
+                    calls in a turn, so build an analysis up over several blocks.
+                    Save matplotlib figures to a file to have them rendered
+                    inline. `title` is a short human label shown as the step
+                    header."""
+                    return _run_exec(
+                        code=code,
+                        title=title,
+                        user_id=_ci_user,
+                        agent_session_id=_ci_session,
+                    )
+                wrapped_tools.append(execute_python)
+                logger.info(f"execute_python registered for actor={actor_id}")
+
             # A2A tools — only when the deploy step patched the A2A envs into
             # this runtime. Any failure here is soft: log and continue with no
             # A2A tools so the main agent path stays healthy.

@@ -2114,10 +2114,15 @@ def list_a2a_agents(_event):
 # ---------------------------------------------------------------------------
 
 BROWSER_SESSIONS_TABLE_NAME = os.environ.get("BROWSER_SESSIONS_TABLE_NAME", "smarthome-browser-sessions")
+CODE_SESSIONS_TABLE_NAME = os.environ.get("CODE_SESSIONS_TABLE_NAME", "smarthome-code-sessions")
 
 
 def _browser_sessions_table():
     return dynamodb.Table(BROWSER_SESSIONS_TABLE_NAME)
+
+
+def _code_sessions_table():
+    return dynamodb.Table(CODE_SESSIONS_TABLE_NAME)
 
 
 def handle_browser_sessions_active(event):
@@ -2136,6 +2141,31 @@ def handle_browser_sessions_active(event):
     # side. ConsistentRead is required because the agent writes
     # `running` → `completed` within ~30s and eventually-consistent reads
     # were missing the brief running window entirely.
+    resp = t.query(
+        KeyConditionExpression=Key("userId").eq(user_id),
+        Limit=20,
+        ConsistentRead=True,
+    )
+    items = resp.get("Items", [])
+    if not items:
+        return response(200, {})
+    items.sort(key=lambda i: i.get("startedAt", ""), reverse=True)
+    return response(200, items[0])
+
+
+def handle_code_sessions_active(event):
+    """Return the most recent code-interpreter run for a user (any status).
+    Same contract as handle_browser_sessions_active: the chatbot polls this
+    while the agent is typing to render the CodeInterpreter tab live."""
+    params = event.get("queryStringParameters") or {}
+    user_id = params.get("userId", "")
+    if not user_id:
+        return response(400, {"error": "userId required"})
+    guard = _require_self_or_admin(event, user_id)
+    if guard:
+        return guard
+
+    t = _code_sessions_table()
     resp = t.query(
         KeyConditionExpression=Key("userId").eq(user_id),
         Limit=20,
@@ -2169,6 +2199,8 @@ def handler(event, context):
         action = (event.get("queryStringParameters") or {}).get("action", "")
         if action == "browser-active":
             return handle_browser_sessions_active(event)
+        if action == "code-active":
+            return handle_code_sessions_active(event)
         # Fall through to the admin-gated list_sessions below if no action=.
 
     if not check_admin(event):

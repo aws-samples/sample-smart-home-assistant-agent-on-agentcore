@@ -15,8 +15,9 @@ import { getIdToken, getAwsCredentials } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
 import { VoiceClient } from '../voice/VoiceClient';
 import { signedInvocationsFetch, signedGatewayInvocationsFetch, presignWsUrl } from '../voice/sigv4';
-import BrowserPanel from './BrowserPanel';
+import BrowserPanel, { PanelTab } from './BrowserPanel';
 import { fetchActiveBrowserSession, BrowserSessionInfo } from '../api/browserSessions';
+import { fetchActiveCodeSession, CodeSessionInfo } from '../api/codeSessions';
 import { getTenantMode } from '../api/tenantEnv';
 
 const CUSTOM_AUTH_HEADER = 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken';
@@ -88,7 +89,12 @@ const ChatInterface: React.FC = () => {
   // 720px view on that tab. The ✕ in the expanded panel only collapses
   // back to the rail, so the user always has one-click re-entry.
   const [browserPanelExpanded, setBrowserPanelExpanded] = useState(false);
-  const [browserPanelTab, setBrowserPanelTab] = useState<'live' | 'files'>('live');
+  const [browserPanelTab, setBrowserPanelTab] = useState<PanelTab>('live');
+  // Code Interpreter run for the current turn, polled the same way as the
+  // browser session. Unlike the browser panel, a fresh code run auto-expands
+  // the panel on the CodeInterpreter tab (requested behavior).
+  const [codeSession, setCodeSession] = useState<CodeSessionInfo | null>(null);
+  const codeAutoOpenedRef = useRef<string | null>(null);
   // Timestamp of the most recent sendMessage — used by the polling effect
   // to drop any DDB rows from previous runs (startedAt < this) so the
   // panel doesn't render a dead session while waiting for the new
@@ -282,6 +288,42 @@ const ChatInterface: React.FC = () => {
     return () => { cancelled = true; };
   }, [isTyping, browserUserId]);
 
+  // Poll /sessions?action=code-active alongside the browser poll. When a code
+  // run for the CURRENT turn appears, auto-open the panel on the
+  // CodeInterpreter tab (the user explicitly wanted the tab to pop open when
+  // the tool is invoked). We auto-open at most once per run id.
+  useEffect(() => {
+    if (!browserUserId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await fetchActiveCodeSession(browserUserId);
+        if (cancelled || !s) return;
+        // Drop rows from previous turns (5s grace for clock skew), same filter
+        // as the browser poll.
+        if (sendStartAtRef.current > 0 && s.startedAt) {
+          const startedMs = new Date(s.startedAt).getTime();
+          if (startedMs < sendStartAtRef.current - 5000) return;
+        }
+        setCodeSession(s);
+        if (codeAutoOpenedRef.current !== s.sessionId) {
+          codeAutoOpenedRef.current = s.sessionId;
+          setBrowserPanelTab('code');
+          setBrowserPanelExpanded(true);
+        }
+      } catch {
+        // Transient auth / network errors are ignored.
+      }
+    };
+    if (isTyping) {
+      tick();
+      const iv = window.setInterval(tick, 1500);
+      return () => { cancelled = true; window.clearInterval(iv); };
+    }
+    tick();
+    return () => { cancelled = true; };
+  }, [isTyping, browserUserId]);
+
   const addImages = useCallback((incoming: FileList | File[]) => {
     // Validate synchronously against the CURRENT state, then apply one
     // pure setState updater at the end. Mixing validation with the updater
@@ -351,6 +393,7 @@ const ChatInterface: React.FC = () => {
     // tool call's DDB write. The polling effect below also guards on
     // sendStartAt so returned rows older than this send are ignored.
     setBrowserSession(null);
+    setCodeSession(null);
     sendStartAtRef.current = Date.now();
 
     try {
@@ -655,6 +698,15 @@ const ChatInterface: React.FC = () => {
       ],
     },
     {
+      title: t('chat.group.code'),
+      chips: [
+        { label: t('chat.chip.code.energy'), prompt: t('chat.chip.code.energy.prompt') },
+        { label: t('chat.chip.code.thermostat'), prompt: t('chat.chip.code.thermostat.prompt') },
+        { label: t('chat.chip.code.anomaly'), prompt: t('chat.chip.code.anomaly.prompt') },
+        { label: t('chat.chip.code.montecarlo'), prompt: t('chat.chip.code.montecarlo.prompt') },
+      ],
+    },
+    {
       title: t('chat.group.vision'),
       chips: [
         { label: t('chat.chip.vision.describe'), prompt: t('chat.chip.vision.describe.prompt') },
@@ -834,6 +886,7 @@ const ChatInterface: React.FC = () => {
     </div>
       <BrowserPanel
         session={browserSession}
+        codeSession={codeSession}
         agentSessionId={browserAgentSessionId}
         expanded={browserPanelExpanded}
         activeTab={browserPanelTab}

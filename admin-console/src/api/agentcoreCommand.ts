@@ -27,6 +27,16 @@ export type ShellChunk =
   | { kind: 'exit'; exitCode: number; status: string }
   | { kind: 'error'; errorCode: string; errorMessage: string };
 
+// The runtime's InvokeAgentRuntimeCommand execs the command directly (no shell),
+// so shell syntax — pipes, &&, redirects, globs — arrives as literal argv and
+// fails (e.g. `ls --- : unrecognized option`). Wrap every command in `bash -c`
+// with POSIX-safe single-quoting so the example chips and any user-typed shell
+// one-liners run as intended. Same trick chatbot/src/api/workspaceFiles.ts uses.
+function wrapInShell(command: string): string {
+  const quoted = `'${command.replace(/'/g, `'"'"'`)}'`;
+  return `bash -c ${quoted}`;
+}
+
 /**
  * Async-iterable over normalised chunks. Caller drives with `for await`.
  * Yields at most one `start`, N stdout/stderr, and exactly one terminal
@@ -45,7 +55,7 @@ export async function* runCommand(
   const command = new sdk.InvokeAgentRuntimeCommandCommand({
     agentRuntimeArn: opts.agentRuntimeArn,
     runtimeSessionId: opts.runtimeSessionId,
-    body: { command: opts.command, timeout: opts.timeoutSeconds },
+    body: { command: wrapInShell(opts.command), timeout: opts.timeoutSeconds },
   });
   // Abort surfaces in multiple shapes depending on where in the pipeline the
   // cancel fires: AbortError from the fetch layer, DOMException named

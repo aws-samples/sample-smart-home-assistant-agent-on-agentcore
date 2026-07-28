@@ -55,6 +55,7 @@ const zh: Record<string, string> = {
   'chat.group.knowledge': '知识库',
   'chat.group.weather': '天气',
   'chat.group.browser': '实时网页浏览',
+  'chat.group.code': '代码执行器',
   'chat.group.vision': '图片分析',
 
   // 知识库
@@ -80,6 +81,16 @@ const zh: Record<string, string> = {
   'chat.chip.browser.wiki.prompt': '打开 Python (programming language) 的维基百科页面，总结前三节的内容。',
   'chat.chip.browser.httpbin': '查看浏览器公网 IP',
   'chat.chip.browser.httpbin.prompt': '打开 https://httpbin.org/ip，告诉我页面上显示的 IP 地址。',
+
+  // 代码执行器示例（code-interpreter 技能 → execute_python 工具）
+  'chat.chip.code.energy': '分析家庭能耗并绘图',
+  'chat.chip.code.energy.prompt': '请合成我家 LED 点阵、电饭煲、风扇和烤箱一周的逐小时能耗数据，用 pandas 计算每台设备的每日 kWh，再用 matplotlib 画出每日总能耗趋势图，以及各设备能耗占比图。执行代码并展示图表。',
+  'chat.chip.code.thermostat': '优化空调排程以最省电费',
+  'chat.chip.code.thermostat.prompt': '给定分时电价（谷段 0.12、平段 0.20、峰段 0.38 美元/kWh）和 22–26°C 的舒适区间，计算一份 24 小时空调最优排程，在满足舒适区间的前提下使电费最低。执行代码，报告相对“全天常开”基线节省的百分比，并把电价曲线与所选排程一起画出来。',
+  'chat.chip.code.anomaly': '检测风扇遥测中的异常',
+  'chat.chip.code.anomaly.prompt': '请合成 7 天风扇逐分钟功率读数并注入几个尖峰，用滑动窗口 Z-score 异常检测标记异常点，并把时间序列与高亮的异常点一起绘图。执行代码并总结异常发生的时间。',
+  'chat.chip.code.montecarlo': '蒙特卡洛模拟下月电费',
+  'chat.chip.code.montecarlo.prompt': '在各设备每日用电量不确定的情况下，对我下个月的电费做蒙特卡洛模拟（10000 次试验），画出电费分布直方图，并报告均值与 90% 置信区间。执行代码并展示图表。',
 
   // 图片分析
   'chat.chip.vision.describe': '识别图片（先点回形针）',
@@ -119,6 +130,16 @@ const zh: Record<string, string> = {
   'browserPanel.collapse': '折叠',
   'browserPanel.maximize': '最大化',
   'browserPanel.restore': '还原',
+
+  // 代码执行器面板
+  'codePanel.title': '代码执行器',
+  'codePanel.task': '任务',
+  'codePanel.step': '步骤',
+  'codePanel.running': '执行中',
+  'codePanel.done': '完成',
+  'codePanel.failed': '失败',
+  'codePanel.executing': '正在执行…',
+  'codePanel.noActive': '当前没有代码在运行。试试“代码执行器”示例，即可在此实时查看执行过程。',
 };
 
 export default zh;

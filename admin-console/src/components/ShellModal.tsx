@@ -27,15 +27,26 @@ const HISTORY_MAX = 20;
 // Example commands admins commonly need when inspecting an AgentCore
 // Runtime session. Keys map to i18n labels; the value is injected verbatim
 // into the command textarea when the chip is clicked.
+// Commands are verified against the live AgentCore Runtime container
+// (Amazon Linux microVM, agent code under /var/task, session storage at
+// /mnt/workspace). Notes on why these specific forms:
+//   - Skills live at /var/task/skills/, NOT /mnt/skills.
+//   - The shell subprocess does NOT inherit the agent's env vars, so reading
+//     them via `env` returns nothing — we read the agent process's env through
+//     /proc/<pid>/environ (pid via `pgrep -f opentelemetry-instrument`).
+//   - `pip list` only shows pip itself (deps are bundled, not pip-tracked), so
+//     we list the .dist-info dirs under /var/task for real package versions.
+//   - There is no local agent log file; runtime logs go to journald/CloudWatch,
+//     so "recent activity" tails journalctl.
 const EXAMPLE_COMMANDS: Array<{ key: string; command: string }> = [
   { key: 'shell.examples.listImages', command: 'ls -la /mnt/workspace/ 2>/dev/null | head -40' },
-  { key: 'shell.examples.showSkills', command: 'ls -la /mnt/skills/ 2>/dev/null && echo --- && cat /mnt/skills/*.md 2>/dev/null | head -200' },
-  { key: 'shell.examples.memUsage', command: 'cat /proc/meminfo | head -5 && echo --- && ps -o pid,rss,cmd -e --sort=-rss | head -10' },
-  { key: 'shell.examples.processes', command: 'ps auxf --no-headers | head -20' },
-  { key: 'shell.examples.diskUsage', command: 'df -h / /tmp /mnt 2>/dev/null && echo --- && du -sh /tmp/* 2>/dev/null | sort -rh | head -10' },
-  { key: 'shell.examples.envVars', command: "env | grep -iE 'AWS_|MEMORY_|GATEWAY_|AGENT_' | sort" },
-  { key: 'shell.examples.recentLogs', command: 'tail -60 /var/log/agent.log 2>/dev/null || journalctl -n 60 --no-pager 2>/dev/null || dmesg | tail -60' },
-  { key: 'shell.examples.pythonVer', command: 'python3 --version && pip list 2>/dev/null | head -20' },
+  { key: 'shell.examples.showSkills', command: 'ls /var/task/skills/ && echo --- && for d in /var/task/skills/*/SKILL.md; do echo "### $d"; sed -n "2,3p" "$d"; done | head -60' },
+  { key: 'shell.examples.memUsage', command: 'free -h && echo --- && ps -eo pid,rss,comm --sort=-rss | head -10' },
+  { key: 'shell.examples.processes', command: 'ps -eo pid,ppid,rss,comm --sort=-rss | head -20' },
+  { key: 'shell.examples.diskUsage', command: 'df -h / /tmp 2>/dev/null && echo --- && du -sh /tmp/* 2>/dev/null | sort -rh | head -10' },
+  { key: 'shell.examples.envVars', command: "P=$(pgrep -f opentelemetry-instrument | head -1); tr '\\0' '\\n' < /proc/$P/environ | grep -iE 'MODEL|MEMORY|TABLE|GATEWAY|REGISTRY|AWS_REGION' | sort" },
+  { key: 'shell.examples.recentLogs', command: 'journalctl -n 30 --no-pager 2>/dev/null | tail -20 || dmesg 2>&1 | tail -20' },
+  { key: 'shell.examples.pythonVer', command: "python3 --version && echo --- && ls -d /var/task/*.dist-info 2>/dev/null | xargs -n1 basename | sed 's/.dist-info//' | sort | head -30" },
 ];
 
 export interface ShellTarget {
