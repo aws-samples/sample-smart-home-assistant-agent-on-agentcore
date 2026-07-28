@@ -57,6 +57,7 @@ cdk/lambda/skill-erp-api/six.py
 venv/
 *.log
 logs/
+.hzh*
 
 # Tooling state
 .remember/
