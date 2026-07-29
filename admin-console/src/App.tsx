@@ -233,7 +233,7 @@ const App: React.FC = () => {
             items={navItems}
           />
         }
-        content={<AdminConsole activeTab={activeTab} setActiveTab={setActiveTab} />}
+        content={<AdminConsole activeTab={activeTab} setActiveTab={setActiveTab} theme={theme} />}
       />
     </>
   );

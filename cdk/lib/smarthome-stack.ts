@@ -353,7 +353,10 @@ export class SmartHomeStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/admin-api")),
-      timeout: cdk.Duration.seconds(30),
+      // 60s (not 30s) so the ops dashboard's Logs Insights polling has headroom;
+      // the effective ceiling is API Gateway's hard 29s integration timeout,
+      // which dashboard.py stays inside via SPANS_QUERY_BUDGET_SECONDS.
+      timeout: cdk.Duration.seconds(60),
       memorySize: 256,
       environment: {
         SKILLS_TABLE_NAME: skillsTable.tableName,
@@ -590,6 +593,23 @@ export class SmartHomeStack extends cdk.Stack {
     abToggleRes.addMethod("GET", optIntegration, authMethodOptions);
     abToggleRes.addMethod("PUT", optIntegration, authMethodOptions);
 
+    // Overview ops dashboard — GET /dashboard (spec 2026-07-29 §4).
+    // Reuses the same plain-Integration + single wildcard-permission trick as
+    // /optimization/* above: the admin Lambda's auto-generated resource policy
+    // is at the 20 KB cap, so a per-method auto-permission would break deploys.
+    const dashboardIntegration = new apigw.Integration({
+      type: apigw.IntegrationType.AWS_PROXY,
+      integrationHttpMethod: "POST",
+      uri: `arn:aws:apigateway:${this.region}:lambda:path/2015-03-31/functions/${adminLambda.functionArn}/invocations`,
+    });
+    adminLambda.addPermission("AdminApiDashboardInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      sourceArn: `arn:aws:execute-api:${this.region}:${this.account}:${adminApi.restApiId}/*/*/dashboard`,
+    });
+    adminApi.root
+      .addResource("dashboard")
+      .addMethod("GET", dashboardIntegration, authMethodOptions);
+
     // NOTE: Browser-session + workspace-file probing does NOT get its own
     // API Gateway path because the admin Lambda's auto-generated resource
     // policy is already at the 20 KB cap (see the similar note for prompt
@@ -647,6 +667,28 @@ export class SmartHomeStack extends cdk.Stack {
     // GetQueryResults doesn't support resource-level scoping.
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ["logs:GetQueryResults"],
+      resources: ["*"],
+    }));
+
+    // Overview ops dashboard (spec 2026-07-29). CloudWatch metric reads back
+    // the health + evaluation cards; CloudTrail supplies endpoint version
+    // change history; the AgentCore control reads supply live version/endpoint
+    // state. Note ListABTests + Logs Insights are already granted above.
+    // None of these APIs support resource-level scoping.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics",
+        "cloudtrail:LookupEvents",
+        // NOTE: these two authorize under the `bedrock-agentcore:` prefix even
+        // though the SDK exposes them on the `bedrock-agentcore-control`
+        // client. Granting the -control prefix alone yields AccessDenied
+        // (verified against the live runtime), so both are listed.
+        "bedrock-agentcore:ListAgentRuntimeEndpoints",
+        "bedrock-agentcore:ListAgentRuntimeVersions",
+        "bedrock-agentcore-control:ListAgentRuntimeEndpoints",
+        "bedrock-agentcore-control:ListAgentRuntimeVersions",
+      ],
       resources: ["*"],
     }));
 

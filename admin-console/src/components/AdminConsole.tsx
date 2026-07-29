@@ -98,6 +98,7 @@ import { useI18n } from '../i18n';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
 import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
+import { DashboardSection } from './Dashboard/DashboardSection';
 import architectureDiagram from '../assets/architecture.drawio.png';
 
 export type ActiveTab =
@@ -1861,8 +1862,11 @@ const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({
 interface AdminConsoleProps {
   activeTab: ActiveTab;
   setActiveTab: (t: ActiveTab) => void;
+  /** Drives chart colours — the dashboard palette has separate validated
+   *  steps per mode, so charts must re-colour with the theme toggle. */
+  theme: 'light' | 'dark';
 }
-const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) => {
+const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, theme }) => {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [userIds, setUserIds] = useState<string[]>(['__global__']);
   const [selectedUserId, setSelectedUserId] = useState('__global__');
@@ -2567,116 +2571,18 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
               </SpaceBetween>
             </Container>
           )}
-          <Table
-            header={
-              <CloudscapeHeader
-                variant="h2"
-                description={t('overview.usersDesc')}
-                actions={
-                  <Button iconName="refresh" onClick={() => loadCognitoUsers()}>
-                    {t('overview.refresh')}
-                  </Button>
-                }
-              >
-                {t('overview.usersTitle')}
-              </CloudscapeHeader>
-            }
-            loading={usersLoading}
-            loadingText={t('overview.loadingUsers')}
-            items={cognitoUsers}
-            trackBy="sub"
-            columnDefinitions={[
-              { id: 'email', header: t('overview.colEmail'), cell: (u) => u.email || u.username },
-              {
-                id: 'status',
-                header: t('overview.colStatus'),
-                cell: (u) => (
-                  <StatusIndicator type={u.status === 'CONFIRMED' ? 'success' : u.status === 'FORCE_CHANGE_PASSWORD' ? 'pending' : 'info'}>
-                    {u.status}
-                  </StatusIndicator>
-                ),
-              },
-              {
-                id: 'groups',
-                header: t('overview.colGroups'),
-                cell: (u) => (u.groups && u.groups.length > 0)
-                  ? <SpaceBetween direction="horizontal" size="xxs">{u.groups.map(g => <Badge key={g} color={g === 'admin' ? 'red' : 'blue'}>{g}</Badge>)}</SpaceBetween>
-                  : '-',
-              },
-              {
-                id: 'created',
-                header: t('overview.colCreated'),
-                cell: (u) => u.createdAt ? new Date(u.createdAt).toLocaleDateString() : '-',
-              },
-              {
-                id: 'actions',
-                header: t('overview.colActions'),
-                minWidth: 280,
-                cell: (u) => {
-                  const isAdmin = (u.groups || []).includes('admin');
-                  const isSelf = u.email && currentEmail && u.email.toLowerCase() === currentEmail.toLowerCase();
-                  return (
-                    <SpaceBetween direction="horizontal" size="xxs">
-                      {isAdmin ? (
-                        <Button
-                          disabled={!!isSelf}
-                          loading={demotingUser === u.username}
-                          onClick={() => handleRemoveAdmin(u.username, u.email)}
-                        >
-                          {t('overview.removeAdmin')}
-                        </Button>
-                      ) : (
-                        <Button
-                          loading={promotingUser === u.username}
-                          onClick={() => handleMakeAdmin(u.username, u.email)}
-                        >
-                          {t('overview.makeAdmin')}
-                        </Button>
-                      )}
-                      <Button
-                        disabled={!!isSelf}
-                        loading={deletingUser === u.username}
-                        onClick={() => setDeleteUserTarget({ username: u.username, email: u.email })}
-                      >
-                        {t('overview.deleteUser')}
-                      </Button>
-                    </SpaceBetween>
-                  );
-                },
-              },
-            ]}
-            variant="container"
-          />
-          <Modal
-            visible={!!deleteUserTarget}
-            onDismiss={() => setDeleteUserTarget(null)}
-            header={t('overview.deleteConfirmTitle')}
-            footer={
-              <CloudscapeBox float="right">
-                <SpaceBetween direction="horizontal" size="xs">
-                  <Button variant="link" onClick={() => setDeleteUserTarget(null)}>
-                    {t('overview.cancel')}
-                  </Button>
-                  <Button
-                    variant="primary"
-                    loading={!!deletingUser}
-                    onClick={handleDeleteUser}
-                  >
-                    {t('overview.deleteUser')}
-                  </Button>
-                </SpaceBetween>
-              </CloudscapeBox>
-            }
-          >
-            <CloudscapeBox variant="p">
-              {t('overview.deleteConfirmBody').replace('{email}', deleteUserTarget?.email || deleteUserTarget?.username || '')}
-            </CloudscapeBox>
-          </Modal>
+          {/* Agent ops dashboard — spec 2026-07-29. The Users table that used
+              to live here now belongs to Build > Identity, so Overview is
+              architecture + demos + operational metrics only. */}
+          <DashboardSection theme={theme} />
         </SpaceBetween>
         );
       })()}
 
       {activeTab === 'identity' && (
+        <SpaceBetween size="l">
+        {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+        {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
         <Table
           header={
             <CloudscapeHeader
@@ -2735,9 +2641,69 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab }) 
               header: t('users.colUserId'),
               cell: (u) => <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>,
             },
+            {
+              // Promote/demote/delete moved here from Overview (spec 2026-07-29):
+              // user management now lives entirely under Build > Identity.
+              id: 'actions',
+              header: t('overview.colActions'),
+              minWidth: 280,
+              cell: (u) => {
+                const isAdmin = (u.groups || []).includes('admin');
+                const isSelf = u.email && currentEmail && u.email.toLowerCase() === currentEmail.toLowerCase();
+                return (
+                  <SpaceBetween direction="horizontal" size="xxs">
+                    {isAdmin ? (
+                      <Button
+                        disabled={!!isSelf}
+                        loading={demotingUser === u.username}
+                        onClick={() => handleRemoveAdmin(u.username, u.email)}
+                      >
+                        {t('overview.removeAdmin')}
+                      </Button>
+                    ) : (
+                      <Button
+                        loading={promotingUser === u.username}
+                        onClick={() => handleMakeAdmin(u.username, u.email)}
+                      >
+                        {t('overview.makeAdmin')}
+                      </Button>
+                    )}
+                    <Button
+                      disabled={!!isSelf}
+                      loading={deletingUser === u.username}
+                      onClick={() => setDeleteUserTarget({ username: u.username, email: u.email })}
+                    >
+                      {t('overview.deleteUser')}
+                    </Button>
+                  </SpaceBetween>
+                );
+              },
+            },
           ]}
           empty={<CloudscapeBox textAlign="center" padding="m"><b>{t('users.noUsers')}</b></CloudscapeBox>}
         />
+        <Modal
+          visible={!!deleteUserTarget}
+          onDismiss={() => setDeleteUserTarget(null)}
+          header={t('overview.deleteConfirmTitle')}
+          footer={
+            <CloudscapeBox float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button variant="link" onClick={() => setDeleteUserTarget(null)}>
+                  {t('overview.cancel')}
+                </Button>
+                <Button variant="primary" loading={!!deletingUser} onClick={handleDeleteUser}>
+                  {t('overview.deleteUser')}
+                </Button>
+              </SpaceBetween>
+            </CloudscapeBox>
+          }
+        >
+          <CloudscapeBox variant="p">
+            {t('overview.deleteConfirmBody').replace('{email}', deleteUserTarget?.email || deleteUserTarget?.username || '')}
+          </CloudscapeBox>
+        </Modal>
+        </SpaceBetween>
       )}
 
       {activeTab === 'instanceType' && (
