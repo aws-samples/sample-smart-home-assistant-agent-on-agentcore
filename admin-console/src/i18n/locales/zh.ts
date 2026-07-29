@@ -25,10 +25,10 @@ const zh: Record<string, string> = {
   'tab.evaluations': '评估',
 
   // 概览
-  'overview.title': '智能家居助手 Agent',
-  'overview.desc': '基于 AWS 的 AI 智能家居设备控制',
-  'overview.intro': '一个全栈应用，演示 AI 代理如何通过自然语言和语音控制 IoT 设备。基于 Amazon Bedrock AgentCore、AWS IoT Core 和 Cognito 构建。',
-  'overview.diagramAlt': '智能家居助手架构图',
+  'overview.title': 'SuperApp Agent',
+  'overview.desc': '面向 C 端用户的统一对话入口',
+  'overview.intro': '面向 C 端用户的智能体：一个对话入口承载全部服务，从智能家居设备控制到企业技能调用。完全基于 Amazon Bedrock AgentCore 构建，实现多租户隔离与千人千面——每位用户拥有独立的模型、提示词、技能、记忆、知识库与工具权限，全部由本控制台统一管控。',
+  'overview.diagramAlt': 'SuperApp Agent 架构图',
   'overview.demosTitle': '演示入口',
   'overview.demosDesc': '在新标签页中打开三个终端用户应用。登录邮箱已预填，各应用首次进入时只需输入密码。',
   'overview.openChatbot': '打开聊天机器人',

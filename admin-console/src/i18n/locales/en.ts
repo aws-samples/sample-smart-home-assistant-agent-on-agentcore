@@ -25,10 +25,10 @@ const en: Record<string, string> = {
   'tab.evaluations': 'Evaluations',
 
   // Overview page
-  'overview.title': 'Smart Home Assistant Agent',
-  'overview.desc': 'AI-driven smart home device control on AWS',
-  'overview.intro': 'A full-stack application demonstrating AI agents that control IoT devices via natural language and voice. Built on Amazon Bedrock AgentCore, AWS IoT Core, and Cognito.',
-  'overview.diagramAlt': 'Smart Home Assistant architecture diagram',
+  'overview.title': 'SuperApp Agent',
+  'overview.desc': 'One conversational entry point for every consumer journey',
+  'overview.intro': 'A consumer-facing agent that turns a single conversation into the entry point for every service — from smart home device control to enterprise skills. Built entirely on Amazon Bedrock AgentCore, so every tenant runs isolated and every user gets a tailored experience: their own model, prompts, skills, memory, knowledge base and tool permissions, all governed from this console.',
+  'overview.diagramAlt': 'SuperApp Agent architecture diagram',
   'overview.demosTitle': 'Demos',
   'overview.demosDesc': 'Open the three end-user apps in a new tab. Your sign-in email is pre-filled — enter your password once on each.',
   'overview.openChatbot': 'Open Chatbot',
