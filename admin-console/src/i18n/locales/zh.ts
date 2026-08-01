@@ -653,9 +653,10 @@ const zh: Record<string, string> = {
   'dashboard.eval.chartNote': '折线图展示漂移绝对值最大的 {n} 个比例型评估器，其中漂移最大的一条以强调色显示，其余为灰色背景参照。Numerical 量表的评估器不与 0-1 指标同轴绘制。',
   'dashboard.eval.score': '评分',
   'dashboard.eval.evaluator': '评估器',
-  'dashboard.eval.average': '窗口均分',
-  'dashboard.eval.latest': '最新分',
-  'dashboard.eval.drift': '漂移（后半段 - 前半段）',
+  'dashboard.eval.average': '均分',
+  'dashboard.eval.latest': '最新',
+  'dashboard.eval.drift': '漂移',
+  'dashboard.eval.driftHint': '漂移 = 窗口后半段均分减去前半段均分。正值表示评分上升，负值表示下滑；绝对值超过 0.1 时高亮提示。',
   'dashboard.eval.numericalScale': 'Numerical 量表',
   'dashboard.eval.abTitle': 'A/B 测试对比评分',
   'dashboard.eval.abDesc': '按 online-evaluation-config 维度拆分的各变体评分。',
@@ -689,6 +690,14 @@ const zh: Record<string, string> = {
   'dashboard.satisfaction.latestEscalation': '最新升级率',
   'dashboard.satisfaction.escalationRate': '升级率',
   'dashboard.satisfaction.footnote': '本卡片全部为模拟数据。Chatbot 目前没有赞/踩交互，也没有 CSAT 推断与升级率埋点。最接近的真实替代指标是上方评估卡中的 Helpfulness 与 GoalSuccessRate，但它们并不等同于 CSAT。',
+
+  'dashboard.strip.tokens': 'Token 消耗合计',
+  'dashboard.strip.tokensHint': '窗口内输入与输出 Token 之和，来自 aws/spans 中 Strands chat span 的 gen_ai.usage.* 属性。',
+  'dashboard.strip.quality': '评估质量均分',
+  'dashboard.strip.qualityHint': '所有比例型（0-1）在线评估器的窗口均分。Numerical 量表的评估器（如 smarthome_SmartHomeQuality）不计入，避免把不同量纲混算成一个百分比。',
+  'dashboard.strip.driftAlerts': '{n} 个评估器下滑',
+  'dashboard.strip.version': '生产版本',
+  'dashboard.strip.noEvalData': '暂无评估数据',
 };
 
 export default zh;

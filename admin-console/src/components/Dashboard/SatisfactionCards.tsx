@@ -1,117 +1,95 @@
 import React from 'react';
-import Container from '@cloudscape-design/components/container';
-import Header from '@cloudscape-design/components/header';
 import Box from '@cloudscape-design/components/box';
-import ColumnLayout from '@cloudscape-design/components/column-layout';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import LineChart from '@cloudscape-design/components/line-chart';
-import { MOCK_SATISFACTION, MOCK_PROVENANCE } from './mockData';
+import { MOCK_SATISFACTION } from './mockData';
 import { ChartTheme, seriesColor } from './palette';
-import { DemoDataBadge } from './DemoDataBadge';
 import { ChartTableToggle } from './ChartTableToggle';
 import { useI18n } from '../../i18n';
 
 interface Props {
   theme: ChartTheme;
+  chartHeight: number;
 }
 
 /**
- * #6 User satisfaction — SIMULATED.
+ * #6 User satisfaction — SIMULATED. Panel body.
  *
- * Stat tiles for CSAT and the thumbs ratio (two-part shares never get a pie),
- * plus a SINGLE-series line for escalation rate — one series needs no legend
- * box, since the card title already names what is plotted.
+ * Three figures plus a SINGLE-series line for escalation rate — one series
+ * needs no legend box, since the panel title already names what is plotted.
+ * Two-part shares (thumbs up/down) are a ratio figure, never a pie.
  *
  * No real source: the chatbot ships no thumbs up/down control, and the
- * `user-feedback` skill only writes JSON files into the runtime's
- * /mnt/workspace/feedback/ which are readable via Remote Shell but not
- * aggregatable. The nearest real proxies are the online evaluators'
- * Helpfulness / GoalSuccessRate in the Evaluation card, which are NOT CSAT.
+ * user-feedback skill only writes JSON into the runtime's
+ * /mnt/workspace/feedback/ — readable via Remote Shell, not aggregatable. The
+ * nearest real proxies are Helpfulness / GoalSuccessRate in the evaluation
+ * panel, which are NOT CSAT.
  */
-export function SatisfactionCards({ theme }: Props) {
+export function SatisfactionCards({ theme, chartHeight }: Props) {
   const { t } = useI18n();
-  const accent = seriesColor(theme, 0);
   const s = MOCK_SATISFACTION;
   const totalVotes = s.thumbsUp + s.thumbsDown;
   const upPct = totalVotes ? (s.thumbsUp / totalVotes) * 100 : 0;
-
-  const escalationChart = (
-    <LineChart
-      height={200}
-      hideFilter
-      hideLegend
-      series={[
-        {
-          title: t('dashboard.satisfaction.escalationRate'),
-          type: 'line',
-          color: accent,
-          data: s.escalationTrend.map((p) => ({ x: p.day.slice(5), y: p.rate * 100 })),
-          valueFormatter: (v: number) => `${v.toFixed(1)}%`,
-        },
-      ]}
-      xScaleType="categorical"
-      xTitle={t('dashboard.token.xDay')}
-      yTitle="%"
-      ariaLabel={t('dashboard.satisfaction.escalationRate')}
-      yTickFormatter={(v: number) => `${v.toFixed(0)}%`}
-    />
-  );
+  const latest = s.escalationTrend[s.escalationTrend.length - 1].rate;
 
   return (
-    <Container
-      header={
-        <Header
-          variant="h3"
-          description={t('dashboard.satisfaction.desc')}
-          actions={<DemoDataBadge provenanceKey={MOCK_PROVENANCE.satisfaction} />}
-        >
-          {t('dashboard.satisfaction.title')}
-        </Header>
-      }
-    >
-      <SpaceBetween size="l">
-        <ColumnLayout columns={3} variant="text-grid">
-          <SpaceBetween size="xxs">
-            <Box variant="awsui-key-label">{t('dashboard.satisfaction.csat')}</Box>
-            <Box fontSize="display-l" fontWeight="bold">
-              {s.csat.toFixed(1)}
-              <Box variant="span" color="text-body-secondary" fontSize="heading-m">
-                {` / ${s.csatScale}`}
-              </Box>
+    <SpaceBetween size="s">
+      <SpaceBetween direction="horizontal" size="l">
+        <div>
+          <Box variant="awsui-key-label">{t('dashboard.satisfaction.csat')}</Box>
+          <Box fontSize="heading-xl" fontWeight="bold">
+            {s.csat.toFixed(1)}
+            <Box variant="span" color="text-body-secondary" fontSize="body-m" fontWeight="normal">
+              {` / ${s.csatScale}`}
             </Box>
-          </SpaceBetween>
-          <SpaceBetween size="xxs">
-            <Box variant="awsui-key-label">{t('dashboard.satisfaction.thumbs')}</Box>
-            <Box fontSize="display-l" fontWeight="bold">{`${upPct.toFixed(0)}%`}</Box>
-            <Box variant="small" color="text-body-secondary">
-              {`${s.thumbsUp} / ${s.thumbsDown}`}
-            </Box>
-          </SpaceBetween>
-          <SpaceBetween size="xxs">
-            <Box variant="awsui-key-label">{t('dashboard.satisfaction.latestEscalation')}</Box>
-            <Box fontSize="display-l" fontWeight="bold">
-              {`${(s.escalationTrend[s.escalationTrend.length - 1].rate * 100).toFixed(1)}%`}
-            </Box>
-          </SpaceBetween>
-        </ColumnLayout>
-
-        <ChartTableToggle
-          chart={escalationChart}
-          items={s.escalationTrend}
-          columns={[
-            { id: 'day', header: t('dashboard.token.xDay'), cell: (p) => p.day },
-            {
-              id: 'rate',
-              header: t('dashboard.satisfaction.escalationRate'),
-              cell: (p) => `${(p.rate * 100).toFixed(1)}%`,
-            },
-          ]}
-        />
-
-        <Box variant="small" color="text-body-secondary">
-          {t('dashboard.satisfaction.footnote')}
-        </Box>
+          </Box>
+        </div>
+        <div>
+          <Box variant="awsui-key-label">{t('dashboard.satisfaction.thumbs')}</Box>
+          <Box fontSize="heading-xl" fontWeight="bold">{`${upPct.toFixed(0)}%`}</Box>
+          <Box variant="small" color="text-body-secondary">{`${s.thumbsUp} / ${s.thumbsDown}`}</Box>
+        </div>
+        <div>
+          <Box variant="awsui-key-label">{t('dashboard.satisfaction.latestEscalation')}</Box>
+          <Box fontSize="heading-xl" fontWeight="bold">{`${(latest * 100).toFixed(1)}%`}</Box>
+        </div>
       </SpaceBetween>
-    </Container>
+
+      <ChartTableToggle
+        chart={
+          <LineChart
+            height={chartHeight}
+            hideFilter
+            hideLegend
+            series={[
+              {
+                title: t('dashboard.satisfaction.escalationRate'),
+                type: 'line',
+                color: seriesColor(theme, 0),
+                data: s.escalationTrend.map((p) => ({ x: p.day.slice(5), y: p.rate * 100 })),
+                valueFormatter: (v: number) => `${v.toFixed(1)}%`,
+              },
+            ]}
+            xScaleType="categorical"
+            yTitle="%"
+            ariaLabel={t('dashboard.satisfaction.escalationRate')}
+            yTickFormatter={(v: number) => `${v.toFixed(0)}%`}
+          />
+        }
+        items={s.escalationTrend}
+        columns={[
+          { id: 'day', header: t('dashboard.token.xDay'), cell: (p) => p.day },
+          {
+            id: 'rate',
+            header: t('dashboard.satisfaction.escalationRate'),
+            cell: (p) => `${(p.rate * 100).toFixed(1)}%`,
+          },
+        ]}
+      />
+
+      <Box variant="small" color="text-body-secondary">
+        {t('dashboard.satisfaction.footnote')}
+      </Box>
+    </SpaceBetween>
   );
 }

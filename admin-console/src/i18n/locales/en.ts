@@ -653,9 +653,10 @@ const en: Record<string, string> = {
   'dashboard.eval.chartNote': 'The chart plots the {n} ratio-scaled evaluators with the largest absolute drift. The highest-drift series wears the accent colour and the rest recede to grey as context. Numerical-scale evaluators are not plotted on the same axis as 0-1 metrics.',
   'dashboard.eval.score': 'Score',
   'dashboard.eval.evaluator': 'Evaluator',
-  'dashboard.eval.average': 'Window average',
+  'dashboard.eval.average': 'Avg',
   'dashboard.eval.latest': 'Latest',
-  'dashboard.eval.drift': 'Drift (2nd half - 1st half)',
+  'dashboard.eval.drift': 'Drift',
+  'dashboard.eval.driftHint': 'Drift = the second half of the window mean minus the first half. Positive means scores rose, negative means they fell; magnitudes above 0.1 are flagged.',
   'dashboard.eval.numericalScale': 'Numerical scale',
   'dashboard.eval.abTitle': 'A/B test comparison',
   'dashboard.eval.abDesc': 'Per-variant scores split by online-evaluation-config.',
@@ -689,6 +690,14 @@ const en: Record<string, string> = {
   'dashboard.satisfaction.latestEscalation': 'Latest escalation rate',
   'dashboard.satisfaction.escalationRate': 'Escalation rate',
   'dashboard.satisfaction.footnote': 'This entire card is simulated. The chatbot has no thumbs up/down control today, and there is no CSAT inference or escalation instrumentation. The closest real proxies are Helpfulness and GoalSuccessRate in the evaluation card above, which are not the same thing as CSAT.',
+
+  'dashboard.strip.tokens': 'Total tokens',
+  'dashboard.strip.tokensHint': 'Input plus output tokens in the window, from the gen_ai.usage.* attributes on Strands chat spans in aws/spans.',
+  'dashboard.strip.quality': 'Evaluation quality',
+  'dashboard.strip.qualityHint': 'Window mean across all ratio-scaled (0-1) online evaluators. Numerical-scale evaluators such as smarthome_SmartHomeQuality are excluded so different scales are never averaged into one percentage.',
+  'dashboard.strip.driftAlerts': '{n} evaluators declining',
+  'dashboard.strip.version': 'Live version',
+  'dashboard.strip.noEvalData': 'No evaluation data',
 };
 
 export default en;
