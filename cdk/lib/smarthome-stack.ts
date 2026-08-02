@@ -412,6 +412,13 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock-agentcore:UpdateGateway",
         "bedrock-agentcore:ListGatewayTargets",
         "bedrock-agentcore:GetGatewayTarget",
+        // REQUIRED for CreatePolicy/UpdatePolicy to succeed: the policy engine
+        // calls back into the gateway while attaching a policy. Without it the
+        // policy lands in UPDATE_FAILED ("Insufficient permissions to call
+        // gateway with ID ...") while the API still returns 200 — the gateway
+        // then serves ZERO tools to that user and the agent degrades to a
+        // polite refusal with nothing logged as an error anywhere.
+        "bedrock-agentcore:InvokeGateway",
       ],
       resources: ["*"],
     }));
@@ -731,6 +738,11 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock-agentcore:UpdateGateway",
         "bedrock-agentcore:ListGatewayTargets",
         "bedrock-agentcore:GetGatewayTarget",
+        // See the userInitLambda grant above — CreatePolicy/UpdatePolicy fail
+        // silently (policy → UPDATE_FAILED, gateway serves 0 tools, API still
+        // 200) without InvokeGateway. This is why only 5 of 30 users had
+        // working tool permissions.
+        "bedrock-agentcore:InvokeGateway",
       ],
       resources: ["*"],
     }));
