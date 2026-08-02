@@ -11,10 +11,11 @@
 4. [设备查询/控制的权限管控](#4-设备查询控制的权限管控)
 5. [Agent 质量评估 (Evaluation)](#5-agent-质量评估-evaluation)
 6. [自动化提示词与工具描述优化](#6-自动化提示词与工具描述优化)
-7. [模型后训练 (Post-training)](#7-模型后训练-post-training)
+7. [模型后训练 (Model Train)](#7-模型后训练-model-train)
 8. [Skill 发布/审批/下发](#8-skill-发布审批下发)
 9. [Session 调试与 Remote Shell](#9-session-调试与-remote-shell)
-10. [其他重要事项](#10-其他重要事项)
+10. [Agent 运维统计大屏与测试数据](#10-agent-运维统计大屏与测试数据)
+11. [其他重要事项](#11-其他重要事项)
 
 ---
 
@@ -125,8 +126,14 @@ bash scripts/06-deploy-agentcore.sh
 
 ### 3.3 管理员动作
 
-- **新增用户**: 由终端用户在 Chatbot 自助注册 (`AllowAdminCreateUserOnly=false`,邮箱验证)。Admin Console 只读 Cognito 用户列表,不做创建/重置。
-- **授予 admin 权限**: 在 Cognito 控制台把用户加入 `admin` 组,Admin Console 会在登录时校验 `cognito:groups` 声明。
+用户管理集中在 **Admin Console → Build → Identity** 页(2026-07-29 从 Overview 收敛过来):
+
+- **新增用户**: 终端用户可在 Chatbot 自助注册(`AllowAdminCreateUserOnly=false`,邮箱验证);管理员也可在 Identity 页点 `+ Add User`,系统生成一次性显示的永久密码(不发邀请邮件)。
+- **授予 / 撤销 admin 权限**: Identity 页每行的 `Make Admin` / `Remove Admin` 按钮,或在 Cognito 控制台改 `admin` 组。Admin Console 登录时校验 `cognito:groups` 声明。
+- **删除用户**: Identity 页 `Delete`(带确认弹窗)。用户相关数据(技能、记忆、KB 文档)会被遗留但不删除。
+- **自我保护**: 不能对自己降权或删除自己,这两个按钮会置灰。
+
+> **⚠️ 管理员新建的用户不会自动获得工具权限。** Cognito 的 PostConfirmation 触发器只在**自助注册**时触发,`AdminCreateUser` 不触发。所以在 Identity 页新建用户后,还要去 **Tool Policy** 页手动授权,并按 §4.2 的方法复核 Cedar 策略状态。
 
 ---
 
@@ -151,7 +158,7 @@ permit(
 
 **场景**: 新增用户 `carol@example.com`,只允许查询设备+KB,**不允许控制设备**。
 
-1. 登录 **Admin Console → Tool Access**。
+1. 登录 **Admin Console → Tool Policy**(旧称 Tool Access,同一页面)。
 2. 在用户表格找到 Carol,点击 `Edit`。
 3. 勾选 `discover_devices`、`query_knowledge_base`,**不勾** `control_device`。
 4. 点击 **Save Permissions**。Admin Lambda 会:
@@ -159,6 +166,27 @@ permit(
    - 重新扫描所有拥有 `control_device` 的用户,**不包含 Carol** 重写该工具的 `permit` 策略;
    - 对 `discover_devices` 和 `query_knowledge_base`,把 Carol 的 sub 加进 permit 白名单。
 5. **Mode Toggle**: Policy Engine 有 `ENFORCE` / `LOG_ONLY` 两档。调试时切到 LOG_ONLY 观察命中情况,正式切回 ENFORCE。
+
+> **⚠️ 保存成功不等于授权生效 —— 一定要复核策略状态。**
+>
+> 页面提示保存成功(API 返回 200)、DynamoDB 也写进去了、Cedar 语句里确实能看到该用户的 sub —— 但策略仍可能落到 `UPDATE_FAILED`。一旦如此,**Gateway 会对该用户返回 0 个工具**,Agent 表现为"抱歉,这超出我的知识范围",看起来像模型能力不足,实际是授权链断了。而且全链路没有任何报错:API 200、Cedar 内容正确、连 `DenyDecisions` 都是 0(请求根本没走到授权评估)。
+>
+> 复核方法(授权后等约 75 秒,`UPDATING` 是正常中间态,`UPDATE_FAILED` 不是):
+>
+> ```bash
+> python3 - <<'PY'
+> import boto3
+> c = boto3.client('bedrock-agentcore-control', region_name='us-west-2')
+> PE = 'SmartHomeUserPermissions-xxxxx'   # 换成实际 policyEngineId
+> for p in c.list_policies(policyEngineId=PE)['policies']:
+>     f = c.get_policy(policyEngineId=PE, policyId=p['policyId'])
+>     print(p['name'], f['status'], f.get('statusReasons'))
+> PY
+> ```
+>
+> 若看到 `Insufficient permissions to call gateway`,说明 admin Lambda 的 role 缺 `bedrock-agentcore:InvokeGateway`(2026-08-02 已在 CDK 中修复;历史部署需重新 `cdk deploy`)。修好后对受影响用户重新保存一次权限即可。
+>
+> 另外:**`tools/list` 不是可靠的排查手段** —— 它对策略已 ACTIVE、且实际能正常用工具的用户仍会间歇返回空列表。权威判断只能是真实发一次对话(例如让 Agent 开风扇)。
 
 ### 4.3 试用与演示
 
@@ -371,36 +399,86 @@ curl -s -o /dev/null -w "%{http_code}\n" "$AGENTCORE_GATEWAY_SMARTHOMEDEVICECONT
 
 ---
 
-## 10. 其他重要事项
+## 10. Agent 运维统计大屏与测试数据
 
-### 10.1 Knowledge Base 管理要点
+### 10.1 大屏在哪、看什么
+
+**Admin Console → Discover → Overview**,在 Demos 下方。按运维监控大屏布局:顶部一条六信号状态条(活跃会话 / TTFT P95 / 错误率 / QPS / Token 合计 / 评估质量均分),下面三行成对面板。
+
+- **时间范围**:24h / 7d / 30d 分段切换。
+- **成本归因维度**:按用户 / 按租户 / 按 Agent 模型。
+- **每张图都有表格视图**,数值不必靠悬浮才能看到。
+- **数据缓存 5 分钟**,右上角"刷新"可强制重新聚合。
+
+### 10.2 哪些是真实数据,哪些是模拟
+
+带 **演示数据** 标记的卡片是模拟值,点标记有说明"要变成真实数据需要什么":
+
+| 卡片 | 真实性 | 说明 |
+|------|--------|------|
+| 实时健康 | ✅ 真实 | 但 **活跃会话数是账号级**(CloudWatch 的 `ActiveSessionCount` 没有按 Runtime 拆分的维度) |
+| Token 成本趋势/归因 | ✅ Token 真实 | **美元成本无法按用户或 Agent 拆分**(Cost Explorer 只到账号级),所以只归因 Token 数量 |
+| 成本预算消耗 | ❌ 模拟 | 项目没有计费模块 |
+| 评估通过率与漂移 | ✅ 单变体真实 | **A/B 对比目前无数据**(配置存在但 A/B test 已 STOPPED),显示空状态而非编造曲线 |
+| 活跃版本与发布状态 | ✅ 版本真实 | **灰度阶段是推导值**,由 Gateway A/B test + `tenant_env` 推出,不是 AgentCore 原生字段 |
+| 用户满意度 | ❌ 模拟 | Chatbot 目前没有赞踩埋点;最接近的真实替代是评估卡里的 Helpfulness / GoalSuccessRate |
+
+> **口径提醒**:TTFT 不存在于 CloudWatch 指标中,只能从 `aws/spans` 里 Strands `chat` span 的 `gen_ai.server.time_to_first_token` 取,所以这部分加载要 5-20 秒(快指标先出,Token 卡片后填充)。错误率在窗口内无流量时显示 `--` 而不是 `0%`。
+
+### 10.3 生成测试数据
+
+刚部署完大屏是空的 —— 需要真实流量。用模拟用户脚本一条命令生成:
+
+```bash
+export SIM_USER_PASSWORD='SomeStrong#Pass1'
+
+python3 scripts/simulate-users.py setup       # 建 5 个 persona(幂等,可反复跑)
+python3 scripts/simulate-users.py run         # 轻量层,约 3.5 分钟
+python3 scripts/simulate-users.py run --heavy # 追加 code-interpreter + browser-use
+python3 scripts/simulate-users.py status
+python3 scripts/simulate-users.py teardown --yes
+```
+
+5 个 persona 各带不同模型 / 租户模式 / 场景侧重,所以归因图表会出现多行真实数据。测试用户走与聊天机器人完全相同的 SigV4 路径,产生的遥测与真实流量无法区分。
+
+- **安全**:仅限 `simuser+` 邮箱前缀,代码里有 guard 对其他邮箱抛异常,`teardown` 不会误删真实用户。
+- **等待**:跑完等两三分钟再看大屏(CloudWatch 摄取延迟 + 5 分钟缓存)。
+- `setup` 会自动等 Cedar 策略变成 ACTIVE 才返回 —— 见 §4.2 那个"保存成功不等于生效"的坑。
+
+细节见 [`scripts/sim/README.md`](../scripts/sim/README.md)。
+
+---
+
+## 11. 其他重要事项
+
+### 11.1 Knowledge Base 管理要点
 
 - **文档隔离**: `__shared__/` 对所有人可见,`{email}/` 仅该用户可见。上传时 Admin API 会同步写 `*.metadata.json` sidecar 作为元数据源。
 - **每次上传/删除后必须点 Sync**,触发 Bedrock `StartIngestionJob` 才会把新文档向量化(查 **Knowledge Base → Sync Status**)。
 - **`user_id` 防篡改**: Agent 用本地 wrapper 替换 MCP 的 `query_knowledge_base`,从 JWT 注入 `actor_id`,LLM 无法伪造他人身份。
 
-### 10.2 Agent Prompt 编辑的两个层级
+### 11.2 Agent Prompt 编辑的两个层级
 
 - Global + Per-user **additive** 拼接: `effective = global + "\n\n" + user`。
 - 文本 Agent 和语音 Agent 提示词**独立**(语音提示词包含 MCP 前缀的工具名 `SmartHomeDeviceDiscovery___discover_devices`),切勿把文本 prompt 直接复制到 voice 侧,否则工具路由失效。
 
-### 10.3 Voice Agent 的限制
+### 11.3 Voice Agent 的限制
 
 - Nova Sonic **单 turn 只能调一个工具**。多设备操作必须通过**复合工具** (`turn_on_all_devices`) 在 server 端打包。若需扩展 "晚餐模式" 等场景,按 `voice_session.py._build_turn_on_all_tool` 的模板封装。
 - `BidiAgent` 不支持 `AgentSkills` 插件,只能把**单个** operational skill (`all-devices-on`) 内联进 system prompt;太多 skill 会让 Nova Sonic 忽略工具。
 
-### 10.4 Memory 策略可选项
+### 11.4 Memory 策略可选项
 
 AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERENCE` / `EPISODIC` / `CUSTOM`),本方案启用前三种。`EPISODIC` 适合对话场景多、需反思的长程任务(如家庭日程规划),后续可按需追加。长期策略为异步抽取(可能数十秒才落地),勿依赖同 session 内立即生效。
 
-### 10.5 成本与规模
+### 11.5 成本与规模
 
 - **S3 Vectors** 替代了 OpenSearch Serverless (节省约 $350/月固定底线),按向量数+查询计费。
 - **Cedar 单策略** 最多约 3,800 个 `principal.id`;超量需要切换为 group-based 策略。
 - **Registry 配额**: 默认每账号 ≤ 5 registries;本方案复用一个 `SmartHomeSkillsRegistry` 同时装 `AGENT_SKILLS` 与 `A2A` 描述符。
 - **Evaluator 配额**: 默认每 region ≤ 1,000 个,最多 100 个 active。
 
-### 10.6 排障 "黄金五步"
+### 11.6 排障 "黄金五步"
 
 1. **Sessions tab 确认用户 session 还活着** → 必要时 Stop 让其重建。
 2. **Remote Shell 查环境变量 + skill 加载** → 80% 配置类问题在此暴露。
@@ -408,7 +486,7 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 4. **Tool Access 切 LOG_ONLY 重放** → 鉴别是 Cedar 拒绝还是模型没调工具。
 5. **Quality Evaluation 跑一次 offline eval** → 判断回归是提示词还是模型引起。
 
-### 10.7 变更安全清单
+### 11.7 变更安全清单
 
 - 改 Prompt / Skill → DynamoDB 即时生效,不需 `agentcore deploy`。
 - 改 Agent Python 代码 → 必须 `bash scripts/06-deploy-agentcore.sh`。
