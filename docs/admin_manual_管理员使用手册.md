@@ -14,7 +14,7 @@
 7. [模型后训练 (Model Train)](#7-模型后训练-model-train)
 8. [Skill 发布/审批/下发](#8-skill-发布审批下发)
 9. [Session 调试与 Remote Shell](#9-session-调试与-remote-shell)
-10. [Agent 运维统计大屏与测试数据](#10-agent-运维统计大屏与测试数据)
+10. [Agent 运维统计大屏与演示前数据准备](#10-agent-运维统计大屏与演示前数据准备)
 11. [其他重要事项](#11-其他重要事项)
 
 ---
@@ -399,7 +399,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "$AGENTCORE_GATEWAY_SMARTHOMEDEVICECONT
 
 ---
 
-## 10. Agent 运维统计大屏与测试数据
+## 10. Agent 运维统计大屏与演示前数据准备
 
 ### 10.1 大屏在哪、看什么
 
@@ -425,27 +425,103 @@ curl -s -o /dev/null -w "%{http_code}\n" "$AGENTCORE_GATEWAY_SMARTHOMEDEVICECONT
 
 > **口径提醒**:TTFT 不存在于 CloudWatch 指标中,只能从 `aws/spans` 里 Strands `chat` span 的 `gen_ai.server.time_to_first_token` 取,所以这部分加载要 5-20 秒(快指标先出,Token 卡片后填充)。错误率在窗口内无流量时显示 `--` 而不是 `0%`。
 
-### 10.3 生成测试数据
+### 10.3 演示前准备:生成模拟数据(每次演示必做)
 
-刚部署完大屏是空的 —— 需要真实流量。用模拟用户脚本一条命令生成:
+刚部署完、或者环境闲置几天后,大屏和 AgentCore Evaluation 都是空的 —— 它们只反映**真实流量**。演示前用模拟用户脚本跑一遍,大屏就会有完整数据。
+
+`scripts/simulate-users.py` 会创建几个测试用户,让它们像真实用户一样和 Agent 对话,覆盖 Agent 的全部功能。测试用户通过 Cognito 登录、走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径,所以产生的 span、Token、会话和评估分与真实流量**无法区分** —— 不是往数据库里塞假数据。
+
+#### 前置条件
+
+| 条件 | 说明 |
+|------|------|
+| 已完成 `./deploy.sh` | 脚本从 `cdk-outputs.json` 和 admin Lambda 的环境变量读取配置 |
+| venv 已激活 | 只依赖 `boto3` + `requests`,均已在 venv 中 |
+| `SIM_USER_PASSWORD` | 必须设置,不硬编码在仓库里。需满足 Cognito 密码策略:≥8 位,含大写、小写、数字、符号 |
+
+#### 标准演示前流程
 
 ```bash
+cd <repo-root>
+source venv/bin/activate
 export SIM_USER_PASSWORD='SomeStrong#Pass1'
 
-python3 scripts/simulate-users.py setup       # 建 5 个 persona(幂等,可反复跑)
-python3 scripts/simulate-users.py run         # 轻量层,约 3.5 分钟
-python3 scripts/simulate-users.py run --heavy # 追加 code-interpreter + browser-use
-python3 scripts/simulate-users.py status
-python3 scripts/simulate-users.py teardown --yes
+# ① 创建并配置 5 个 persona(幂等 —— 已存在则复用,可反复跑)
+python3 scripts/simulate-users.py setup
+
+# ② 生成对话数据(轻量层,23 轮对话,约 1.5-3.5 分钟)
+python3 scripts/simulate-users.py run
+
+# ③ 等 2-3 分钟,然后打开 Admin Console → Overview,时间范围切 24h
 ```
 
-5 个 persona 各带不同模型 / 租户模式 / 场景侧重,所以归因图表会出现多行真实数据。测试用户走与聊天机器人完全相同的 SigV4 路径,产生的遥测与真实流量无法区分。
+**演示要展示 code-interpreter 或 browser-use 时**,追加跑一次 heavy 层(实测约 190 秒):
 
-- **安全**:仅限 `simuser+` 邮箱前缀,代码里有 guard 对其他邮箱抛异常,`teardown` 不会误删真实用户。
-- **等待**:跑完等两三分钟再看大屏(CloudWatch 摄取延迟 + 5 分钟缓存)。
-- `setup` 会自动等 Cedar 策略变成 ACTIVE 才返回 —— 见 §4.2 那个"保存成功不等于生效"的坑。
+```bash
+python3 scripts/simulate-users.py run --heavy --personas dave,erin
+```
 
-细节见 [`scripts/sim/README.md`](../scripts/sim/README.md)。
+#### 四个子命令
+
+| 命令 | 作用 | 耗时 |
+|------|------|------|
+| `setup` | 建用户 → 授权工具 → **等 Cedar 策略变 ACTIVE** → 写差异化配置(模型 / 入口环境) | 约 1-2 分钟(大部分在等 Cedar) |
+| `run` | 按 persona 并发跑场景,每轮记录 JSONL,结束打印汇总表 | 轻量 1.5-3.5 分钟(实测 97s 热 / 212s 含冷启动);`--heavy` 再加约 3 分钟 |
+| `status` | 列出现有模拟用户及其模型 / 入口环境 / 权限数,以及 Cedar 策略状态和已记录轮数 | 数秒 |
+| `teardown --yes` | 回收授权 + 删除用户(**只删 `simuser+` 前缀**) | 约 1 分钟 |
+
+常用参数(注意归属的子命令不同):
+
+| 参数 | 属于 | 作用 |
+|------|------|------|
+| `--personas alice,bob` | `setup` / `run` | 只处理指定 persona(默认全部 5 个) |
+| `--heavy` | `run` | 追加 code-interpreter 和 browser-use 场景 |
+| `--rounds N` | `run` | 重复整套场景 N 次,想要更多数据点时用 |
+| `--no-grant erin` | `setup` | 故意不给某个 persona 授权,用来产生"工具不可用"的真实错误数据 |
+| `--yes` | `teardown` | 跳过确认提示 |
+
+#### 5 个 persona 覆盖什么
+
+每个 persona 刻意配了不同的模型、入口环境和场景侧重,这样大屏的成本归因图表会出现**多行真实数据**,而不是全塞进一个桶 —— 这正是演示"千人千面"要看到的效果。
+
+| persona | 模型 | 入口环境 | 覆盖的功能 |
+|---------|------|---------|-----------|
+| `alice` | Opus 4.6 | default | 四类设备控制(LED / 风扇 / 烤箱 / 电饭煲)、设备发现、一键全开 |
+| `bob` | Sonnet 4.6 | default | 企业知识库检索、天气查询(`http_request`)、越界拒答 |
+| `carol` | Haiku 4.5 | ab-bundles | 多轮记忆延续(第三轮要求复现前两轮偏好)、用户反馈技能 |
+| `dave` | Kimi K2.5 | ab-targets | code-interpreter 数据分析 + 绘图(heavy) |
+| `erin` | Sonnet 4.5 | default | browser-use 真实网页操作(heavy)、拒答、模糊指令澄清 |
+
+实测单轮耗时:轻量场景 3-25 秒;heavy 场景 19-141 秒(browser-use 是最慢的那个,且会占用真实 DCV 浏览器会话)。persona 之间并发跑,单个 persona 内部串行(对话本身有先后顺序)。
+
+#### 跑完检查什么
+
+打开 **Admin Console → Overview**,时间范围切 **24h**,确认:
+
+- **状态条**有值:活跃会话数、TTFT P95、Token 消耗合计、评估质量均分
+- **Token 成本归因**切"按用户"能看到多个 `simuser+*` 行;切"按 Agent 模型"能看到 5 个不同模型;切"按入口环境"能看到 default / ab-bundles / ab-targets
+- **评估通过率与漂移**表格里有 8 个评估器出分
+- **错误率**应该是 0.0%(若明显偏高,见下方排障)
+
+运行日志在 `scripts/sim-results/{persona}.jsonl`(已 gitignore),每行含耗时、HTTP 状态、回复片段、是否命中工具 —— 排查某轮为什么失败时看这个。
+
+#### 排障
+
+| 现象 | 原因与处理 |
+|------|-----------|
+| `SIM_USER_PASSWORD is not set` | 忘了 export;或密码不满足 Cognito 策略 |
+| `setup` 报 Cedar 策略未全部 ACTIVE | 授权没生效 —— 见 [§4.2](#42-c-端用户权限配置运维管理员操作路径) 那个"保存成功不等于生效"的坑。**别跳过这一步直接 `run`**,否则会产出一堆"工具不可用"的假数据 |
+| 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
+| 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
+| `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
+
+#### 安全边界
+
+一切都限定在 **`simuser+` 邮箱前缀**内,`Provisioner._guard()` 对其他邮箱直接抛异常 —— `teardown` **不可能**误删真实用户。`setup` 是幂等的:已存在的用户会复用而不是重建,所以反复跑不会在 Cognito 里堆垃圾账号。
+
+演示结束后建议 `teardown --yes` 清理,保持用户池干净;不清理也不影响下次 `setup`。
+
+更多实现细节见 [`scripts/sim/README.md`](../scripts/sim/README.md) 与[架构文档 §9.16](./architecture-and-design.md#916-simulated-end-users-test-data-generation)。
 
 ---
 

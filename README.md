@@ -13,15 +13,17 @@
 
 ## 前置条件
 
-| 条件 | 版本 | 用途 |
-|------|------|------|
-| Node.js | >= 18.x | 构建 React 应用、运行 CDK |
-| npm | >= 9.x | 包管理 |
-| Python 3 | >= 3.12 | AgentCore 部署脚本、Agent 代码 |
-| boto3 | 最新 | 部署脚本中的 AgentCore API 调用 |
-| agentcore CLI | 最新 | 部署 AgentCore 资源（`pip install strands-agents-builder`） |
-| AWS CLI | >= 2.x | AWS 凭证配置 |
-| AWS 账号 | — | 需开通 Bedrock AgentCore、Kimi-2.5 和 Nova Sonic 模型访问权限 |
+| 条件 | 版本 | 用途 | 安装方式 |
+|------|------|------|---------|
+| [Node.js](https://nodejs.org/) | >= 18.x | 构建 React 应用、运行 CDK | [下载安装包](https://nodejs.org/en/download) 或 [nvm](https://github.com/nvm-sh/nvm#installing-and-updating) |
+| [npm](https://www.npmjs.com/) | >= 9.x | 包管理 | 随 Node.js 一起安装 |
+| [Python 3](https://www.python.org/) | >= 3.12 | AgentCore 部署脚本、Agent 代码 | [下载安装包](https://www.python.org/downloads/) 或系统包管理器 |
+| [AWS CLI](https://aws.amazon.com/cli/) | >= 2.x | AWS 凭证配置 | [官方安装指南](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| [agentcore CLI](https://www.npmjs.com/package/@aws/agentcore) | >= 0.13.0 | 部署 AgentCore 资源（Gateway / Runtime / Memory） | `npm install -g @aws/agentcore` · [Starter Toolkit 文档](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) |
+| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.42.93 | 部署脚本中的 AgentCore API 调用 | 见下方[快速开始](#快速开始)的 `pip install`（`scripts/01-install-deps.sh` 会自动升级） |
+| AWS 账号 | — | 需开通 Bedrock AgentCore、Kimi K2.5 和 Nova Sonic 模型访问权限 | 见下方说明 |
+
+> **agentcore CLI 走 npm，不是 pip。** 早期版本的本文档写的是 `pip install strands-agents-builder`，那个包提供的是 `strands` 命令（一个 Strands 示例 agent），**并不会**安装 `deploy.sh` 所需的 `agentcore`。正确方式是 `npm install -g @aws/agentcore`；`deploy.sh` 启动时会校验版本 >= 0.13.0（该版本修掉了一个会让 `agentcore deploy` 失败的 scaffold-test 回归）。升级用 `npm install -g @aws/agentcore@latest`。
 
 **重要：** 部署前需在 [Bedrock 控制台 > 模型访问](https://console.aws.amazon.com/bedrock/home#/modelaccess) 中申请：
 - **Kimi K2.5**（`moonshotai.kimi-k2.5`）用于文字聊天
@@ -49,12 +51,16 @@
 # 1. 配置 AWS 凭证
 aws configure
 
-# 2. 设置 Python 环境
+# 2. 安装 agentcore CLI（npm 全局包，deploy.sh 会校验版本 >= 0.13.0）
+npm install -g @aws/agentcore
+agentcore --version
+
+# 3. 设置 Python 环境
 python3 -m venv venv
 source venv/bin/activate
 pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp pyyaml
 
-# 3. 一键部署
+# 4. 一键部署
 ./deploy.sh
 ```
 
@@ -380,7 +386,7 @@ cd cdk && npx cdk destroy --all --force
 
 ### 部署相关
 
-- **`agentcore CLI not found`** → `pip install strands-agents-builder`
+- **`agentcore CLI not found`** → `npm install -g @aws/agentcore`（**不是** pip 包；详见[前置条件](#前置条件)）
 - **`agentcore deploy fails: Target not found in aws-targets.json`** → 部署脚本会自动生成，手动跑的话创建 `[{"name": "default", "region": "us-west-2", "account": "YOUR_ACCOUNT_ID"}]`
 - **`CDK synth fails: pyproject.toml not found`** → `agent/pyproject.toml` 必须存在（仓库已含）
 - **`Bedrock Model Access Denied`** → Bedrock 控制台申请 Kimi K2.5 + Nova Sonic 访问权限
@@ -438,15 +444,17 @@ AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gatew
 
 ## Prerequisites
 
-| Requirement | Version | Purpose |
-|-------------|---------|---------|
-| Node.js | >= 18.x | Build React apps, run CDK |
-| npm | >= 9.x | Package management |
-| Python 3 | >= 3.12 | AgentCore setup script, agent code |
-| boto3 | latest | AgentCore API calls in setup script |
-| agentcore CLI | latest | Deploy AgentCore resources (`pip install strands-agents-builder`) |
-| AWS CLI | >= 2.x | AWS credentials |
-| AWS Account | — | With Bedrock AgentCore, Kimi-2.5 and Nova Sonic model access |
+| Requirement | Version | Purpose | How to install |
+|-------------|---------|---------|----------------|
+| [Node.js](https://nodejs.org/) | >= 18.x | Build React apps, run CDK | [Installer](https://nodejs.org/en/download) or [nvm](https://github.com/nvm-sh/nvm#installing-and-updating) |
+| [npm](https://www.npmjs.com/) | >= 9.x | Package management | Ships with Node.js |
+| [Python 3](https://www.python.org/) | >= 3.12 | AgentCore setup script, agent code | [Installer](https://www.python.org/downloads/) or your system package manager |
+| [AWS CLI](https://aws.amazon.com/cli/) | >= 2.x | AWS credentials | [Official install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| [agentcore CLI](https://www.npmjs.com/package/@aws/agentcore) | >= 0.13.0 | Deploy AgentCore resources (Gateway / Runtime / Memory) | `npm install -g @aws/agentcore` · [Starter Toolkit docs](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) |
+| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.42.93 | AgentCore API calls in setup script | Via the `pip install` in [Quick Start](#quick-start) below (`scripts/01-install-deps.sh` upgrades it automatically) |
+| AWS Account | — | With Bedrock AgentCore, Kimi K2.5 and Nova Sonic model access | See below |
+
+> **The agentcore CLI comes from npm, not pip.** Earlier revisions of this README said `pip install strands-agents-builder`; that package provides a `strands` command (a sample Strands agent) and does **not** install the `agentcore` binary `deploy.sh` needs. Use `npm install -g @aws/agentcore`. `deploy.sh` checks for >= 0.13.0 on startup (that release fixed a scaffold-test regression that broke `agentcore deploy`). Upgrade with `npm install -g @aws/agentcore@latest`.
 
 **Important:** In [Bedrock Console > Model Access](https://console.aws.amazon.com/bedrock/home#/modelaccess), request access to:
 - **Kimi K2.5** (`moonshotai.kimi-k2.5`) for text chat
@@ -474,12 +482,16 @@ The IAM user/role running `deploy.sh` needs permissions for (full list + minimal
 # 1. Configure AWS credentials
 aws configure
 
-# 2. Set up Python environment
+# 2. Install the agentcore CLI (global npm package; deploy.sh checks for >= 0.13.0)
+npm install -g @aws/agentcore
+agentcore --version
+
+# 3. Set up Python environment
 python3 -m venv venv
 source venv/bin/activate
 pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp pyyaml
 
-# 3. Deploy everything
+# 4. Deploy everything
 ./deploy.sh
 ```
 
@@ -784,7 +796,7 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 
 ### Deployment
 
-- **`agentcore CLI not found`** → `pip install strands-agents-builder`
+- **`agentcore CLI not found`** → `npm install -g @aws/agentcore` (**not** a pip package; see [Prerequisites](#prerequisites))
 - **`agentcore deploy fails: Target not found in aws-targets.json`** → setup script seeds this; if running manually, create `[{"name": "default", "region": "us-west-2", "account": "YOUR_ACCOUNT_ID"}]`
 - **`CDK synth fails: pyproject.toml not found`** → `agent/pyproject.toml` must exist (included in repo)
 - **`Bedrock Model Access Denied`** → request access to Kimi K2.5 + Nova Sonic in the Bedrock console
