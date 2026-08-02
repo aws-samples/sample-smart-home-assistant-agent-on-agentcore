@@ -7,7 +7,11 @@ SigV4 /invocations path the chatbot uses. The resulting spans, token counts,
 sessions and evaluation scores are indistinguishable from real traffic, which
 is what the Overview ops dashboard and AgentCore Evaluations consume.
 
-Usage:
+Run this before a customer demo: the dashboard only reflects real traffic, so a
+freshly deployed (or idle) environment shows an empty wall until someone talks
+to the agent.
+
+Usage (works from the repo root or from scripts/):
     export SIM_USER_PASSWORD='SomeStrong#Pass1'
 
     python3 scripts/simulate-users.py setup
@@ -15,6 +19,11 @@ Usage:
     python3 scripts/simulate-users.py run --heavy --personas dave,erin
     python3 scripts/simulate-users.py status
     python3 scripts/simulate-users.py teardown --yes
+
+Docs:
+    docs/admin_manual_管理员使用手册.md  §10.3 — pre-demo runbook (start here)
+    scripts/sim/README.md                     — personas, coverage, gotchas
+    docs/architecture-and-design.md           §9.16 — design rationale
 
 Everything is scoped to the `simuser+` email prefix; the real users in the pool
 are never touched.
@@ -41,12 +50,32 @@ RESULTS_DIR = os.path.join(HERE, "sim-results")
 
 
 def _password() -> str:
+    """Read the shared password for the simulated users.
+
+    It lives in an env var rather than the repo so a real credential is never
+    committed. The error below is the first thing most people see, so it also
+    points at the docs — otherwise the reader has no way to know a runbook
+    exists two directories away.
+    """
     pw = os.environ.get("SIM_USER_PASSWORD", "")
     if not pw:
         raise SystemExit(
-            "SIM_USER_PASSWORD is not set.\n"
+            "SIM_USER_PASSWORD is not set — the simulated users all share this password.\n"
+            "\n"
             "  export SIM_USER_PASSWORD='SomeStrong#Pass1'\n"
-            "(Must satisfy the Cognito password policy: upper, lower, digit, symbol.)"
+            "\n"
+            "Any value works as long as it satisfies the Cognito password policy:\n"
+            "at least 8 characters with an uppercase letter, a lowercase letter,\n"
+            "a digit and a symbol. It is read from the environment (never the repo)\n"
+            "so no real credential is committed.\n"
+            "\n"
+            "Then:\n"
+            "  python3 simulate-users.py setup   # create + configure 5 personas\n"
+            "  python3 simulate-users.py run     # generate conversations (~2 min)\n"
+            "\n"
+            "Full runbook:  docs/admin_manual_管理员使用手册.md  section 10.3\n"
+            "Implementation: scripts/sim/README.md\n"
+            "Run `python3 simulate-users.py --help` for all commands and flags."
         )
     return pw
 
@@ -267,7 +296,24 @@ def cmd_teardown(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Simulate real end users against the deployed agent.")
+        description="Simulate real end users against the deployed agent, so the "
+                    "ops dashboard and AgentCore Evaluations have real data.",
+        epilog=(
+            "requires:  export SIM_USER_PASSWORD='SomeStrong#Pass1'\n"
+            "\n"
+            "typical pre-demo run:\n"
+            "  python3 simulate-users.py setup     # 5 personas, idempotent\n"
+            "  python3 simulate-users.py run       # ~2 min, 23 conversations\n"
+            "  # wait 2-3 min, then open Admin Console > Overview at 24h\n"
+            "\n"
+            "docs:\n"
+            "  docs/admin_manual_管理员使用手册.md  §10.3  pre-demo runbook\n"
+            "  scripts/sim/README.md                     personas and gotchas\n"
+            "\n"
+            "Scoped to the simuser+ email prefix; real users are never touched."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("setup", help="create + configure simulated users")

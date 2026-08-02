@@ -214,7 +214,7 @@ python3 scripts/simulate-users.py teardown --yes
 >
 > 跑完等两三分钟再看大屏 —— CloudWatch 有摄取延迟，且大屏有 5 分钟缓存（点刷新可强制重算）。
 
-细节见 [`scripts/sim/README.md`](scripts/sim/README.md) 与 [`docs/architecture-and-design.md` §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation)。
+**完整演示前 runbook**(含排障、跑完该检查什么)见 [管理员手册 §10.3](docs/admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做);实现细节见 [`scripts/sim/README.md`](scripts/sim/README.md) 与[架构文档 §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation)。
 
 ---
 
@@ -645,7 +645,7 @@ Test users sign in through Cognito and use the **same** SigV4 `/invocations` pat
 >
 > Wait two or three minutes after a run before checking the dashboard: CloudWatch ingestion lags and the dashboard caches for 5 minutes (use Refresh to force re-aggregation).
 
-Details in [`scripts/sim/README.md`](scripts/sim/README.md) and [`docs/architecture-and-design.md` §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation).
+**Full pre-demo runbook** (troubleshooting, what to verify afterwards) is [admin manual §10.3](docs/admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做); implementation detail in [`scripts/sim/README.md`](scripts/sim/README.md) and [architecture §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation).
 
 ---
 
