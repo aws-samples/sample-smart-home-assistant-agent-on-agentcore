@@ -3,6 +3,7 @@ import TopNavigation from '@cloudscape-design/components/top-navigation';
 import AppLayout from '@cloudscape-design/components/app-layout';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
+import Link from '@cloudscape-design/components/link';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
@@ -155,6 +156,23 @@ const App: React.FC = () => {
               <Header variant="h1">{t('app.accessDenied')}</Header>
               <Alert type="error">
                 <span dangerouslySetInnerHTML={{ __html: t('app.accessDeniedMsg') }} />
+              </Alert>
+              {/* A self-registered user lands here, so this must not be a dead
+                  end: point them at the surface they CAN use rather than only
+                  offering Sign out. */}
+              <Alert type="info" header={t('login.adminNotice.header')}>
+                <SpaceBetween size="xs">
+                  <span>{t('app.accessDeniedNext')}</span>
+                  {getConfig().chatbotUrl && (
+                    <Link
+                      href={getConfig().chatbotUrl}
+                      external
+                      externalIconAriaLabel={t('login.adminNotice.opensNewTab')}
+                    >
+                      {t('login.adminNotice.openChatbot')}
+                    </Link>
+                  )}
+                </SpaceBetween>
               </Alert>
               <Box>
                 <Button onClick={handleLogout}>{t('app.signOut')}</Button>

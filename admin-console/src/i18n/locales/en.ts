@@ -1,6 +1,7 @@
 const en: Record<string, string> = {
   // App
   'app.loading': 'Loading...',
+  'common.loading': 'Loading…',
   'app.title': 'Agent Harness Control Center',
   'app.headerTitle': 'Agent Harness Control Center for Administrator',
   'app.signOut': 'Sign Out',
@@ -92,10 +93,10 @@ const en: Record<string, string> = {
 
   'app.accessDenied': 'Access Denied',
   'app.accessDeniedMsg': 'You must be a member of the <strong>admin</strong> group to use this console.',
+  'app.accessDeniedNext': 'Your account is registered but does not have admin permission yet. Ask an administrator to add you to the admin group. In the meantime you can use the chatbot directly — no end-user capability requires admin rights.',
 
   // Login
   'login.title': 'Admin Console',
-  'login.subtitle': 'Smart Home Skill Management',
   'login.email': 'Email',
   'login.emailPlaceholder': 'admin@example.com',
   'login.password': 'Password',
@@ -103,6 +104,25 @@ const en: Record<string, string> = {
   'login.signingIn': 'Signing in...',
   'login.signIn': 'Sign In',
   'login.signInFailed': 'Sign in failed',
+  'login.subtitle': 'Agent Harness Control Center · administrator sign-in',
+  'login.noAccount': "Don't have an account? Sign up",
+  'login.hasAccount': 'Already have an account? Sign in',
+  'login.signUp': 'Sign up',
+  'login.choosePassword': 'Choose a password',
+  'login.passwordPolicy': 'At least 8 characters, with an uppercase letter, a lowercase letter, a number and a symbol.',
+  'login.backToSignIn': 'Back to sign in',
+  'login.signUp.subtitle': 'Create an account',
+  'login.confirm.subtitle': 'Verify your email',
+  'login.confirm.code': 'Verification code',
+  'login.confirm.codePlaceholder': '6-digit code from the email',
+  'login.confirm.submit': 'Confirm account',
+  'login.confirm.resend': 'Resend code',
+  'login.confirm.sent': 'A verification code was sent to {email}. Check your inbox (and spam folder).',
+  'login.confirm.done': 'Email verified. You can sign in now.',
+  'login.adminNotice.header': 'This console requires admin permission',
+  'login.adminNotice.body': 'You can sign in once registered, but this console is only open to members of the admin group — ask an administrator to grant you access. Until then you can use the chatbot directly; every end-user capability (smart home conversation, device control, knowledge base) works without admin rights.',
+  'login.adminNotice.openChatbot': 'Open Chatbot',
+  'login.adminNotice.opensNewTab': 'Opens in a new tab',
 
   // Tabs
   'tab.skills': 'Skills',

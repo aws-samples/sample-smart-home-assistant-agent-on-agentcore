@@ -1,6 +1,7 @@
 import {
   CognitoUserPool,
   CognitoUser,
+  CognitoUserAttribute,
   AuthenticationDetails,
   CognitoUserSession,
 } from 'amazon-cognito-identity-js';
@@ -50,6 +51,59 @@ export function signIn(username: string, password: string): Promise<AuthTokens> 
       onFailure(err: Error) {
         reject(err);
       },
+    });
+  });
+}
+
+/**
+ * Self-service registration.
+ *
+ * The pool is configured with `UsernameAttributes: ["email"]`, so the email IS
+ * the username — there is no separate username to choose (unlike the chatbot's
+ * older signup form). Cognito emails a 6-digit confirmation code because
+ * `email` is in `AutoVerifiedAttributes`.
+ *
+ * A new account can sign in here but will hit the "Access Denied" gate until an
+ * administrator adds it to the `admin` group; until then the chatbot is the
+ * usable surface. LoginPage says so on this form.
+ */
+export function signUp(email: string, password: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const userPool = getUserPool();
+    const attributes = [new CognitoUserAttribute({ Name: 'email', Value: email })];
+    userPool.signUp(email, password, attributes, [], (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+export function confirmSignUp(email: string, code: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cognitoUser = new CognitoUser({ Username: email, Pool: getUserPool() });
+    cognitoUser.confirmRegistration(code, true, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+/** Re-send the confirmation code, for when the first email is lost. */
+export function resendConfirmationCode(email: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cognitoUser = new CognitoUser({ Username: email, Pool: getUserPool() });
+    cognitoUser.resendConfirmationCode((err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
     });
   });
 }

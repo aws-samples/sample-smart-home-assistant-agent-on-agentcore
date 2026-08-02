@@ -92,7 +92,11 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 ### 管理控制台 —— Agent Harness Control Center
 
-使用部署输出中的管理员凭证登录（或在 Cognito 控制台把现有用户加到 `admin` 组）。左侧导航按 Agent 生命周期分成四段，共 15 个页面：
+使用部署输出中的管理员凭证登录。登录页也提供 **自助注册** 通道（邮箱即用户名，Cognito 发 6 位验证码验证邮箱）。
+
+> **注册 ≠ 有管理员权限。** 本控制台只对 `admin` 组成员开放。新注册的账号能登录，但会看到"访问被拒绝"，需要联系管理员把你加入 `admin` 组（Admin Console → Build → Identity 页的 `Make Admin`，或 `aws cognito-idp admin-add-user-to-group`）。在此之前可以直接使用**聊天机器人** —— 所有终端用户功能（智能家居对话、设备控制、知识库问答）都不需要管理员权限。注册页和"访问被拒绝"页都给出了聊天机器人的直达链接。
+
+左侧导航按 Agent 生命周期分成四段，共 15 个页面：
 
 | 分段 | 页面 | 能做什么 |
 |------|------|---------|
@@ -156,14 +160,23 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 - Admin 在 **Admin Console → Users → Manage Permissions → A2A Agents** 区块按用户按 skill 授权；text agent 在下一次调用时加载。
 - 完整部署流程、测试提示词和逐步演示指南见 [`a2a-agent-registry/README.md`](a2a-agent-registry/README.md)。
 
-### 添加管理员用户（可选）
+### 添加管理员用户
 
-```bash
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id <USER_POOL_ID> \
-  --username <EMAIL> \
-  --group-name admin
-```
+给自助注册的用户开通管理控制台权限。两种方式：
+
+- **控制台**：Admin Console → Build → **Identity** 页，找到该用户点 `Make Admin`。
+- **命令行**：
+
+  ```bash
+  aws cognito-idp admin-add-user-to-group \
+    --user-pool-id <USER_POOL_ID> \
+    --username <EMAIL> \
+    --group-name admin
+  ```
+
+用户重新登录后即可进入控制台（`admin` 组信息在 idToken 的 `cognito:groups` 声明里，需要重新签发令牌才会生效）。
+
+> **注意**：管理员在 Identity 页新建的用户**不会**自动获得工具权限 —— Cognito 的 PostConfirmation 触发器只在自助注册时触发。这类用户还需要去 **Tool Policy** 页手动授权，并按 [管理员手册 §4.2](docs/admin_manual_管理员使用手册.md) 复核 Cedar 策略状态。
 
 ### 生成测试数据（模拟真实用户）
 
@@ -504,7 +517,11 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 
 ### Admin Console — Agent Harness Control Center
 
-Log in with the admin credentials from deploy output (or add a user to the `admin` Cognito group). The side navigation groups 15 pages by agent lifecycle stage:
+Log in with the admin credentials from deploy output. The login page also offers **self-service registration** (the email is the username; Cognito emails a 6-digit code to verify it).
+
+> **Registering does not grant admin permission.** This console is open only to members of the `admin` group. A newly registered account can sign in but lands on "Access Denied" until an administrator adds it to the group (`Make Admin` on Build → Identity, or `aws cognito-idp admin-add-user-to-group`). Until then, use the **chatbot** — every end-user capability (smart home conversation, device control, knowledge base) works without admin rights. Both the sign-up form and the Access Denied page link straight to it.
+
+The side navigation groups 15 pages by agent lifecycle stage:
 
 | Stage | Page | What you can do |
 |-------|------|-----------------|
@@ -568,14 +585,23 @@ Skill ERP is a self-service skills site for **regular end users** (no `admin` gr
 - Grant access per user per skill in **Admin Console → Users → Manage Permissions → A2A Agents**; the text agent picks it up on the next invocation.
 - Full deploy flow, test prompts, and step-by-step demo walkthrough: [`a2a-agent-registry/README.md`](a2a-agent-registry/README.md).
 
-### Add Admin Users (Optional)
+### Add Admin Users
 
-```bash
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id <USER_POOL_ID> \
-  --username <EMAIL> \
-  --group-name admin
-```
+Grant a self-registered user access to this console, either way:
+
+- **Console**: Admin Console → Build → **Identity**, find the user and click `Make Admin`.
+- **CLI**:
+
+  ```bash
+  aws cognito-idp admin-add-user-to-group \
+    --user-pool-id <USER_POOL_ID> \
+    --username <EMAIL> \
+    --group-name admin
+  ```
+
+The user must sign in again for it to take effect — group membership arrives in the idToken's `cognito:groups` claim, so a fresh token is required.
+
+> **Note**: users an administrator creates from the Identity page do **not** get tool permissions automatically — Cognito's PostConfirmation trigger only fires for self-signup. Those users still need an explicit grant on **Tool Policy**, verified per [the admin manual §4.2](docs/admin_manual_管理员使用手册.md).
 
 ### Generate test data (simulated users)
 

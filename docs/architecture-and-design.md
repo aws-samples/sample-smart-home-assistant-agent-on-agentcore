@@ -1768,7 +1768,8 @@ admin-console/
 
 **Key Features:**
 
-- **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see a Cloudscape `Alert` "Access Denied" page.
+- **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see a Cloudscape `Alert` "Access Denied" page — which also links to the chatbot, so a self-registered user isn't left at a dead end (see below).
+- **Self-service registration**: The login page has three modes — sign in, sign up, confirm. The pool sets `UsernameAttributes: ["email"]`, so the email *is* the username (no separate username field, unlike the chatbot's older form), and `email` being in `AutoVerifiedAttributes` means Cognito emails a 6-digit code; `resendConfirmationCode` covers a lost email. Both the sign-up and confirm forms carry an info Alert stating that registering does **not** grant console access — the account needs the `admin` group, and until then the chatbot is the usable surface. Without that notice, a new user's first experience is an unexplained "Access Denied".
 - **AWS-Console-style side navigation** with four collapsible sections (Discover / Build / Deploy / Assess) plus a Docs link. This replaces the previous top tab-bar layout and matches the AWS Console's IA.
 - **Light/Dark theme toggle** in the top-right, persisted to `localStorage` under `admin.theme`. Initial paint honors `prefers-color-scheme` on first visit.
 - **Fifteen pages** organised under those four sections:

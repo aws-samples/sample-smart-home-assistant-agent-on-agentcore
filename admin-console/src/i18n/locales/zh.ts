@@ -1,6 +1,7 @@
 const zh: Record<string, string> = {
   // App
   'app.loading': '加载中...',
+  'common.loading': '加载中…',
   'app.title': '智能体管控中心',
   'app.headerTitle': '智能体管控中心（管理员）',
   'app.signOut': '退出登录',
@@ -92,10 +93,10 @@ const zh: Record<string, string> = {
 
   'app.accessDenied': '访问被拒绝',
   'app.accessDeniedMsg': '您必须是 <strong>admin</strong> 组的成员才能使用此控制台。',
+  'app.accessDeniedNext': '你的账号已注册成功，但还没有管理员权限。请联系管理员将你加入 admin 组。在此之前，你可以直接使用聊天机器人 —— 所有终端用户功能都不需要管理员权限。',
 
   // Login
   'login.title': '管理控制台',
-  'login.subtitle': '智能家居技能管理',
   'login.email': '邮箱',
   'login.emailPlaceholder': 'admin@example.com',
   'login.password': '密码',
@@ -103,6 +104,25 @@ const zh: Record<string, string> = {
   'login.signingIn': '登录中...',
   'login.signIn': '登录',
   'login.signInFailed': '登录失败',
+  'login.subtitle': '智能体管控中心 · 管理员登录',
+  'login.noAccount': '没有账号？注册',
+  'login.hasAccount': '已有账号？返回登录',
+  'login.signUp': '注册',
+  'login.choosePassword': '设置密码',
+  'login.passwordPolicy': '至少 8 位，需包含大写字母、小写字母、数字和符号。',
+  'login.backToSignIn': '返回登录',
+  'login.signUp.subtitle': '注册新账号',
+  'login.confirm.subtitle': '验证邮箱',
+  'login.confirm.code': '验证码',
+  'login.confirm.codePlaceholder': '邮件中的 6 位数字',
+  'login.confirm.submit': '确认注册',
+  'login.confirm.resend': '重新发送',
+  'login.confirm.sent': '验证码已发送至 {email}，请查收邮件（含垃圾邮件箱）。',
+  'login.confirm.done': '邮箱验证成功，现在可以登录了。',
+  'login.adminNotice.header': '管理控制台需要管理员权限',
+  'login.adminNotice.body': '注册后即可登录，但本控制台仅对 admin 组成员开放 —— 请联系管理员为你开通权限。在此之前，你可以直接使用聊天机器人（智能家居对话、设备控制、知识库问答等全部终端用户功能均不受影响）。',
+  'login.adminNotice.openChatbot': '打开聊天机器人',
+  'login.adminNotice.opensNewTab': '在新标签页打开',
 
   // Tabs
   'tab.skills': '技能',
