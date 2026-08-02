@@ -92,6 +92,7 @@ import Table from '@cloudscape-design/components/table';
 import Textarea from '@cloudscape-design/components/textarea';
 import Toggle from '@cloudscape-design/components/toggle';
 import Modal from '@cloudscape-design/components/modal';
+import ExpandableSection from '@cloudscape-design/components/expandable-section';
 import { getConfig } from '../config';
 import { getCurrentUserEmail } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
@@ -2516,15 +2517,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
   return (
     <div className="admin-console">
-      {activeTab === 'overview' && (() => {
-        const cfg = getConfig();
-        const hint = currentEmail;
-        const withHint = (base: string | undefined) =>
-          base ? `${base.replace(/\/$/, '')}/${hint ? `?username=${encodeURIComponent(hint)}` : ''}` : '';
-        const chatUrl = withHint(cfg.chatbotUrl);
-        const simUrl = withHint(cfg.deviceSimulatorUrl);
-        const erpUrl = withHint(cfg.skillErpUrl);
-        return (
+      {activeTab === 'overview' && (
         <SpaceBetween size="l">
           {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
           {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
@@ -2537,47 +2530,27 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           >
             <SpaceBetween size="m">
               <CloudscapeBox variant="p">{t('overview.intro')}</CloudscapeBox>
-              <img
-                src={architectureDiagram}
-                alt={t('overview.diagramAlt')}
-                style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
-              />
+              {/* Collapsed by default: the architecture diagram is tall, and when
+                  demoing to an administrator the operational metrics below are
+                  what should be on screen first. */}
+              <ExpandableSection
+                variant="footer"
+                headerText={t('overview.diagramToggle')}
+              >
+                <img
+                  src={architectureDiagram}
+                  alt={t('overview.diagramAlt')}
+                  style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
+                />
+              </ExpandableSection>
             </SpaceBetween>
           </Container>
-          {(chatUrl || simUrl || erpUrl) && (
-            <Container
-              header={
-                <CloudscapeHeader variant="h2" description={t('overview.demosDesc')}>
-                  {t('overview.demosTitle')}
-                </CloudscapeHeader>
-              }
-            >
-              <SpaceBetween direction="horizontal" size="s">
-                {chatUrl && (
-                  <Button iconName="external" iconAlign="right" href={chatUrl} target="_blank">
-                    {t('overview.openChatbot')}
-                  </Button>
-                )}
-                {simUrl && (
-                  <Button iconName="external" iconAlign="right" href={simUrl} target="_blank">
-                    {t('overview.openDeviceSim')}
-                  </Button>
-                )}
-                {erpUrl && (
-                  <Button iconName="external" iconAlign="right" href={erpUrl} target="_blank">
-                    {t('overview.openSkillErp')}
-                  </Button>
-                )}
-              </SpaceBetween>
-            </Container>
-          )}
-          {/* Agent ops dashboard — spec 2026-07-29. The Users table that used
-              to live here now belongs to Build > Identity, so Overview is
-              architecture + demos + operational metrics only. */}
+          {/* Agent ops dashboard — spec 2026-07-29. User management moved to
+              Build > Identity and the demo launchers moved to the side nav, so
+              Overview is intro + architecture + operational metrics. */}
           <DashboardSection theme={theme} />
         </SpaceBetween>
-        );
-      })()}
+      )}
 
       {activeTab === 'identity' && (
         <SpaceBetween size="l">

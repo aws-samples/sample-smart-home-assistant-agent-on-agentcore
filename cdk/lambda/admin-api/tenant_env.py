@@ -11,6 +11,8 @@ import datetime as _dt
 import json
 import logging
 import os
+from urllib.parse import unquote
+
 from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger(__name__)
@@ -95,7 +97,7 @@ def get_tenant_env(event):
 def put_tenant_env(event):
     """PUT /skills/{userId}/__tenant_env__ body: {mode, acknowledgeMaskedOverride?}"""
     path = event.get("pathParameters") or {}
-    email = path.get("userId", "")
+    email = unquote(path.get("userId", ""))
     if not email:
         return _resp(400, {"error": "userId path param required"})
 
@@ -132,7 +134,7 @@ def put_tenant_env(event):
 def delete_tenant_env(event):
     """DELETE /skills/{userId}/__tenant_env__ — fall back to default."""
     path = event.get("pathParameters") or {}
-    email = path.get("userId", "")
+    email = unquote(path.get("userId", ""))
     if not email:
         return _resp(400, {"error": "userId path param required"})
     sk = f"{SK_PREFIX}{email}{SK_SUFFIX}"

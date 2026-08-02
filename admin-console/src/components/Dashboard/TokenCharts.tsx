@@ -10,9 +10,13 @@ import { useI18n } from '../../i18n';
 interface Props {
   spans?: DashboardSpans;
   loading: boolean;
-  dim: DashboardDim;
   theme: ChartTheme;
   chartHeight: number;
+}
+
+/** Attribution additionally needs the dimension, to label its category axis. */
+interface AttributionProps extends Props {
+  dim: DashboardDim;
 }
 
 /**
@@ -82,7 +86,7 @@ export function TokenTrend({ spans, loading, theme, chartHeight }: Props) {
  * bars by their own value would spend the identity channel re-encoding what
  * bar length already shows.
  */
-export function TokenAttribution({ spans, loading, dim, theme, chartHeight }: Props) {
+export function TokenAttribution({ spans, loading, dim, theme, chartHeight }: AttributionProps) {
   const { t } = useI18n();
   const attribution = spans?.attribution ?? [];
 

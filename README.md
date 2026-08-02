@@ -96,7 +96,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 | 分段 | 页面 | 能做什么 |
 |------|------|---------|
-| **Discover** | **Overview** | 产品说明 + 架构图、三个 Demo 入口，以及 **Agent 运维统计大屏**（见下节） |
+| **Discover** | **Overview** | 产品说明 + 架构图（默认折叠）以及 **Agent 运维统计大屏**（见下节）。三个 Demo 入口已移至侧边栏「演示入口」分组 |
 | Discover | **Integration Registry** | 工具集成概览 + 从 AgentCore Registry 读取已批准的 **A2A Agent** 记录（显示名称/端点/能力/发布者） |
 | **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
 | Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AgentCore Registry 导入已批准技能** |
@@ -110,11 +110,13 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | **Assess** | **Agent Guardrails** | 跳转 AgentCore Evaluator + Bedrock Guardrails 控制台 |
 | Assess | **Observability** | 跳转 CloudWatch Gen-AI Observability |
 | Assess | **Evaluations** | 跳转 AgentCore Evaluations 控制台 |
-| Assess | **Optimization** | AgentCore Optimization：推荐、配置包、目标级 A/B 测试、按租户入口环境 |
+| Assess | **Optimization** | AgentCore Optimization：推荐、配置包、目标级 A/B 测试、按用户配置入口环境（entryEnvironment） |
 
 #### Agent 运维统计大屏（Overview 页内）
 
-面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。可切换时间范围（24h / 7d / 30d）和成本归因维度（按用户 / 租户 / 模型），每张图都配表格视图。
+面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。架构图默认折叠，打开页面即见运维数据。顶部可切换时间范围（24h / 7d / 30d，作用于全部面板）；成本归因维度（按用户 / 入口环境 / Agent 模型）位于「Token 成本归因」面板内，因为它只影响该面板。每张图都配表格视图。
+
+> **「按入口环境」不是按客户计费。** 它聚合的是 `tenant_env` 的三种模式（`default` / `ab-bundles` / `ab-targets`），也就是 A/B 分流组之间的成本对比 —— 本项目没有独立的租户实体。真正的按客户归因需要先引入 tenant 实体（如 Cognito 组或 `tenantId` 属性）。
 
 | 指标组 | 数据来源 | 是否真实 |
 |--------|---------|---------|
@@ -506,7 +508,7 @@ Log in with the admin credentials from deploy output (or add a user to the `admi
 
 | Stage | Page | What you can do |
 |-------|------|-----------------|
-| **Discover** | **Overview** | Product intro + architecture diagram, three demo launchers, and the **agent operations dashboard** (see below) |
+| **Discover** | **Overview** | Product intro + architecture diagram (collapsed by default) and the **agent operations dashboard** (see below). The three demo launchers moved to the side nav's **Demos** group |
 | Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AgentCore Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card |
 | **Build** | **Models** | Set the global default LLM; override text and vision models per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
 | Build | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides; **import approved records from AgentCore Registry** |
@@ -524,7 +526,9 @@ Log in with the admin credentials from deploy output (or add a user to the `admi
 
 #### Agent operations dashboard (on Overview)
 
-A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. Switch time range (24h / 7d / 30d) and cost-attribution dimension (by user / tenant / model); every chart has a table view.
+A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. The architecture diagram is collapsed by default so the metrics are on screen when the page opens. Time range (24h / 7d / 30d) sits at the top and scopes every panel; the cost-attribution dimension (by user / entry environment / agent model) lives inside the **Token cost attribution** panel because it only affects that panel. Every chart has a table view.
+
+> **"By entry environment" is not per-customer billing.** It aggregates the three `tenant_env` modes (`default` / `ab-bundles` / `ab-targets`) — a cost comparison across A/B routing groups. This project has no separate tenant entity; real per-customer attribution would need one first (a Cognito group or a `tenantId` attribute).
 
 | Metric group | Source | Real? |
 |---|---|---|

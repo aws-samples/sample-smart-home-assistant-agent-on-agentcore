@@ -11,7 +11,8 @@ import Spinner from '@cloudscape-design/components/spinner';
 import SideNavigation from '@cloudscape-design/components/side-navigation';
 import LoginPage from './auth/LoginPage';
 import AdminConsole, { ActiveTab } from './components/AdminConsole';
-import { getCurrentSession, refreshSession, signOut, getIsAdmin, AuthTokens } from './auth/CognitoAuth';
+import { getCurrentSession, refreshSession, signOut, getIsAdmin, getCurrentUserEmail, AuthTokens } from './auth/CognitoAuth';
+import { getConfig } from './config';
 import { useI18n } from './i18n';
 import { detectInitialTheme, setTheme, Theme } from './theme/applyTheme';
 import './App.css';
@@ -41,6 +42,9 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [theme, setLocalTheme] = useState<Theme>(() => detectInitialTheme());
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
+  // Used to prefill `?username=` on the demo links so the admin only has to
+  // type a password when opening an end-user app.
+  const [currentEmail, setCurrentEmail] = useState('');
   const { t, language, setLanguage } = useI18n();
 
   useEffect(() => {
@@ -57,6 +61,7 @@ const App: React.FC = () => {
         try { await refreshSession(); } catch { await getCurrentSession(); }
         setIsAuthenticated(true);
         setIsAdmin(await getIsAdmin());
+        try { setCurrentEmail(await getCurrentUserEmail()); } catch { /* prefill is optional */ }
       } catch {
         setIsAuthenticated(false);
       } finally {
@@ -70,6 +75,7 @@ const App: React.FC = () => {
     setIsAuthenticated(true);
     const admin = await getIsAdmin();
     setIsAdmin(admin);
+    try { setCurrentEmail(await getCurrentUserEmail()); } catch { /* prefill is optional */ }
   };
 
   const handleLogout = () => {
@@ -160,6 +166,24 @@ const App: React.FC = () => {
     );
   }
 
+  const cfg = getConfig();
+  const withUser = (base: string | undefined) =>
+    base
+      ? `${base.replace(/\/$/, '')}/${currentEmail ? `?username=${encodeURIComponent(currentEmail)}` : ''}`
+      : '';
+  const demoLinks = ([
+    [cfg.chatbotUrl, t('overview.openChatbot')],
+    [cfg.deviceSimulatorUrl, t('overview.openDeviceSim')],
+    [cfg.skillErpUrl, t('overview.openSkillErp')],
+  ] as const)
+    .filter(([base]) => !!base)
+    .map(([base, text]) => ({
+      type: 'link' as const,
+      text,
+      href: withUser(base),
+      external: true,
+    }));
+
   const navItems = [
     {
       type: 'section' as const,
@@ -205,10 +229,22 @@ const App: React.FC = () => {
       ],
     },
     { type: 'divider' as const },
+    // Demo launchers. These used to be a card on Overview; moving them into the
+    // nav keeps them reachable from every page and lets Overview lead with the
+    // operational metrics. `?username=` is prefilled with the signed-in admin's
+    // email so opening an end-user app only asks for a password.
+    ...(demoLinks.length > 0
+      ? [{
+          type: 'section' as const,
+          text: t('overview.demosTitle'),
+          defaultExpanded: true,
+          items: demoLinks,
+        }]
+      : []),
     {
       type: 'link' as const,
       text: t('nav.docs'),
-      href: 'https://github.com/aws-samples/smarthome-assistant-agent',
+      href: 'https://github.com/aws-samples/sample-smart-home-assistant-agent-on-agentcore',
       external: true,
     },
   ];

@@ -1775,7 +1775,7 @@ admin-console/
 
 | Section | Page | Purpose |
 |---|---|---|
-| Discover | **Overview** | Product intro + architecture diagram, demo launchers, and the **agent operations dashboard** — a monitoring-wall view of six live metric groups (see [§9.15](#915-agent-operations-dashboard)) |
+| Discover | **Overview** | Product intro + architecture diagram (collapsed by default, so the metrics are on screen when the page opens) and the **agent operations dashboard** — a monitoring-wall view of six live metric groups (see [§9.15](#915-agent-operations-dashboard)). Demo launchers live in the side nav's **Demos** group rather than on this page, so they stay reachable from anywhere |
 | Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AgentCore Registry with publisher info; details modal shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
 | Build | **Models** | Global default model + per-user model override table for both text agent (`modelId`) and vision agent (`visionModelId`); resolution priority: per-user > global > env var |
 | Build | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
@@ -3444,7 +3444,14 @@ Four constraints drove the design, all measured rather than assumed:
   Bedrock spend only to account level. Token *counts* are attributable (join
   `session.id` against the `smarthome-runtime-sessions` table for the email);
   dollars are not. There is also no feature-level instrumentation, so the
-  attribution dimensions are user / tenant / model only.
+  attribution dimensions are user / entry environment / model only.
+- **"Entry environment" is not a tenant.** That dimension aggregates the three
+  `tenant_env` modes (`default` / `ab-bundles` / `ab-targets`), so it compares
+  cost across A/B routing groups — this project has no tenant entity (no tenant
+  table, no `tenantId` attribute; `tenant_env` is a per-user routing marker).
+  The label was `By tenant` until 2026-08-02, which invited the reasonable but
+  wrong reading that it was per-customer billing. Real per-customer attribution
+  needs a tenant entity introduced first.
 - **Rollout stage has no native field.** AgentCore Runtime endpoints carry no
   Shadow/Canary/Percentage/Full traffic-split attribute. This project implements
   gradual rollout with Gateway A/B tests plus per-tenant `tenant_env` routing, so

@@ -127,25 +127,17 @@ export function DashboardSection({ theme }: Props) {
       }
     >
       <SpaceBetween size="l">
-        {/* One filter row, above everything it scopes. Range as a segmented
-            control because three mutually-exclusive presets are a switch, not
-            a dropdown to open. */}
-        <SpaceBetween direction="horizontal" size="m">
-          <SegmentedControl
-            selectedId={range}
-            onChange={({ detail }) => setRange(detail.selectedId as DashboardRange)}
-            label={t('dashboard.filter.range')}
-            options={RANGES.map((r) => ({ id: r, text: t(`dashboard.range.${r}`) }))}
-          />
-          <div style={{ minWidth: 190 }}>
-            <Select
-              selectedOption={{ value: dim, label: t(`dashboard.dim.${dim}`) }}
-              onChange={({ detail }) => setDim(detail.selectedOption.value as DashboardDim)}
-              options={DIMS.map((d) => ({ value: d, label: t(`dashboard.dim.${d}`) }))}
-              ariaLabel={t('dashboard.filter.dim')}
-            />
-          </div>
-        </SpaceBetween>
+        {/* Time range scopes every panel, so it stays here. The attribution
+            dimension only affects the Token attribution panel and now lives in
+            that panel's header — a global-looking control that changes one card
+            reads as a bug. Range is a segmented control because three
+            mutually-exclusive presets are a switch, not a dropdown to open. */}
+        <SegmentedControl
+          selectedId={range}
+          onChange={({ detail }) => setRange(detail.selectedId as DashboardRange)}
+          label={t('dashboard.filter.range')}
+          options={RANGES.map((r) => ({ id: r, text: t(`dashboard.range.${r}`) }))}
+        />
 
         {error && (
           <Alert type="error" dismissible onDismiss={() => setError('')}>
@@ -181,7 +173,6 @@ export function DashboardSection({ theme }: Props) {
                 <TokenTrend
                   spans={spans?.spans}
                   loading={spansLoading}
-                  dim={dim}
                   theme={theme}
                   chartHeight={PLOT_HEIGHT}
                 />
@@ -226,6 +217,17 @@ export function DashboardSection({ theme }: Props) {
               <Panel
                 title={t('dashboard.token.attributionTitle')}
                 info={t(`dashboard.token.attributionDesc.${dim}`)}
+                actions={
+                  // Scoped to this panel because it only affects this panel.
+                  <div style={{ minWidth: 170 }}>
+                    <Select
+                      selectedOption={{ value: dim, label: t(`dashboard.dim.${dim}`) }}
+                      onChange={({ detail }) => setDim(detail.selectedOption.value as DashboardDim)}
+                      options={DIMS.map((d) => ({ value: d, label: t(`dashboard.dim.${d}`) }))}
+                      ariaLabel={t('dashboard.filter.dim')}
+                    />
+                  </div>
+                }
               >
                 <TokenAttribution
                   spans={spans?.spans}
