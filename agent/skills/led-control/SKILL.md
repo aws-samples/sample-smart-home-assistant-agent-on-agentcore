@@ -1,7 +1,7 @@
 ---
 name: led-control
 description: Control the LED Matrix - set modes (rainbow, breathing, chase, sparkle, fire, ocean, aurora), brightness (0-100), power on/off, and static colors
-allowed-tools: device_control
+allowed-tools: control_device
 ---
 # LED Matrix Control
 

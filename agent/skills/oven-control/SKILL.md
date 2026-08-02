@@ -1,7 +1,7 @@
 ---
 name: oven-control
 description: Control the smart oven - set power on/off, cooking mode (bake, broil, convection), and temperature (200-500 F)
-allowed-tools: device_control
+allowed-tools: control_device
 ---
 # Oven Control
 

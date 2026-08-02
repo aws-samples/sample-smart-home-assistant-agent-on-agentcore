@@ -15,6 +15,7 @@ from boto3.dynamodb.conditions import Key
 from agent_prompt_defaults import DEFAULTS as PROMPT_DEFAULTS
 
 import optimization  # AgentCore Optimization handlers; see optimization.py
+import dashboard  # Overview ops-dashboard aggregation; see dashboard.py
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -2205,6 +2206,18 @@ def handler(event, context):
 
     if not check_admin(event):
         return response(403, {"error": "Forbidden: admin group required"})
+
+    # Overview ops dashboard. Admin-only (it aggregates cross-tenant cost and
+    # error data), hence placed after the check_admin gate. Wrapped so a
+    # boto3-level error still returns CORS headers — otherwise the browser
+    # reports a generic CORS failure and masks the real cause (same reasoning
+    # as the /optimization/* wrapper below).
+    if resource == "/dashboard" and method == "GET":
+        try:
+            return dashboard.get_dashboard(event)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Dashboard handler error")
+            return response(500, {"error": type(e).__name__, "message": str(e)})
 
     # User & tool permission routes
     if resource == "/users" and method == "GET":

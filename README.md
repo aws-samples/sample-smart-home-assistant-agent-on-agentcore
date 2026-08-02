@@ -2,7 +2,7 @@
 
 > **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、**企业知识库**、外部集成、会话监控、长期记忆查看和质量评估。
 
-基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台提供 8 个管理维度覆盖 Agent 全生命周期。**Skill ERP** 网站（新增）让普通用户可以自助发布技能到 **AgentCore Registry**，审批通过后一键导入到技能目录。
+基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台按 **Discover / Build / Deploy / Assess** 四个阶段组织 15 个页面，覆盖 Agent 全生命周期，其中 Overview 页内置 **Agent 运维统计大屏**（实时健康、Token 成本归因、评估漂移、版本发布状态）。**Skill ERP** 网站让普通用户可以自助发布技能到 **AgentCore Registry**，审批通过后一键导入到技能目录。
 
 > **实现原理、架构图、协议细节** 请参见 [`docs/architecture-and-design.md`](docs/architecture-and-design.md)。本 README 专注于**部署和使用**。
 
@@ -92,19 +92,42 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 ### 管理控制台 —— Agent Harness Control Center
 
-使用部署输出中的管理员凭证登录（或在 Cognito 控制台把现有用户加到 `admin` 组）。9 个管理页签：
+使用部署输出中的管理员凭证登录（或在 Cognito 控制台把现有用户加到 `admin` 组）。左侧导航按 Agent 生命周期分成四段，共 15 个页面：
 
-| 页签 | 能做什么 |
-|------|---------|
-| **Skills** | 创建/编辑/删除技能（支持完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；管理技能目录文件（scripts / references / assets，S3 预签名 URL 上传下载）；全局技能 + 按用户覆盖；**从 AgentCore Registry 导入已批准技能**（按全局或用户维度勾选） |
-| **Knowledge Base** | 上传文档到企业知识库（PDF、TXT、MD、DOCX、CSV 等）；一键触发 Bedrock KB 向量化同步；按用户隔离（公共知识 + 用户专属） |
-| **Models** | 设置全局默认 LLM 模型；按用户覆盖模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
-| **Agent Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时做叠加拼接 |
-| **Tool Access** | 按用户配置可调用的 Gateway 工具（Cedar 策略）；切换 ENFORCE / LOG_ONLY 模式；**演示入口** 一键打开该用户的聊天机器人（URL 带 `?username=` 预填登录）与设备模拟器 |
-| **Integration Registry** | 工具集成概览 + 从 AgentCore Registry 读取已批准的 **A2A Agent** 记录（A2A 子页签显示名称/端点/能力/发布者等详情） |
-| **Sessions** | 查看所有活跃运行时会话（用户/会话 ID/最后活跃时间）、一键 Stop 终止、以及 **Remote Shell** 按钮（在 Runtime 容器中远程执行 shell 命令，stdout/stderr 流式回传，类似 SSH 调试工具） |
-| **Memories** | 查看每个用户的长期记忆（事实 + 偏好，来自 AgentCore Memory） |
-| **Quality Evaluation** | 跳转到 AgentCore Evaluator、Bedrock Guardrails 控制台 |
+| 分段 | 页面 | 能做什么 |
+|------|------|---------|
+| **Discover** | **Overview** | 产品说明 + 架构图、三个 Demo 入口，以及 **Agent 运维统计大屏**（见下节） |
+| Discover | **Integration Registry** | 工具集成概览 + 从 AgentCore Registry 读取已批准的 **A2A Agent** 记录（显示名称/端点/能力/发布者） |
+| **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
+| Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AgentCore Registry 导入已批准技能** |
+| Build | **Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时叠加拼接 |
+| Build | **Tool Policy** | 按用户配置可调用的工具（Cedar 策略）；内置工具与 Gateway 工具并列并用 Badge 区分；ENFORCE / LOG_ONLY 切换 |
+| Build | **Memories** | 查看每个用户的长期记忆（事实 + 偏好，来自 AgentCore Memory） |
+| Build | **Knowledge Base** | 上传文档到企业知识库（PDF、TXT、MD、DOCX、CSV 等）；一键触发 Bedrock KB 向量化同步；按用户隔离 |
+| Build | **Identity** | 已注册用户表，**以及全部用户管理**：新增用户、提权/降权、删除（原先在 Overview，已统一收敛到此处；不能对自己降权或删除） |
+| **Deploy** | **Instance Type** | 计算实例类型（当前 MicroVM，EC2 规划中） |
+| Deploy | **Sessions** | 每次登录的运行时会话列表（用户 / 类型 / 会话 ID / 最近活跃 / 近 7 天 Token）、一键 Stop，以及 **Remote Shell**（在 Runtime 容器里执行 shell 命令，stdout/stderr 流式回传） |
+| **Assess** | **Agent Guardrails** | 跳转 AgentCore Evaluator + Bedrock Guardrails 控制台 |
+| Assess | **Observability** | 跳转 CloudWatch Gen-AI Observability |
+| Assess | **Evaluations** | 跳转 AgentCore Evaluations 控制台 |
+| Assess | **Optimization** | AgentCore Optimization：推荐、配置包、目标级 A/B 测试、按租户入口环境 |
+
+#### Agent 运维统计大屏（Overview 页内）
+
+面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。可切换时间范围（24h / 7d / 30d）和成本归因维度（按用户 / 租户 / 模型），每张图都配表格视图。
+
+| 指标组 | 数据来源 | 是否真实 |
+|--------|---------|---------|
+| 实时健康（活跃会话、TTFT P95/P99、错误率、QPS） | `AWS/Bedrock-AgentCore` 指标 + `aws/spans` | ✅ |
+| Token 成本趋势与归因（输入/输出拆分） | `aws/spans` 里的 Strands `chat` span | ✅ Token；❌ 美元成本 |
+| 成本预算消耗 | — | ❌ 模拟数据 |
+| 评估通过率与漂移 | `Bedrock-AgentCore/Evaluations` | ✅ 单变体；❌ A/B 对比 |
+| 活跃版本与发布状态 | Runtime Endpoint/Version + CloudTrail | ✅ 版本；⚠️ 灰度阶段为推导值 |
+| 用户满意度（CSAT、赞踩、升级率） | — | ❌ 模拟数据 |
+
+无真实数据来源的卡片会显示 **演示数据** 标记，点开有说明"要变成真实数据需要什么"。几个口径要点：**TTFT 不存在于 CloudWatch 指标中**，只能从 span 属性取；**美元成本无法按用户/Agent 拆分**（Cost Explorer 只到账号级），所以只归因 Token 数量；**灰度阶段没有原生字段**，由 Gateway A/B test 与 `tenant_env` 推导而来。详见 [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard)。
+
+> 大屏默认是空的 —— 需要真实流量才有数据。用下面的[模拟用户脚本](#生成测试数据模拟真实用户)一条命令生成。
 
 ### Skill ERP —— 用户自助发布技能
 
@@ -139,6 +162,38 @@ aws cognito-idp admin-add-user-to-group \
   --username <EMAIL> \
   --group-name admin
 ```
+
+### 生成测试数据（模拟真实用户）
+
+刚部署完，运维大屏和 AgentCore Evaluation 都是空的 —— 它们需要真实流量。这个脚本创建几个测试用户，让它们像真实用户一样和 Agent 对话，覆盖 Agent 的全部功能：
+
+```bash
+export SIM_USER_PASSWORD='SomeStrong#Pass1'   # 需满足 Cognito 密码策略
+
+python3 scripts/simulate-users.py setup       # 创建并配置 5 个 persona（幂等）
+python3 scripts/simulate-users.py run         # 轻量层，约 3.5 分钟
+python3 scripts/simulate-users.py run --heavy # 追加 code-interpreter + browser-use
+python3 scripts/simulate-users.py status      # 查看现有模拟用户及其配置
+python3 scripts/simulate-users.py teardown --yes
+```
+
+5 个 persona 各带不同的模型、租户模式和场景侧重，这样大屏的成本归因图表才会出现多行真实数据、而不是全塞进一个桶：
+
+| persona | 模型 | 租户模式 | 覆盖 |
+|---|---|---|---|
+| `alice` | Opus 4.6 | default | 四类设备控制、设备发现、一键全开 |
+| `bob` | Sonnet 4.6 | default | 企业知识库、天气查询、拒答 |
+| `carol` | Haiku 4.5 | ab-bundles | 多轮记忆延续、用户反馈 |
+| `dave` | Kimi K2.5 | ab-targets | code-interpreter 数据分析（heavy） |
+| `erin` | Sonnet 4.5 | default | browser-use 网页操作（heavy）、拒答、模糊指令 |
+
+测试用户通过 Cognito 登录、走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径，所以产生的 span、Token、会话和评估分与真实流量无法区分。
+
+> **安全边界**：一切都限定在 `simuser+` 邮箱前缀内，代码里有 guard 对其他邮箱直接抛异常，所以 `teardown` 不可能误删真实用户。
+>
+> 跑完等两三分钟再看大屏 —— CloudWatch 有摄取延迟，且大屏有 5 分钟缓存（点刷新可强制重算）。
+
+细节见 [`scripts/sim/README.md`](scripts/sim/README.md) 与 [`docs/architecture-and-design.md` §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation)。
 
 ---
 
@@ -341,7 +396,9 @@ cd cdk && npx cdk destroy --all --force
 | 文档 | 内容 |
 |------|------|
 | 本 README | 部署、使用、本地开发、成本估算、故障排除 |
-| [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | 架构图、组件设计、认证模型、语音模式实现细节、AgentCore CLI 坑、API 参考、MQTT 命令、技术选型 |
+| [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | 架构图、组件设计、认证模型、语音模式实现细节、AgentCore CLI 坑、运维大屏与测试数据设计、API 参考、MQTT 命令、技术选型 |
+| [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | 管理员运维手册:部署闭环、身份接入、权限管控(含授权复核)、质量评估、提示词优化、Skill 流水线、Session 调试、运维大屏 |
+| [`scripts/sim/README.md`](scripts/sim/README.md) | 模拟用户脚本:persona 配置、覆盖范围、安全边界与已知坑位 |
 
 ---
 
@@ -360,7 +417,7 @@ cd cdk && npx cdk destroy --all --force
 
 > **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base (on S3 Vectors)**, **Integration Registry (A2A agents)**, session monitoring (with **Remote Shell** debug console), long-term memory viewing, and safety guardrails.
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console provides 9 management dimensions covering the full Agent lifecycle, including a **Remote Shell** per-session debug console. A new **Skill ERP** site lets end users publish their own skills and A2A agents to **AgentCore Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the new **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console organises 15 pages across four lifecycle stages — **Discover / Build / Deploy / Assess** — including an **agent operations dashboard** on Overview (live health, token cost attribution, evaluation drift, release state) and a **Remote Shell** per-session debug console. The **Skill ERP** site lets end users publish their own skills and A2A agents to **AgentCore Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
 
 > **Implementation details, architecture diagrams, protocol specs** live in [`docs/architecture-and-design.md`](docs/architecture-and-design.md). This README focuses on **deployment and usage**.
 
@@ -445,19 +502,42 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 
 ### Admin Console — Agent Harness Control Center
 
-Log in with the admin credentials from deploy output (or add a user to the `admin` Cognito group). Nine tabs:
+Log in with the admin credentials from deploy output (or add a user to the `admin` Cognito group). The side navigation groups 15 pages by agent lifecycle stage:
 
-| Tab | What you can do |
-|-----|-----------------|
-| **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files (scripts / references / assets via S3 presigned URLs); global skills + per-user overrides; **import approved records from AgentCore Registry** (select global or per-user scope) |
-| **Knowledge Base** | Upload documents to the enterprise KB (PDF, TXT, MD, DOCX, CSV, ...); one-click Bedrock KB vectorization sync; per-user isolation (shared + user-scoped) |
-| **Models** | Set the global default LLM; override per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
-| **Agent Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
-| **Tool Access** | Configure per-user gateway tool permissions (Cedar policies); toggle ENFORCE / LOG_ONLY; **Demo Links** column to open that user's chatbot (URL prefilled with `?username=`) and device simulator in new tabs |
-| **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: lists approved A2A records from AgentCore Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card (skills, examples, tags) |
-| **Sessions** | View active runtime sessions (user / session ID / last active); Stop a session with one click; **Remote Shell** button opens a modal that runs a shell command inside the runtime container (text or voice) and streams stdout/stderr back live — admin-only SSH-style debug console |
-| **Memories** | View each user's long-term memory (facts + preferences, from AgentCore Memory) |
-| **Quality Evaluation** | Links to AgentCore Evaluator, Bedrock Guardrails consoles |
+| Stage | Page | What you can do |
+|-------|------|-----------------|
+| **Discover** | **Overview** | Product intro + architecture diagram, three demo launchers, and the **agent operations dashboard** (see below) |
+| Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AgentCore Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card |
+| **Build** | **Models** | Set the global default LLM; override text and vision models per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
+| Build | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides; **import approved records from AgentCore Registry** |
+| Build | **Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
+| Build | **Tool Policy** | Configure per-user tool permissions (Cedar policies); built-in and gateway tools listed side-by-side with source badges; toggle ENFORCE / LOG_ONLY |
+| Build | **Memories** | View each user's long-term memory (facts + preferences, from AgentCore Memory) |
+| Build | **Knowledge Base** | Upload documents to the enterprise KB (PDF, TXT, MD, DOCX, CSV, ...); one-click Bedrock KB vectorization sync; per-user isolation |
+| Build | **Identity** | Registered-users table **and all user management**: create, promote/demote admin, delete. (These lived on Overview previously; consolidated here. Self-demotion and self-deletion stay disabled.) |
+| **Deploy** | **Instance Type** | Compute class configuration (MicroVM today, EC2 planned) |
+| Deploy | **Sessions** | Per-login runtime sessions (user / kind / session ID / last active / 7-day tokens); Stop with one click; **Remote Shell** streams shell commands inside the runtime container — admin-only SSH-style debug console |
+| **Assess** | **Agent Guardrails** | Links to AgentCore Evaluator + Bedrock Guardrails consoles |
+| Assess | **Observability** | Link to CloudWatch Gen-AI Observability |
+| Assess | **Evaluations** | Link to the AgentCore Evaluations console |
+| Assess | **Optimization** | AgentCore Optimization: recommendations, configuration bundles, target-based A/B tests, per-tenant entry environment |
+
+#### Agent operations dashboard (on Overview)
+
+A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. Switch time range (24h / 7d / 30d) and cost-attribution dimension (by user / tenant / model); every chart has a table view.
+
+| Metric group | Source | Real? |
+|---|---|---|
+| Live health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans` | ✅ |
+| Token cost trend + attribution (input/output split) | Strands `chat` spans in `aws/spans` | ✅ tokens; ❌ dollar cost |
+| Budget consumption | — | ❌ simulated |
+| Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
+| Active version & release state | Runtime Endpoint/Version + CloudTrail | ✅ versions; ⚠️ rollout stage derived |
+| User satisfaction (CSAT, thumbs, escalation) | — | ❌ simulated |
+
+Cards without a real source carry a **Demo data** badge whose popover states what a real source would require. Three caveats worth knowing: **TTFT is not a CloudWatch metric** (it exists only as a span attribute); **dollar cost cannot be split per user or agent** (Cost Explorer resolves only to account level), so only token counts are attributed; and **rollout stage has no native field** — it is derived from Gateway A/B tests plus `tenant_env`. Full detail in [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard).
+
+> The dashboard starts empty — it needs real traffic. Generate some with the [simulated-users script](#generate-test-data-simulated-users).
 
 ### Skill ERP — end-user skill publishing
 
@@ -492,6 +572,38 @@ aws cognito-idp admin-add-user-to-group \
   --username <EMAIL> \
   --group-name admin
 ```
+
+### Generate test data (simulated users)
+
+Right after deploy the ops dashboard and AgentCore Evaluations are empty — they need real traffic. This script creates a few test users and has them converse with the agent like real users, covering the agent's full feature surface:
+
+```bash
+export SIM_USER_PASSWORD='SomeStrong#Pass1'   # must satisfy the Cognito password policy
+
+python3 scripts/simulate-users.py setup       # create + configure 5 personas (idempotent)
+python3 scripts/simulate-users.py run         # light tier, ~3.5 min
+python3 scripts/simulate-users.py run --heavy # adds code-interpreter + browser-use
+python3 scripts/simulate-users.py status      # who exists, with what config
+python3 scripts/simulate-users.py teardown --yes
+```
+
+The five personas deliberately differ in model, tenant mode and scenario mix, so the dashboard's attribution charts show several real rows instead of collapsing into one bucket:
+
+| persona | model | tenant env | exercises |
+|---|---|---|---|
+| `alice` | Opus 4.6 | default | all four devices, discovery, all-devices-on |
+| `bob` | Sonnet 4.6 | default | knowledge base, weather lookup, refusal |
+| `carol` | Haiku 4.5 | ab-bundles | multi-turn memory recall, user feedback |
+| `dave` | Kimi K2.5 | ab-targets | code-interpreter data analysis (heavy) |
+| `erin` | Sonnet 4.5 | default | browser-use web automation (heavy), refusal, ambiguity |
+
+Test users sign in through Cognito and use the **same** SigV4 `/invocations` path as the chatbot, so the spans, tokens, sessions and evaluation scores they produce are indistinguishable from real usage.
+
+> **Safety boundary**: everything is scoped to the `simuser+` email prefix, and a guard in the code raises on any other address — `teardown` cannot delete real users.
+>
+> Wait two or three minutes after a run before checking the dashboard: CloudWatch ingestion lags and the dashboard caches for 5 minutes (use Refresh to force re-aggregation).
+
+Details in [`scripts/sim/README.md`](scripts/sim/README.md) and [`docs/architecture-and-design.md` §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation).
 
 ---
 
@@ -673,7 +785,9 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 | Document | Covers |
 |----------|--------|
 | This README | Deployment, usage, local dev, cost estimation, troubleshooting |
-| [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | Architecture diagrams, component design, authentication model, voice-mode implementation details, AgentCore CLI quirks, API reference, MQTT schemas, technology choices |
+| [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | Architecture diagrams, component design, authentication model, voice-mode implementation details, AgentCore CLI quirks, ops-dashboard and test-data design, API reference, MQTT schemas, technology choices |
+| [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | Administrator runbook (Chinese): deploy loop, identity, permission management incl. grant verification, quality evaluation, prompt optimization, skill pipeline, session debugging, ops dashboard |
+| [`scripts/sim/README.md`](scripts/sim/README.md) | Simulated-users script: persona configuration, coverage, safety boundary, known gotchas |
 
 ---
 

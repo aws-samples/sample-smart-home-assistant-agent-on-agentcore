@@ -1,0 +1,2 @@
+# Generated run logs — regenerate with `simulate-users.py run`, don't commit.
+*.jsonl

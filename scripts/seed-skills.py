@@ -8,6 +8,7 @@ overwrites existing items with the same key.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -59,9 +60,13 @@ def main():
         skill_name = fm.get("name", skill_dir)
         allowed_tools_raw = fm.get("allowed-tools", "")
         if isinstance(allowed_tools_raw, str):
-            allowed_tools = [t for t in allowed_tools_raw.split() if t]
+            # Split on commas AND whitespace. Splitting on whitespace alone let
+            # a comma ride along into the tool name — `allowed-tools:
+            # discover_devices, device_control` seeded a tool literally called
+            # "discover_devices," which matches nothing.
+            allowed_tools = [t.strip() for t in re.split(r"[,\s]+", allowed_tools_raw) if t.strip()]
         elif isinstance(allowed_tools_raw, list):
-            allowed_tools = allowed_tools_raw
+            allowed_tools = [str(t).strip() for t in allowed_tools_raw if str(t).strip()]
         else:
             allowed_tools = []
 

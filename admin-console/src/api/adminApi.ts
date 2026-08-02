@@ -1148,3 +1148,166 @@ export async function deleteTenantEnv(email: string): Promise<void> {
     throw new Error(body.error || `Failed to delete tenant environment (${res.status})`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Overview ops dashboard — GET /dashboard
+// Two-stage: the fast part is CloudWatch + control-plane reads; the spans part
+// runs Logs Insights over aws/spans and takes ~5-20s, so the UI requests it
+// separately and fills those cards in when it lands. See dashboard.py.
+// ---------------------------------------------------------------------------
+
+export type DashboardRange = '24h' | '7d' | '30d';
+export type DashboardDim = 'user' | 'tenant' | 'agent';
+
+export interface MetricSeries {
+  timestamps: string[];
+  values: number[];
+}
+
+export interface DashboardHealth {
+  available: boolean;
+  reason?: string;
+  invocations: number;
+  sessions: number;
+  userErrors: number;
+  systemErrors: number;
+  throttles: number;
+  /** null when there was no traffic — 0/0 would render a misleading 0%. */
+  errorRate: number | null;
+  qps: number;
+  latencyP95Ms: number | null;
+  /** ActiveSessionCount only exists account-wide, not per runtime. */
+  activeSessionsAccount: number | null;
+  series: Record<string, MetricSeries>;
+}
+
+export interface EvaluatorScore {
+  name: string;
+  average: number;
+  latest: number;
+  drift: number | null;
+  /** false for Numerical scales (e.g. smarthome_SmartHomeQuality) — not a %. */
+  isRatio: boolean;
+  timestamps: string[];
+  values: number[];
+}
+
+export interface DashboardEvaluations {
+  available: boolean;
+  reason?: string;
+  evaluators: EvaluatorScore[];
+}
+
+export interface DashboardAbComparison {
+  available: boolean;
+  reason?: string;
+  rows?: { variant: string; evaluator: string; average: number; n: number }[];
+}
+
+export interface RuntimeEndpointInfo {
+  name: string;
+  liveVersion: string;
+  status: string;
+  description: string;
+  lastUpdatedAt: string;
+}
+
+export interface DashboardRelease {
+  available: boolean;
+  reason?: string;
+  runtimeId: string;
+  latestVersion: string | null;
+  endpoints: RuntimeEndpointInfo[];
+  abTests: { name: string; status: string; executionStatus: string; updatedAt: string }[];
+  abRunning: boolean;
+  tenantOverrides: number;
+  /** Derived, not a native AgentCore field — see dashboard.py _rollout_stage. */
+  rolloutStage: string;
+  rollbackHistory: {
+    eventTime: string; username: string; endpointName: string; targetVersion: string;
+  }[];
+  historyRetentionDays: number;
+}
+
+export interface SpanTrendPoint {
+  day: string;
+  n: number;
+  ttftP95: number;
+  ttftP99: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface AttributionRow {
+  key: string;
+  inputTokens: number;
+  outputTokens: number;
+  sessions: number;
+}
+
+export interface DashboardSpans {
+  available: boolean;
+  reason?: string;
+  trend: SpanTrendPoint[];
+  attribution: AttributionRow[];
+  dim: DashboardDim;
+  totals: {
+    inputTokens: number;
+    outputTokens: number;
+    spans: number;
+    ttftP95Ms: number | null;
+    ttftP99Ms: number | null;
+  };
+}
+
+export interface DashboardFastResponse {
+  range: DashboardRange;
+  part: 'fast';
+  generatedAt: string;
+  cached: boolean;
+  cachedAt?: string;
+  health: DashboardHealth;
+  evaluations: DashboardEvaluations;
+  abComparison: DashboardAbComparison;
+  release: DashboardRelease;
+}
+
+export interface DashboardSpansResponse {
+  range: DashboardRange;
+  part: 'spans';
+  generatedAt: string;
+  cached: boolean;
+  cachedAt?: string;
+  spans: DashboardSpans;
+}
+
+export async function getDashboardFast(
+  range: DashboardRange,
+  refresh = false,
+): Promise<DashboardFastResponse> {
+  const headers = await authHeaders();
+  const qs = new URLSearchParams({ range });
+  if (refresh) qs.set('refresh', '1');
+  const res = await fetch(`${getBaseUrl()}/dashboard?${qs}`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load dashboard (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function getDashboardSpans(
+  range: DashboardRange,
+  dim: DashboardDim,
+  refresh = false,
+): Promise<DashboardSpansResponse> {
+  const headers = await authHeaders();
+  const qs = new URLSearchParams({ range, part: 'spans', dim });
+  if (refresh) qs.set('refresh', '1');
+  const res = await fetch(`${getBaseUrl()}/dashboard?${qs}`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load token metrics (${res.status})`);
+  }
+  return res.json();
+}

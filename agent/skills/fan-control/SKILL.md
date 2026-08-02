@@ -1,7 +1,7 @@
 ---
 name: fan-control
 description: Control the smart fan - set power on/off, speed (0-3), and oscillation on/off
-allowed-tools: device_control
+allowed-tools: control_device
 ---
 # Fan Control
 

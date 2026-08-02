@@ -15,7 +15,7 @@
 - [8.9. Per-Login Session ID and Session Tracking](#89-per-login-session-id-and-session-tracking)
 - [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
 - [8.11. Image Input (Vision Bypass Path)](#811-image-input-vision-bypass-path)
-- [8.12. AgentCore Optimization (Recommendations, Bundles, A/B Tests)](#812-agentcore-optimization-recommendations-bundles--ab-tests)
+- [8.12. AgentCore Optimization (Recommendations, Bundles, A/B Tests)](#812-agentcore-optimization-recommendations--target-based-ab-routing)
 - [8.13. Per-Tenant Entry Environment](#813-per-tenant-entry-environment)
 - [9. Infrastructure Design](#9-infrastructure-design)
 - [9.4. Admin Console Design](#94-admin-console-design)
@@ -30,6 +30,8 @@
 - [9.12. Observability and AgentCore Online Evaluation](#912-observability-and-agentcore-online-evaluation)
 - [9.13. A2A Sample Agents & Text Agent A2A Client](#913-a2a-sample-agents--text-agent-a2a-client)
 - [9.14. Code Interpreter — Live Agent Code Execution](#914-code-interpreter--live-agent-code-execution)
+- [9.15. Agent Operations Dashboard](#915-agent-operations-dashboard)
+- [9.16. Simulated End Users (Test Data Generation)](#916-simulated-end-users-test-data-generation)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -801,8 +803,15 @@ The `tests/` directory is intentionally excluded from the CodeZip packaging — 
 # Example: agent activates led-control skill
 # -> Loads instructions about rainbow, breathing, chase modes
 # -> Knows exact command format: {"action": "setMode", "mode": "rainbow"}
-# -> Has allowed-tools: device_control
+# -> Has allowed-tools: control_device
 ```
+
+> **Tool names in `allowed-tools` must match what the agent actually registers.**
+> The five device skills originally declared `device_control` while `agent.py`
+> registers `control_device`; the model dutifully called the declared name, got
+> `Unknown tool: device_control`, and recovered via a second `skills` call —
+> a wasted round trip on every device operation that also depressed
+> `ToolSelectionAccuracy`. Fixed 2026-08-02.
 
 ### 8.5 Command Validation
 
@@ -1018,7 +1027,7 @@ All fields from the [Agent Skills specification](https://agentskills.io/specific
 | `skillName` (SK) | String | Skill identifier (e.g., `led-control`). 1-64 chars, lowercase alphanumeric + hyphens |
 | `description` | String | Skill description, max 1024 chars (shown in skill metadata) |
 | `instructions` | String | Full markdown instructions (SKILL.md body, loaded on skill activation) |
-| `allowedTools` | List\<String\> | Tools the skill can use (e.g., `["device_control"]`) |
+| `allowedTools` | List\<String\> | Tools the skill can use (e.g., `["control_device"]`). Seeded from the SKILL.md `allowed-tools` front-matter, which `seed-skills.py` splits on **commas and whitespace** — splitting on whitespace alone once produced a tool literally named `"discover_devices,"` |
 | `license` | String | Optional. License name or reference (e.g., `Apache-2.0`) |
 | `compatibility` | String | Optional, max 500 chars. Environment requirements (e.g., `Requires Python 3.12+`) |
 | `metadata` | Map\<String, String\> | Optional. Arbitrary key-value pairs for additional metadata |
@@ -1068,8 +1077,16 @@ S3: smarthome-skill-files-{accountId}
 | `PUT` | `/users/{userId}/permissions` | Update allowed tools + sync Cedar policies |
 | `GET` | `/memories` | List all memory actors |
 | `GET` | `/memories/{actorId}` | Get long-term memory records (facts + preferences) for an actor |
+| `GET` | `/dashboard?range=24h\|7d\|30d` | Ops-dashboard fast half — health metrics, evaluation scores, release/version state (see [§9.15](#915-agent-operations-dashboard)) |
+| `GET` | `/dashboard?range=…&part=spans&dim=user\|tenant\|agent` | Ops-dashboard slow half — TTFT percentiles and token trend/attribution from a Logs Insights query over `aws/spans` (~5-20s) |
 
 **Authorization:** All admin API endpoints require a valid Cognito JWT. The Lambda additionally checks that the caller belongs to the `admin` Cognito group (returns 403 if not).
+
+> `/dashboard` is wired with a plain `apigw.Integration` plus a **single**
+> wildcard `lambda:InvokeFunction` permission rather than CDK's per-method
+> auto-permissions, because the admin Lambda's auto-generated resource policy is
+> already at the API Gateway 20 KB cap — the same reason `/optimization/*` and
+> the `?action=` dispatches exist.
 
 ### 8.8 Per-User Model Selection
 
@@ -1754,11 +1771,11 @@ admin-console/
 - **Admin role gate**: After Cognito login, decodes the JWT `cognito:groups` claim. Users not in the `admin` group see a Cloudscape `Alert` "Access Denied" page.
 - **AWS-Console-style side navigation** with four collapsible sections (Discover / Build / Deploy / Assess) plus a Docs link. This replaces the previous top tab-bar layout and matches the AWS Console's IA.
 - **Light/Dark theme toggle** in the top-right, persisted to `localStorage` under `admin.theme`. Initial paint honors `prefers-color-scheme` on first visit.
-- **Fourteen pages** organised under those four sections:
+- **Fifteen pages** organised under those four sections:
 
 | Section | Page | Purpose |
 |---|---|---|
-| Discover | **Overview** | Intro card + architecture-diagram placeholder |
+| Discover | **Overview** | Product intro + architecture diagram, demo launchers, and the **agent operations dashboard** — a monitoring-wall view of six live metric groups (see [§9.15](#915-agent-operations-dashboard)) |
 | Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AgentCore Registry with publisher info; details modal shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
 | Build | **Models** | Global default model + per-user model override table for both text agent (`modelId`) and vision agent (`visionModelId`); resolution priority: per-user > global > env var |
 | Build | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
@@ -1766,12 +1783,13 @@ admin-console/
 | Build | **Tool Policy** | Per-user tool permissions. Lists built-in Strands/AgentCore tools (default-allowed) and Gateway-scanned tools (opt-in) side-by-side with Cloudscape `Badge`s tagging the source. Cedar policy enforcement with ENFORCE/LOG_ONLY toggle. |
 | Build | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory. Actor IDs are resolved back to the user's email via the sanitizer mirror. |
 | Build | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
-| Build | **Identity** | Registered-users table (Cognito User Pool) |
+| Build | **Identity** | Registered-users table (Cognito User Pool) **and all user management** — create user, promote/demote admin, delete. These actions used to live on Overview; they were consolidated here on 2026-07-29 so Overview is architecture + demos + metrics only. Self-demotion and self-deletion stay disabled. |
 | Deploy | **Instance Type** | Compute class configuration (MicroVM today, EC2 planned) |
 | Deploy | **Sessions** | Runtime session monitoring listing every per-login AgentCore Runtime session from the `smarthome-runtime-sessions` table (one row per login, not overwritten) with User ID, Kind (Text/Voice), Session ID, Last Active, Total Tokens (7d), **Remote Shell** button, and Stop button. Kind column distinguishes text-runtime vs voice-runtime sessions — clicking Stop passes `?kind=text\|voice` so the correct runtime ARN is targeted, and the DynamoDB record is deleted on success so the stopped row clears immediately. Remote Shell opens a modal that streams shell commands into the runtime container via `InvokeAgentRuntimeCommand` (see §9.10), including a row of example-command chips for common ops. |
 | Assess | **Agent Guardrails** | Links to AgentCore Evaluator + Bedrock Guardrails consoles |
 | Assess | **Observability** | Link to CloudWatch Gen-AI Observability |
 | Assess | **Evaluations** | Link to AgentCore Evaluations console |
+| Assess | **Optimization** | AgentCore Optimization — recommendations, configuration bundles, target-based A/B tests, and the per-tenant entry-environment table (see [§8.12](#812-agentcore-optimization-recommendations--target-based-ab-routing)) |
 | (external) | **Docs** | Link to the public repo |
 
 **CDK Resources:**
@@ -1815,6 +1833,19 @@ The `+ Add User` button used to live on the Overview tab's user table
 and on the Skills tab's user-scope row. Both have been removed —
 Identity is the single entry point for creating users so admins know
 where to look.
+
+**Admin-created users get no tool permissions automatically.** The
+`userInitLambda` that provisions gateway tool grants is wired to the
+**PostConfirmation** trigger, and per the
+[Cognito docs](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-post-confirmation.html)
+that trigger fires "only for user who sign up in your user pool, not for user
+accounts that you create with your administrator credentials" — it runs on
+`ConfirmSignUp` / `AdminConfirmSignUp` / `ConfirmForgotPassword`, none of which
+`AdminCreateUser` + `AdminSetUserPassword` invokes. So a user created from the
+Identity tab must be granted tools explicitly on the **Tool Policy** page
+(and the grant verified per §9.5). Combined with the missing-`InvokeGateway`
+bug documented in §9.5, this is why only 5 of 30 users in the reference
+deployment had working tool permissions.
 
 **Why permanent passwords instead of the email-invite flow.** The system
 runs in environments where the user's email may be on an external
@@ -1900,6 +1931,47 @@ When the admin clicks "Save Permissions" for a user:
 4. Create or update the tool's Cedar policy in the policy engine
 5. If no users have a tool, delete its permit policy (default-deny blocks it)
 6. On first save: create policy engine, grant gateway role IAM permissions (PolicyEngineAccess), associate with gateway (ENFORCE mode)
+
+**`bedrock-agentcore:InvokeGateway` is required — and its absence fails silently.**
+
+The policy engine calls back into the gateway while attaching a policy, so the
+caller's role needs `InvokeGateway` on top of
+`GetGateway` / `UpdateGateway` / `ListGatewayTargets` / `GetGatewayTarget`.
+Without it, `PUT /users/{sub}/permissions` still returns **200**, DynamoDB is
+still written, and the sub really does appear in the Cedar statement — but the
+policy then settles into:
+
+```
+UPDATE_FAILED: Insufficient permissions to call gateway with ID <gateway-id>
+```
+
+A failed attach means the gateway serves that user **zero** tools. The agent
+receives an empty `tools/list`, so it answers "that's beyond my knowledge"
+and the failure reads like a model-quality problem. Nothing anywhere reports
+an error: the API returned 200, the Cedar contents are correct, and there are
+no `DenyDecisions` either (measured 2 allow / 0 deny over an hour) because the
+request never reaches authorization — the tool simply isn't in the list.
+
+Both the admin Lambda and `userInitLambda` (the Cognito PostConfirmation
+trigger, so self-signup users were affected too) were missing this. Only 5 of
+30 users had working tool permissions as a result. Fixed 2026-08-02.
+
+**Therefore: never treat the 200 as confirmation.** Verify the policy status:
+
+```python
+c = boto3.client("bedrock-agentcore-control", region_name=REGION)
+for p in c.list_policies(policyEngineId=PE_ID)["policies"]:
+    f = c.get_policy(policyEngineId=PE_ID, policyId=p["policyId"])
+    print(p["name"], f["status"], f.get("statusReasons"))
+```
+
+`UPDATING` immediately after a grant is normal; settle time is ~75s.
+`UPDATE_FAILED` is not. `scripts/sim/provisioning.py:wait_for_policies_active()`
+implements this poll — reuse it rather than re-inventing the check.
+
+> `tools/list` is an unreliable probe on its own: it intermittently returned
+> `[]` for users whose policies were ACTIVE and who could successfully invoke
+> tools through the agent. The authoritative test is a real agent invocation.
 
 **User Identity:**
 
@@ -3334,6 +3406,152 @@ font-list fallback chain was proven ineffective and removed.
 scientific stack. The chatbot reuses its existing `react-markdown` dependency
 for code syntax rendering and the §9.10/§9.11 `InvokeAgentRuntimeCommand`
 workspace-read path for charts; no new frontend packages.
+
+---
+
+### 9.15 Agent Operations Dashboard
+
+The Overview page carries a monitoring-wall view of six operational metric
+groups, aimed at the administrator of a consumer-facing unified entry point.
+Backed by `GET /dashboard` (`cdk/lambda/admin-api/dashboard.py`), admin-gated
+because it aggregates cross-tenant cost and error data.
+
+**Which numbers are real.** The distinction matters, so the UI marks it and so
+does this table:
+
+| # | Card | Source | Real? |
+|---|------|--------|-------|
+| 1 | Health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans` | ✅ |
+| 2 | Token trend + attribution (input/output split) | Strands `chat` spans in `aws/spans` | ✅ tokens; ❌ dollar cost |
+| 3 | Budget consumption | — | ❌ simulated |
+| 4 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
+| 5 | Active version & release state | `ListAgentRuntimeEndpoints` / `…Versions`, CloudTrail | ✅ versions; ⚠️ rollout stage derived |
+| 6 | User satisfaction (CSAT, thumbs, escalation) | — | ❌ simulated |
+
+Four constraints drove the design, all measured rather than assumed:
+
+- **TTFT is not a CloudWatch metric.** The `bedrock-agentcore` OTel namespace
+  advertises `gen_ai.client.operation.duration` but returns **zero
+  datapoints**. Real TTFT lives only on Strands `chat` spans as
+  `gen_ai.server.time_to_first_token`, alongside `gen_ai.usage.input_tokens` /
+  `output_tokens` / `request.model` / `session.id`. Anything wanting TTFT must
+  pay for a Logs Insights query. See [[project-agentcore-metric-sources]] in the
+  repo's operational notes.
+- **`ActiveSessionCount` only has an account-level dimension**
+  (`Service=AgentCore.Runtime`) — there is no per-runtime variant, so that tile
+  is labelled account-wide.
+- **Dollar cost cannot be attributed per user or agent.** Cost Explorer resolves
+  Bedrock spend only to account level. Token *counts* are attributable (join
+  `session.id` against the `smarthome-runtime-sessions` table for the email);
+  dollars are not. There is also no feature-level instrumentation, so the
+  attribution dimensions are user / tenant / model only.
+- **Rollout stage has no native field.** AgentCore Runtime endpoints carry no
+  Shadow/Canary/Percentage/Full traffic-split attribute. This project implements
+  gradual rollout with Gateway A/B tests plus per-tenant `tenant_env` routing, so
+  the stage is *derived*: no RUNNING A/B test → `Full`; RUNNING with tenant
+  overrides → `Canary`; RUNNING without → `Percentage`. `Shadow` has no
+  implementation here and never appears. The UI labels this as a
+  project-specific reading.
+
+**Two-stage loading.** The fast half (CloudWatch `GetMetricData` + control-plane
+reads + CloudTrail) returns in ~2-3s and paints immediately. The slow half
+(`?part=spans`) runs Logs Insights over `aws/spans` and takes ~5-20s, filling in
+the token cards when it lands. Both spans queries share **one** deadline
+(`SPANS_QUERY_BUDGET_SECONDS = 22`) because API Gateway's integration timeout is
+a hard 29s that cannot be raised — giving each query its own 20s budget risked a
+40s worst case and a 504 with no usable response. The admin Lambda timeout was
+raised 30s → 60s for headroom.
+
+**Caching.** Results are cached 5 minutes in the existing `smarthome-skills`
+table under `__dashboard_cache_{range}#{part}#{dim}__` sort keys, following the
+same reserved-SK pattern as `optimization.py` and `tenant_env.py` — no extra
+table. The key space is bounded at 12 rows overwritten in place, so the table's
+disabled TTL is harmless (expiry is checked on read). Logs Insights bills by
+bytes scanned and admins reload Overview often, which is the whole point of the
+cache.
+
+**Degradation.** Every block is independently `try`/`except`ed: a failing block
+yields `None` for its own card rather than a 500 for the page. Error rate renders
+`--` rather than `0%` when there was no traffic, since 0/0 would read as healthy.
+
+**Layout.** Laid out as a NOC wall rather than stacked cards: a filter row, then
+a six-signal status strip, then three rows of paired panels (8/4 and 6/6 column
+splits). Long explanatory prose moved into info popovers, which is most of what
+cut the block height from ~4200px to ~2270px. Two layout notes worth keeping:
+Cloudscape resolves `Grid` breakpoints against the **container**, not the
+viewport — the console's nav rail leaves ~1078px at a 1680px viewport, short of
+`m` (1120px), so columns switch at `s` (912px) or they silently never split. And
+verbose table headers overflow a 6-column cell: `Drift (2nd half - 1st half)`
+pushed the evaluator table to 651px inside a 477px cell and clipped the column,
+so it is one word plus a popover.
+
+**Chart palette.** Cloudscape's stock 8-slot categorical palette fails
+colorblind-safety validation outright (light: `#096f64` chroma 0.085 below the
+0.10 floor, `#096f64`↔`#962249` deuteranopia ΔE 4.6 against a ≥8 target; dark:
+five slots outside the lightness band). The dashboard therefore snaps to passing
+*within Cloudscape's own ramp steps*, validated for both modes under all-pairs
+(a line chart lets any two series neighbour): blue-2-300 / pink-400 /
+yellow-300, worst all-pairs CVD ΔE 12.0 light and 13.0 dark. **Hard cap of three
+series** — a fourth cannot clear the floors, so the tail folds into "Other" or
+facets. Status colours (good/warning/serious/critical) are reserved and always
+ship with an icon and text label, never colour alone. See
+`admin-console/src/components/Dashboard/palette.ts`.
+
+### 9.16 Simulated End Users (Test Data Generation)
+
+`scripts/simulate-users.py` plus `scripts/sim/` generates real agent traffic on
+demand so §9.15's dashboard and AgentCore Evaluations have something to show.
+Test users sign in through Cognito and converse with the deployed runtime over
+the **same SigV4 `/invocations` path the chatbot uses**, so the resulting spans,
+tokens, sessions and evaluation scores are indistinguishable from real usage.
+
+```bash
+export SIM_USER_PASSWORD='SomeStrong#Pass1'
+python3 scripts/simulate-users.py setup      # 5 personas, idempotent
+python3 scripts/simulate-users.py run        # light tier, ~3.5 min
+python3 scripts/simulate-users.py run --heavy
+python3 scripts/simulate-users.py status
+python3 scripts/simulate-users.py teardown --yes
+```
+
+**Personas.** Each is a different tenant profile on purpose, so the dashboard's
+attribution charts show several real rows instead of collapsing into one bucket
+— that per-user differentiation is the product's headline claim:
+
+| persona | model | tenant env | exercises |
+|---|---|---|---|
+| `alice` | Opus 4.6 | default | all four devices, discovery, all-devices-on |
+| `bob` | Sonnet 4.6 | default | knowledge base, weather (`http_request`), refusal |
+| `carol` | Haiku 4.5 | ab-bundles | multi-turn memory recall, user feedback |
+| `dave` | Kimi K2.5 | ab-targets | code-interpreter (heavy) |
+| `erin` | Sonnet 4.5 | default | browser-use (heavy), refusal, ambiguity |
+
+Measured turn latency: light 3–25s, heavy 19–141s (browser-use is the 141s case
+and occupies a real DCV session). Personas run concurrently; turns within a
+persona stay sequential because a conversation is ordered.
+
+**Module boundaries.** `sim/agent_client.py` is the auth + invoke wrapper
+(Cognito → Identity Pool → SigV4), `sim/personas.py` is pure scenario data,
+`sim/provisioning.py` owns AWS-side state (create, grant, wait, configure,
+tear down). Only `boto3` + `requests`, both already in the venv.
+
+**Three non-obvious constraints the code handles:**
+
+- **Runtime session ids must be ≥33 characters** or AgentCore rejects the call
+  with `Member must have length greater than or equal to 33`. The harness mirrors
+  the chatbot's `user-session-{sub}-{epoch_ms}` (~63 chars).
+- **`setup` must wait for Cedar policies to reach ACTIVE** before running
+  scenarios. The grant API returns 200 before the attach lands (§9.5), and
+  skipping the wait produces convincing but bogus "tool unavailable" data.
+- **Three different keys.** Tool permissions are keyed by Cognito **sub**; model
+  settings and `tenant_env` are keyed by **email**. The runtime ARN is not a CDK
+  output at all — it is read from the admin Lambda's env, which
+  `setup-agentcore.py` patches and a bare `cdk deploy` resets to a placeholder.
+
+**Safety.** Everything is scoped to the `simuser+` email prefix, and
+`Provisioner._guard()` raises on anything outside that namespace, so `teardown`
+cannot reach real users. Setup is idempotent (existing users reused, not
+recreated). Run logs land in `scripts/sim-results/*.jsonl` (gitignored).
 
 ---
 

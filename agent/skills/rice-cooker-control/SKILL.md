@@ -1,7 +1,7 @@
 ---
 name: rice-cooker-control
 description: Control the smart rice cooker - start cooking with different modes (white_rice, brown_rice, porridge, steam), stop cooking, and toggle keep warm
-allowed-tools: device_control
+allowed-tools: control_device
 ---
 # Rice Cooker Control
 
