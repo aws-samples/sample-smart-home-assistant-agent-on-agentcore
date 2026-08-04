@@ -362,6 +362,59 @@ def _ensure_online_eval_config(ac_control, name: str, log_group: str,
     return resp["onlineEvaluationConfigArn"]
 
 
+def _lookup_optimization_infra(runtime_id: str, account: str,
+                               region: str) -> dict:
+    """Read-only recovery path for the optimization env vars.
+
+    `_ensure_optimization_infra` provisions AND returns the ARNs in one shot, so
+    when it raises partway through (e.g. a transient throttle on one of the two
+    online-eval creates) the caller gets NOTHING back and the admin Lambda ends
+    up with no `OPTIMIZATION_GATEWAY_ARN` — the console then fails every
+    `POST /optimization/ab-tests` with `ConfigurationError` even though the
+    gateway, targets, endpoints and eval configs are all live in the account.
+    This function looks up whatever already exists so the patch block can still
+    populate the env. Returns only the keys it could resolve.
+    """
+    ac = boto3.client("bedrock-agentcore-control", region_name=region)
+    found = {}
+    try:
+        paginator = ac.get_paginator("list_gateways")
+        for page in paginator.paginate():
+            for g in page.get("items", []):
+                if g.get("name") == "smarthome-optimization-gateway":
+                    gw_id = g["gatewayId"]
+                    found["OPTIMIZATION_GATEWAY_ID"] = gw_id
+                    found["OPTIMIZATION_GATEWAY_ARN"] = (
+                        f"arn:aws:bedrock-agentcore:{region}:{account}:gateway/{gw_id}"
+                    )
+                    break
+    except Exception as e:
+        print(f"  [opt-infra] lookup: list_gateways failed: {e}")
+    for ep, key in (("control", "CONTROL_ENDPOINT_ARN"),
+                    ("treatment", "TREATMENT_ENDPOINT_ARN")):
+        found[key] = (f"arn:aws:bedrock-agentcore:{region}:{account}:runtime/"
+                      f"{runtime_id}/runtime-endpoint/{ep}")
+    try:
+        paginator = ac.get_paginator("list_online_evaluation_configs")
+        names = {"smarthome_control_online_eval": "CONTROL_ONLINE_EVAL_ARN",
+                 "smarthome_treatment_online_eval": "TREATMENT_ONLINE_EVAL_ARN"}
+        for page in paginator.paginate():
+            for c in page.get("onlineEvaluationConfigs", []):
+                key = names.get(c.get("onlineEvaluationConfigName"))
+                if key:
+                    found[key] = c["onlineEvaluationConfigArn"]
+    except Exception as e:
+        print(f"  [opt-infra] lookup: list_online_evaluation_configs failed: {e}")
+    try:
+        boto3.client("iam", region_name=region).get_role(
+            RoleName="smarthome-abtest-execution-role")
+        found["AB_TEST_ROLE_ARN"] = (
+            f"arn:aws:iam::{account}:role/smarthome-abtest-execution-role")
+    except Exception:
+        pass
+    return found
+
+
 def _ensure_optimization_infra(runtime_id: str, runtime_arn: str,
                                account: str, region: str) -> dict:
     """Provision the dedicated optimization gateway + runtime endpoints +
@@ -1581,8 +1634,17 @@ def main():
                     print(f"  [opt-infra] Warning: failed to grant gateway invoke to auth role: {e}")
         except Exception as e:
             print(f"  [opt-infra] Warning: provisioning failed: {e}")
-            print("  [opt-infra] Admin Console Optimization tab will show "
-                  "ConfigurationError until this resolves.")
+            # Fall back to looking up whatever already exists. A partial
+            # provisioning failure must not leave the admin Lambda with no
+            # OPTIMIZATION_GATEWAY_ARN — that breaks "Start A/B test" with a
+            # ConfigurationError even when every resource is live.
+            opt_infra = _lookup_optimization_infra(runtime_id, account_id, REGION)
+            if opt_infra.get("OPTIMIZATION_GATEWAY_ARN"):
+                print("  [opt-infra] Recovered existing ARNs by lookup: "
+                      f"{sorted(opt_infra)}")
+            else:
+                print("  [opt-infra] Admin Console Optimization tab will show "
+                      "ConfigurationError until this resolves.")
 
         # Bundles runtime (§8.13). Same image as primary, ENABLE_BUNDLE_HOOK=1
         # so it registers a BeforeModelCallEvent hook overriding system_prompt
@@ -1662,6 +1724,18 @@ def main():
             # Merge optimization infra ARNs (empty dict on failure → admin
             # Lambda will return 500 ConfigurationError on /optimization/*).
             admin_env.update(opt_infra)
+            # Don't let a silently-empty merge read as a successful deploy:
+            # these four are exactly what optimization.py:start_ab_test needs.
+            missing_opt = [k for k in ("OPTIMIZATION_GATEWAY_ARN",
+                                       "CONTROL_ONLINE_EVAL_ARN",
+                                       "TREATMENT_ONLINE_EVAL_ARN",
+                                       "AB_TEST_ROLE_ARN")
+                           if not admin_env.get(k)]
+            if missing_opt:
+                print(f"  WARNING: admin Lambda is missing {missing_opt} — the "
+                      f"Admin Console's Evaluation > Optimization > Start A/B "
+                      f"test will fail with ConfigurationError. Re-run this "
+                      f"script once the optimization infra provisions.")
             # Preserve SKILL_FILES_BUCKET from CDK stack
             skill_files_bucket = outputs.get("SkillFilesBucketName", "")
             if skill_files_bucket:
