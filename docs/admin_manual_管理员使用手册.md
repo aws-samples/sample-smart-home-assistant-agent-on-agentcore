@@ -406,7 +406,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "$AGENTCORE_GATEWAY_SMARTHOMEDEVICECONT
 **Admin Console → Discover → Overview**,在 Demos 下方。按运维监控大屏布局:顶部一条六信号状态条(活跃会话 / TTFT P95 / 错误率 / QPS / Token 合计 / 评估质量均分),下面三行成对面板。
 
 - **时间范围**:24h / 7d / 30d 分段切换。
-- **成本归因维度**:按用户 / 按租户 / 按 Agent 模型。
+- **成本归因维度**:按用户 / 按入口环境 / 按 Agent 运行时。
 - **每张图都有表格视图**,数值不必靠悬浮才能看到。
 - **数据缓存 5 分钟**,右上角"刷新"可强制重新聚合。
 
@@ -499,7 +499,7 @@ python3 scripts/simulate-users.py run --heavy --personas dave,erin
 打开 **Admin Console → Overview**,时间范围切 **24h**,确认:
 
 - **状态条**有值:活跃会话数、TTFT P95、Token 消耗合计、评估质量均分
-- **Token 成本归因**切"按用户"能看到多个 `simuser+*` 行;切"按 Agent 模型"能看到 5 个不同模型;切"按入口环境"能看到 default / ab-bundles / ab-targets
+- **Token 成本归因**切"按用户"能看到多个 `simuser+*` 行;切"按入口环境"能看到 default / ab-bundles / ab-targets;切"按 Agent 运行时"只会看到 `smarthome_smarthome.DEFAULT` **一行** —— 模拟流量全部走 text runtime,这是预期的(表格视图能看到该运行时用过的多个模型)
 - **评估通过率与漂移**表格里有 8 个评估器出分
 - **错误率**应该是 0.0%(若明显偏高,见下方排障)
 
@@ -514,6 +514,7 @@ python3 scripts/simulate-users.py run --heavy --personas dave,erin
 | 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
 | 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
 | `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
+| 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 这三个环境变量推导出的 Runtime。修复:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),A2A 则重跑 `python a2a-agent-registry/deploy.py --only patch-text-agent`。**注意**:2026-08-05 之前部署的环境没有 `DASHBOARD_EXTRA_RUNTIME_ARNS`,升级后必须重跑一次才会生效 |
 
 #### 安全边界
 

@@ -124,20 +124,20 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 #### Agent 运维统计大屏（Overview 页内）
 
-面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。架构图默认折叠，打开页面即见运维数据。顶部可切换时间范围（24h / 7d / 30d，作用于全部面板）；成本归因维度（按用户 / 入口环境 / Agent 模型）位于「Token 成本归因」面板内，因为它只影响该面板。每张图都配表格视图。
+面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。架构图默认折叠，打开页面即见运维数据。顶部可切换时间范围（24h / 7d / 30d，作用于全部面板）；成本归因维度（按用户 / 入口环境 / Agent 运行时）位于「Token 成本归因」面板内，因为它只影响该面板。每张图都配表格视图。
 
 > **「按入口环境」不是按客户计费。** 它聚合的是 `tenant_env` 的三种模式（`default` / `ab-bundles` / `ab-targets`），也就是 A/B 分流组之间的成本对比 —— 本项目没有独立的租户实体。真正的按客户归因需要先引入 tenant 实体（如 Cognito 组或 `tenantId` 属性）。
 
 | 指标组 | 数据来源 | 是否真实 |
 |--------|---------|---------|
-| 实时健康（活跃会话、TTFT P95/P99、错误率、QPS） | `AWS/Bedrock-AgentCore` 指标 + `aws/spans` | ✅ |
+| 实时健康（活跃会话、TTFT P95/P99、错误率、QPS） | `AWS/Bedrock-AgentCore` 指标 + `aws/spans`，跨全部已登记 Runtime 汇总并附每个 Runtime 的分解 | ✅ |
 | Token 成本趋势与归因（输入/输出拆分） | `aws/spans` 里的 Strands `chat` span | ✅ Token；❌ 美元成本 |
 | 成本预算消耗 | — | ❌ 模拟数据 |
 | 评估通过率与漂移 | `Bedrock-AgentCore/Evaluations` | ✅ 单变体；❌ A/B 对比 |
 | 活跃版本与发布状态 | Runtime Endpoint/Version + CloudTrail | ✅ 版本；⚠️ 灰度阶段为推导值 |
 | 用户满意度（CSAT、赞踩、升级率） | — | ❌ 模拟数据 |
 
-无真实数据来源的卡片会显示 **演示数据** 标记，点开有说明"要变成真实数据需要什么"。几个口径要点：**TTFT 不存在于 CloudWatch 指标中**，只能从 span 属性取；**美元成本无法按用户/Agent 拆分**（Cost Explorer 只到账号级），所以只归因 Token 数量；**灰度阶段没有原生字段**，由 Gateway A/B test 与 `tenant_env` 推导而来。详见 [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard)。
+无真实数据来源的卡片会显示 **演示数据** 标记，点开有说明"要变成真实数据需要什么"。几个口径要点：**TTFT 不存在于 CloudWatch 指标中**，只能从 span 属性取；**美元成本无法按用户/Agent 拆分**（Cost Explorer 只到账号级），所以只归因 Token 数量；**灰度阶段没有原生字段**，由 Gateway A/B test 与 `tenant_env` 推导而来；**每个 Runtime 必须显式登记** —— span 与评估指标上的 `service.name` 是精确匹配，大屏聚合的是由 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 构成的白名单（A2A 部署脚本会自动登记自己）。详见 [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard)。
 
 > 大屏默认是空的 —— 需要真实流量才有数据。用下面的[模拟用户脚本](#生成测试数据模拟真实用户)一条命令生成。
 
@@ -555,20 +555,20 @@ The side navigation groups 15 pages by agent lifecycle stage:
 
 #### Agent operations dashboard (on Overview)
 
-A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. The architecture diagram is collapsed by default so the metrics are on screen when the page opens. Time range (24h / 7d / 30d) sits at the top and scopes every panel; the cost-attribution dimension (by user / entry environment / agent model) lives inside the **Token cost attribution** panel because it only affects that panel. Every chart has a table view.
+A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. The architecture diagram is collapsed by default so the metrics are on screen when the page opens. Time range (24h / 7d / 30d) sits at the top and scopes every panel; the cost-attribution dimension (by user / entry environment / agent runtime) lives inside the **Token cost attribution** panel because it only affects that panel. Every chart has a table view.
 
 > **"By entry environment" is not per-customer billing.** It aggregates the three `tenant_env` modes (`default` / `ab-bundles` / `ab-targets`) — a cost comparison across A/B routing groups. This project has no separate tenant entity; real per-customer attribution would need one first (a Cognito group or a `tenantId` attribute).
 
 | Metric group | Source | Real? |
 |---|---|---|
-| Live health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans` | ✅ |
+| Live health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans`, summed across every registered runtime with a per-runtime breakdown | ✅ |
 | Token cost trend + attribution (input/output split) | Strands `chat` spans in `aws/spans` | ✅ tokens; ❌ dollar cost |
 | Budget consumption | — | ❌ simulated |
 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
 | Active version & release state | Runtime Endpoint/Version + CloudTrail | ✅ versions; ⚠️ rollout stage derived |
 | User satisfaction (CSAT, thumbs, escalation) | — | ❌ simulated |
 
-Cards without a real source carry a **Demo data** badge whose popover states what a real source would require. Three caveats worth knowing: **TTFT is not a CloudWatch metric** (it exists only as a span attribute); **dollar cost cannot be split per user or agent** (Cost Explorer resolves only to account level), so only token counts are attributed; and **rollout stage has no native field** — it is derived from Gateway A/B tests plus `tenant_env`. Full detail in [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard).
+Cards without a real source carry a **Demo data** badge whose popover states what a real source would require. Four caveats worth knowing: **TTFT is not a CloudWatch metric** (it exists only as a span attribute); **dollar cost cannot be split per user or agent** (Cost Explorer resolves only to account level), so only token counts are attributed; **rollout stage has no native field** — it is derived from Gateway A/B tests plus `tenant_env`; and **every runtime must be registered explicitly** — `service.name` on spans and eval metrics is an exact match, so the dashboard aggregates over an allowlist built from `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` (the A2A deploy script registers its own runtimes). Full detail in [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard).
 
 > The dashboard starts empty — it needs real traffic. Generate some with the [simulated-users script](#generate-test-data-simulated-users).
 

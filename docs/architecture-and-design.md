@@ -1697,7 +1697,8 @@ A key design challenge: React apps need environment-specific values (API endpoin
 **Post-deploy Lambda env patching (and the CDK-redeploy hazard).** Several
 backend env values are only known *after* `scripts/setup-agentcore.py` creates
 the AgentCore resources — `AGENT_RUNTIME_ARN`, `VOICE_AGENT_RUNTIME_ARN`,
-`MEMORY_ID`, `GATEWAY_ID`, `REGISTRY_ID`, `KB_ID`, optimization ARNs. The CDK
+`DASHBOARD_EXTRA_RUNTIME_ARNS`, `MEMORY_ID`, `GATEWAY_ID`, `REGISTRY_ID`,
+`KB_ID`, optimization ARNs. The CDK
 stack seeds these as `PLACEHOLDER_SET_BY_SETUP_SCRIPT` (or omits them), and
 `setup-agentcore.py` patches the real values into the **admin** and
 **skill-erp** Lambdas via `update_function_configuration` at the end of its run.
@@ -2823,7 +2824,9 @@ paths.
 all three envs are present: `A2A_M2M_SECRET_ARN`, `A2A_COGNITO_TOKEN_URL`,
 `REGISTRY_ID`. Missing any → the invoke path skips A2A entirely, so the
 base smarthome system works with zero A2A setup. `deploy.py` step 8
-writes these envs into the text-agent Runtime.
+writes these envs into the text-agent Runtime, and also appends each A2A
+runtime ARN to the admin Lambda's `DASHBOARD_EXTRA_RUNTIME_ARNS` so the ops
+dashboard counts their tokens (§9.15); `teardown.py` removes them again.
 
 **`deploy.sh` does NOT deploy A2A samples.** The root one-click deploy
 keeps the base system minimal; A2A is an opt-in second-stage deploy. Run
@@ -2885,6 +2888,38 @@ and siblings.
   both expect `a2a.server.apps.A2AStarletteApplication`, which only
   exists in the 0.3.x line. `a2a-sdk` 1.0.x renamed the module and is
   not yet compatible.
+- **`teardown.py` must mirror step 8's field preservation, and it didn't.**
+  Fixed 2026-08-05. Its `update_agent_runtime` forwarded only
+  `authorizerConfiguration` — a field the text runtime does *not* have (it uses
+  `AWS_IAM`) — while `protocolConfiguration`, `requestHeaderConfiguration` and
+  `filesystemConfigurations`, all of which it *does* have, were dropped. A
+  teardown therefore broke the chatbot's auth-header forwarding and unmounted
+  `/mnt/workspace`. It also removed only the three `A2A_*` vars, leaving
+  `REGISTRY_ID` (written by step 8) behind, so `agent.py`'s A2A feature gate
+  stayed half-armed. Both reproduced against the live runtime before fixing.
+- **`ListRegistryRecords` returns `registryRecords`, not `records`.** The
+  `ConflictException` recovery path in `ensure_registry_record` read the wrong
+  key, so it always iterated an empty list, never found the conflicting record
+  and re-raised. Fixed 2026-08-05.
+
+**Observability.** The A2A runtimes are ADOT-instrumented (their entrypoint is
+`["opentelemetry-instrument", "main.py"]`) and tag spans with
+`service.name = {runtimeName}.DEFAULT`, so once they receive real traffic their
+tokens flow into `aws/spans` and — since 2026-08-05 — into the ops dashboard's
+service-name allowlist (§9.15). Two caveats worth stating plainly:
+
+- **Nothing has been observed yet.** As of 2026-08-05 the three sample runtimes
+  have only ever received `/ping` and agent-card fetches, never a real
+  `message/send`, so `aws/spans` has never contained a `sha2a*` record. The
+  dashboard coverage is correct but latent, not verified end-to-end.
+- **Upstream evaluation measures the caller, not the callee.** The existing
+  `SmartHomeOnlineEval` scores the text agent's session, in which an A2A call
+  appears as a `tool_use`/`tool_result` span pair. That grades whether the text
+  agent *chose and used* the delegate correctly — it does not grade the
+  delegate's own answer. Acceptable while the samples are prompt-only advisors;
+  a delegate that writes state or orchestrates actions would need its own
+  online-eval config (`_ensure_online_eval_config` in `setup-agentcore.py` is
+  reusable, keyed on the A2A runtime's log group + service name).
 
 **Flow:**
 
@@ -3422,7 +3457,7 @@ does this table:
 
 | # | Card | Source | Real? |
 |---|------|--------|-------|
-| 1 | Health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans` | ✅ |
+| 1 | Health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans`, summed across every configured runtime and also returned per-runtime as `health.runtimes[]` | ✅ |
 | 2 | Token trend + attribution (input/output split) | Strands `chat` spans in `aws/spans` | ✅ tokens; ❌ dollar cost |
 | 3 | Budget consumption | — | ❌ simulated |
 | 4 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
@@ -3445,7 +3480,31 @@ Four constraints drove the design, all measured rather than assumed:
   Bedrock spend only to account level. Token *counts* are attributable (join
   `session.id` against the `smarthome-runtime-sessions` table for the email);
   dollars are not. There is also no feature-level instrumentation, so the
-  attribution dimensions are user / entry environment / model only.
+  attribution dimensions are user / entry environment / agent runtime only.
+- **Every runtime must be enumerated explicitly.** OTel stamps
+  `service.name = {agentRuntimeName}.{endpointName}` on each span and eval
+  metric, and both the CloudWatch dimension and the health metrics' `Resource`
+  dimension are *exact* matches. The dashboard therefore aggregates over an
+  allowlist built from `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` +
+  `DASHBOARD_EXTRA_RUNTIME_ARNS` (comma-separated; `setup-agentcore.py` seeds
+  the bundles runtime, `a2a-agent-registry/deploy.py` registers its own and
+  `teardown.py` removes them). Until 2026-08-05 the spans queries filtered
+  `service.name like /smarthome/` and the evaluation block pinned the single
+  text-runtime name, so the voice runtime and the A2A specialist runtimes were
+  absent from Overview even though their tokens are real spend. A widened prefix
+  regex was rejected as the fix: this account's `aws/spans` also carries
+  unrelated projects (`midea-langgraph`, `hermes-agent`, `demo0731`, …) that
+  `/^smarthome/` would eventually absorb. The evaluation block issues one query
+  per (evaluator, service) pair and merges the series timestamp-wise, clamped to
+  `GetMetricData`'s 500-query ceiling.
+- **`dim=agent` buckets by runtime, not by model.** It previously grouped on
+  `gen_ai.request.model`, which answers "which model burned tokens" — a
+  different question once A2A specialist runtimes pick their own models, since
+  two runtimes can share a model and one runtime can switch models between
+  versions. The bucket key is now the span's `service.name`, with the models
+  observed on that runtime returned alongside for context (the console renders
+  the key; the model list is available in the payload). Spans predating the
+  change lack the grouping field and fall back to the model id.
 - **"Entry environment" is not a tenant.** That dimension aggregates the three
   `tenant_env` modes (`default` / `ab-bundles` / `ab-targets`), so it compares
   cost across A/B routing groups — this project has no tenant entity (no tenant
