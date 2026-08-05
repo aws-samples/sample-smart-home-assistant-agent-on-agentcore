@@ -566,7 +566,7 @@ def ensure_registry_record(
             log(f"  [{agent}] name conflict; searching existing records")
             paginator = ac.get_paginator("list_registry_records")
             for page in paginator.paginate(registryId=registry_id):
-                for rec in page.get("records", []):
+                for rec in page.get("registryRecords", []):
                     if rec.get("name") == AGENT_LONG_NAMES[agent] and rec.get("descriptorType") == "A2A":
                         record_id = rec["recordId"]
                         ac.update_registry_record(

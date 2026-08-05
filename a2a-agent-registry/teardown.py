@@ -140,21 +140,33 @@ def teardown_global(deployed: dict[str, Any], region: str, user_pool_id: str) ->
                 rt = ac.get_agent_runtime(agentRuntimeId=runtime_id)
                 env = rt.get("environmentVariables", {}) or {}
                 changed = False
-                for key in ("A2A_M2M_SECRET_ARN", "A2A_COGNITO_TOKEN_URL", "A2A_COGNITO_SCOPE"):
+                # REGISTRY_ID is written by deploy.py's patch_text_agent alongside
+                # the A2A_* vars, so it has to come back off here too — otherwise
+                # agent.py's A2A feature gate stays half-armed after teardown.
+                for key in ("A2A_M2M_SECRET_ARN", "A2A_COGNITO_TOKEN_URL",
+                            "A2A_COGNITO_SCOPE", "REGISTRY_ID"):
                     if key in env:
                         env.pop(key)
                         changed = True
                 if changed:
-                    ac.update_agent_runtime(
+                    # Mirror deploy.py's patch_text_agent: pass through every
+                    # optional config block the runtime already has. Dropping
+                    # requestHeaderConfiguration / filesystemConfigurations /
+                    # protocolConfiguration here would break the chatbot's custom
+                    # auth header and the /mnt/workspace mount.
+                    update_kwargs = dict(
                         agentRuntimeId=runtime_id,
                         agentRuntimeArtifact=rt["agentRuntimeArtifact"],
                         roleArn=rt["roleArn"],
                         networkConfiguration=rt.get("networkConfiguration", {"networkMode": "PUBLIC"}),
                         environmentVariables=env,
-                        **({"authorizerConfiguration": rt["authorizerConfiguration"]}
-                           if rt.get("authorizerConfiguration") else {}),
                     )
-                    log("  removed A2A_* envs from text agent runtime")
+                    for key in ("authorizerConfiguration", "protocolConfiguration",
+                                "requestHeaderConfiguration", "filesystemConfigurations"):
+                        if rt.get(key):
+                            update_kwargs[key] = rt[key]
+                    ac.update_agent_runtime(**update_kwargs)
+                    log("  removed A2A_* + REGISTRY_ID envs from text agent runtime")
                 role_arn = rt["roleArn"]
                 role_name = role_arn.split("/")[-1]
                 try:
