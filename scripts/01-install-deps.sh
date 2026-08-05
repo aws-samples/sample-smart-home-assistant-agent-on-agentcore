@@ -35,14 +35,40 @@ npm install
 # require boto3 >= 1.42.93. Older venvs (including the 1.42.82 that still
 # ships in some environments) silently no-op the registry section because
 # hasattr(client, 'create_registry') returns False.
+#
+# These installs used to end in `2>/dev/null || true`, which discarded both the
+# error text and the exit code — hiding the one failure this step exists to
+# prevent. They now fail loudly, and the version floor is asserted afterwards so
+# a pip that "succeeds" without actually upgrading is caught too.
+BOTO3_MIN="1.42.93"
+
 echo "==> Upgrading boto3 in the active venv..."
-pip install --upgrade boto3 -q 2>/dev/null || true
+pip install --upgrade boto3 -q
+
+python - "$BOTO3_MIN" <<'PY'
+import sys
+import boto3
+
+minimum = sys.argv[1]
+
+
+def parts(v):
+    return tuple(int(x) for x in v.split(".")[:3])
+
+
+if parts(boto3.__version__) < parts(minimum):
+    sys.exit(
+        f"boto3 {boto3.__version__} is below the required {minimum}. "
+        "The AgentCore registry APIs would silently no-op. "
+        "Upgrade the venv (or recreate it) and re-run."
+    )
+print(f"    -> boto3 {boto3.__version__} (>= {minimum})")
+PY
 
 echo "==> Bundling latest boto3 into Lambda code directories..."
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/admin-api"     -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/user-init"     -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/kb-query"      -q --upgrade 2>/dev/null || true
-pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/skill-erp-api" -q --upgrade 2>/dev/null || true
+for lambda_dir in admin-api user-init kb-query skill-erp-api; do
+    pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/$lambda_dir" -q --upgrade
+done
 
 # ------------------------------------------------------------------------------
 # Fetch the Amazon DCV Web Client SDK into chatbot/public/dcvjs/.

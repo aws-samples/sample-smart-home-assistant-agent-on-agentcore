@@ -234,6 +234,9 @@ def test_no_images_still_routes_to_kimi(agent_mod):
     minvoke.assert_called_once_with(
         "turn on the LED",
         session_id="sess", actor_id="u@x", auth_header=None,
+        # Request headers ride along for the A/B configuration-bundle hook; the
+        # stub context carries none, so this is the empty dict agent.py passes.
+        headers={},
     )
     assert out == {"response": "OK", "status": "success"}
 
@@ -253,7 +256,7 @@ def test_raw_bytes_persisted_to_session_storage_before_haiku(agent_mod, tiny_png
         return {"path": "uploads/images/x.png", "sha256": "abcdef" * 10 + "abcd",
                 "mime": kwargs.get("mime", "image/png"), "bytes": 100, "ts": "t"}
 
-    def fake_caption(images, prompt):
+    def fake_caption(images, prompt, model_id=None):
         call_order.append("caption")
         return ("Image 1: ok.", "")
 

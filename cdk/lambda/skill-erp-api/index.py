@@ -268,13 +268,25 @@ def _poll_until_out_of_creating(record_id, timeout_seconds=10):
 
 
 def _submit_for_approval(record_id):
-    """Submit record for curator approval. Errors logged, not raised."""
+    """Submit record for curator approval.
+
+    Deliberately does NOT raise: by the time this runs the record exists and its
+    ownership row is committed, so a 5xx here would tell the user their skill
+    failed to save and invite a retry that creates a duplicate record.
+
+    It does report, though. Returning the failure lets the caller put it in the
+    201 body — silently swallowing it left the record parked in DRAFT while the
+    UI claimed success, so the user waited for an approval that was never
+    coming. Returns None on success, or the error string to surface.
+    """
     try:
         agentcore_control.submit_registry_record_for_approval(
             registryId=REGISTRY_ID, recordId=record_id
         )
+        return None
     except Exception as e:
         logger.warning("Submit-for-approval failed for %s: %s", record_id, e)
+        return str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -408,13 +420,16 @@ def create_my_record(event):
     # Poll GetRegistryRecord until the record leaves CREATING (usually <1s)
     # before submitting, otherwise SubmitRegistryRecordForApproval fails silently.
     _poll_until_out_of_creating(record_id)
-    _submit_for_approval(record_id)
+    submit_error = _submit_for_approval(record_id)
 
-    return response(201, {
+    body = {
         "recordId": record_id,
         "recordArn": record_arn,
         "name": attempt_name,
-    })
+    }
+    if submit_error:
+        body["submitWarning"] = submit_error
+    return response(201, body)
 
 
 def update_my_record(event):
@@ -480,9 +495,12 @@ def update_my_record(event):
     )
 
     # Re-submit for approval (any edit resets the curator flow)
-    _submit_for_approval(record_id)
+    submit_error = _submit_for_approval(record_id)
 
-    return response(200, {"message": f"Record '{record_id}' updated", "recordId": record_id})
+    body = {"message": f"Record '{record_id}' updated", "recordId": record_id}
+    if submit_error:
+        body["submitWarning"] = submit_error
+    return response(200, body)
 
 
 def delete_my_record(event):
@@ -619,13 +637,16 @@ def create_my_a2a(event):
     })
 
     _poll_until_out_of_creating(record_id)
-    _submit_for_approval(record_id)
+    submit_error = _submit_for_approval(record_id)
 
-    return response(201, {
+    body = {
         "recordId": record_id,
         "recordArn": record_arn,
         "name": attempt_name,
-    })
+    }
+    if submit_error:
+        body["submitWarning"] = submit_error
+    return response(201, body)
 
 
 def update_my_a2a(event):
@@ -679,8 +700,11 @@ def update_my_a2a(event):
         UpdateExpression="SET updatedAt = :t, ownerEmail = :e",
         ExpressionAttributeValues={":t": now_iso(), ":e": caller_email},
     )
-    _submit_for_approval(record_id)
-    return response(200, {"message": f"A2A record '{record_id}' updated", "recordId": record_id})
+    submit_error = _submit_for_approval(record_id)
+    body = {"message": f"A2A record '{record_id}' updated", "recordId": record_id}
+    if submit_error:
+        body["submitWarning"] = submit_error
+    return response(200, body)
 
 
 def delete_my_a2a(event):

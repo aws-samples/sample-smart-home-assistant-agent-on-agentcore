@@ -3,30 +3,43 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock, Mock
 
-# Mock heavy dependencies before importing agent.agent
-sys.modules["strands"] = Mock()
-sys.modules["strands.models"] = Mock()
-sys.modules["strands.models.bedrock"] = Mock()
-sys.modules["strands.tools"] = Mock()
-sys.modules["strands.tools.mcp"] = Mock()
-sys.modules["strands.tools.mcp.mcp_client"] = Mock()
-sys.modules["strands.vended_plugins"] = Mock()
-sys.modules["strands.vended_plugins.skills"] = Mock()
-sys.modules["mcp"] = Mock()
-sys.modules["mcp.client"] = Mock()
-sys.modules["mcp.client.streamable_http"] = Mock()
-sys.modules["bedrock_agentcore"] = Mock()
-sys.modules["bedrock_agentcore.memory"] = Mock()
-sys.modules["bedrock_agentcore.memory.integrations"] = Mock()
-sys.modules["bedrock_agentcore.memory.integrations.strands"] = Mock()
-sys.modules["bedrock_agentcore.memory.integrations.strands.config"] = Mock()
-sys.modules["bedrock_agentcore.memory.integrations.strands.session_manager"] = Mock()
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# agent.agent pulls in the whole Strands + AgentCore stack at import time, which
+# these tests neither need nor want. They are stubbed via monkeypatch rather than
+# assigned to sys.modules at module scope: a bare assignment never gets undone,
+# so every test file collected after this one would import the Mock instead of
+# the real package. tools/a2a.py imports `strands.tool` lazily for exactly this
+# reason, and a leaked Mock there turns its @tool-decorated functions into Mock
+# objects — test_a2a.py's 5 failures were this leak, not a bug in a2a.py.
+_STUBBED_MODULES = (
+    "strands",
+    "strands.models",
+    "strands.models.bedrock",
+    "strands.tools",
+    "strands.tools.mcp",
+    "strands.tools.mcp.mcp_client",
+    "strands.vended_plugins",
+    "strands.vended_plugins.skills",
+    "mcp",
+    "mcp.client",
+    "mcp.client.streamable_http",
+    "bedrock_agentcore",
+    "bedrock_agentcore.memory",
+    "bedrock_agentcore.memory.integrations",
+    "bedrock_agentcore.memory.integrations.strands",
+    "bedrock_agentcore.memory.integrations.strands.config",
+    "bedrock_agentcore.memory.integrations.strands.session_manager",
+)
 
 
 @pytest.fixture(autouse=True)
 def isolate_env(monkeypatch):
+    for name in _STUBBED_MODULES:
+        monkeypatch.setitem(sys.modules, name, Mock())
+    # agent.agent captured the real modules when some earlier test imported it;
+    # drop it so each test's importlib.reload() rebinds against the stubs above.
+    monkeypatch.delitem(sys.modules, "agent.agent", raising=False)
     monkeypatch.delenv("ENABLE_BUNDLE_HOOK", raising=False)
     monkeypatch.setenv("SKILLS_TABLE_NAME", "smarthome-skills-test")
     yield

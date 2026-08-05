@@ -19,6 +19,11 @@ command -v npx >/dev/null 2>&1 || { echo "npx is required."; exit 1; }
 
 echo "==> Running cdk bootstrap (no-op if already bootstrapped)..."
 cd "$SCRIPT_DIR/cdk"
-npx cdk bootstrap 2>/dev/null || true
+# `cdk bootstrap` is itself idempotent and exits 0 on an already-bootstrapped
+# account, so it needs no `|| true`. This used to be `2>/dev/null || true`,
+# which also discarded the failures that are NOT benign — missing IAM
+# permissions, a bad region, no credentials — and those then resurfaced in
+# step 4 as a confusing asset-upload error instead.
+npx cdk bootstrap
 
 echo "==> Step 3 complete."
