@@ -1164,6 +1164,24 @@ export interface MetricSeries {
   values: number[];
 }
 
+/**
+ * One agent runtime's slice of the fleet-wide health totals.
+ *
+ * The dashboard aggregates every registered runtime (text, voice, bundles, and
+ * each A2A specialist), so the top-line numbers alone can't say which agent
+ * produced them. `latencyP95` is null when that runtime emitted no latency
+ * samples in the window.
+ */
+export interface RuntimeBreakdown {
+  name: string;
+  invocations?: number;
+  sessions?: number;
+  userErrors?: number;
+  systemErrors?: number;
+  throttles?: number;
+  latencyP95?: number | null;
+}
+
 export interface DashboardHealth {
   available: boolean;
   reason?: string;
@@ -1179,6 +1197,8 @@ export interface DashboardHealth {
   /** ActiveSessionCount only exists account-wide, not per runtime. */
   activeSessionsAccount: number | null;
   series: Record<string, MetricSeries>;
+  /** Per-runtime split of the totals above. Absent on older backends. */
+  runtimes?: RuntimeBreakdown[];
 }
 
 export interface EvaluatorScore {

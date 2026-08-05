@@ -647,6 +647,15 @@ const zh: Record<string, string> = {
 
   'dashboard.health.unavailable': '健康指标暂不可用：{reason}',
 
+  'dashboard.fleet.title': '按运行时分解',
+  'dashboard.fleet.desc': '上方全局汇总数字来自哪些 Agent 运行时。某个运行时全为 0 表示它已部署，但在所选时间范围内没有被调用。整次调用延迟统计的是完整请求耗时，因此远大于上方的首 Token 延迟。',
+  'dashboard.fleet.runtime': 'Agent 运行时',
+  'dashboard.fleet.invocations': '调用次数',
+  'dashboard.fleet.sessions': '会话数',
+  'dashboard.fleet.errors': '错误数',
+  'dashboard.fleet.throttles': '限流次数',
+  'dashboard.fleet.latencyP95': '整次调用延迟 P95',
+
   'dashboard.token.trendTitle': 'Token 成本趋势',
   'dashboard.token.trendDesc': '按天堆叠的输入/输出 Token 消耗。实测输入与输出比例约 28:1，因此输出段会很薄——这是数据的真实形态，精确数值可切换表格视图查看。',
   'dashboard.token.attributionTitle': 'Token 成本归因',

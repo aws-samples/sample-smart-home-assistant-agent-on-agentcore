@@ -647,6 +647,15 @@ const en: Record<string, string> = {
 
   'dashboard.health.unavailable': 'Health metrics unavailable: {reason}',
 
+  'dashboard.fleet.title': 'Per-runtime breakdown',
+  'dashboard.fleet.desc': 'Which agent runtimes the fleet-wide figures above came from. A runtime with all zeros is deployed but was not invoked in the selected window. Invocation latency covers the whole request, so it is much larger than the time-to-first-token above.',
+  'dashboard.fleet.runtime': 'Agent runtime',
+  'dashboard.fleet.invocations': 'Invocations',
+  'dashboard.fleet.sessions': 'Sessions',
+  'dashboard.fleet.errors': 'Errors',
+  'dashboard.fleet.throttles': 'Throttles',
+  'dashboard.fleet.latencyP95': 'Invocation latency P95',
+
   'dashboard.token.trendTitle': 'Token cost trend',
   'dashboard.token.trendDesc': 'Daily stacked input/output token consumption. Measured input:output is roughly 28:1, so the output segment renders as a thin sliver — that is the real shape of the data; switch to the table view for exact numbers.',
   'dashboard.token.attributionTitle': 'Token cost attribution',

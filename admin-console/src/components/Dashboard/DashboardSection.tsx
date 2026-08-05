@@ -18,6 +18,7 @@ import {
 } from '../../api/adminApi';
 import { ChartTheme } from './palette';
 import { StatusStrip } from './StatusStrip';
+import { FleetTable } from './FleetTable';
 import { Panel } from './Panel';
 import { TokenTrend, TokenAttribution } from './TokenCharts';
 import { BudgetMeter } from './BudgetMeter';
@@ -153,6 +154,9 @@ export function DashboardSection({ theme }: Props) {
 
         <div style={{ opacity: loading && fast ? 0.6 : 1, transition: 'opacity 120ms ease' }}>
           <SpaceBetween size="l">
+            {/* The strip's numbers are fleet-wide; the breakdown under it says
+                which runtime each one came from. Same card, because it is the
+                same question one level down. */}
             <Container>
               <StatusStrip
                 fast={fast}
@@ -160,6 +164,7 @@ export function DashboardSection({ theme }: Props) {
                 spansLoading={spansLoading}
                 theme={theme}
               />
+              <FleetTable runtimes={fast?.health?.runtimes} loading={fastLoading} />
             </Container>
 
             {/* Time series gets the wide cell; the meter stack is naturally narrow. */}
