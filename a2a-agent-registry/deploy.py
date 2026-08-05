@@ -666,6 +666,47 @@ def patch_text_agent(state: dict[str, Any]) -> None:
         log(f"  warn: failed to attach inline policy — {e}")
 
 
+def register_runtimes_for_dashboard(state: dict[str, Any]) -> None:
+    """Add the A2A runtime ARNs to the admin Lambda's dashboard allowlist.
+
+    dashboard.py builds an exact `service.name` allowlist from the runtime ARNs
+    it is told about. Without this the A2A runtimes' spans and eval metrics are
+    filtered out of Overview, so their token spend silently goes unreported.
+
+    Merges into whatever is already there (text/voice/bundles are set by
+    setup-agentcore.py) and is idempotent. Non-fatal: a failure here costs
+    observability, not function.
+    """
+    arns = [
+        e["runtimeArn"]
+        for e in state.get("deployed", {}).get("agents", [])
+        if e.get("runtimeArn")
+    ]
+    if not arns:
+        return
+    lam = boto3.client("lambda", region_name=state["region"])
+    fn = "smarthome-admin-api"
+    try:
+        env = (lam.get_function_configuration(FunctionName=fn)
+               .get("Environment", {}).get("Variables", {}))
+        existing = [a.strip()
+                    for a in env.get("DASHBOARD_EXTRA_RUNTIME_ARNS", "").split(",")
+                    if a.strip()]
+        merged = list(existing)
+        for a in arns:
+            if a not in merged:
+                merged.append(a)
+        if merged == existing:
+            log("  dashboard allowlist already current")
+            return
+        env["DASHBOARD_EXTRA_RUNTIME_ARNS"] = ",".join(merged)
+        lam.update_function_configuration(
+            FunctionName=fn, Environment={"Variables": env})
+        log(f"  registered {len(arns)} A2A runtime(s) in the dashboard allowlist")
+    except Exception as e:
+        log(f"  warn: dashboard allowlist update failed — {e}")
+
+
 # ------------------------------------------------------------------
 # Top-level orchestration
 # ------------------------------------------------------------------
@@ -745,6 +786,7 @@ def main(argv: list[str] | None = None) -> int:
     if "patch-text-agent" in steps:
         log("\n[patch-text-agent] wiring A2A envs into smarthome text agent runtime")
         patch_text_agent(state)
+        register_runtimes_for_dashboard(state)
 
     log(
         "\nDone. A2A records are in PENDING_APPROVAL. Open the AgentCore "

@@ -42,6 +42,10 @@ RUNTIME_SESSIONS_TABLE_NAME = os.environ.get(
 )
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 VOICE_RUNTIME_ARN = os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
+# Comma-separated extra runtime ARNs to fold into the health block (A2A
+# specialist runtimes, the bundles runtime, …). Set by setup-agentcore.py /
+# a2a-agent-registry/deploy.py as those runtimes come and go.
+EXTRA_RUNTIME_ARNS = os.environ.get("DASHBOARD_EXTRA_RUNTIME_ARNS", "")
 SPANS_LOG_GROUP = "aws/spans"
 
 # Cache rows live on the global partition of the skills table.
@@ -79,6 +83,8 @@ EVALUATORS = [
 NON_RATIO_EVALUATORS = {"smarthome_SmartHomeQuality"}
 
 # Service name as it appears on spans/eval metrics for the text runtime.
+# Kept as its own constant because the A/B block's per-variant dimensions are
+# text-runtime-only (the control/treatment endpoints hang off this runtime).
 SERVICE_NAME = "smarthome_smarthome.DEFAULT"
 
 _clients = {}
@@ -121,6 +127,65 @@ def _runtime_name_from_arn(arn):
     """Runtime id minus its random suffix → `smarthome_smarthome`."""
     rid = _runtime_id_from_arn(arn)
     return rid.rsplit("-", 1)[0] if "-" in rid else rid
+
+
+# ---------------------------------------------------------------------------
+# Service-name allowlist
+#
+# Every runtime OTel-tags its spans and eval metrics with
+# `service.name = <agentRuntimeName>.<endpointName>`. The spans queries used to
+# filter `like /smarthome/`, which silently excluded the A2A specialist
+# runtimes (`sha2aenergy_sha2aenergy.DEFAULT` and friends) — their tokens are
+# real spend but never reached this dashboard.
+#
+# An exact allowlist rather than a widened regex: this AWS account is shared
+# with unrelated projects (midea-langgraph, hermes-agent, demo0731, …), and a
+# prefix regex would eventually pull a stranger's traffic into these numbers.
+# ---------------------------------------------------------------------------
+
+def _service_name_from_arn(arn, endpoint="DEFAULT"):
+    """`...:runtime/smarthome_smarthome-ee97ToCthI` → `smarthome_smarthome.DEFAULT`."""
+    name = _runtime_name_from_arn(arn)
+    return f"{name}.{endpoint}" if name else ""
+
+
+def _extra_runtime_arns():
+    return [a.strip() for a in EXTRA_RUNTIME_ARNS.split(",") if a.strip()]
+
+
+def _all_runtime_arns():
+    """Text + voice + any extras, de-duplicated, order preserved."""
+    out = []
+    for arn in [RUNTIME_ARN, VOICE_RUNTIME_ARN, *_extra_runtime_arns()]:
+        if arn and arn not in out:
+            out.append(arn)
+    return out
+
+
+def _service_names():
+    """Exact service.name values this project owns.
+
+    Derived from the configured runtime ARNs so a newly deployed A2A agent is
+    covered by setting DASHBOARD_EXTRA_RUNTIME_ARNS — no code change needed.
+    """
+    out = []
+    for arn in _all_runtime_arns():
+        svc = _service_name_from_arn(arn)
+        if svc and svc not in out:
+            out.append(svc)
+    if SERVICE_NAME not in out:
+        out.insert(0, SERVICE_NAME)
+    return out
+
+
+def _spans_service_filter():
+    """Logs Insights clause restricting spans to this project's runtimes.
+
+    `in [...]` is an exact match — verified against aws/spans, where it
+    returned only our runtimes and excluded every unrelated project.
+    """
+    names = ", ".join(f'"{n}"' for n in _service_names())
+    return f"| filter resource.attributes.service.name in [{names}]\n"
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +249,11 @@ def _runtime_dims(arn):
 def _fetch_health(days):
     """Invocations / errors / throttles / sessions from CloudWatch.
 
+    Covers every configured runtime (text + voice + extras), not just text —
+    the per-runtime dimensions are exact, so querying one ARN hid the voice and
+    A2A runtimes' invocations and errors entirely. Per-runtime totals are also
+    returned so the UI can break the fleet down.
+
     ActiveSessionCount only exists at ACCOUNT level (dimension
     Service=AgentCore.Runtime) — there is no per-runtime variant — so the UI
     labels that tile as account-wide.
@@ -195,28 +265,46 @@ def _fetch_health(days):
     start = end - timedelta(days=days)
     # One datapoint per day for 7d/30d; hourly for 24h so the sparkline moves.
     period = 3600 if days <= 1 else 86400
-    dims = _runtime_dims(RUNTIME_ARN)
+    arns = _all_runtime_arns()
 
-    queries = [
-        ("invocations", "AWS/Bedrock-AgentCore", "Invocations", dims, "Sum"),
-        ("userErrors", "AWS/Bedrock-AgentCore", "UserErrors", dims, "Sum"),
-        ("systemErrors", "AWS/Bedrock-AgentCore", "SystemErrors", dims, "Sum"),
-        ("throttles", "AWS/Bedrock-AgentCore", "Throttles", dims, "Sum"),
-        ("sessions", "AWS/Bedrock-AgentCore", "Sessions", dims, "Sum"),
-        ("latencyP95", "AWS/Bedrock-AgentCore", "Latency", dims, "p95"),
-        ("activeSessions", "AWS/Bedrock-AgentCore", "ActiveSessionCount",
-         [{"Name": "Service", "Value": "AgentCore.Runtime"}], "Maximum"),
-    ]
-    mdq = [{
-        "Id": f"m{i}",
-        "Label": label,
+    per_runtime_metrics = (
+        ("invocations", "Invocations", "Sum"),
+        ("userErrors", "UserErrors", "Sum"),
+        ("systemErrors", "SystemErrors", "Sum"),
+        ("throttles", "Throttles", "Sum"),
+        ("sessions", "Sessions", "Sum"),
+        ("latencyP95", "Latency", "p95"),
+    )
+
+    mdq = []
+    for ai, arn in enumerate(arns):
+        dims = _runtime_dims(arn)
+        for mi, (label, mn, stat) in enumerate(per_runtime_metrics):
+            mdq.append({
+                "Id": f"m{ai}_{mi}",
+                # Label carries the runtime so results can be split apart.
+                "Label": f"{label}|{_runtime_name_from_arn(arn)}",
+                "ReturnData": True,
+                "MetricStat": {
+                    "Metric": {"Namespace": "AWS/Bedrock-AgentCore",
+                               "MetricName": mn, "Dimensions": dims},
+                    "Period": period,
+                    "Stat": stat,
+                },
+            })
+    mdq.append({
+        "Id": "acct_sessions",
+        "Label": "activeSessions|__account__",
         "ReturnData": True,
         "MetricStat": {
-            "Metric": {"Namespace": ns, "MetricName": mn, "Dimensions": d},
+            "Metric": {"Namespace": "AWS/Bedrock-AgentCore",
+                       "MetricName": "ActiveSessionCount",
+                       "Dimensions": [{"Name": "Service",
+                                       "Value": "AgentCore.Runtime"}]},
             "Period": period,
-            "Stat": stat,
+            "Stat": "Maximum",
         },
-    } for i, (label, ns, mn, d, stat) in enumerate(queries)]
+    })
 
     try:
         res = _client("cloudwatch").get_metric_data(
@@ -227,12 +315,31 @@ def _fetch_health(days):
         logger.warning("GetMetricData (health) failed: %s", e)
         return {"available": False, "reason": str(e)}
 
+    # Fold per-runtime results into fleet-wide series (summed timestamp-wise,
+    # max for the p95 envelope) while keeping a per-runtime breakdown.
     series = {}
+    by_runtime = {}
     for r in res.get("MetricDataResults", []):
-        series[r["Label"]] = {
-            "timestamps": [t.isoformat() for t in r.get("Timestamps", [])],
-            "values": [float(v) for v in r.get("Values", [])],
+        label, _, runtime = r["Label"].partition("|")
+        vals = [float(v) for v in r.get("Values", [])]
+        stamps = [t.isoformat() for t in r.get("Timestamps", [])]
+        if runtime != "__account__":
+            slot = by_runtime.setdefault(runtime, {})
+            slot[label] = sum(vals) if label != "latencyP95" else (
+                max(vals) if vals else None)
+        agg = series.setdefault(label, {})
+        for ts, v in zip(stamps, vals):
+            if label == "latencyP95":
+                agg[ts] = max(agg.get(ts, v), v)
+            else:
+                agg[ts] = agg.get(ts, 0.0) + v
+    series = {
+        label: {
+            "timestamps": [ts for ts, _ in sorted(points.items())],
+            "values": [v for _, v in sorted(points.items())],
         }
+        for label, points in series.items()
+    }
 
     def total(name):
         return sum(series.get(name, {}).get("values") or [])
@@ -257,6 +364,11 @@ def _fetch_health(days):
         "latencyP95Ms": max(latency_vals) if latency_vals else None,
         "activeSessionsAccount": active_vals[-1] if active_vals else None,
         "series": series,
+        # Fleet breakdown: which runtimes these fleet-wide totals came from.
+        "runtimes": [
+            {"name": name, **totals}
+            for name, totals in sorted(by_runtime.items())
+        ],
     }
 
 
@@ -265,25 +377,43 @@ def _fetch_health(days):
 # ---------------------------------------------------------------------------
 
 def _fetch_evaluations(days):
-    """Per-evaluator average + daily series from Bedrock-AgentCore/Evaluations."""
+    """Per-evaluator average + daily series from Bedrock-AgentCore/Evaluations.
+
+    Queried once per (evaluator, service.name) pair: the dimension is an exact
+    match, so a single value would hide every non-text runtime's scores. Series
+    for the same evaluator are merged timestamp-wise below.
+    """
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     period = 3600 if days <= 1 else 86400
+    services = _service_names()
 
-    mdq = [{
-        "Id": f"e{i}",
-        "Label": name,
-        "ReturnData": True,
-        "MetricStat": {
-            "Metric": {
-                "Namespace": "Bedrock-AgentCore/Evaluations",
-                "MetricName": name,
-                "Dimensions": [{"Name": "service.name", "Value": SERVICE_NAME}],
-            },
-            "Period": period,
-            "Stat": "Average",
-        },
-    } for i, name in enumerate(EVALUATORS)]
+    # GetMetricData caps a request at 500 queries; 11 evaluators x N runtimes
+    # stays far below that, but clamp so a long extras list can't 400 the page.
+    max_services = max(1, 500 // len(EVALUATORS))
+    if len(services) > max_services:
+        logger.warning(
+            "evaluations: %d service names exceeds the GetMetricData budget; "
+            "querying the first %d only", len(services), max_services)
+        services = services[:max_services]
+
+    mdq = []
+    for si, svc in enumerate(services):
+        for ei, name in enumerate(EVALUATORS):
+            mdq.append({
+                "Id": f"e{si}_{ei}",
+                "Label": f"{name}|{svc}",
+                "ReturnData": True,
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "Bedrock-AgentCore/Evaluations",
+                        "MetricName": name,
+                        "Dimensions": [{"Name": "service.name", "Value": svc}],
+                    },
+                    "Period": period,
+                    "Stat": "Average",
+                },
+            })
 
     try:
         res = _client("cloudwatch").get_metric_data(
@@ -294,9 +424,29 @@ def _fetch_evaluations(days):
         logger.warning("GetMetricData (evaluations) failed: %s", e)
         return {"available": False, "reason": str(e), "evaluators": []}
 
-    evaluators = []
+    # Merge the per-service series back into one row per evaluator. Values at
+    # the same timestamp are averaged, which matches the previous single-runtime
+    # semantics when only the text runtime has data.
+    merged = {}
     for r in res.get("MetricDataResults", []):
+        label = r["Label"]
+        name, _, svc = label.partition("|")
         vals = [float(v) for v in r.get("Values", [])]
+        if not vals:
+            continue
+        slot = merged.setdefault(name, {})
+        for ts, v in zip(r.get("Timestamps", []), vals):
+            slot.setdefault(ts, []).append(v)
+
+    evaluators = []
+    for name, by_ts in merged.items():
+        ordered = sorted(by_ts.items())
+        r = {
+            "Label": name,
+            "Timestamps": [ts for ts, _ in ordered],
+            "Values": [sum(vs) / len(vs) for _, vs in ordered],
+        }
+        vals = r["Values"]
         if not vals:
             continue
         # "Drift" = second-half mean minus first-half mean over the window.
@@ -590,10 +740,11 @@ def _fetch_spans(days, dim):
     deadline so the pair can never blow the API Gateway 29s ceiling.
     """
     deadline = time.time() + SPANS_QUERY_BUDGET_SECONDS
+    svc_filter = _spans_service_filter()
     daily = _run_logs_insights(
         'filter scope.name = "strands.telemetry.tracer"\n'
         '| filter ispresent(attributes.gen_ai.server.time_to_first_token)\n'
-        '| filter resource.attributes.service.name like /smarthome/\n'
+        + svc_filter +
         '| stats count(*) as n,'
         ' pct(attributes.gen_ai.server.time_to_first_token, 95) as ttftP95,'
         ' pct(attributes.gen_ai.server.time_to_first_token, 99) as ttftP99,'
@@ -620,14 +771,15 @@ def _fetch_spans(days, dim):
     overall = _run_logs_insights(
         'filter scope.name = "strands.telemetry.tracer"\n'
         '| filter ispresent(attributes.gen_ai.server.time_to_first_token)\n'
-        '| filter resource.attributes.service.name like /smarthome/\n'
+        + svc_filter +
         '| stats count(*) as n,'
         ' pct(attributes.gen_ai.server.time_to_first_token, 95) as ttftP95,'
         ' pct(attributes.gen_ai.server.time_to_first_token, 99) as ttftP99,'
         ' sum(attributes.gen_ai.usage.input_tokens) as inTok,'
         ' sum(attributes.gen_ai.usage.output_tokens) as outTok'
         ' by attributes.session.id as sessionId,'
-        ' attributes.gen_ai.request.model as model\n'
+        ' attributes.gen_ai.request.model as model,'
+        ' resource.attributes.service.name as svc\n'
         '| limit 1000',
         days,
         deadline,
@@ -701,7 +853,13 @@ def _attribute(rows, dim):
 
     dim=user   → Cognito email (via the runtime-sessions table)
     dim=tenant → entryEnvironment mode from tenant_env, else "default"
-    dim=agent  → the model id on the span
+    dim=agent  → the runtime that emitted the span (its service.name), with the
+                 model id kept alongside for context
+
+    `dim=agent` used to bucket by model id, which answered "which model burned
+    tokens", not "which agent". With A2A specialist runtimes running their own
+    models that distinction matters: the text agent and a delegate can share a
+    model, and one runtime can change models between versions.
 
     There is no per-FEATURE attribution: the agent emits no feature-level
     telemetry, so that dimension is deliberately absent (see spec §2.3).
@@ -709,12 +867,17 @@ def _attribute(rows, dim):
     if dim == "agent":
         buckets = {}
         for r in rows:
-            key = r.get("model") or "unknown"
+            # Fall back to the model id for spans predating the svc field.
+            key = r.get("svc") or r.get("model") or "unknown"
             b = buckets.setdefault(key, {"key": key, "inputTokens": 0,
-                                         "outputTokens": 0, "sessions": 0})
+                                         "outputTokens": 0, "sessions": 0,
+                                         "models": []})
             b["inputTokens"] += int(_num(r, "inTok"))
             b["outputTokens"] += int(_num(r, "outTok"))
             b["sessions"] += 1
+            model = r.get("model")
+            if model and model not in b["models"]:
+                b["models"].append(model)
         return sorted(buckets.values(),
                       key=lambda b: -(b["inputTokens"] + b["outputTokens"]))[:20]
 

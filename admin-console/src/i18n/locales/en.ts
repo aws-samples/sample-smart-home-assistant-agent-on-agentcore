@@ -626,7 +626,7 @@ const en: Record<string, string> = {
   'dashboard.range.30d': 'Last 30 days',
   'dashboard.dim.user': 'By user',
   'dashboard.dim.tenant': 'By entry environment',
-  'dashboard.dim.agent': 'By agent model',
+  'dashboard.dim.agent': 'By agent runtime',
 
   'dashboard.severity.good': 'Healthy',
   'dashboard.severity.warning': 'Watch',
@@ -652,7 +652,7 @@ const en: Record<string, string> = {
   'dashboard.token.attributionTitle': 'Token cost attribution',
   'dashboard.token.attributionDesc.user': 'Attributed to Cognito users by joining session.id against the runtime-sessions table.',
   'dashboard.token.attributionDesc.tenant': 'Attributed to entry environment (default / ab-bundles / ab-targets) from the tenant_env configuration. This compares cost across A/B routing groups, not per-customer billing — the project has no separate tenant entity.',
-  'dashboard.token.attributionDesc.agent': 'Attributed to the model the agent used, from the span\'s gen_ai.request.model.',
+  'dashboard.token.attributionDesc.agent': 'Attributed to the agent runtime that emitted the span (its service.name — text, voice, or an A2A specialist), with the models that runtime used listed alongside. One runtime can switch models between versions and several runtimes can share a model, so bucketing by runtime is what answers "which agent spent this".',
   'dashboard.token.input': 'Input tokens',
   'dashboard.token.output': 'Output tokens',
   'dashboard.token.totalTokens': 'Total tokens',

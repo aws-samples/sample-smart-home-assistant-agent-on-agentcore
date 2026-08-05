@@ -626,7 +626,7 @@ const zh: Record<string, string> = {
   'dashboard.range.30d': '最近 30 天',
   'dashboard.dim.user': '按用户',
   'dashboard.dim.tenant': '按入口环境',
-  'dashboard.dim.agent': '按 Agent 模型',
+  'dashboard.dim.agent': '按 Agent 运行时',
 
   'dashboard.severity.good': '正常',
   'dashboard.severity.warning': '需关注',
@@ -652,7 +652,7 @@ const zh: Record<string, string> = {
   'dashboard.token.attributionTitle': 'Token 成本归因',
   'dashboard.token.attributionDesc.user': '按 Cognito 用户归因（通过 session.id 关联 runtime-sessions 表）。',
   'dashboard.token.attributionDesc.tenant': '按入口环境（entryEnvironment）归因：default / ab-bundles / ab-targets，来自 tenant_env 配置。这是 A/B 分流组的成本对比，不是按客户计费——本项目没有独立的租户实体。',
-  'dashboard.token.attributionDesc.agent': '按 Agent 使用的模型归因（来自 span 的 gen_ai.request.model）。',
+  'dashboard.token.attributionDesc.agent': '按发出 span 的 Agent 运行时归因（来自 span 的 service.name，即 text / voice / A2A 专家 Agent 各自的 Runtime），并附带该运行时用过的模型列表。一个运行时可能跨版本换模型，多个运行时也可能共用同一模型，因此按运行时归因才能回答"哪个 Agent 花了钱"。',
   'dashboard.token.input': '输入 Token',
   'dashboard.token.output': '输出 Token',
   'dashboard.token.totalTokens': 'Token 合计',

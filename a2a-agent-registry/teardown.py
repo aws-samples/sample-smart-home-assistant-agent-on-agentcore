@@ -81,10 +81,41 @@ def load_user_pool_id() -> str:
     return ""
 
 
+def unregister_runtime_from_dashboard(runtime_arn: str, region: str) -> None:
+    """Drop a torn-down runtime from the admin Lambda's dashboard allowlist.
+
+    Counterpart to deploy.py's register_runtimes_for_dashboard. Leaving a
+    deleted runtime in place is harmless to CloudWatch (it just returns no
+    datapoints) but wastes GetMetricData query budget and misleads anyone
+    reading the env var. Non-fatal.
+    """
+    if not runtime_arn:
+        return
+    lam = boto3.client("lambda", region_name=region)
+    fn = "smarthome-admin-api"
+    try:
+        env = (lam.get_function_configuration(FunctionName=fn)
+               .get("Environment", {}).get("Variables", {}))
+        existing = [a.strip()
+                    for a in env.get("DASHBOARD_EXTRA_RUNTIME_ARNS", "").split(",")
+                    if a.strip()]
+        if runtime_arn not in existing:
+            return
+        env["DASHBOARD_EXTRA_RUNTIME_ARNS"] = ",".join(
+            a for a in existing if a != runtime_arn)
+        lam.update_function_configuration(
+            FunctionName=fn, Environment={"Variables": env})
+        log("  removed from dashboard allowlist")
+    except Exception as e:
+        log(f"  warn: dashboard allowlist cleanup failed — {e}")
+
+
 def teardown_agent(agent: str, entry: dict[str, Any], region: str, registry_id: str) -> None:
     log(f"\n=== {agent} ===")
     ac = boto3.client("bedrock-agentcore-control", region_name=region)
     cf = boto3.client("cloudformation", region_name=region)
+
+    unregister_runtime_from_dashboard(entry.get("runtimeArn", ""), region)
 
     rec_id = entry.get("recordId")
     if rec_id and registry_id:

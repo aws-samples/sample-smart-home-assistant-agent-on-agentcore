@@ -1707,11 +1707,33 @@ def main():
                 ).get("Environment", {}).get("Variables", {})
             except Exception:
                 current_admin_env = {}
+            # Extra runtimes the ops dashboard should aggregate alongside
+            # text+voice. Every runtime tags its spans and eval metrics with
+            # `service.name = <runtimeName>.<endpoint>`, and dashboard.py builds
+            # an exact allowlist from these ARNs — a runtime missing here is
+            # invisible on Overview even though its tokens are real spend.
+            # Preserve any ARNs a later script (a2a-agent-registry/deploy.py)
+            # appended, so re-running this script doesn't drop the A2A runtimes.
+            dashboard_extra = [
+                a.strip()
+                for a in current_admin_env.get(
+                    "DASHBOARD_EXTRA_RUNTIME_ARNS", "").split(",")
+                if a.strip()
+            ]
+            bundles_runtime_arn = ""
+            try:
+                bundles_runtime_arn = bundles_info.get("runtimeArn", "")
+            except NameError:
+                pass  # bundles provisioning block didn't run
+            if bundles_runtime_arn and bundles_runtime_arn not in dashboard_extra:
+                dashboard_extra.append(bundles_runtime_arn)
+
             admin_env = dict(current_admin_env)
             admin_env.update({
                 "SKILLS_TABLE_NAME": outputs.get("SkillsTableName", "smarthome-skills"),
                 "AGENT_RUNTIME_ARN": runtime_arn,
                 "VOICE_AGENT_RUNTIME_ARN": voice_runtime_arn,
+                "DASHBOARD_EXTRA_RUNTIME_ARNS": ",".join(dashboard_extra),
                 "AWS_REGION_OVERRIDE": REGION,
                 "COGNITO_USER_POOL_ID": outputs.get("UserPoolId", ""),
                 "GATEWAY_ID": gateway_id,
