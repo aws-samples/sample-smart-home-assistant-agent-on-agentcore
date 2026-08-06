@@ -71,6 +71,22 @@ for lambda_dir in admin-api user-init kb-query skill-erp-api; do
 done
 
 # ------------------------------------------------------------------------------
+# Copy the shared device catalog into the Lambdas that validate against it.
+# CDK packages each Lambda with Code.fromAsset(<dir>), so a file outside the
+# directory is not deployed — and the catalog has to stay a SINGLE source of
+# truth, because the drift between per-copy device tables is exactly what it
+# replaces. Source of truth is shared/; these are build outputs (gitignored).
+# ------------------------------------------------------------------------------
+echo "==> Copying shared device catalog into IoT Lambda directories..."
+for lambda_dir in iot-control iot-discovery iot-query; do
+    target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
+    [ -d "$target" ] || continue
+    cp "$SCRIPT_DIR/shared/device-catalog.json" "$target/device-catalog.json"
+    cp "$SCRIPT_DIR/shared/device_catalog.py"   "$target/device_catalog.py"
+    echo "    -> $lambda_dir"
+done
+
+# ------------------------------------------------------------------------------
 # Fetch the Amazon DCV Web Client SDK into chatbot/public/dcvjs/.
 # Required for the BrowserPanel live-view feature: the chatbot's DcvViewer
 # component loads /dcvjs/dcv.js at runtime to render the AgentCore browser

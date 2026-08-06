@@ -1,0 +1,263 @@
+"""Tests for the shared device catalog and its command validation.
+
+The three cases this file exists for are the defects the catalog replaces
+(see device_catalog.py's module docstring): clamping instead of rejecting,
+actually enforcing declared types, and accepting the enum values the frontend
+always supported but the old hardcoded table rejected.
+"""
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import device_catalog as dc  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Catalog integrity — a malformed catalog breaks validation everywhere
+# ---------------------------------------------------------------------------
+
+def test_catalog_loads():
+    assert dc.load_catalog()["devices"]
+
+
+def test_device_ids_unique():
+    ids = dc.device_ids()
+    assert len(ids) == len(set(ids)), f"duplicate deviceId in catalog: {ids}"
+
+
+def test_device_ids_are_topic_safe():
+    # deviceId becomes an MQTT topic segment; '/' '+' '#' would reshape the topic.
+    for did in dc.device_ids():
+        assert did, "empty deviceId"
+        for bad in ("/", "+", "#", " "):
+            assert bad not in did, f"{did!r} contains {bad!r}, unsafe in a topic"
+
+
+def test_every_action_writes_a_declared_capability():
+    for d in dc.devices():
+        caps = d.get("capabilities", {})
+        for action, spec in d.get("actions", {}).items():
+            writes = spec.get("writes")
+            assert writes in caps, (
+                f"{d['deviceId']}.{action} writes '{writes}' which is not a capability"
+            )
+
+
+def test_every_accepted_parameter_resolves_to_a_capability():
+    """Guards the catalog bug this constraint was added for.
+
+    `colors` (on setEffect) and `enabled` (on setOscillation/keepWarm) are named
+    differently from the capability they write, so they need an explicit `params`
+    mapping. Without it, validation fell back to the action's `writes` target and
+    checked a color list against the effect enum.
+    """
+    for d in dc.devices():
+        caps = d.get("capabilities", {})
+        for action, spec in d.get("actions", {}).items():
+            mapping = spec.get("params", {})
+            for param in set(spec.get("required", [])) | set(spec.get("optional", [])):
+                cap_name = mapping.get(param, param)
+                assert cap_name in caps, (
+                    f"{d['deviceId']}.{action} accepts '{param}' -> '{cap_name}', "
+                    f"which is not a capability. Add a `params` mapping."
+                )
+
+
+def test_power_payloads_reference_real_actions():
+    # voice_session.turn_on_all_devices replays these verbatim.
+    for d in dc.devices():
+        for key in ("powerOn", "powerOff"):
+            payload = d.get(key)
+            if payload:
+                assert payload["action"] in d["actions"], (
+                    f"{d['deviceId']}.{key} uses undeclared action {payload['action']}"
+                )
+
+
+def test_readonly_devices_declare_no_actions():
+    sensor = dc.device_by_id("living-sensor-1")
+    assert dc.is_readonly(sensor)
+    assert not dc.is_readonly(dc.device_by_id("living-fan-1"))
+
+
+# ---------------------------------------------------------------------------
+# Defect 1 — out-of-range values clamp instead of failing
+# ---------------------------------------------------------------------------
+
+def test_speed_above_max_is_clamped_with_a_warning():
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, warnings = dc.validate_command(fan, {"action": "setSpeed", "speed": 20})
+    assert ok, "over-range should clamp, not reject"
+    assert cmd["speed"] == 8
+    assert warnings and "8" in warnings[0]
+
+
+def test_speed_below_min_is_clamped():
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, warnings = dc.validate_command(fan, {"action": "setSpeed", "speed": -5})
+    assert ok
+    assert cmd["speed"] == 0
+    assert warnings
+
+
+def test_in_range_value_passes_without_warning():
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, warnings = dc.validate_command(fan, {"action": "setSpeed", "speed": 5})
+    assert ok and cmd["speed"] == 5 and not warnings
+
+
+# ---------------------------------------------------------------------------
+# Defect 2 — declared types are enforced
+# ---------------------------------------------------------------------------
+
+def test_string_for_boolean_is_rejected():
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, warnings = dc.validate_command(fan, {"action": "setPower", "power": "yes"})
+    assert not ok, "the old table declared this type but never checked it"
+    assert cmd is None
+
+
+def test_number_for_boolean_is_rejected():
+    fan = dc.device_by_id("living-fan-1")
+    ok, _, _ = dc.validate_command(fan, {"action": "setPower", "power": 1})
+    assert not ok
+
+
+def test_bool_for_integer_is_rejected():
+    # bool is a subclass of int in Python, so this needs an explicit guard.
+    fan = dc.device_by_id("living-fan-1")
+    ok, _, _ = dc.validate_command(fan, {"action": "setSpeed", "speed": True})
+    assert not ok
+
+
+def test_boolean_accepts_real_booleans():
+    fan = dc.device_by_id("living-fan-1")
+    for value in (True, False):
+        ok, cmd, _ = dc.validate_command(fan, {"action": "setPower", "power": value})
+        assert ok and cmd["power"] is value
+
+
+# ---------------------------------------------------------------------------
+# Defect 3 — enum values the frontend supported but the Lambda rejected
+# ---------------------------------------------------------------------------
+
+def test_led_solid_mode_is_accepted():
+    led = dc.device_by_id("living-led-1")
+    ok, _, _ = dc.validate_command(led, {"action": "setMode", "mode": "solid"})
+    assert ok, "LedMatrix.tsx has always rendered 'solid'"
+
+
+def test_oven_preheat_mode_is_accepted():
+    oven = dc.device_by_id("kitchen-oven-1")
+    ok, _, _ = dc.validate_command(oven, {"action": "setMode", "mode": "preheat"})
+    assert ok, "Oven.tsx has always rendered 'preheat'"
+
+
+def test_unknown_enum_value_is_rejected():
+    led = dc.device_by_id("living-led-1")
+    ok, _, warnings = dc.validate_command(led, {"action": "setMode", "mode": "disco"})
+    assert not ok and "disco" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# Sensors reject writes with a query hint
+# ---------------------------------------------------------------------------
+
+def test_sensor_rejects_control_with_a_hint():
+    sensor = dc.device_by_id("living-sensor-1")
+    ok, _, warnings = dc.validate_command(sensor, {"action": "setPower", "power": True})
+    assert not ok
+    assert "temperature" in warnings[0], "the refusal should point at what it can report"
+
+
+# ---------------------------------------------------------------------------
+# Colors and segments
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", ["red", "#fff", "ff0000", "#gggggg", 123])
+def test_invalid_colors_rejected(bad):
+    light = dc.device_by_id("bedroom-light-1")
+    ok, _, _ = dc.validate_command(light, {"action": "setColor", "color": bad})
+    assert not ok, f"{bad!r} should not validate as a color"
+
+
+def test_valid_color_is_lowercased():
+    light = dc.device_by_id("bedroom-light-1")
+    ok, cmd, _ = dc.validate_command(light, {"action": "setColor", "color": "#FF00AA"})
+    assert ok and cmd["color"] == "#ff00aa"
+
+
+def test_segments_longer_than_strip_are_truncated():
+    strip = dc.device_by_id("living-strip-1")
+    count = strip["capabilities"]["segments"]["count"]
+    ok, cmd, warnings = dc.validate_command(
+        strip, {"action": "setEffect", "effect": "gradient", "colors": ["#112233"] * (count + 5)}
+    )
+    assert ok
+    assert len(cmd["colors"]) == count
+    assert warnings
+
+
+def test_color_temp_clamps_to_kelvin_range():
+    light = dc.device_by_id("bedroom-light-1")
+    ok, cmd, warnings = dc.validate_command(
+        light, {"action": "setColorTemp", "color_temp": 9000}
+    )
+    assert ok and cmd["color_temp"] == 6500 and warnings
+
+
+# ---------------------------------------------------------------------------
+# Device resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_by_id():
+    d, err = dc.resolve_device(device_id="bedroom-light-1")
+    assert err is None and d["room"] == "bedroom"
+
+
+def test_resolve_unknown_id_lists_known_ones():
+    d, err = dc.resolve_device(device_id="nope-1")
+    assert d is None and "bedroom-light-1" in err
+
+
+def test_resolve_by_type_falls_back_for_legacy_callers():
+    d, err = dc.resolve_device(device_type="fan")
+    assert err is None and d["deviceType"] == "fan"
+
+
+def test_resolve_requires_one_of_the_two():
+    d, err = dc.resolve_device()
+    assert d is None and err
+
+
+# ---------------------------------------------------------------------------
+# Discovery payload keeps the contract voice_session depends on
+# ---------------------------------------------------------------------------
+
+def test_discovery_keeps_device_type_and_power_payloads():
+    payload = dc.discovery_payload()
+    assert payload
+    for entry in payload:
+        assert "deviceType" in entry, "voice_session.py:350 reads this"
+    powered = [e for e in payload if not e["readOnly"]]
+    for entry in powered:
+        assert "powerOn" in entry, "voice_session.py:351 reads this"
+
+
+def test_discovery_exposes_capabilities_and_rooms():
+    payload = dc.discovery_payload()
+    strip = next(e for e in payload if e["deviceId"] == "living-strip-1")
+    assert strip["capabilities"]["brightness"]["max"] == 100
+    assert strip["room"] == "living"
+    assert strip["roomName"] == "Living Room"
+
+
+def test_two_lights_in_different_rooms_are_distinguishable():
+    # The whole reason deviceId replaced deviceType in the topic.
+    payload = dc.discovery_payload()
+    rooms = {e["room"] for e in payload if "light" in e["deviceType"]}
+    assert len(rooms) > 1, "need lights in at least two rooms to demo disambiguation"

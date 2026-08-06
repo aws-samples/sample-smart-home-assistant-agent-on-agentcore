@@ -81,3 +81,9 @@ admin-console/scripts/
 .playwright-mcp/
 
 docs/superpowers/
+
+# Build outputs: the shared device catalog is copied into each IoT Lambda by
+# scripts/01-install-deps.sh, since CDK only packages a Lambda's own directory.
+# Source of truth is shared/device-catalog.json.
+cdk/lambda/*/device-catalog.json
+cdk/lambda/*/device_catalog.py

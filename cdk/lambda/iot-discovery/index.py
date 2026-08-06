@@ -1,55 +1,28 @@
 """
 Lambda function to discover available smart home devices.
 Called as an AgentCore Gateway Lambda target.
-Returns the mock device list that corresponds to the caller's own IoT topic
-scope. The user's Cognito `sub` is derived from the Gateway-forwarded JWT;
-the device list itself is static per user (same four devices) but the
-response includes the user's sub so the chatbot / voice agent can confirm
-which device-simulator session they are addressing.
+
+Returns the shared device catalog (copied in next to this file at build time by
+scripts/01-install-deps.sh) so the agent sees one definition of the fleet rather
+than a second hardcoded list that drifts from the simulator's.
+
+The response includes each device's `capabilities` — ranges, enums and units —
+so the agent can pick valid parameters instead of guessing and being rejected.
+`deviceType` and `powerOn`/`powerOff` are preserved because
+agent/voice_session.py's turn_on_all_devices replays exactly those fields.
+
+The list is the same for every user; the caller's `sub` is echoed back so the
+chatbot / voice agent can confirm which simulator session it is addressing.
 """
 
 import base64
 import json
 import logging
 
+import device_catalog
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-MOCK_DEVICES = [
-    {
-        "thingName": "smarthome-led_matrix",
-        "deviceType": "led_matrix",
-        "displayName": "LED Matrix",
-        "actions": ["setPower", "setMode", "setBrightness", "setColor"],
-        "powerOn": {"action": "setPower", "power": True},
-        "powerOff": {"action": "setPower", "power": False},
-    },
-    {
-        "thingName": "smarthome-rice_cooker",
-        "deviceType": "rice_cooker",
-        "displayName": "Rice Cooker",
-        "actions": ["start", "stop", "keepWarm"],
-        "powerOn": {"action": "start", "mode": "white_rice"},
-        "powerOff": {"action": "stop"},
-    },
-    {
-        "thingName": "smarthome-fan",
-        "deviceType": "fan",
-        "displayName": "Fan",
-        "actions": ["setPower", "setSpeed", "setOscillation"],
-        "powerOn": {"action": "setPower", "power": True},
-        "powerOff": {"action": "setPower", "power": False},
-    },
-    {
-        "thingName": "smarthome-oven",
-        "deviceType": "oven",
-        "displayName": "Oven",
-        "actions": ["setPower", "setMode", "setTemperature"],
-        "powerOn": {"action": "setPower", "power": True},
-        "powerOff": {"action": "setPower", "power": False},
-    },
-]
-
 
 def _decode_jwt_sub(token):
     try:
@@ -100,8 +73,10 @@ def handler(event, context):
     if not user_sub:
         return {"error": "caller identity missing — cannot list devices for unknown user"}
 
+    devices = device_catalog.discovery_payload()
     return {
         "userId": user_sub,
-        "devices": MOCK_DEVICES,
-        "count": len(MOCK_DEVICES),
+        "devices": devices,
+        "count": len(devices),
+        "rooms": device_catalog.load_catalog().get("rooms", {}),
     }

@@ -1,0 +1,216 @@
+{
+  "$comment": [
+    "Single source of truth for the simulated device fleet.",
+    "",
+    "This file is consumed by three places that used to each carry their own",
+    "hardcoded copy, which had already drifted apart (the frontend accepted led",
+    "modes 'solid' and oven mode 'preheat' that the control Lambda rejected):",
+    "  - device-simulator renders a component per entry",
+    "  - cdk/lambda/iot-control validates commands against `capabilities`",
+    "  - cdk/lambda/iot-discovery returns this list to the agent",
+    "",
+    "deviceId is the MQTT topic segment and the agent's handle for a device:",
+    "  smarthome/{userSub}/{deviceId}/command   (agent -> device)",
+    "  smarthome/{userSub}/{deviceId}/state     (device -> IoT rule -> DynamoDB)",
+    "It is {room}-{type}-{seq} so two of the same kind stay addressable, which",
+    "is what makes 'turn on the living room light' resolvable at all.",
+    "",
+    "capabilities drives validation. Types: boolean | integer | enum | color |",
+    "segments | readonly. `integer` carries min/max and is CLAMPED rather than",
+    "rejected, so 'set the fan to 20' answers 'that fan goes up to 8, set to 8'.",
+    "",
+    "`actions` maps a wire action name to the capability it writes. Keeping the",
+    "action names lets existing skills and the voice agent's powerOn/powerOff",
+    "payloads keep working."
+  ],
+  "rooms": {
+    "living": { "en": "Living Room", "zh": "客厅" },
+    "bedroom": { "en": "Bedroom", "zh": "卧室" },
+    "kitchen": { "en": "Kitchen", "zh": "厨房" }
+  },
+  "devices": [
+    {
+      "deviceId": "living-strip-1",
+      "deviceType": "light_strip",
+      "displayName": { "en": "Living Room Light Strip", "zh": "客厅灯带" },
+      "room": "living",
+      "connectivity": "wifi",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "brightness": { "type": "integer", "min": 0, "max": 100 },
+        "color": { "type": "color" },
+        "color_temp": { "type": "integer", "min": 2000, "max": 6500, "unit": "K" },
+        "segments": { "type": "segments", "count": 30 },
+        "effect": {
+          "type": "enum",
+          "values": ["solid", "gradient", "wave", "chase", "breathe", "sparkle", "twinkle"]
+        },
+        "effect_speed": { "type": "integer", "min": 1, "max": 10 }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setBrightness": { "writes": "brightness", "required": ["brightness"] },
+        "setColor": { "writes": "color", "required": ["color"] },
+        "setColorTemp": { "writes": "color_temp", "required": ["color_temp"] },
+        "setEffect": {
+          "writes": "effect",
+          "required": ["effect"],
+          "optional": ["colors", "effect_speed"],
+          "params": { "colors": "segments" }
+        }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "bedroom-light-1",
+      "deviceType": "light",
+      "displayName": { "en": "Bedroom Light", "zh": "卧室灯" },
+      "room": "bedroom",
+      "connectivity": "wifi",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "brightness": { "type": "integer", "min": 0, "max": 100 },
+        "color": { "type": "color" },
+        "color_temp": { "type": "integer", "min": 2000, "max": 6500, "unit": "K" }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setBrightness": { "writes": "brightness", "required": ["brightness"] },
+        "setColor": { "writes": "color", "required": ["color"] },
+        "setColorTemp": { "writes": "color_temp", "required": ["color_temp"] }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "living-fan-1",
+      "deviceType": "fan",
+      "displayName": { "en": "Living Room Fan", "zh": "客厅风扇" },
+      "room": "living",
+      "connectivity": "wifi",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "speed": { "type": "integer", "min": 0, "max": 8 },
+        "mode": { "type": "enum", "values": ["normal", "natural", "sleep", "auto"] },
+        "oscillation": { "type": "boolean" }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setSpeed": { "writes": "speed", "required": ["speed"] },
+        "setMode": { "writes": "mode", "required": ["mode"] },
+        "setOscillation": {
+          "writes": "oscillation",
+          "required": ["enabled"],
+          "params": { "enabled": "oscillation" }
+        }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "living-plug-1",
+      "deviceType": "plug",
+      "displayName": { "en": "Living Room Smart Plug", "zh": "客厅智能插座" },
+      "room": "living",
+      "connectivity": "wifi",
+      "capabilities": {
+        "power": { "type": "boolean" }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "living-sensor-1",
+      "deviceType": "sensor",
+      "displayName": { "en": "Living Room Environment Sensor", "zh": "客厅环境传感器" },
+      "room": "living",
+      "connectivity": "ble",
+      "$comment": "Read-only. Control actions are rejected with a query hint, which is what makes 'turn on the thermometer' answerable as 'that only reports readings — here they are'.",
+      "capabilities": {
+        "temperature": { "type": "readonly", "unit": "C", "min": -10, "max": 50 },
+        "humidity": { "type": "readonly", "unit": "%", "min": 0, "max": 100 },
+        "pm25": { "type": "readonly", "unit": "ug/m3", "min": 0, "max": 500 },
+        "co2": { "type": "readonly", "unit": "ppm", "min": 400, "max": 5000 }
+      },
+      "actions": {}
+    },
+    {
+      "deviceId": "living-led-1",
+      "deviceType": "led_matrix",
+      "displayName": { "en": "LED Matrix", "zh": "LED 点阵屏" },
+      "room": "living",
+      "connectivity": "wifi",
+      "$comment": "Pre-existing device. Kept because skills, docs and the voice agent's all-devices loop reference it. 'solid' is in the enum now — the frontend always supported it while the control Lambda rejected it.",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "brightness": { "type": "integer", "min": 0, "max": 100 },
+        "color": { "type": "color" },
+        "mode": {
+          "type": "enum",
+          "values": ["rainbow", "breathing", "chase", "sparkle", "fire", "ocean", "aurora", "solid"]
+        }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setMode": { "writes": "mode", "required": ["mode"] },
+        "setBrightness": { "writes": "brightness", "required": ["brightness"] },
+        "setColor": { "writes": "color", "required": ["color"] }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "kitchen-cooker-1",
+      "deviceType": "rice_cooker",
+      "displayName": { "en": "Rice Cooker", "zh": "电饭煲" },
+      "room": "kitchen",
+      "connectivity": "wifi",
+      "capabilities": {
+        "cooking": { "type": "boolean" },
+        "mode": {
+          "type": "enum",
+          "values": ["white_rice", "brown_rice", "porridge", "steam"]
+        },
+        "keep_warm": { "type": "boolean" }
+      },
+      "actions": {
+        "start": { "writes": "mode", "required": ["mode"] },
+        "stop": { "writes": "cooking", "required": [] },
+        "keepWarm": {
+          "writes": "keep_warm",
+          "required": ["enabled"],
+          "params": { "enabled": "keep_warm" }
+        }
+      },
+      "powerOn": { "action": "start", "mode": "white_rice" },
+      "powerOff": { "action": "stop" }
+    },
+    {
+      "deviceId": "kitchen-oven-1",
+      "deviceType": "oven",
+      "displayName": { "en": "Oven", "zh": "烤箱" },
+      "room": "kitchen",
+      "connectivity": "wifi",
+      "$comment": "'preheat' is in the enum now — same frontend/Lambda drift as led_matrix's 'solid'.",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "mode": {
+          "type": "enum",
+          "values": ["bake", "broil", "convection", "preheat"]
+        },
+        "temperature": { "type": "integer", "min": 200, "max": 500, "unit": "F" }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setMode": { "writes": "mode", "required": ["mode"] },
+        "setTemperature": { "writes": "temperature", "required": ["temperature"] }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    }
+  ]
+}
