@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { MqttClient } from '../mqtt/MqttClient';
+import { DeviceCard } from './DeviceCard';
+import { DeviceDef } from '../devices/catalog';
+import { useDeviceState } from '../state/useDeviceState';
 import { useI18n } from '../i18n';
 
 type CookerStatus = 'idle' | 'cooking' | 'keep_warm' | 'done';
@@ -33,16 +35,45 @@ const STATUS_LABEL_KEYS: Record<CookerStatus, string> = {
   done: 'rice.status.done',
 };
 
-interface Props { userSub: string; }
+interface Props {
+  device: DeviceDef;
+  userSub: string;
+}
 
-const RiceCooker: React.FC<Props> = ({ userSub }) => {
+/**
+ * Rice cooker, keeping its steam and display visual.
+ *
+ * `cooking`, `mode` and `keep_warm` are catalog-backed. The four-way `status`
+ * (idle / cooking / keep_warm / done) stays local and derived: it encodes where a
+ * cook cycle got to, which is presentation, and 'done' in particular is not a
+ * commandable state — an agent can start or stop a cooker, not put it in 'done'.
+ */
+const RiceCooker: React.FC<Props> = ({ device, userSub }) => {
+  const { t } = useI18n();
+  const { state, set, merge } = useDeviceState(device, userSub);
   const [status, setStatus] = useState<CookerStatus>('idle');
-  const [cookingMode, setCookingMode] = useState<CookingMode>('white_rice');
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [temperature, setTemperature] = useState(25);
-  const [keepWarm, setKeepWarm] = useState(false);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const { t } = useI18n();
+
+  const cookingMode = String(state.mode ?? 'white_rice') as CookingMode;
+  const keepWarm = Boolean(state.keep_warm);
+  const setKeepWarm = (v: boolean) => set('keep_warm', v);
+
+  // The catalog's `cooking` boolean is the wire-level truth; the richer local
+  // status follows it, so an agent's start/stop drives the visual too.
+  useEffect(() => {
+    const cooking = Boolean(state.cooking);
+    if (cooking && status !== 'cooking') {
+      setStatus('cooking');
+      setTimeRemaining(COOK_TIMES[cookingMode]);
+      setTemperature(25);
+    } else if (!cooking && status === 'cooking') {
+      setStatus('idle');
+      setTimeRemaining(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.cooking, state.mode]);
 
   useEffect(() => {
     if (status === 'cooking' && timeRemaining > 0) {
@@ -52,6 +83,7 @@ const RiceCooker: React.FC<Props> = ({ userSub }) => {
             clearInterval(timerRef.current!);
             setStatus(keepWarm ? 'keep_warm' : 'done');
             setTemperature(keepWarm ? 65 : 25);
+            set('cooking', false);
             return 0;
           }
           return prev - 1;
@@ -80,39 +112,13 @@ const RiceCooker: React.FC<Props> = ({ userSub }) => {
   }, [status, temperature]);
 
   const startCooking = (mode: CookingMode) => {
-    setCookingMode(mode);
-    setStatus('cooking');
-    setTimeRemaining(COOK_TIMES[mode]);
-    setTemperature(25);
+    merge({ mode, cooking: true });
   };
 
   const stopCooking = () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    setStatus('idle');
-    setTimeRemaining(0);
+    set('cooking', false);
   };
-
-  // MQTT subscription (per-user topic prefix)
-  useEffect(() => {
-    if (!userSub) return;
-    const mqtt = MqttClient.getInstance();
-    const topic = `smarthome/${userSub}/rice_cooker/command`;
-    const handler = (_topic: string, payload: any) => {
-      switch (payload.action) {
-        case 'start':
-          if (payload.mode) startCooking(payload.mode as CookingMode);
-          break;
-        case 'stop':
-          stopCooking();
-          break;
-        case 'keepWarm':
-          if (typeof payload.enabled === 'boolean') setKeepWarm(payload.enabled);
-          break;
-      }
-    };
-    mqtt.subscribe(topic, handler);
-    return () => mqtt.unsubscribe(topic, handler);
-  }, [userSub]);
 
   const formatTime = (seconds: number): string => {
     const m = Math.floor(seconds / 60);
@@ -121,14 +127,11 @@ const RiceCooker: React.FC<Props> = ({ userSub }) => {
   };
 
   return (
-    <div className="device-card">
-      <div className="device-card-header">
-        <h2>{t('rice.title')}</h2>
-        <div className="device-status">
-          <span className={`dot ${status !== 'idle' ? 'on' : 'off'}`} />
-          {t(STATUS_LABEL_KEYS[status])}
-        </div>
-      </div>
+    <DeviceCard
+      device={device}
+      status={t(STATUS_LABEL_KEYS[status])}
+      active={status !== 'idle'}
+    >
       <div className="rice-cooker-body">
         <div className="cooker-visual">
           {status === 'cooking' && (
@@ -146,7 +149,7 @@ const RiceCooker: React.FC<Props> = ({ userSub }) => {
             <div className="timer-display">
               {status === 'cooking' ? formatTime(timeRemaining) : status === 'keep_warm' ? t('rice.warm') : status === 'done' ? t('rice.done') : '--:--'}
             </div>
-            <div className="temp-display">{temperature}\u00b0C</div>
+            <div className="temp-display">{temperature}°C</div>
           </div>
         </div>
         <div className="cooker-buttons">
@@ -171,7 +174,7 @@ const RiceCooker: React.FC<Props> = ({ userSub }) => {
           </button>
         </div>
       </div>
-    </div>
+    </DeviceCard>
   );
 };
 

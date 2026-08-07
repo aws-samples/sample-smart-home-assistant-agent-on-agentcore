@@ -10,7 +10,7 @@ export function detectInitialTheme(): Theme {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
-// Cloudscape tokens for the device widgets (Fan, LedMatrix, Oven, RiceCooker).
+// Cloudscape tokens for the device widgets (lights, Fan, Oven, RiceCooker, sensors).
 // Same approach as the chatbot — values sampled from Cloudscape's
 // visual-refresh design-tokens JSON and piped through stable `--sim-*` aliases
 // so the widget CSS can reference them without dealing with hashed component

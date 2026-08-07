@@ -32,6 +32,8 @@ export interface ActionSpec {
   optional?: string[];
   /** Wire parameter -> capability, for names that differ (`enabled` -> `oscillation`). */
   params?: Record<string, string>;
+  /** Side effects the device performs itself, e.g. setSpeed implies power=true. */
+  implies?: Record<string, unknown>;
 }
 
 export interface DeviceDef {
@@ -94,13 +96,18 @@ export function initialState(device: DeviceDef): Record<string, unknown> {
       case 'boolean':
         state[name] = false;
         break;
-      case 'integer':
-        // Brightness-like values start mid-range so turning a light on shows
-        // something; everything else starts at its floor.
-        state[name] = name === 'brightness'
-          ? Math.round(((cap.max ?? 100) - (cap.min ?? 0)) * 0.8 + (cap.min ?? 0))
-          : (cap.min ?? 0);
+      case 'integer': {
+        const min = cap.min ?? 0;
+        const max = cap.max ?? 100;
+        // Most integers start at their floor (a fan starts off, an oven cold).
+        // Two do not: brightness at 0 makes a light that is "on" look broken,
+        // and colour temperature at its floor pins a white-tunable lamp to the
+        // extreme warm end when neutral is the sane resting point.
+        if (name === 'brightness') state[name] = Math.round(min + (max - min) * 0.8);
+        else if (name === 'color_temp') state[name] = Math.round((min + max) / 2);
+        else state[name] = min;
         break;
+      }
       case 'enum':
         state[name] = cap.values?.[0];
         break;

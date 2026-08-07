@@ -1,7 +1,7 @@
 /**
  * Light effect renderer: (colors, effect, speed, tick) -> per-segment colors.
  *
- * This replaces the eight hardcoded `case` blocks in LedMatrix.tsx, each of
+ * This replaced the eight hardcoded `case` blocks in the old LedMatrix, each of
  * which computed one named look from a closed-form function of (tick, row, col).
  * That shape only renders effects someone wrote a branch for, which caps an
  * effect-generating agent at picking from a menu of eight.

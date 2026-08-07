@@ -261,3 +261,56 @@ def test_two_lights_in_different_rooms_are_distinguishable():
     payload = dc.discovery_payload()
     rooms = {e["room"] for e in payload if "light" in e["deviceType"]}
     assert len(rooms) > 1, "need lights in at least two rooms to demo disambiguation"
+
+
+# ---------------------------------------------------------------------------
+# implies — device-side side effects
+# ---------------------------------------------------------------------------
+
+def test_set_speed_implies_power_on():
+    """"Set the fan to 5" should run the fan, not just store a speed."""
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, _ = dc.validate_command(fan, {"action": "setSpeed", "speed": 5})
+    assert ok
+    assert cmd["power"] is True, "the device turns itself on; the agent should not need two commands"
+    assert cmd["speed"] == 5
+
+
+def test_explicit_parameter_beats_the_implication():
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, _ = dc.validate_command(
+        fan, {"action": "setSpeed", "speed": 3, "power": False})
+    assert ok and cmd["power"] is False, "an explicit value must win over `implies`"
+
+
+def test_set_power_off_does_not_self_imply():
+    fan = dc.device_by_id("living-fan-1")
+    ok, cmd, _ = dc.validate_command(fan, {"action": "setPower", "power": False})
+    assert ok and cmd["power"] is False
+
+
+def test_light_property_changes_turn_the_light_on():
+    for device_id, command in (
+        ("living-strip-1", {"action": "setEffect", "effect": "wave"}),
+        ("bedroom-light-1", {"action": "setBrightness", "brightness": 60}),
+        ("bedroom-light-1", {"action": "setColor", "color": "#ff0000"}),
+        ("living-led-1", {"action": "setMode", "mode": "ocean"}),
+    ):
+        device = dc.device_by_id(device_id)
+        ok, cmd, _ = dc.validate_command(device, command)
+        assert ok and cmd.get("power") is True, f"{device_id} {command['action']} should light up"
+
+
+def test_cooker_start_implies_cooking():
+    cooker = dc.device_by_id("kitchen-cooker-1")
+    ok, cmd, _ = dc.validate_command(cooker, {"action": "start", "mode": "porridge"})
+    assert ok and cmd.get("cooking") is True
+
+
+def test_implied_fields_are_real_capabilities():
+    for d in dc.devices():
+        caps = d.get("capabilities", {})
+        for action, spec in d.get("actions", {}).items():
+            for field in (spec.get("implies") or {}):
+                assert field in caps, (
+                    f"{d['deviceId']}.{action} implies '{field}', not a capability")

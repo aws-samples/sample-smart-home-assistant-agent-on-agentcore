@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { MqttClient } from '../mqtt/MqttClient';
+import { DeviceCard } from './DeviceCard';
+import { DeviceDef } from '../devices/catalog';
+import { useDeviceState } from '../state/useDeviceState';
 import { useI18n } from '../i18n';
 
 type OvenMode = 'off' | 'bake' | 'broil' | 'convection' | 'preheat';
@@ -12,16 +14,38 @@ const MODE_LABEL_KEYS: Record<OvenMode, string> = {
   preheat: 'oven.mode.preheat',
 };
 
-interface Props { userSub: string; }
+interface Props {
+  device: DeviceDef;
+  userSub: string;
+}
 
-const Oven: React.FC<Props> = ({ userSub }) => {
-  const [power, setPower] = useState(false);
-  const [mode, setMode] = useState<OvenMode>('off');
-  const [targetTemp, setTargetTemp] = useState(350);
+/**
+ * Oven, keeping its heating-element glow and window visual.
+ *
+ * Power, mode and target temperature are catalog-backed and reported to the
+ * cloud. `currentTemp` stays local on purpose: it is a simulated physical
+ * reading that ticks twice a second while the oven warms, and reporting it would
+ * be a state write per tick for a value nothing queries — the oven is not one of
+ * the sensors.
+ */
+const Oven: React.FC<Props> = ({ device, userSub }) => {
+  const { t } = useI18n();
+  const { state, set, merge } = useDeviceState(device, userSub);
   const [currentTemp, setCurrentTemp] = useState(72);
   const [timer, setTimer] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const { t } = useI18n();
+
+  const tempCap = device.capabilities.temperature;
+  const power = Boolean(state.power);
+  // `off` is a UI-only mode: the catalog models "not running" as power=false,
+  // since an enum value of 'off' plus a power boolean can disagree.
+  const mode = (power ? String(state.mode ?? 'bake') : 'off') as OvenMode;
+  const targetTemp = Number(state.temperature ?? 350);
+
+  const setPower = (v: boolean) => set('power', v);
+  const setMode = (m: OvenMode) =>
+    m === 'off' ? set('power', false) : merge({ mode: m, power: true });
+  const setTargetTemp = (v: number) => set('temperature', v);
 
   // Temperature simulation
   useEffect(() => {
@@ -61,7 +85,6 @@ const Oven: React.FC<Props> = ({ userSub }) => {
           if (prev <= 1) {
             clearInterval(timerRef.current!);
             setPower(false);
-            setMode('off');
             return 0;
           }
           return prev - 1;
@@ -78,49 +101,6 @@ const Oven: React.FC<Props> = ({ userSub }) => {
     }
   }, [mode, currentTemp, targetTemp]);
 
-  const setOvenMode = (m: OvenMode) => {
-    if (m === 'off') {
-      setPower(false);
-      setMode('off');
-    } else {
-      setPower(true);
-      setMode(m);
-    }
-  };
-
-  // MQTT subscription (per-user topic prefix)
-  useEffect(() => {
-    if (!userSub) return;
-    const mqtt = MqttClient.getInstance();
-    const topic = `smarthome/${userSub}/oven/command`;
-    const handler = (_topic: string, payload: any) => {
-      switch (payload.action) {
-        case 'setMode':
-          if (payload.mode) { setOvenMode(payload.mode as OvenMode); setPower(true); }
-          break;
-        case 'setTemperature':
-          if (typeof payload.temperature === 'number') {
-            setTargetTemp(Math.max(200, Math.min(500, payload.temperature)));
-            setPower(true);
-          }
-          break;
-        case 'setPower':
-          if (typeof payload.power === 'boolean') {
-            if (payload.power) {
-              setPower(true);
-              if (mode === 'off') setMode('preheat');
-            } else {
-              setPower(false);
-              setMode('off');
-            }
-          }
-          break;
-      }
-    };
-    mqtt.subscribe(topic, handler);
-    return () => mqtt.unsubscribe(topic, handler);
-  }, [mode, userSub]);
-
   const formatTime = (seconds: number): string => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -135,14 +115,7 @@ const Oven: React.FC<Props> = ({ userSub }) => {
   const isTopHot = isHeating && (mode === 'broil' || mode === 'convection');
 
   return (
-    <div className="device-card">
-      <div className="device-card-header">
-        <h2>{t('oven.title')}</h2>
-        <div className="device-status">
-          <span className={`dot ${power ? 'on' : 'off'}`} />
-          {t(MODE_LABEL_KEYS[mode])}
-        </div>
-      </div>
+    <DeviceCard device={device} status={t(MODE_LABEL_KEYS[mode])} active={power}>
       <div className="oven-body">
         <div className="oven-visual">
           <div className="oven-control-panel">
@@ -150,10 +123,10 @@ const Oven: React.FC<Props> = ({ userSub }) => {
             <div className="oven-screen">
               <div className="oven-mode">{t(MODE_LABEL_KEYS[mode])}</div>
               <div className="oven-temp" style={{ color: isHeating ? '#ef4444' : '#666' }}>
-                {currentTemp}\u00b0F
+                {currentTemp}°F
               </div>
               <div className="oven-timer">
-                {timer > 0 ? formatTime(timer) : isHeating ? `${t('oven.target')} ${targetTemp}\u00b0F` : ''}
+                {timer > 0 ? formatTime(timer) : isHeating ? `${t('oven.target')} ${targetTemp}°F` : ''}
               </div>
             </div>
             <div className="oven-knob" />
@@ -170,10 +143,7 @@ const Oven: React.FC<Props> = ({ userSub }) => {
         <div className="oven-controls">
           <button
             className={power ? 'active' : ''}
-            onClick={() => {
-              if (power) { setPower(false); setMode('off'); }
-              else { setPower(true); setMode('preheat'); }
-            }}
+            onClick={() => setMode(power ? 'off' : 'preheat')}
             style={power ? { background: '#3a1a1a', borderColor: '#ef4444', color: '#ef4444' } : {}}
           >
             {power ? t('common.on') : t('common.off')}
@@ -182,7 +152,7 @@ const Oven: React.FC<Props> = ({ userSub }) => {
             <button
               key={m}
               className={mode === m ? 'active' : ''}
-              onClick={() => setOvenMode(m)}
+              onClick={() => setMode(m)}
             >
               {t(MODE_LABEL_KEYS[m])}
             </button>
@@ -193,19 +163,19 @@ const Oven: React.FC<Props> = ({ userSub }) => {
             {t('oven.temperature')}
             <input
               type="range"
-              min={200}
-              max={500}
+              min={tempCap?.min ?? 200}
+              max={tempCap?.max ?? 500}
               step={25}
               value={targetTemp}
               onChange={(e) => setTargetTemp(Number(e.target.value))}
               style={{ width: 100, marginLeft: 6, accentColor: '#ef4444' }}
             />
-            {targetTemp}\u00b0F
+            {targetTemp}°F
           </span>
           {timer > 0 && <span>{t('oven.timer')} {formatTime(timer)}</span>}
         </div>
       </div>
-    </div>
+    </DeviceCard>
   );
 };
 

@@ -115,7 +115,13 @@ def validate_command(device, command):
         ]
 
     spec = actions[action]
-    out = dict(command)
+    # Side effects the device performs itself: setting a fan speed runs the fan,
+    # picking a light effect turns the light on. Seeded before the caller's own
+    # parameters so an explicit value still wins, and applied here rather than in
+    # each caller so the simulator and the control path agree on what a command
+    # means.
+    out = dict(spec.get("implies") or {})
+    out.update(command)
 
     for param in spec.get("required", []):
         if param not in command:

@@ -649,3 +649,161 @@ body {
   font-size: 0.72rem;
   color: #666;
 }
+
+/* ---------------------------------------------------------------------------
+   Catalog-driven device cards
+   Two devices can now be the same type and are told apart by room, so the room
+   sits under the title. Controls are generated from capabilities, hence the
+   generic row/label/value classes rather than per-device ones.
+   --------------------------------------------------------------------------- */
+
+.device-room {
+  font-size: 0.7rem;
+  color: var(--sim-text-secondary, #656871);
+  margin-top: 2px;
+}
+
+/* Addressable strip: one row of segments, wrapping on narrow cards. */
+.strip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: 14px;
+}
+
+.strip-segment {
+  flex: 1 1 12px;
+  min-width: 8px;
+  height: 26px;
+  border-radius: 3px;
+  background: #000;
+  transition: background-color 0.12s linear;
+}
+
+.generic-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.control-row-wrap {
+  flex-wrap: wrap;
+}
+
+.control-label {
+  font-size: 0.75rem;
+  color: var(--sim-text-secondary, #656871);
+  min-width: 84px;
+}
+
+.control-value {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 42px;
+  text-align: right;
+}
+
+.control-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Sensor panel */
+.sensor-readings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 12px;
+}
+
+.sensor-reading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sensor-label {
+  font-size: 0.7rem;
+  color: var(--sim-text-secondary, #656871);
+}
+
+.sensor-value {
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.sensor-unit {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--sim-text-secondary, #656871);
+  margin-left: 3px;
+}
+
+/* A shape, not a chart — the number above it carries the value. */
+.sensor-spark {
+  height: 22px;
+  width: 100%;
+  color: var(--sim-primary, #0972d3);
+  opacity: 0.75;
+}
+
+.sensor-footnote {
+  margin-top: 12px;
+  font-size: 0.68rem;
+  color: var(--sim-text-secondary, #656871);
+}
+
+/* A one-element light is a bulb: stretched across the card as a single strip
+   segment it read as a grey bar rather than something lit. */
+.bulb-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0 14px;
+  /* Own stacking context, so the halo's negative z-index stays above the card
+     background instead of being painted behind it. */
+  isolation: isolate;
+}
+
+.bulb {
+  width: 54px;
+  height: 54px;
+  border-radius: 50% 50% 45% 45%;
+  background: var(--sim-card-border, #e9ebed);
+  border: 1px solid var(--sim-card-border, #d5dbdb);
+  transition: background-color 0.25s, box-shadow 0.25s;
+  position: relative;
+}
+
+/* A white bulb at 80% renders as #cccccc, and a pale halo of that colour on a
+   pale card is invisible — the light looked off while every value said on. The
+   halo below sits UNDER the bulb in a warm tint that contrasts with the card, so
+   "lit" reads at a glance regardless of the bulb's own colour. Saturated colours
+   (and the strip) never needed this; plain white did. */
+.bulb.lit {
+  border-color: transparent;
+}
+
+.bulb.lit::before {
+  content: '';
+  position: absolute;
+  inset: -14px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 214, 122, 0.55), rgba(255, 214, 122, 0) 70%);
+  z-index: -1;
+}
+
+.bulb-base {
+  width: 18px;
+  height: 12px;
+  margin-top: -1px;
+  border-radius: 0 0 3px 3px;
+  background: linear-gradient(#9ba7b0, #6b7780);
+}

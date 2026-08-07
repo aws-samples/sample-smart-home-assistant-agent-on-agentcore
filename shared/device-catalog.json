@@ -21,7 +21,12 @@
     "",
     "`actions` maps a wire action name to the capability it writes. Keeping the",
     "action names lets existing skills and the voice agent's powerOn/powerOff",
-    "payloads keep working."
+    "payloads keep working.",
+    "",
+    "`implies` states side effects the device performs itself. 'Set the fan to 5'",
+    "should make the fan run, so setSpeed implies power=true — otherwise the agent",
+    "has to know to send a second command, and a UI click and an MQTT command end",
+    "up behaving differently."
   ],
   "rooms": {
     "living": { "en": "Living Room", "zh": "客厅" },
@@ -49,14 +54,15 @@
       },
       "actions": {
         "setPower": { "writes": "power", "required": ["power"] },
-        "setBrightness": { "writes": "brightness", "required": ["brightness"] },
-        "setColor": { "writes": "color", "required": ["color"] },
-        "setColorTemp": { "writes": "color_temp", "required": ["color_temp"] },
+        "setBrightness": { "writes": "brightness", "required": ["brightness"], "implies": { "power": true } },
+        "setColor": { "writes": "color", "required": ["color"], "implies": { "power": true } },
+        "setColorTemp": { "writes": "color_temp", "required": ["color_temp"], "implies": { "power": true } },
         "setEffect": {
           "writes": "effect",
           "required": ["effect"],
           "optional": ["colors", "effect_speed"],
-          "params": { "colors": "segments" }
+          "params": { "colors": "segments" },
+          "implies": { "power": true }
         }
       },
       "powerOn": { "action": "setPower", "power": true },
@@ -76,9 +82,9 @@
       },
       "actions": {
         "setPower": { "writes": "power", "required": ["power"] },
-        "setBrightness": { "writes": "brightness", "required": ["brightness"] },
-        "setColor": { "writes": "color", "required": ["color"] },
-        "setColorTemp": { "writes": "color_temp", "required": ["color_temp"] }
+        "setBrightness": { "writes": "brightness", "required": ["brightness"], "implies": { "power": true } },
+        "setColor": { "writes": "color", "required": ["color"], "implies": { "power": true } },
+        "setColorTemp": { "writes": "color_temp", "required": ["color_temp"], "implies": { "power": true } }
       },
       "powerOn": { "action": "setPower", "power": true },
       "powerOff": { "action": "setPower", "power": false }
@@ -97,8 +103,8 @@
       },
       "actions": {
         "setPower": { "writes": "power", "required": ["power"] },
-        "setSpeed": { "writes": "speed", "required": ["speed"] },
-        "setMode": { "writes": "mode", "required": ["mode"] },
+        "setSpeed": { "writes": "speed", "required": ["speed"], "implies": { "power": true } },
+        "setMode": { "writes": "mode", "required": ["mode"], "implies": { "power": true } },
         "setOscillation": {
           "writes": "oscillation",
           "required": ["enabled"],
@@ -156,9 +162,9 @@
       },
       "actions": {
         "setPower": { "writes": "power", "required": ["power"] },
-        "setMode": { "writes": "mode", "required": ["mode"] },
-        "setBrightness": { "writes": "brightness", "required": ["brightness"] },
-        "setColor": { "writes": "color", "required": ["color"] }
+        "setMode": { "writes": "mode", "required": ["mode"], "implies": { "power": true } },
+        "setBrightness": { "writes": "brightness", "required": ["brightness"], "implies": { "power": true } },
+        "setColor": { "writes": "color", "required": ["color"], "implies": { "power": true } }
       },
       "powerOn": { "action": "setPower", "power": true },
       "powerOff": { "action": "setPower", "power": false }
@@ -178,7 +184,7 @@
         "keep_warm": { "type": "boolean" }
       },
       "actions": {
-        "start": { "writes": "mode", "required": ["mode"] },
+        "start": { "writes": "mode", "required": ["mode"], "implies": { "cooking": true } },
         "stop": { "writes": "cooking", "required": [] },
         "keepWarm": {
           "writes": "keep_warm",
@@ -206,8 +212,8 @@
       },
       "actions": {
         "setPower": { "writes": "power", "required": ["power"] },
-        "setMode": { "writes": "mode", "required": ["mode"] },
-        "setTemperature": { "writes": "temperature", "required": ["temperature"] }
+        "setMode": { "writes": "mode", "required": ["mode"], "implies": { "power": true } },
+        "setTemperature": { "writes": "temperature", "required": ["temperature"], "implies": { "power": true } }
       },
       "powerOn": { "action": "setPower", "power": true },
       "powerOff": { "action": "setPower", "power": false }

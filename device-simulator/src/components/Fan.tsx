@@ -1,18 +1,39 @@
 import React, { useEffect, useState } from 'react';
-import { MqttClient } from '../mqtt/MqttClient';
+import { DeviceCard } from './DeviceCard';
+import { DeviceDef } from '../devices/catalog';
+import { useDeviceState } from '../state/useDeviceState';
 import { useI18n } from '../i18n';
 
-const SPEED_LABEL_KEYS = ['fan.speed.off', 'fan.speed.low', 'fan.speed.medium', 'fan.speed.high'];
-const SPIN_DURATIONS = ['0s', '3s', '1.5s', '0.6s'];
+interface Props {
+  device: DeviceDef;
+  userSub: string;
+}
 
-interface Props { userSub: string; }
-
-const Fan: React.FC<Props> = ({ userSub }) => {
-  const [power, setPower] = useState(false);
-  const [speed, setSpeed] = useState(0);
-  const [oscillation, setOscillation] = useState(false);
-  const [timer, setTimer] = useState(0);
+/**
+ * Fan with its spinning-blade visual, driven by the catalog.
+ *
+ * Speed went from 0-3 to 0-8 because the requirements use "set the fan to 8" as
+ * an example; the range comes from the catalog so the buttons and the Lambda's
+ * clamp agree. Blade speed is computed from the ratio rather than a per-step
+ * lookup table, which would need re-writing on every range change.
+ */
+const Fan: React.FC<Props> = ({ device, userSub }) => {
   const { t } = useI18n();
+  const { state, set, merge } = useDeviceState(device, userSub);
+  const [timer, setTimer] = useState(0);
+
+  const speedCap = device.capabilities.speed;
+  const maxSpeed = speedCap?.max ?? 8;
+  const power = Boolean(state.power);
+  const speed = Number(state.speed ?? 0);
+  const oscillation = Boolean(state.oscillation);
+
+  const setPower = (v: boolean) => set('power', v);
+  const setSpeed = (v: number) => set('speed', v);
+  const setOscillation = (v: boolean) => set('oscillation', v);
+
+  // Faster spin at higher settings, with a floor so step 1 still reads as motion.
+  const spinDuration = speed > 0 ? `${(3.2 - (speed / maxSpeed) * 2.6).toFixed(2)}s` : '0s';
 
   // Timer countdown
   useEffect(() => {
@@ -20,8 +41,7 @@ const Fan: React.FC<Props> = ({ userSub }) => {
       const interval = setInterval(() => {
         setTimer((prev) => {
           if (prev <= 1) {
-            setPower(false);
-            setSpeed(0);
+            merge({ power: false, speed: 0 });
             return 0;
           }
           return prev - 1;
@@ -32,49 +52,12 @@ const Fan: React.FC<Props> = ({ userSub }) => {
   }, [timer, power]);
 
   const togglePower = () => {
-    if (power) {
-      setPower(false);
-      setSpeed(0);
-    } else {
-      setPower(true);
-      setSpeed(1);
-    }
+    merge(power ? { power: false, speed: 0 } : { power: true, speed: 1 });
   };
 
-  const changeSpeed = (s: number) => {
-    setSpeed(s);
-    if (s > 0 && !power) setPower(true);
-    if (s === 0) setPower(false);
+  const changeSpeed = (next: number) => {
+    merge({ speed: next, power: next > 0 });
   };
-
-  // MQTT subscription (per-user topic prefix)
-  useEffect(() => {
-    if (!userSub) return;
-    const mqtt = MqttClient.getInstance();
-    const topic = `smarthome/${userSub}/fan/command`;
-    const handler = (_topic: string, payload: any) => {
-      switch (payload.action) {
-        case 'setPower':
-          if (typeof payload.power === 'boolean') {
-            setPower(payload.power);
-            if (payload.power && speed === 0) setSpeed(1);
-            if (!payload.power) setSpeed(0);
-          }
-          break;
-        case 'setSpeed':
-          if (typeof payload.speed === 'number') {
-            changeSpeed(payload.speed);
-            if (payload.speed > 0) setPower(true);
-          }
-          break;
-        case 'setOscillation':
-          if (typeof payload.enabled === 'boolean') { setOscillation(payload.enabled); setPower(true); }
-          break;
-      }
-    };
-    mqtt.subscribe(topic, handler);
-    return () => mqtt.unsubscribe(topic, handler);
-  }, [speed, userSub]);
 
   const formatTime = (seconds: number): string => {
     const h = Math.floor(seconds / 3600);
@@ -85,14 +68,11 @@ const Fan: React.FC<Props> = ({ userSub }) => {
   };
 
   return (
-    <div className="device-card">
-      <div className="device-card-header">
-        <h2>{t('fan.title')}</h2>
-        <div className="device-status">
-          <span className={`dot ${power ? 'on' : 'off'}`} />
-          {power ? `${t('fan.speed')} ${speed} - ${t(SPEED_LABEL_KEYS[speed])}` : t('common.off')}
-        </div>
-      </div>
+    <DeviceCard
+      device={device}
+      status={power ? `${t('fan.speed')} ${speed}/${maxSpeed}` : t('common.off')}
+      active={power}
+    >
       <div className="fan-body">
         <div className="fan-visual" style={oscillation && power ? { animation: 'fan-osc 4s ease-in-out infinite' } : {}}>
           <style>{`
@@ -105,7 +85,7 @@ const Fan: React.FC<Props> = ({ userSub }) => {
             <div className="fan-hub" />
             <div
               className={`fan-blades ${power && speed > 0 ? 'spinning' : ''}`}
-              style={{ '--spin-duration': SPIN_DURATIONS[speed] } as React.CSSProperties}
+              style={{ '--spin-duration': spinDuration } as React.CSSProperties}
             >
               <div className="fan-blade" />
               <div className="fan-blade" />
@@ -124,13 +104,17 @@ const Fan: React.FC<Props> = ({ userSub }) => {
           >
             {power ? t('common.on') : t('common.off')}
           </button>
-          {[0, 1, 2, 3].map((s) => (
+          {/* Speeds start at 1: level 0 IS off, and rendering it as a second
+              button left the card with two OFFs side by side. Highlighting is
+              gated on power so a stored speed does not look active while the fan
+              is off. */}
+          {Array.from({ length: maxSpeed }, (_, i) => i + 1).map((level) => (
             <button
-              key={s}
-              className={speed === s && (s > 0 || !power) ? 'active' : ''}
-              onClick={() => changeSpeed(s)}
+              key={level}
+              className={power && speed === level ? 'active' : ''}
+              onClick={() => changeSpeed(level)}
             >
-              {t(SPEED_LABEL_KEYS[s])}
+              {level}
             </button>
           ))}
           <button
@@ -145,7 +129,7 @@ const Fan: React.FC<Props> = ({ userSub }) => {
           {oscillation && <span>{t('fan.oscillating')}</span>}
         </div>
       </div>
-    </div>
+    </DeviceCard>
   );
 };
 

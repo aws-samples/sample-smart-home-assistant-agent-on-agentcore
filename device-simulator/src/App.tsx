@@ -6,10 +6,13 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { MqttClient } from './mqtt/MqttClient';
-import LedMatrix from './components/LedMatrix';
-import RiceCooker from './components/RiceCooker';
+import { DEVICES, isReadOnly } from './devices/catalog';
+import { LightDevice } from './components/LightDevice';
+import { GenericDevice } from './components/GenericDevice';
+import { SensorDevice } from './components/SensorDevice';
 import Fan from './components/Fan';
 import Oven from './components/Oven';
+import RiceCooker from './components/RiceCooker';
 import LoginPage from './auth/LoginPage';
 import { getCurrentSession, refreshSession, getUserSub, ensureIotPolicyAttached, signOut, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
@@ -162,11 +165,37 @@ const App: React.FC = () => {
                 <StatusIndicator type="stopped">{t('app.disconnected')}</StatusIndicator>
               )}
             </div>
+            {/* Rendered from the catalog rather than a hardcoded list, so a
+                device added there appears here with controls bounded by the
+                same capability declaration the control Lambda validates
+                against.
+
+                Component choice is by shape, not by device: anything with
+                colour renders through the effect engine, sensors get the
+                readings panel, and the rest fall back to generated controls.
+                Fan, oven and cooker keep their hand-drawn visuals — spinning
+                blades and rising steam are most of what makes the simulator
+                read as a device rather than a form. */}
             <div className="dashboard-grid">
-              <LedMatrix userSub={userSub} />
-              <RiceCooker userSub={userSub} />
-              <Fan userSub={userSub} />
-              <Oven userSub={userSub} />
+              {DEVICES.map((device) => {
+                const key = device.deviceId;
+                if (isReadOnly(device)) {
+                  return <SensorDevice key={key} device={device} userSub={userSub} />;
+                }
+                if (device.capabilities.color || device.capabilities.segments) {
+                  return <LightDevice key={key} device={device} userSub={userSub} />;
+                }
+                switch (device.deviceType) {
+                  case 'fan':
+                    return <Fan key={key} device={device} userSub={userSub} />;
+                  case 'oven':
+                    return <Oven key={key} device={device} userSub={userSub} />;
+                  case 'rice_cooker':
+                    return <RiceCooker key={key} device={device} userSub={userSub} />;
+                  default:
+                    return <GenericDevice key={key} device={device} userSub={userSub} />;
+                }
+              })}
             </div>
           </div>
         }
