@@ -192,6 +192,155 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // DynamoDB - Device State
+    // The cloud-side copy of what the simulator is currently showing. The link
+    // used to be one-way (agent -> MQTT -> browser), so device state lived only
+    // in React state and nothing could answer "is that light on".
+    //
+    // ttl is 24h: a simulator closed for a day should read as absent rather
+    // than serving a stale state the agent would report as current.
+    // ========================
+    const deviceStateTable = new dynamodb.Table(this, "DeviceStateTable", {
+      tableName: "smarthome-device-state",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
+    // DynamoDB - Sensor History
+    // Time series for the sensor metrics, so "the temperature over the last 24
+    // hours" has something to read.
+    //
+    // The partition key includes the METRIC, not just user+device: all four
+    // metrics of a sensor are sampled at the same instant, so keying on
+    // (device, ts) alone would make them collide and only the last write of
+    // each timestamp would survive. One metric per partition also keeps the
+    // numeric `ts` sort key usable for a plain range query.
+    // ========================
+    const sensorHistoryTable = new dynamodb.Table(this, "SensorHistoryTable", {
+      tableName: "smarthome-sensor-history",
+      partitionKey: { name: "metricKey", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "ts", type: dynamodb.AttributeType.NUMBER },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
+    // IoT Topic Rules - device state and sensor history -> DynamoDB
+    //
+    // The rule writes straight to DynamoDB with no Lambda in the path: fewer
+    // moving parts, no cold start, and no per-message compute cost.
+    //
+    // Both rules extract the user and device from the topic itself
+    // (`smarthome/{sub}/{deviceId}/state`) rather than trusting the payload, so
+    // a client cannot report state on another user's behalf — the topic is what
+    // IoT authorised, the body is not.
+    //
+    // NOTE: a rule whose SQL does not match, or whose role cannot write, drops
+    // the message silently. There is no error surface, which is why the deploy
+    // runbook publishes a test message and checks the table.
+    // ========================
+    const topicRuleRole = new iam.Role(this, "DeviceStateRuleRole", {
+      assumedBy: new iam.ServicePrincipal("iot.amazonaws.com"),
+      description: "Lets IoT topic rules write device state and sensor history",
+    });
+    deviceStateTable.grantWriteData(topicRuleRole);
+    sensorHistoryTable.grantWriteData(topicRuleRole);
+
+    new iot.CfnTopicRule(this, "DeviceStateRule", {
+      ruleName: "smarthome_device_state",
+      topicRulePayload: {
+        // dynamoDBv2 writes each selected field as its own column, so the table's
+        // key attributes have to come out of the SELECT. userId and deviceId are
+        // taken from the TOPIC (`smarthome/{sub}/{deviceId}/state`, hence
+        // topic(2)/topic(3)) rather than the payload: the topic is what IoT
+        // authorised, so a client cannot report state as another user by putting
+        // a different id in the body.
+        //
+        // `+` matches exactly one segment, which keeps this off /command traffic.
+        // ttl matches the table's 24h intent — a simulator closed for a day
+        // should read as absent rather than serve stale state as current.
+        sql:
+          "SELECT topic(2) as userId, topic(3) as deviceId, state, online, " +
+          "reportedAt, (timestamp() / 1000) + 86400 as ttl " +
+          "FROM 'smarthome/+/+/state'",
+        awsIotSqlVersion: "2016-03-23",
+        ruleDisabled: false,
+        actions: [
+          {
+            dynamoDBv2: {
+              roleArn: topicRuleRole.roleArn,
+              putItem: { tableName: deviceStateTable.tableName },
+            },
+          },
+        ],
+      },
+    });
+
+    // Sensor history needs a Lambda where device state does not: dynamoDBv2
+    // writes one item per message, but seeding 24h of 5-minute samples is ~288
+    // points per metric, so the simulator sends one message carrying an array
+    // and this expands it with BatchWriteItem.
+    const historyIngestLambda = new lambda.Function(this, "IoTHistoryIngestLambda", {
+      functionName: "smarthome-iot-history-ingest",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/iot-history-ingest")),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: { SENSOR_HISTORY_TABLE: sensorHistoryTable.tableName },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+    sensorHistoryTable.grantWriteData(historyIngestLambda);
+
+    new iot.CfnTopicRule(this, "SensorHistoryRule", {
+      ruleName: "smarthome_sensor_history",
+      topicRulePayload: {
+        // `topic()` is selected explicitly: the ingest Lambda derives the user
+        // and device from the topic rather than the body, so a client cannot
+        // write history into another user's partition.
+        sql: "SELECT *, topic() as topic FROM 'smarthome/+/+/history'",
+        awsIotSqlVersion: "2016-03-23",
+        ruleDisabled: false,
+        actions: [{ lambda: { functionArn: historyIngestLambda.functionArn } }],
+      },
+    });
+
+    historyIngestLambda.addPermission("IoTRuleInvoke", {
+      principal: new iam.ServicePrincipal("iot.amazonaws.com"),
+      sourceArn: `arn:aws:iot:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:rule/smarthome_sensor_history`,
+    });
+
+    // ========================
+    // Lambda - IoT Query (AgentCore Gateway target)
+    // The read half: current device state and sensor history.
+    // ========================
+    const iotQueryLambda = new lambda.Function(this, "IoTQueryLambda", {
+      functionName: "smarthome-iot-query",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/iot-query")),
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 256,
+      environment: {
+        DEVICE_STATE_TABLE: deviceStateTable.tableName,
+        SENSOR_HISTORY_TABLE: sensorHistoryTable.tableName,
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    deviceStateTable.grantReadData(iotQueryLambda);
+    sensorHistoryTable.grantReadData(iotQueryLambda);
+
+    iotQueryLambda.addPermission("AgentCoreGatewayInvoke", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+    });
+
+    // ========================
     // Cognito Admin Group + Default Admin User
     // ========================
     new cognito.CfnUserPoolGroup(this, "AdminGroup", {
