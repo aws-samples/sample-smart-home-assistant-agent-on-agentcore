@@ -133,6 +133,29 @@ const en: Record<string, string> = {
   'mode.ocean': 'Ocean',
   'mode.aurora': 'Aurora',
   'mode.solid': 'Solid',
+
+  // Phase 2 devices
+  'cap.mist_level': 'Mist',
+  'cap.target_humidity': 'Target humidity',
+  'cap.water_level': 'Water',
+  'cap.fan_speed': 'Fan speed',
+  'cap.child_lock': 'Child lock',
+  'cap.filter_life': 'Filter life',
+  'cap.making_ice': 'Making ice',
+  'cap.ice_size': 'Ice size',
+  'cap.bin_level': 'Bin',
+  'cap.sync_mode': 'Screen sync',
+
+  'mode.continuous': 'Continuous',
+  'mode.intermittent': 'Intermittent',
+  'mode.turbo': 'Turbo',
+  'mode.manual': 'Manual',
+  'mode.small': 'Small',
+  'mode.medium': 'Medium',
+  'mode.large': 'Large',
+  'mode.off': 'Off',
+  'mode.video': 'Video',
+  'mode.music': 'Music',
 };
 
 export default en;

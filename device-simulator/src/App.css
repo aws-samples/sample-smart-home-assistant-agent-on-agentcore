@@ -18,7 +18,9 @@ body {
 .app {
   min-height: 100vh;
   padding: 24px 32px;
-  max-width: 1400px;
+  /* Wide enough for three columns of device cards on a normal desktop; 1400px
+     squeezed the third column out. */
+  max-width: 1760px;
   margin: 0 auto;
 }
 
@@ -109,24 +111,40 @@ body {
   50% { box-shadow: 0 0 14px #22c55ecc; }
 }
 
-/* ========== Dashboard Grid — LED left, 3 devices stacked right ========== */
+/* ========== Dashboard Grid ========== */
+/* Masonry columns.
+   Originally `1fr 1fr` with three hardcoded rows and the first card spanning all
+   of them — a layout built for exactly four devices. Twelve devices of very
+   different heights broke it, and a plain auto-fill grid was no better: a
+   double-width card cannot share a row with a single-width one, so every span
+   forced a new row and left holes, while `align-items: start` left ragged dead
+   space under short cards.
+
+   CSS multi-column packs cards tightly with no JS row measuring — a card flows
+   into whichever column has room. Order becomes column-major rather than
+   row-major, which for a device wall is fine: nobody reads a dashboard as a
+   sentence. */
 .dashboard-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: auto auto auto;
-  gap: 20px;
+  column-count: 3;
+  column-gap: 20px;
 }
 
-.dashboard-grid > :nth-child(1) {
-  grid-row: 1 / 4;
+.dashboard-grid > * {
+  /* Cards must not be split across a column boundary. */
+  break-inside: avoid;
+  page-break-inside: avoid;
+  margin-bottom: 20px;
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1500px) {
   .dashboard-grid {
-    grid-template-columns: 1fr;
+    column-count: 2;
   }
-  .dashboard-grid > :nth-child(1) {
-    grid-row: auto;
+}
+
+@media (max-width: 900px) {
+  .dashboard-grid {
+    column-count: 1;
   }
 }
 
@@ -243,7 +261,6 @@ body {
   border-radius: 12px;
   border: 1px solid rgba(255,255,255,0.06);
   width: 100%;
-  max-width: 380px;
   aspect-ratio: 1;
   box-shadow: inset 0 2px 20px rgba(0,0,0,0.5);
 }
@@ -269,12 +286,15 @@ body {
   box-shadow: 0 0 12px rgba(124, 124, 255, 0.1);
 }
 
+/* Wraps: brightness + warmth + colour do not fit one line in a column-width
+   card, and without wrapping the colour swatch was clipped off the edge. */
 .led-info {
   display: flex;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   margin-top: 10px;
   font-size: 0.75rem;
-  color: #666;
+  color: var(--sim-text-secondary, #656871);
 }
 
 .led-info span {
@@ -672,9 +692,9 @@ body {
 }
 
 .strip-segment {
-  flex: 1 1 12px;
-  min-width: 8px;
-  height: 26px;
+  flex: 1 1 16px;
+  min-width: 14px;
+  height: 24px;
   border-radius: 3px;
   background: #000;
   transition: background-color 0.12s linear;
@@ -806,4 +826,112 @@ body {
   margin-top: -1px;
   border-radius: 0 0 3px 3px;
   background: linear-gradient(#9ba7b0, #6b7780);
+}
+
+/* ---------------------------------------------------------------------------
+   Generated controls: gauges, segmented meters, pills.
+
+   These replace bare range inputs and default buttons for the catalog-driven
+   cards. A mist level of 3-of-5 is a discrete device setting, and stepped bars
+   read as a control panel where a slider reads as a form field.
+   --------------------------------------------------------------------------- */
+
+.gauge-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.gauge-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.7rem;
+  color: var(--sim-text-secondary, #656871);
+  margin-bottom: 4px;
+}
+
+.gauge-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--sim-text-default, #0f141a);
+}
+
+/* Low water / spent filter / full bin — the states worth acting on. */
+.gauge-warn {
+  color: #d13212;
+}
+
+.gauge-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--sim-card-border, #e9ebed);
+  overflow: hidden;
+}
+
+.gauge-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #0972d3, #38bdf8);
+  transition: width 0.6s ease;
+}
+
+.gauge-fill-warn {
+  background: linear-gradient(90deg, #d13212, #f59e0b);
+}
+
+.meter {
+  display: flex;
+  gap: 3px;
+  flex: 1;
+}
+
+.meter-seg {
+  flex: 1;
+  height: 22px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid var(--sim-card-border, #d5dbdb);
+  background: var(--sim-card-bg, #fff);
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.meter-seg:hover {
+  border-color: var(--sim-primary, #0972d3);
+}
+
+.meter-seg-on {
+  background: linear-gradient(180deg, #38bdf8, #0972d3);
+  border-color: transparent;
+}
+
+.pill {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--sim-card-border, #d5dbdb);
+  background: var(--sim-card-bg, #fff);
+  color: var(--sim-text-default, #0f141a);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.pill:hover {
+  border-color: var(--sim-primary, #0972d3);
+}
+
+.pill-on {
+  background: #1a3a1a;
+  border-color: #22c55e;
+  color: #22c55e;
+  font-weight: 600;
+}
+
+.pill-sel {
+  background: var(--sim-primary, #0972d3);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
 }

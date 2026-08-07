@@ -314,3 +314,53 @@ def test_implied_fields_are_real_capabilities():
             for field in (spec.get("implies") or {}):
                 assert field in caps, (
                     f"{d['deviceId']}.{action} implies '{field}', not a capability")
+
+
+def test_stop_actions_declare_that_they_stop():
+    """A parameterless stop has to say what it clears.
+
+    `stopIce` and `stop` write a boolean but take no arguments, so without an
+    explicit `implies` the published payload carried no state at all and the
+    device never stopped. The simulator had a fallback rule for this; the Lambda
+    did not, so the two disagreed.
+    """
+    for device_id, action, field in (
+        ("kitchen-icemaker-1", "stopIce", "making_ice"),
+        ("kitchen-cooker-1", "stop", "cooking"),
+    ):
+        device = dc.device_by_id(device_id)
+        ok, cmd, _ = dc.validate_command(device, {"action": action})
+        assert ok
+        assert cmd.get(field) is False, f"{device_id}.{action} must clear {field}"
+
+
+def test_parameterless_actions_all_declare_an_effect():
+    """Guards the class of bug above for any device added later."""
+    for d in dc.devices():
+        for action, spec in d.get("actions", {}).items():
+            if spec.get("required") or spec.get("optional"):
+                continue
+            assert spec.get("implies"), (
+                f"{d['deviceId']}.{action} takes no parameters and declares no "
+                f"`implies`, so it would publish no state change at all"
+            )
+
+
+def test_phase_two_devices_are_present():
+    ids = set(dc.device_ids())
+    for expected in ("bedroom-humidifier-1", "living-purifier-1",
+                     "kitchen-icemaker-1", "living-tvlight-1"):
+        assert expected in ids
+
+
+def test_maintenance_readings_are_readonly_but_devices_stay_controllable():
+    """water_level / filter_life / bin_level are readings, not settings — but a
+    humidifier is still a controllable device, unlike the sensor."""
+    for device_id, field in (
+        ("bedroom-humidifier-1", "water_level"),
+        ("living-purifier-1", "filter_life"),
+        ("kitchen-icemaker-1", "bin_level"),
+    ):
+        device = dc.device_by_id(device_id)
+        assert device["capabilities"][field]["type"] == "readonly"
+        assert not dc.is_readonly(device), f"{device_id} must still accept commands"

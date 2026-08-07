@@ -185,7 +185,7 @@
       },
       "actions": {
         "start": { "writes": "mode", "required": ["mode"], "implies": { "cooking": true } },
-        "stop": { "writes": "cooking", "required": [] },
+        "stop": { "writes": "cooking", "required": [], "implies": { "cooking": false } },
         "keepWarm": {
           "writes": "keep_warm",
           "required": ["enabled"],
@@ -194,6 +194,106 @@
       },
       "powerOn": { "action": "start", "mode": "white_rice" },
       "powerOff": { "action": "stop" }
+    },
+    {
+      "deviceId": "bedroom-humidifier-1",
+      "deviceType": "humidifier",
+      "displayName": { "en": "Bedroom Humidifier", "zh": "卧室加湿器" },
+      "room": "bedroom",
+      "connectivity": "wifi",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "mist_level": { "type": "integer", "min": 1, "max": 5 },
+        "mode": { "type": "enum", "values": ["continuous", "intermittent", "sleep", "auto"] },
+        "target_humidity": { "type": "integer", "min": 30, "max": 80, "unit": "%" },
+        "water_level": { "type": "readonly", "unit": "%", "min": 0, "max": 100 }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setMistLevel": { "writes": "mist_level", "required": ["mist_level"], "implies": { "power": true } },
+        "setMode": { "writes": "mode", "required": ["mode"], "implies": { "power": true } },
+        "setTargetHumidity": { "writes": "target_humidity", "required": ["target_humidity"], "implies": { "power": true } }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "living-purifier-1",
+      "deviceType": "air_purifier",
+      "displayName": { "en": "Living Room Air Purifier", "zh": "客厅空气净化器" },
+      "room": "living",
+      "connectivity": "wifi",
+      "$comment": "filter_life is read-only so 'when do I change the filter' is answerable, and it is the kind of maintenance reading an agent should surface rather than set.",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "fan_speed": { "type": "integer", "min": 1, "max": 5 },
+        "mode": { "type": "enum", "values": ["auto", "sleep", "turbo", "manual"] },
+        "child_lock": { "type": "boolean" },
+        "filter_life": { "type": "readonly", "unit": "%", "min": 0, "max": 100 }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setFanSpeed": { "writes": "fan_speed", "required": ["fan_speed"], "implies": { "power": true } },
+        "setMode": { "writes": "mode", "required": ["mode"], "implies": { "power": true } },
+        "setChildLock": { "writes": "child_lock", "required": ["enabled"], "params": { "enabled": "child_lock" } }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
+    },
+    {
+      "deviceId": "kitchen-icemaker-1",
+      "deviceType": "ice_maker",
+      "displayName": { "en": "Ice Maker", "zh": "制冰机" },
+      "room": "kitchen",
+      "connectivity": "wifi",
+      "$comment": "The requirements name 'start making ice' explicitly, hence startIce/stopIce rather than a bare power toggle.",
+      "capabilities": {
+        "making_ice": { "type": "boolean" },
+        "ice_size": { "type": "enum", "values": ["small", "medium", "large"] },
+        "bin_level": { "type": "readonly", "unit": "%", "min": 0, "max": 100 }
+      },
+      "actions": {
+        "startIce": { "writes": "making_ice", "required": [], "implies": { "making_ice": true } },
+        "stopIce": { "writes": "making_ice", "required": [], "implies": { "making_ice": false } },
+        "setIceSize": { "writes": "ice_size", "required": ["ice_size"] }
+      },
+      "powerOn": { "action": "startIce" },
+      "powerOff": { "action": "stopIce" }
+    },
+    {
+      "deviceId": "living-tvlight-1",
+      "deviceType": "tv_light",
+      "displayName": { "en": "TV Backlight", "zh": "电视背光灯" },
+      "room": "living",
+      "connectivity": "wifi",
+      "$comment": "The screen-sync master for the video-sync scene. Zones map to the four screen edges, so a 4-segment addressable light; sync_mode is inert until the scene agent drives it (spec 3).",
+      "capabilities": {
+        "power": { "type": "boolean" },
+        "brightness": { "type": "integer", "min": 0, "max": 100 },
+        "color": { "type": "color" },
+        "segments": { "type": "segments", "count": 4 },
+        "effect": {
+          "type": "enum",
+          "values": ["solid", "gradient", "wave", "chase", "breathe", "sparkle", "twinkle"]
+        },
+        "effect_speed": { "type": "integer", "min": 1, "max": 10 },
+        "sync_mode": { "type": "enum", "values": ["off", "video", "music"] }
+      },
+      "actions": {
+        "setPower": { "writes": "power", "required": ["power"] },
+        "setBrightness": { "writes": "brightness", "required": ["brightness"], "implies": { "power": true } },
+        "setColor": { "writes": "color", "required": ["color"], "implies": { "power": true } },
+        "setEffect": {
+          "writes": "effect",
+          "required": ["effect"],
+          "optional": ["colors", "effect_speed"],
+          "params": { "colors": "segments" },
+          "implies": { "power": true }
+        },
+        "setSyncMode": { "writes": "sync_mode", "required": ["sync_mode"], "implies": { "power": true } }
+      },
+      "powerOn": { "action": "setPower", "power": true },
+      "powerOff": { "action": "setPower", "power": false }
     },
     {
       "deviceId": "kitchen-oven-1",

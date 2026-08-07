@@ -133,6 +133,29 @@ const zh: Record<string, string> = {
   'mode.ocean': '海洋',
   'mode.aurora': '极光',
   'mode.solid': '纯色',
+
+  // 第二批设备
+  'cap.mist_level': '雾量',
+  'cap.target_humidity': '目标湿度',
+  'cap.water_level': '水位',
+  'cap.fan_speed': '风速',
+  'cap.child_lock': '童锁',
+  'cap.filter_life': '滤芯寿命',
+  'cap.making_ice': '制冰中',
+  'cap.ice_size': '冰块大小',
+  'cap.bin_level': '冰盒',
+  'cap.sync_mode': '屏幕同步',
+
+  'mode.continuous': '连续',
+  'mode.intermittent': '间歇',
+  'mode.turbo': '强力',
+  'mode.manual': '手动',
+  'mode.small': '小',
+  'mode.medium': '中',
+  'mode.large': '大',
+  'mode.off': '关闭',
+  'mode.video': '视频',
+  'mode.music': '音乐',
 };
 
 export default zh;

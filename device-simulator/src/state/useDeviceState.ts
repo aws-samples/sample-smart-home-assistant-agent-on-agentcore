@@ -75,15 +75,11 @@ export function useDeviceState(device: DeviceDef, userSub: string) {
         const field = spec.params?.[param] || param;
         patch[field] = payload[param];
       }
-      // An action with no parameters still means something: `stop` clears the
-      // boolean it writes.
-      if (params.length === 0 && spec.writes) {
-        patch[spec.writes] = false;
-      }
       // Side effects the device performs itself — "set the fan to 5" runs the
-      // fan. Declared in the catalog so a click and an MQTT command agree, and
-      // so the agent does not have to know to send a second power command.
-      // Applied first so an explicit parameter still wins.
+      // fan, `stop` clears the cooking flag. Declared in the catalog so a click
+      // and an MQTT command agree, and so the agent does not have to know to
+      // send a second power command. Applied first so an explicit parameter
+      // still wins.
       merge({ ...(spec.implies || {}), ...patch });
     };
 
