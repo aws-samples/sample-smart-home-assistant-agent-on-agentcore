@@ -20,7 +20,7 @@
 | [Python 3](https://www.python.org/) | >= 3.12 | AgentCore 部署脚本、Agent 代码 | [下载安装包](https://www.python.org/downloads/) 或系统包管理器 |
 | [AWS CLI](https://aws.amazon.com/cli/) | >= 2.x | AWS 凭证配置 | [官方安装指南](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
 | [agentcore CLI](https://www.npmjs.com/package/@aws/agentcore) | >= 0.13.0 | 部署 AgentCore 资源（Gateway / Runtime / Memory） | `npm install -g @aws/agentcore` · [Starter Toolkit 文档](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) |
-| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.42.93 | 部署脚本中的 AgentCore API 调用 | 见下方[快速开始](#快速开始)的 `pip install`（`scripts/01-install-deps.sh` 会自动升级） |
+| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.43.67 | 部署脚本中的 AgentCore / Agent Registry API 调用 | 见下方[快速开始](#快速开始)的 `pip install`（`scripts/01-install-deps.sh` 会自动升级） |
 | AWS 账号 | — | 需开通 Bedrock AgentCore、Kimi K2.5 和 Nova Sonic 模型访问权限 | 见下方说明 |
 
 > **agentcore CLI 走 npm，不是 pip。** 早期版本的本文档写的是 `pip install strands-agents-builder`，那个包提供的是 `strands` 命令（一个 Strands 示例 agent），**并不会**安装 `deploy.sh` 所需的 `agentcore`。正确方式是 `npm install -g @aws/agentcore`；`deploy.sh` 启动时会校验版本 >= 0.13.0（该版本修掉了一个会让 `agentcore deploy` 失败的 scaffold-test 回归）。升级用 `npm install -g @aws/agentcore@latest`。
@@ -393,7 +393,7 @@ cd cdk && npx cdk destroy --all --force
 - **`@aws-sdk/client-bedrockagentcorecontrol does not exist`** → 正常，AgentCore 资源由 `agentcore` CLI 创建（步骤 6），不由 CDK 直接创建
 - **销毁失败 `Gateway has targets associated`** → 销毁脚本会按顺序处理；手动跑时 `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → 账号已经达到 AgentCore Registry 的默认配额（5）。如果该账号已经有名为 `SmartHomeSkillsRegistry` 的 Registry，部署脚本会自动复用；否则需在 AWS Service Quotas 控制台申请提额，或删除不用的 Registry。
-- **`boto3 is too old — missing bedrock-agentcore-control.create_registry`** → venv 中的 boto3 低于 1.42.93。重跑 `scripts/01-install-deps.sh`（会自动升级），或 `pip install --upgrade boto3`。
+- **`boto3 ... is below the required 1.43.67`** → venv 中的 boto3 过旧。1.43.67 是首个包含 `agent-registry` / `agent-registry-control` 两个 service 的版本（AWS Agent Registry 于 2026-08-06 GA 时迁到该命名空间）。重跑 `scripts/01-install-deps.sh`（会自动升级），或 `pip install --upgrade boto3`。
 - **Skill ERP 新建技能后卡在 DRAFT 状态** → 表示 `SubmitRegistryRecordForApproval` 在记录仍处于 `CREATING` 时被调用。最新 Lambda 会轮询 `GetRegistryRecord` 直到状态脱离 `CREATING` 再提交，更新 Lambda 代码即可（重跑 `scripts/04-cdk-deploy.sh` 或 `aws lambda update-function-code`）。
 
 ### 前端相关
@@ -451,7 +451,7 @@ AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gatew
 | [Python 3](https://www.python.org/) | >= 3.12 | AgentCore setup script, agent code | [Installer](https://www.python.org/downloads/) or your system package manager |
 | [AWS CLI](https://aws.amazon.com/cli/) | >= 2.x | AWS credentials | [Official install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
 | [agentcore CLI](https://www.npmjs.com/package/@aws/agentcore) | >= 0.13.0 | Deploy AgentCore resources (Gateway / Runtime / Memory) | `npm install -g @aws/agentcore` · [Starter Toolkit docs](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) |
-| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.42.93 | AgentCore API calls in setup script | Via the `pip install` in [Quick Start](#quick-start) below (`scripts/01-install-deps.sh` upgrades it automatically) |
+| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.43.67 | AgentCore / Agent Registry API calls in setup script | Via the `pip install` in [Quick Start](#quick-start) below (`scripts/01-install-deps.sh` upgrades it automatically) |
 | AWS Account | — | With Bedrock AgentCore, Kimi K2.5 and Nova Sonic model access | See below |
 
 > **The agentcore CLI comes from npm, not pip.** Earlier revisions of this README said `pip install strands-agents-builder`; that package provides a `strands` command (a sample Strands agent) and does **not** install the `agentcore` binary `deploy.sh` needs. Use `npm install -g @aws/agentcore`. `deploy.sh` checks for >= 0.13.0 on startup (that release fixed a scaffold-test regression that broke `agentcore deploy`). Upgrade with `npm install -g @aws/agentcore@latest`.
@@ -803,7 +803,7 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 - **`@aws-sdk/client-bedrockagentcorecontrol does not exist`** → expected; AgentCore resources are created by the `agentcore` CLI (step 6), not by CDK directly
 - **Teardown fails `Gateway has targets associated`** → the teardown script handles order; manually: `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → the account is at the AgentCore Registry default quota (5). If a registry named `SmartHomeSkillsRegistry` already exists the deploy script reuses it automatically; otherwise request a quota increase in AWS Service Quotas or delete an unused registry.
-- **`boto3 is too old — missing bedrock-agentcore-control.create_registry`** → venv boto3 is older than 1.42.93. Re-run `scripts/01-install-deps.sh` (which upgrades boto3) or `pip install --upgrade boto3`.
+- **`boto3 ... is below the required 1.43.67`** → venv boto3 is too old. 1.43.67 is the first release carrying the `agent-registry` and `agent-registry-control` services that AWS Agent Registry moved to when it went GA on 2026-08-06. Re-run `scripts/01-install-deps.sh` (which upgrades boto3) or `pip install --upgrade boto3`.
 - **Skill ERP records stuck in `DRAFT`** → `SubmitRegistryRecordForApproval` was called while the record was still `CREATING`. The current Lambda polls `GetRegistryRecord` until the record leaves `CREATING` before submitting — just push the latest code (re-run `scripts/04-cdk-deploy.sh` or `aws lambda update-function-code`).
 
 ### Frontend

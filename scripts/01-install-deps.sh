@@ -31,16 +31,22 @@ echo "==> Installing CDK npm dependencies..."
 cd "$SCRIPT_DIR/cdk"
 npm install
 
-# scripts/setup-agentcore.py calls CreateRegistry / CreateRegistryRecord, which
-# require boto3 >= 1.42.93. Older venvs (including the 1.42.82 that still
-# ships in some environments) silently no-op the registry section because
-# hasattr(client, 'create_registry') returns False.
+# scripts/setup-agentcore.py calls CreateRegistry / CreateRegistryRecord. An
+# older boto3 silently no-ops the registry section, because the code guards on
+# hasattr(client, 'create_registry') and an absent API just returns False.
+#
+# The floor is 1.43.67: that is the first release carrying the `agent-registry`
+# and `agent-registry-control` services that AWS Agent Registry moved to when it
+# went GA on 2026-08-06 (verified by inspecting boto3's own service model). The
+# old namespace still works until 2026-09-17, so this is not yet required for
+# the registry calls to succeed — but pinning it now means the migration is a
+# code change only, not a code-plus-environment change.
 #
 # These installs used to end in `2>/dev/null || true`, which discarded both the
 # error text and the exit code — hiding the one failure this step exists to
 # prevent. They now fail loudly, and the version floor is asserted afterwards so
 # a pip that "succeeds" without actually upgrading is caught too.
-BOTO3_MIN="1.42.93"
+BOTO3_MIN="1.43.67"
 
 echo "==> Upgrading boto3 in the active venv..."
 pip install --upgrade boto3 -q
