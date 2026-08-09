@@ -201,12 +201,14 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
     calls = []
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider):
+    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+                   user_token=None):
         calls.append({
             "endpoint": endpoint_url,
             "message": message,
             "allowed": list(allowed_skill_ids),
             "token": token_provider(),
+            "user_token": user_token,
         })
         return f"⟦A2A⟧ echo: {message}"
 
@@ -231,3 +233,122 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     assert calls[0]["message"] == "How much can I save?"
     assert calls[0]["allowed"] == ["estimate_savings"]
     assert calls[0]["token"] == "tok-abc"
+
+
+# ---------------------------------------------------------------------------
+# User identity forwarding
+#
+# A sub-agent that touches devices needs the end user, and the m2m token in
+# Authorization cannot supply one — it is a client_credentials token with no
+# `sub`. The user's idToken therefore rides in its own header, pinned in the
+# tool closure so the LLM can never name a different user.
+# ---------------------------------------------------------------------------
+
+def _invoke_tool(wrapped, message):
+    for attr in ("func", "_func", "callable", "__wrapped__"):
+        fn = getattr(wrapped, attr, None)
+        if callable(fn):
+            return fn(message)
+    return wrapped(message)
+
+
+def _capture_sends(monkeypatch):
+    from tools import a2a as a2a_mod
+
+    calls = []
+
+    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+                   user_token=None):
+        calls.append({"user_token": user_token,
+                      "allowed": list(allowed_skill_ids)})
+        return "⟦A2A⟧ ok"
+
+    monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
+    return calls
+
+
+def test_user_token_is_forwarded_to_the_sub_agent(monkeypatch):
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    calls = _capture_sends(monkeypatch)
+
+    tools = build_a2a_tools(
+        grants={"rec-energy": ["estimate_savings"]},
+        registry_id="test-registry",
+        token_provider=lambda: "tok-abc",
+        user_token="Bearer user.id.token",
+    )
+    _invoke_tool(tools[0], "hello")
+    assert calls[0]["user_token"] == "Bearer user.id.token"
+
+
+def test_user_token_is_absent_when_there_is_none(monkeypatch):
+    """An unauthenticated path still builds working tools for prompt-only
+    specialists; the tool-using ones refuse on the far side."""
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    calls = _capture_sends(monkeypatch)
+
+    tools = build_a2a_tools(
+        grants={"rec-energy": ["estimate_savings"]},
+        registry_id="test-registry",
+        token_provider=lambda: "tok-abc",
+    )
+    _invoke_tool(tools[0], "hello")
+    assert calls[0]["user_token"] is None
+
+
+def test_the_llm_facing_signature_takes_only_a_message(monkeypatch):
+    """The guarantee that makes the closure worth anything: identity is not a
+    parameter, so the model cannot supply or override one."""
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _capture_sends(monkeypatch)
+    tools = build_a2a_tools(
+        grants={"rec-energy": ["estimate_savings"]},
+        registry_id="test-registry",
+        token_provider=lambda: "tok-abc",
+        user_token="Bearer user.id.token",
+    )
+    spec = tools[0].tool_spec
+    props = spec["inputSchema"]["json"]["properties"]
+    assert list(props) == ["message"], props
+    for forbidden in ("user_token", "user_id", "sub", "authorization"):
+        assert forbidden not in props
+
+
+def test_bearer_prefix_is_stripped_before_the_header_is_set(monkeypatch):
+    """The receiving side accepts either form, but sending a doubled prefix is
+    the kind of thing that only shows up in a live deploy."""
+    import httpx
+    from tools import a2a as a2a_mod
+
+    sent = {}
+
+    class _FakeClient:
+        def __init__(self, headers=None, timeout=None):
+            sent.update(headers or {})
+
+        async def __aenter__(self):
+            raise RuntimeError("stop here — headers already captured")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    # The fake aborts as soon as the headers exist — everything after that point
+    # is network work this test has no interest in.
+    with pytest.raises(RuntimeError, match="headers already captured"):
+        a2a_mod._send_a2a_message(
+            endpoint_url="https://example.invalid/invocations",
+            message="hi",
+            allowed_skill_ids=["estimate_savings"],
+            token_provider=lambda: "m2m-token",
+            user_token="Bearer  user.id.token  ",
+        )
+    assert sent["X-SuperApp-User-Token"] == "user.id.token"
+    assert sent["Authorization"] == "Bearer m2m-token"
+    assert sent["X-A2A-Allowed-Skills"] == "estimate_savings"

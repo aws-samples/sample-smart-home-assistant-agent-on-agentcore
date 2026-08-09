@@ -4,9 +4,17 @@ The roster used to be copy-pasted into four scripts. These tests pin the derived
 maps and the two slug constraints that were measured against the real CLI and
 service, so a roster addition that would fail at deploy time fails here instead.
 """
+import os
+
 import pytest
 
 from common import agents
+
+# a2a-agent-registry/ — two levels up from common/agents.py, not three. The
+# earlier three-level version pointed at the repo root, where none of the agent
+# directories exist; the "scripts no longer define their own copies" check passed
+# only because it skips paths that are absent.
+REGISTRY_DIR = os.path.dirname(os.path.dirname(os.path.abspath(agents.__file__)))
 
 
 def test_derived_maps_agree_with_the_roster():
@@ -17,19 +25,21 @@ def test_derived_maps_agree_with_the_roster():
         assert agents.LONG_NAME_TO_AGENT[long_name] == name
 
 
-def test_the_three_deployed_agents_keep_their_existing_identifiers():
+def test_deployed_agents_keep_their_existing_identifiers():
     """These are live: the slug names the CFN stack and runtime, and the long name
-    is the Registry record. Changing either orphans deployed infrastructure."""
-    assert agents.AGENT_SHORT_SLUG == {
-        "energy-optimization": "sha2aenergy",
-        "home-security": "sha2asecurity",
-        "appliance-maintenance": "sha2amaintenance",
-    }
-    assert agents.AGENT_LONG_NAMES == {
-        "energy-optimization": "energy-optimization-agent",
-        "home-security": "home-security-agent",
-        "appliance-maintenance": "appliance-maintenance-agent",
-    }
+    is the Registry record. Changing either orphans deployed infrastructure.
+
+    Subset checks, not equality — adding an agent is expected, renaming a deployed
+    one is not.
+    """
+    for name, slug, long_name in (
+        ("energy-optimization", "sha2aenergy", "energy-optimization-agent"),
+        ("home-security", "sha2asecurity", "home-security-agent"),
+        ("appliance-maintenance", "sha2amaintenance", "appliance-maintenance-agent"),
+        ("device-control", "sha2adevice", "device-control-agent"),
+    ):
+        assert agents.AGENT_SHORT_SLUG[name] == slug
+        assert agents.AGENT_LONG_NAMES[name] == long_name
 
 
 def test_current_roster_validates():
@@ -100,15 +110,40 @@ def test_every_slug_fits_the_runtime_name_cap():
         assert runtime_name_len <= 48, f"{agent}: {runtime_name_len}"
 
 
+def test_every_agent_has_the_files_deploy_expects():
+    """deploy.py loads system_prompt.md and card.json by path and decides on the
+    tools path by whether tools.py exists — a missing file fails at render."""
+    import json
+    for name in agents.AGENT_NAMES:
+        agent_dir = os.path.join(REGISTRY_DIR, name)
+        assert os.path.isdir(agent_dir), name
+        for required in ("card.json", "system_prompt.md"):
+            assert os.path.exists(os.path.join(agent_dir, required)), f"{name}/{required}"
+        card = json.load(open(os.path.join(agent_dir, "card.json"), encoding="utf-8"))
+        assert card["name"] == agents.AGENT_LONG_NAMES[name], (
+            f"{name}/card.json name must match the roster's long name — it is the "
+            f"Registry record name and the AgentCard name")
+        assert card.get("skills"), f"{name} publishes no skills, so nothing can be granted"
+        for skill in card["skills"]:
+            assert skill.get("id"), f"{name} has a skill with no id"
+
+
+def test_device_control_is_the_agent_with_tools():
+    """The tools path is chosen by the presence of tools.py, so which agents have
+    one is a fact worth pinning."""
+    with_tools = {
+        name for name in agents.AGENT_NAMES
+        if os.path.exists(os.path.join(REGISTRY_DIR, name, "tools.py"))
+    }
+    assert with_tools == {"device-control"}, with_tools
+
+
 def test_the_scripts_no_longer_define_their_own_copies():
     """The whole point of this module — a second copy silently diverges."""
-    import os
-    registry_dir = os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(agents.__file__))))
     for script in ("deploy.py", "teardown.py", "demo_reset.py", "smoke_test.py"):
-        path = os.path.join(registry_dir, script)
-        if not os.path.exists(path):
-            continue
+        path = os.path.join(REGISTRY_DIR, script)
+        # Assert rather than skip: a wrong path made this vacuous before.
+        assert os.path.exists(path), path
         src = open(path, encoding="utf-8").read()
         for table in ("AGENT_NAMES", "AGENT_LONG_NAMES", "AGENT_SHORT_SLUG"):
             assert f"{table} = (" not in src and f"{table} = {{" not in src, (

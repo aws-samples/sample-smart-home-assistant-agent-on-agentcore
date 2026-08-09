@@ -30,6 +30,10 @@ AGENTS: dict[str, tuple[str, str]] = {
     "energy-optimization": ("energy-optimization-agent", "sha2aenergy"),
     "home-security": ("home-security-agent", "sha2asecurity"),
     "appliance-maintenance": ("appliance-maintenance-agent", "sha2amaintenance"),
+    # The first agent with tools: it ships a tools.py, so deploy.py generates a
+    # main.py that passes the factory and the server requires a verified user
+    # identity on every request.
+    "device-control": ("device-control-agent", "sha2adevice"),
 }
 
 AGENT_NAMES: tuple[str, ...] = tuple(AGENTS)

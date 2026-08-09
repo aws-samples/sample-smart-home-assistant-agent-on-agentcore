@@ -384,6 +384,11 @@ def _wrap_scoped_voice_tool(mcp_client, tool, user_sub):
         kwargs.pop("user_id", None)  # never trust a model-supplied identity
         if user_sub:
             kwargs["user_id"] = user_sub
+        # Returned as-is rather than flattened to text: the raw MCPToolResult is
+        # what the unwrapped gateway tools returned before this wrapper existed,
+        # and Nova Sonic's tool-result path already handles that shape (see
+        # _extract_devices). Changing it here would change voice behaviour, which
+        # is not what wrapping the tools was for.
         return mcp_client.call_tool_sync(
             tool_use_id=str(_uuid.uuid4()),
             name=mcp_name,

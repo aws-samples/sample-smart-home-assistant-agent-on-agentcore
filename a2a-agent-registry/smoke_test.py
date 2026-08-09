@@ -39,6 +39,12 @@ PROMPTS = {
         "When should I replace my AC filter?",
         "⟦A2A:appliance-maintenance⟧",
     ),
+    # This one has real tools, so the prompt asks it to READ rather than control:
+    # a smoke test should not leave the user's devices in a different state.
+    "device-control-agent": (
+        "What is the living room environment sensor reading right now?",
+        "⟦A2A:device-control⟧",
+    ),
 }
 
 # Roster: see common/agents.py. A stale copy here makes the smoke test skip an
@@ -59,6 +65,37 @@ def fetch_m2m_token(region: str, token_url: str, scope: str, secret_arn: str) ->
     )
     r.raise_for_status()
     return r.json()["access_token"]
+
+
+def fetch_user_id_token() -> str:
+    """Sign in as the admin user and return an idToken.
+
+    Stands in for the chatbot: an agent with tools needs a real end user to act
+    as, and the m2m token cannot supply one. Returns "" if the credentials are not
+    available, so the prompt-only agents still get tested.
+    """
+    outputs_path = HERE.parent / "cdk-outputs.json"
+    if not outputs_path.exists():
+        print(f"  note: {outputs_path} missing — skipping the user idToken")
+        return ""
+    outputs = json.loads(outputs_path.read_text())
+    out = outputs[next(iter(outputs))]
+    try:
+        region = out["UserPoolId"].split("_")[0]
+        cognito = boto3.client("cognito-idp", region_name=region)
+        resp = cognito.initiate_auth(
+            ClientId=out["UserPoolClientId"],
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": out["AdminUsername"],
+                "PASSWORD": out["AdminPassword"],
+            },
+        )
+        return resp["AuthenticationResult"]["IdToken"]
+    except Exception as exc:  # noqa: BLE001
+        print(f"  note: could not fetch a user idToken ({exc}) — tool-using "
+              f"agents will refuse")
+        return ""
 
 
 def _card_skill_ids(agent: str) -> list[str]:
@@ -217,9 +254,15 @@ async def main() -> int:
     )
     print(f"fetched m2m token ({len(token)} chars)")
 
+    # An agent with tools acts on a real user's devices and refuses a request with
+    # no verified user identity, so the smoke test has to present one the way the
+    # orchestrator does. Sign in as the admin from cdk-outputs.json.
+    user_token = fetch_user_id_token()
+    print(f"fetched user idToken ({len(user_token) if user_token else 0} chars)")
+
     results = {}
     for entry in state["agents"]:
-        results[entry["agent"]] = await smoke_one(entry, token)
+        results[entry["agent"]] = await smoke_one(entry, token, user_token)
 
     # Negative cases, run against one agent — the check is in shared code, so one
     # agent exercises the same path all of them use.
@@ -232,6 +275,16 @@ async def main() -> int:
         results["negative:other-agents-skill"] = await expect_refusal(
             probe, token, "some_skill_this_agent_does_not_publish",
             "a skill this agent does not publish")
+
+    # A tool-using agent must refuse when there is no user identity to act as —
+    # otherwise it would fall back to acting as its own service identity, which is
+    # exactly the cross-user hole the forwarded token exists to close.
+    tool_agents = [e for e in state["agents"]
+                   if (HERE / e["agent"] / "tools.py").exists()]
+    for entry in tool_agents:
+        skills = ",".join(_card_skill_ids(entry["agent"]))
+        results[f"negative:{entry['agent']}-no-user-token"] = await expect_refusal(
+            entry, token, skills, "granted skills but NO user token")
 
     print()
     print("summary:", results)

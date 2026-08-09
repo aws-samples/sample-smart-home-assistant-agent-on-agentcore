@@ -248,6 +248,30 @@ def ensure_cognito(state: dict[str, Any]) -> dict[str, Any]:
 # Step 3: Render per-agent agentcore project
 # ------------------------------------------------------------------
 
+def _text_agent_gateway_env(state: dict[str, Any]) -> dict[str, str]:
+    """Read the tools-Gateway env vars off the main text runtime.
+
+    `agentcore deploy` names them AGENTCORE_GATEWAY_<GATEWAYNAME>_URL, so the key
+    is not knowable without looking. Copying whatever the main runtime uses keeps
+    the sub-agent pointed at the same Gateway by construction.
+    """
+    runtime_id = state.get("text_agent_runtime_id", "")
+    if not runtime_id:
+        return {}
+    try:
+        ac = boto3.client("bedrock-agentcore-control", region_name=state["region"])
+        env = ac.get_agent_runtime(
+            agentRuntimeId=runtime_id).get("environmentVariables") or {}
+    except Exception as exc:  # noqa: BLE001
+        log(f"  warn: could not read the main runtime's env: {exc}")
+        return {}
+    return {
+        k: v for k, v in env.items()
+        if k.startswith("AGENTCORE_GATEWAY_") and (
+            k.endswith("_URL") or k.endswith("_AUTH_TYPE") or k == "AGENTCORE_GATEWAY_ARN")
+    }
+
+
 def _module_name(agent: str) -> str:
     """Importable package name for an agent directory.
 
@@ -479,6 +503,24 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
     if not state.get("user_pool_client_id"):
         log(f"  [{agent}] WARNING: no UserPoolClientId in cdk-outputs.json — the "
             f"forwarded user token's audience will NOT be checked")
+
+    # A tool-bearing agent calls the same tools Gateway the orchestrator does, so
+    # it needs the URL. Read it off the main runtime rather than reconstructing it
+    # — the env var's name embeds the gateway's name, and the URL format is the
+    # platform's to choose.
+    #
+    # No IAM grant accompanies this: the Gateway is CUSTOM_JWT, so the credential
+    # is the end user's forwarded token, not this runtime's role. That is the
+    # point — the runtime holds no device permissions of its own, so every command
+    # is evaluated against the real user by Cedar.
+    if (HERE / agent / "tools.py").exists():
+        gateway_env = _text_agent_gateway_env(state)
+        if gateway_env:
+            env.update(gateway_env)
+            log(f"  [{agent}] gateway env: {sorted(gateway_env)}")
+        else:
+            log(f"  [{agent}] WARNING: could not find AGENTCORE_GATEWAY_*_URL on "
+                f"the main runtime — this agent will have no device tools")
     if default_model:
         env["MODEL_ID"] = default_model
     update_kwargs = dict(

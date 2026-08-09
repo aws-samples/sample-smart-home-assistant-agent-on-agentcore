@@ -7,11 +7,25 @@ per (recordId, grantedSkillId) pair.
 Each tool:
   - Has a name like ``a2a_energy_optimization_agent_estimate_savings``.
   - Description = AgentCard skill description + examples (AI-readable).
-  - Closure pins endpoint_url + allowed_skill_ids + token_provider so the
-    LLM cannot forge any of them.
+  - Closure pins endpoint_url + allowed_skill_ids + token_provider + the user's
+    idToken so the LLM cannot forge any of them. The LLM-facing signature is
+    ``_invoke(message: str)`` and nothing else — identity is never a parameter.
   - Sends an A2A JSON-RPC ``message/send`` with
-      Authorization: Bearer <m2m JWT>
-      X-A2A-Allowed-Skills: <csv>   (cooperative hint to downstream)
+      Authorization: Bearer <m2m JWT>        (service identity; Runtime checks it)
+      X-A2A-Allowed-Skills: <csv>            (ENFORCED downstream, not a hint)
+      X-SuperApp-User-Token: <user idToken>  (who this is actually for)
+
+Why the user token rides in its own header: the m2m token is a
+client_credentials token with no ``sub``, so it identifies the calling service
+and nothing else. A sub-agent that touches a user's devices needs the end user,
+and ``Authorization`` is already taken by the token the Runtime's CUSTOM_JWT
+authorizer validates — the same split the main runtime uses when the chatbot
+sends its idToken in X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken.
+
+The sub-agent re-verifies that token (signature, issuer, audience, expiry) rather
+than trusting it, and uses the resulting sub to call the same Gateway the main
+agent does, so Cedar evaluates the real end user. See
+a2a-agent-registry/common/user_identity.py.
 
 All failures are soft: the tool returns a string beginning with
 ``"A2A agent call failed: ..."`` so the LLM can apologise / fall back rather
@@ -80,8 +94,15 @@ def build_a2a_tools(
     grants: dict[str, list[str]],
     registry_id: str,
     token_provider: Callable[[], str],
+    user_token: str | None = None,
 ) -> list[Any]:
     """Return a list of Strands tools — one per granted (record, skill) pair.
+
+    ``user_token`` is the caller's idToken, already validated by the Runtime
+    before ``invoke_agent`` ran. It is forwarded so a sub-agent can act as that
+    user against the same Gateway, under the same Cedar policies. Optional so an
+    unauthenticated path still builds tools that work for prompt-only agents;
+    tool-using sub-agents refuse a request that arrives without it.
 
     Soft-fails on per-record AgentCard resolution: logs a warning and skips
     that record. Returns an empty list if ``grants`` is empty.
@@ -121,6 +142,7 @@ def build_a2a_tools(
                 skill=skill,
                 allowed_skill_ids=list(skill_ids),
                 token_provider=token_provider,
+                user_token=user_token,
             )
             if tool is not None:
                 tools.append(tool)
@@ -134,6 +156,7 @@ def _make_skill_tool(
     skill: dict,
     allowed_skill_ids: list[str],
     token_provider: Callable[[], str],
+    user_token: str | None = None,
 ):
     tool_name = f"a2a_{_slug(agent_name)}_{_slug(skill.get('id', 'x'))}"
     desc_parts = [skill.get("description", "").strip() or skill.get("name", "")]
@@ -144,9 +167,12 @@ def _make_skill_tool(
     doc = "\n".join(desc_parts).strip() or "Invoke the remote A2A agent skill."
 
     # Bind loop-local copies so every tool closure captures its own values.
+    # `_user_token` is pinned here for the same reason the MCP wrappers pin the
+    # sub: it must not be reachable from the LLM-facing signature.
     _endpoint = endpoint_url
     _allowed = list(allowed_skill_ids)
     _token = token_provider
+    _user_token = user_token
 
     @strands_tool(name=tool_name, description=doc)
     def _invoke(message: str) -> str:
@@ -157,6 +183,7 @@ def _make_skill_tool(
                 message=message,
                 allowed_skill_ids=_allowed,
                 token_provider=_token,
+                user_token=_user_token,
             )
         except Exception as e:
             logger.warning("A2A call %s failed: %s", tool_name, e)
@@ -174,6 +201,7 @@ def _send_a2a_message(
     message: str,
     allowed_skill_ids: list[str],
     token_provider: Callable[[], str],
+    user_token: str | None = None,
 ) -> str:
     """Send one A2A ``message/send`` and collect the reply text.
 
@@ -190,6 +218,14 @@ def _send_a2a_message(
             "Authorization": f"Bearer {token_provider()}",
             "X-A2A-Allowed-Skills": ",".join(allowed_skill_ids),
         }
+        if user_token:
+            # Forward the end user so the sub-agent can act as them. It arrives
+            # here already validated by the Runtime, and the sub-agent verifies
+            # it again independently rather than trusting this hop.
+            token = user_token
+            if token.lower().startswith("bearer "):
+                token = token.split(" ", 1)[1].strip()
+            headers["X-SuperApp-User-Token"] = token
         async with httpx.AsyncClient(headers=headers, timeout=60) as http:
             resolver = A2ACardResolver(http, endpoint_url)
             card = await resolver.get_agent_card()

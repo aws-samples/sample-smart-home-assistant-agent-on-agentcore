@@ -208,8 +208,65 @@ def _build_skills(card_dict: dict[str, Any]):
     ]
 
 
+class _MarkedResult:
+    """An AgentResult whose ``str()`` carries the routing marker."""
+
+    __slots__ = ("_inner", "_marker")
+
+    def __init__(self, inner, marker: str):
+        self._inner = inner
+        self._marker = marker
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __str__(self) -> str:
+        text = str(self._inner) if self._inner is not None else ""
+        if text.lstrip().startswith(self._marker):
+            return text  # the model already emitted it; don't double it
+        return f"{self._marker}\n\n{text}"
+
+
+def _marker_prefixing_agent(agent, marker: str):
+    """Wrap an Agent so its final result carries `marker`.
+
+    The marker is a routing assertion — the caller reads it to confirm the request
+    reached the intended specialist — so it should not depend on the model
+    choosing to comply. Measured: the same model, same instruction, emits it
+    reliably when answering from the prompt and drops it after a tool call, where
+    the last thing in its context is a tool result to summarise rather than the
+    system prompt. Instructing harder moved nothing.
+
+    The marker goes on the RESULT, not the stream. With
+    ``enable_a2a_compliant_streaming=False`` — what A2AServer defaults to, and what
+    is in use here — the executor builds the client-visible artifact from
+    ``str(result)`` and the streamed ``data`` events only drive interim status
+    updates. Our client reads ``artifacts[0].parts``, so a prefix injected into the
+    stream would never reach it.
+
+    Only agents with tools are wrapped, so the three prompt-only agents' output is
+    byte-for-byte what it was.
+    """
+    class _MarkerAgent:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def stream_async(self, *args, **kwargs):
+            async for event in self._inner.stream_async(*args, **kwargs):
+                if isinstance(event, dict) and "result" in event:
+                    yield {**event, "result": _MarkedResult(event["result"], marker)}
+                else:
+                    yield event
+
+    return _MarkerAgent(agent)
+
+
 def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
-                               tools_factory, require_user_identity: bool):
+                               tools_factory, require_user_identity: bool,
+                               marker: str = ""):
     """Subclass the Strands executor so each request gets its own Agent.
 
     Strands builds one Agent at startup and the executor streams from it. That is
@@ -240,7 +297,10 @@ def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
             # Swap in a request-scoped Agent for the duration of this call. The
             # executor instance is shared, so this must not outlive the request.
             previous = self.agent
-            self.agent = _build_strands_agent(tools=tools, **agent_kwargs)
+            request_agent = _build_strands_agent(tools=tools, **agent_kwargs)
+            if marker:
+                request_agent = _marker_prefixing_agent(request_agent, marker)
+            self.agent = request_agent
             try:
                 await super().execute(context, event_queue)
             finally:
@@ -255,6 +315,20 @@ def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
             )
 
     return PerRequestExecutor
+
+
+def _marker_for(card_dict: dict) -> str:
+    """The routing marker for an agent, derived from its card name.
+
+    `device-control-agent` -> `⟦A2A:device-control⟧`, matching the convention the
+    prompt-only agents already emit themselves. Derived rather than configured so
+    the marker cannot drift from the agent it identifies.
+    """
+    name = card_dict.get("name", "")
+    if not name:
+        return ""
+    domain = name[: -len("-agent")] if name.endswith("-agent") else name
+    return f"⟦A2A:{domain}⟧"
 
 
 def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
@@ -328,14 +402,22 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
     # as they did.
     from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
+    # Prefix the routing marker only for tool-using agents. A prompt-only agent
+    # emits its own reliably; one that has just summarised a tool result does not,
+    # and the marker is an assertion about routing rather than something to leave
+    # to the model. Prefixing unconditionally would double it on the other three.
+    marker = _marker_for(card_dict) if tools_factory else ""
+
     executor_cls = _make_per_request_executor(
-        StrandsA2AExecutor, agent_kwargs, tools_factory, require_user_identity)
+        StrandsA2AExecutor, agent_kwargs, tools_factory, require_user_identity,
+        marker=marker)
     a2a_server.request_handler.agent_executor = executor_cls(strands_agent)
 
     logger.info(
-        "A2A agent %s ready — skills=%s tools=%s require_user_identity=%s",
+        "A2A agent %s ready — skills=%s tools=%s require_user_identity=%s marker=%s",
         card_dict["name"], sorted(_SKILL_IDS),
         "per-request factory" if tools_factory else "none", require_user_identity,
+        marker or "(model-emitted)",
     )
 
     from fastapi import FastAPI

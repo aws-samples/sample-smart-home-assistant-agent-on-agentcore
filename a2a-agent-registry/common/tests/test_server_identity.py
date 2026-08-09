@@ -251,3 +251,89 @@ def test_the_startup_agent_is_restored_even_when_execution_raises():
             asyncio.run(ex.execute(
                 _context({ALLOWED_SKILLS_HEADER: "estimate_savings"}), MagicMock()))
     assert ex.agent == "startup-agent"
+
+
+# --------------------------------------------------------------------------
+# Routing marker
+#
+# The caller reads a marker line to confirm the request reached the intended
+# specialist. A prompt-only agent emits its own reliably; one that has just
+# summarised a tool result drops it, so for tool-using agents the server adds it.
+# --------------------------------------------------------------------------
+
+class _FakeResult:
+    def __init__(self, text):
+        self._text = text
+        self.stop_reason = "end_turn"
+
+    def __str__(self):
+        return self._text
+
+
+def _agent_yielding(text):
+    class _A:
+        async def stream_async(self, *a, **kw):
+            yield {"data": text}
+            yield {"result": _FakeResult(text)}
+    return _A()
+
+
+def _final_text(wrapped):
+    import asyncio
+
+    async def run():
+        out = None
+        async for event in wrapped.stream_async():
+            if isinstance(event, dict) and "result" in event:
+                out = str(event["result"])
+        return out
+    return asyncio.run(run())
+
+
+def test_marker_is_added_when_the_model_omits_it():
+    wrapped = server._marker_prefixing_agent(
+        _agent_yielding("Temperature: 26.9C"), "⟦A2A:device-control⟧")
+    assert _final_text(wrapped).startswith("⟦A2A:device-control⟧")
+
+
+def test_marker_is_not_doubled_when_the_model_emits_it():
+    wrapped = server._marker_prefixing_agent(
+        _agent_yielding("⟦A2A:device-control⟧\n\nTemperature: 26.9C"),
+        "⟦A2A:device-control⟧")
+    assert _final_text(wrapped).count("⟦A2A:device-control⟧") == 1
+
+
+def test_marker_goes_on_the_result_not_only_the_stream():
+    """With enable_a2a_compliant_streaming=False the client-visible artifact is
+    built from str(result); the streamed data events only drive status updates. A
+    prefix injected into the stream alone would never reach the caller."""
+    import asyncio
+
+    wrapped = server._marker_prefixing_agent(
+        _agent_yielding("plain"), "⟦A2A:device-control⟧")
+
+    async def collect():
+        data, result = [], None
+        async for event in wrapped.stream_async():
+            if "data" in event:
+                data.append(event["data"])
+            if "result" in event:
+                result = str(event["result"])
+        return data, result
+
+    data, result = asyncio.run(collect())
+    assert data == ["plain"]                       # stream left alone
+    assert result.startswith("⟦A2A:device-control⟧")  # result carries it
+
+
+def test_marked_result_passes_other_attributes_through():
+    marked = server._MarkedResult(_FakeResult("x"), "M")
+    assert marked.stop_reason == "end_turn"
+
+
+def test_marker_is_derived_from_the_card_name():
+    assert server._marker_for({"name": "device-control-agent"}) == "⟦A2A:device-control⟧"
+    assert server._marker_for({"name": "home-security-agent"}) == "⟦A2A:home-security⟧"
+    # Matches the convention the prompt-only agents already emit by hand.
+    assert server._marker_for({"name": "nameless"}) == "⟦A2A:nameless⟧"
+    assert server._marker_for({}) == ""

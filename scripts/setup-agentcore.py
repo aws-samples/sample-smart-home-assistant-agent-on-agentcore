@@ -431,6 +431,97 @@ def _iot_query_tool_schema() -> list:
     ]
 
 
+def _control_device_tool_schema() -> list:
+    """Tool schema for the write half of the device link (iot-control Lambda).
+
+    Two things were wrong with the schema this replaces, both dating from when the
+    fleet was four devices of distinct types:
+
+      - `device_id` was not declared at all, even though the Lambda has supported
+        it for a while and its own comment says it is "what the agent should
+        send". A caller could not address a specific unit through the Gateway.
+      - `device_type` was REQUIRED. With 12 devices and several sharing a type,
+        type-only addressing resolves to whichever comes first in the catalog —
+        so a request for the bedroom light could act on the living room strip.
+        Worse, a caller that correctly sent only `device_id` got a validation
+        error from the Gateway before the Lambda ever saw it.
+
+    Both are declared now and neither is required; the Lambda rejects a call that
+    supplies neither. `device_type` stays for the voice agent's power-on loop and
+    the existing skills, which were written against it.
+    """
+    catalog_hint = _catalog_device_hint()
+    return [
+        {
+            "name": "control_device",
+            "description": (
+                "Send one command to one smart home device. Prefer `device_id` — "
+                "it addresses a specific unit. `device_type` is a fallback that "
+                "resolves to the FIRST device of that type, which is ambiguous "
+                "when several share it. Out-of-range numbers are clamped rather "
+                "than rejected and the reply says so, so report the value that "
+                "was actually applied."
+                + (f" Devices: {catalog_hint}." if catalog_hint else "")
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": (
+                            "Exact device id from discover_devices, e.g. "
+                            "bedroom-light-1. Preferred over device_type."
+                        ),
+                    },
+                    "device_type": {
+                        "type": "string",
+                        "description": (
+                            "Device type, used only when the id is unknown. "
+                            "Resolves to the first device of the type."
+                        ),
+                    },
+                    "command": {
+                        "type": "object",
+                        "description": (
+                            "Command object. Must carry an `action` plus that "
+                            "action's parameters, e.g. {\"action\": "
+                            "\"setBrightness\", \"brightness\": 30} or "
+                            "{\"action\": \"setPower\", \"power\": false}. Call "
+                            "discover_devices for each device's actions and the "
+                            "valid range of every parameter."
+                        ),
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "The action to perform.",
+                            },
+                        },
+                        "required": ["action"],
+                    },
+                },
+                # Neither id nor type is required here: the Lambda accepts either
+                # and errors when it gets neither. Requiring `device_type` is what
+                # blocked id-only calls at the Gateway.
+                "required": ["command"],
+            },
+        },
+    ]
+
+
+def _catalog_device_hint() -> str:
+    """One line per device: id, type and room, from the shared catalog."""
+    try:
+        path = os.path.join(PROJECT_ROOT, "shared", "device-catalog.json")
+        with open(path, encoding="utf-8") as fh:
+            catalog = json.load(fh)
+    except Exception:
+        return ""
+    return "; ".join(
+        f"{d['deviceId']} ({d['deviceType']}, {d.get('room', '?')})"
+        for d in catalog.get("devices", [])
+    )
+
+
 def _nav_deeplink_tool_schema() -> list:
     """Tool schema for the navigation DeepLink Lambda.
 
@@ -521,7 +612,8 @@ def _ensure_gateway_can_invoke(ac_control, gateway_id: str, lambda_arns: list) -
 
 def ensure_device_read_and_nav_tools(gateway_id: str, query_lambda_arn: str,
                                      nav_lambda_arn: str,
-                                     skills_table_name: str) -> list:
+                                     skills_table_name: str,
+                                     control_lambda_arn: str = "") -> list:
     """Register the device-read and navigation Gateway targets, then grant them.
 
     Two halves, both required — a target nobody is permitted to call is
@@ -543,7 +635,7 @@ def ensure_device_read_and_nav_tools(gateway_id: str, query_lambda_arn: str,
     the schemas in place and skips users who already hold the tools.
     """
     new_tool_names = []
-    if not gateway_id or not (query_lambda_arn or nav_lambda_arn):
+    if not gateway_id or not (query_lambda_arn or nav_lambda_arn or control_lambda_arn):
         return new_tool_names
 
     print("\nRegistering device-read and navigation Gateway targets...")
@@ -581,6 +673,24 @@ def ensure_device_read_and_nav_tools(gateway_id: str, query_lambda_arn: str,
     else:
         print("  Skipped navigation target — stack has no NavDeepLinkLambdaArn "
               "output yet (re-run cdk deploy).")
+
+    # Re-register the existing control target with a corrected schema. It was
+    # created when the fleet was four devices of distinct types: `device_id` was
+    # not declared at all and `device_type` was required, so a caller could not
+    # address a specific unit and an id-only call was rejected by the Gateway
+    # before the Lambda saw it. The Lambda has accepted `device_id` for a while.
+    if control_lambda_arn:
+        try:
+            _ensure_lambda_gateway_target(
+                ac_control, gateway_id, "SmartHomeDeviceControl",
+                control_lambda_arn, _control_device_tool_schema())
+            # Not appended to new_tool_names: control_device already has a Cedar
+            # policy and users already hold it. Re-granting would be a no-op that
+            # rebuilds a working policy for nothing.
+            print("  Updated control_device schema (device_id now addressable, "
+                  "device_type no longer required)")
+        except Exception as e:
+            print(f"  Warning: Failed to update the device-control target: {e}")
 
     if not new_tool_names:
         return new_tool_names
@@ -2382,6 +2492,7 @@ def main():
         query_lambda_arn=query_lambda_arn,
         nav_lambda_arn=nav_lambda_arn,
         skills_table_name=outputs.get("SkillsTableName", "smarthome-skills"),
+        control_lambda_arn=lambda_arn,
     )
 
     # --------------------------------------------------------
@@ -2668,6 +2779,7 @@ def only_tool_targets():
         query_lambda_arn=outputs.get("IoTQueryLambdaArn", ""),
         nav_lambda_arn=outputs.get("NavDeepLinkLambdaArn", ""),
         skills_table_name=outputs.get("SkillsTableName", "smarthome-skills"),
+        control_lambda_arn=outputs.get("IoTControlLambdaArn", ""),
     )
     if not registered:
         raise RuntimeError(

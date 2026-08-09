@@ -228,6 +228,47 @@ KNOWLEDGE BASE: Use query_knowledge_base for questions that may relate to compan
 IMAGES IN THIS CONVERSATION: When the user references an image they uploaded ("the image I just sent", "the photo", "上一张图片", "这张图"), rely on the image description that appears earlier in the conversation as a prior assistant message — that is the vision model's caption. Do NOT say "I cannot see images" or "I don't have image access"; the description is already in your context. If no image description is present, say so honestly and ask the user to re-upload. Never fabricate image contents; never invent colors, modes, or details that are not stated in a prior image description."""
 
 
+# Appended to the system prompt only on turns where `a2a_*` tools are actually
+# registered, so a user without grants is never told about specialists they
+# cannot reach.
+#
+# The routing table is the point. A delegation costs at least two serial LLM
+# calls — this agent deciding, then the sub-agent reasoning — plus the network
+# round trips, which measures at 5-15s. Anything the main agent can do with one
+# tool call must not be delegated, or every light switch pays for a conversation.
+# Delegation is for work that genuinely needs a specialist: multi-device
+# orchestration, capability reasoning, creative generation.
+A2A_DELEGATION_RULES = """SPECIALIST AGENTS (A2A) — WHEN TO DELEGATE AND WHEN NOT TO:
+
+You have specialist agents available as tools named `a2a_*`. Each one is a separate
+agent with its own expertise. Delegating to one costs several seconds, so it is the
+right move only when the work actually needs that expertise.
+
+DO IT YOURSELF — never delegate these. Call the tool directly, in your first response:
+  - Turning one device on or off, setting its brightness, colour, mode, speed or temperature → control_device
+  - What a device is doing right now, or any single sensor reading → query_device_state
+  - A sensor's history, trend, min/max/average → query_sensor_history
+  - Which devices exist → discover_devices
+  - Opening an app page → navigate_to_page
+  - Company documents, manuals, troubleshooting guides → query_knowledge_base
+
+DELEGATE — only when a matching `a2a_*` tool is registered this turn:
+  - Work needing several devices coordinated toward one outcome, where the choice of
+    devices or the order matters
+  - Reasoning about what a device is capable of, or resolving an ambiguous request
+    into a specific device
+  - Creative generation (for example turning a description or an image into a
+    lighting effect)
+  - Domain expertise the tools cannot supply: security risk, energy analysis,
+    appliance maintenance
+
+HOW TO DELEGATE: send the specialist a self-contained request in natural language.
+It cannot see this conversation, so include the devices, rooms and parameters it
+needs. Report back what it tells you and name the specialist you used. If it fails
+or is unavailable, say so honestly — do not answer from general knowledge in its
+place."""
+
+
 def create_agent(tools=None, session_manager=None, skills=None, model_id=None,
                  system_prompt=None, headers=None):
     model = BedrockModel(
@@ -375,11 +416,35 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             present_suffixes = set(mcp_name_for.keys())
 
             def _mcp_text(result) -> str:
-                """Flatten an MCP tool result into the string a tool must return."""
-                if hasattr(result, 'content') and result.content:
-                    texts = [c.text for c in result.content if hasattr(c, 'text')]
-                    return "\n".join(texts) if texts else json.dumps(result.content, default=str)
-                return str(result)
+                """Flatten an MCP tool result into the string a tool must return.
+
+                `call_tool_sync` returns an MCPToolResult, which is a TypedDict —
+                so the payload is `result["content"][i]["text"]`, not
+                `result.content[i].text`. Only checking the attribute form meant
+                every tool result reached the model as a stringified Python dict
+                (`{'status': 'success', 'toolUseId': ..., 'content': [{'text':
+                '<the actual JSON>'}]}`) with the answer buried inside it. The
+                model was parsing through that wrapper, which is why this looked
+                like it worked. Both shapes are handled since a future SDK
+                version may return either.
+                """
+                content = None
+                if isinstance(result, dict):
+                    content = result.get("content")
+                if content is None:
+                    content = getattr(result, "content", None)
+                if not content:
+                    return str(result)
+                texts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if "text" in item:
+                            texts.append(item["text"])
+                    elif hasattr(item, "text"):
+                        texts.append(item.text)
+                if texts:
+                    return "\n".join(texts)
+                return json.dumps(content, default=str)
 
             def _call_scoped(suffix: str, args: dict) -> str:
                 """Call a per-user MCP tool with the runtime-validated identity.
@@ -419,13 +484,27 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
 
             if "control_device" in present_suffixes:
                 @strands_tool
-                def control_device(device_type: str, command: dict) -> str:
-                    """Send a command to one of the user's smart home devices. Returns
-                    a short confirmation or error message. `device_type` is one of
-                    led_matrix, rice_cooker, fan, oven. `command` is a JSON object with
-                    an `action` field and action-specific parameters."""
-                    return _call_scoped("control_device", {
-                        "device_type": device_type, "command": command})
+                def control_device(device_id: str = "", device_type: str = "",
+                                   command: dict | None = None) -> str:
+                    """Send one command to one of the user's smart home devices.
+
+                    Prefer `device_id` (an exact id from discover_devices, e.g.
+                    bedroom-light-1) — it addresses a specific unit. `device_type`
+                    is a fallback that resolves to the FIRST device of that type,
+                    which is ambiguous now that several devices share a type.
+                    `command` is an object with an `action` and that action's
+                    parameters, e.g. {"action": "setBrightness", "brightness": 30}.
+                    Out-of-range values are clamped and the reply says so — report
+                    the value that was applied, not the one requested."""
+                    args: dict = {"command": command or {}}
+                    if device_id:
+                        args["device_id"] = device_id
+                    if device_type:
+                        args["device_type"] = device_type
+                    if not device_id and not device_type:
+                        return ("control_device needs a device_id (preferred) or a "
+                                "device_type; call discover_devices for the ids.")
+                    return _call_scoped("control_device", args)
                 wrapped_tools.append(control_device)
 
             if "discover_devices" in present_suffixes:
@@ -569,25 +648,41 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                             grants=grants,
                             registry_id=os.environ["REGISTRY_ID"],
                             token_provider=build_token_provider(),
+                            # Forward the caller's idToken so a sub-agent with
+                            # tools can act as this user against the same Gateway,
+                            # under the same Cedar policies. Pinned in the tool
+                            # closure, never a parameter the LLM can set.
+                            user_token=auth_header,
                         )
                         logger.info(
-                            f"A2A tools registered: {len(a2a_tools)} for actor={actor_id}"
+                            f"A2A tools registered: {len(a2a_tools)} for actor={actor_id} "
+                            f"(user identity forwarded: {bool(auth_header)})"
                         )
+                        if not auth_header:
+                            logger.warning(
+                                "No user token to forward — sub-agents that act on "
+                                "devices will refuse these calls"
+                            )
                 except Exception as e:
                     logger.warning(f"A2A tool registration failed (skipped): {e}")
 
             all_tools = non_scoped_tools + wrapped_tools + builtin_tools + a2a_tools
 
-            # When A2A tools are registered, append a short hint so the LLM
-            # knows to prefer the specialist over general knowledge. Non-A2A
-            # turns see the original system prompt untouched.
-            effective_system_prompt = user_system_prompt
-            if a2a_tools and effective_system_prompt:
+            # When A2A tools are registered, append a short hint so the LLM knows
+            # to prefer the specialist over general knowledge. Non-A2A turns see
+            # the prompt untouched.
+            #
+            # The `and effective_system_prompt` guard used to mean this was only
+            # appended when DynamoDB held a per-user or global override. A tenant
+            # with no override — the default — fell back to the hardcoded
+            # SYSTEM_PROMPT and never saw the hint, so its model was told nothing
+            # about the specialists it had been granted. Fall back to SYSTEM_PROMPT
+            # explicitly so both paths get it.
+            effective_system_prompt = user_system_prompt or SYSTEM_PROMPT
+            if a2a_tools:
                 effective_system_prompt = (
                     effective_system_prompt
-                    + "\n\nYou also have access to specialist A2A agents via tools named `a2a_*`. "
-                    + "When the user's question maps to one of those specialists, prefer the corresponding "
-                    + "tool over general knowledge — each routes to a purpose-built agent with domain expertise."
+                    + "\n\n" + A2A_DELEGATION_RULES
                 )
 
             agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt, headers=headers)

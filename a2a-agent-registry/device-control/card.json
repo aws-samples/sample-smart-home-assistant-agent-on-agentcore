@@ -1,0 +1,45 @@
+{
+  "name": "device-control-agent",
+  "description": "A specialist agent that resolves an ambiguous or multi-device request into concrete device commands, checks each device is capable of what was asked, and reports what it actually did. Also reads current device state and sensor history.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/device-control-agent"
+  },
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "skills": [
+    {
+      "id": "orchestrate_devices",
+      "name": "Orchestrate several devices",
+      "description": "Carry out a request that spans several devices or rooms, working out which devices are involved and in what order, then reporting per-device results including any that could not comply.",
+      "tags": ["devices", "control", "multi-device"],
+      "examples": [
+        "Set the living room and bedroom lights to 30% warm white",
+        "Turn off everything in the kitchen",
+        "Make the living room comfortable for reading"
+      ]
+    },
+    {
+      "id": "resolve_capability",
+      "name": "Resolve capability and disambiguate",
+      "description": "Work out whether a device can do what was asked, pick the right device when the request names a room or a category rather than a device, and explain the closest thing that is possible when it is not.",
+      "tags": ["devices", "capability", "disambiguation"],
+      "examples": [
+        "Turn on the thermometer",
+        "Set the fan to level 12",
+        "Make the kitchen light blue"
+      ]
+    },
+    {
+      "id": "inspect_devices",
+      "name": "Inspect device state and history",
+      "description": "Read what devices are doing right now and how a sensor metric has moved over a time window, then summarise it — including which devices have reported nothing.",
+      "tags": ["devices", "state", "sensors", "history"],
+      "examples": [
+        "Which devices are on right now?",
+        "Has the air quality been getting worse today?",
+        "Is anything in the kitchen still running?"
+      ]
+    }
+  ]
+}
