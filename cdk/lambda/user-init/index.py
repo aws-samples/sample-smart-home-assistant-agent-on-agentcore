@@ -42,9 +42,17 @@ def _get_gateway_arn():
     return _get_gateway_arn._cache
 
 
-def _get_tool_action_map():
-    """Build a map of tool_name -> Cedar action name ({TargetName}___{toolName})."""
-    if not hasattr(_get_tool_action_map, "_cache"):
+def _get_tool_action_map(refresh=False):
+    """Build a map of tool_name -> Cedar action name ({TargetName}___{toolName}).
+
+    Cached per container. A tool registered after this container warmed up is
+    missing from the map, and a policy built from the bare tool name names an
+    action the Gateway never emits — ACTIVE, permitting nothing, with no error.
+    Pass refresh=True on the write path. Mirrors admin-api/index.py.
+    """
+    if refresh:
+        _get_tool_action_map._cache = None
+    if getattr(_get_tool_action_map, "_cache", None) is None:
         action_map = {}
         targets = agentcore_control.list_gateway_targets(gatewayIdentifier=GATEWAY_ID)
         for t in targets.get("items", []):
@@ -71,6 +79,20 @@ def _get_tool_action_map():
                 logger.warning(f"Failed to get tools for target {target_name}: {e}")
         _get_tool_action_map._cache = action_map
     return _get_tool_action_map._cache
+
+
+def _cedar_action_name(tool_name):
+    """Resolve a tool to its prefixed Cedar action, refreshing the map once."""
+    action_name = _get_tool_action_map().get(tool_name)
+    if action_name is None:
+        action_name = _get_tool_action_map(refresh=True).get(tool_name)
+    if action_name is None:
+        raise ValueError(
+            f"tool '{tool_name}' is not exposed by any gateway target, so no "
+            f"Cedar action name exists for it; refusing to write a policy that "
+            f"would silently permit nothing"
+        )
+    return action_name
 
 
 def ensure_policy_engine():
@@ -171,8 +193,7 @@ def ensure_gateway_policy_engine(policy_engine_arn):
 
 def build_cedar_statement(tool_name, user_ids):
     """Build a Cedar permit statement for a tool with per-user access control."""
-    action_map = _get_tool_action_map()
-    action_name = action_map.get(tool_name, tool_name)
+    action_name = _cedar_action_name(tool_name)
     gateway_arn = _get_gateway_arn()
 
     if not user_ids:
@@ -191,6 +212,30 @@ def build_cedar_statement(tool_name, user_ids):
         f'  ({conditions})\n'
         f'}};'
     )
+
+
+def _wait_for_policy_settled(engine_id, policy_id, timeout=30):
+    """Block until a policy leaves CREATING/UPDATING. Returns its final status.
+
+    UpdatePolicy/DeletePolicy reject with ConflictException while a previous edit
+    is settling. The handler rebuilds one policy per gateway tool in a loop, so
+    without this the later tools in the loop fail and the user ends up permitted
+    in DynamoDB but denied by Cedar. Mirrors admin-api/index.py.
+    """
+    deadline = time.time() + timeout
+    status = ""
+    while time.time() < deadline:
+        try:
+            status = agentcore_control.get_policy(
+                policyEngineId=engine_id, policyId=policy_id).get("status", "")
+        except Exception as e:
+            logger.warning(f"Could not read policy {policy_id} status: {e}")
+            return status
+        if status not in ("CREATING", "UPDATING"):
+            return status
+        time.sleep(2)
+    logger.warning(f"Policy {policy_id} still {status} after {timeout}s")
+    return status
 
 
 def rebuild_tool_policy(tool_name):
@@ -226,6 +271,7 @@ def rebuild_tool_policy(tool_name):
     if not cedar_stmt:
         if existing_policy_id:
             try:
+                _wait_for_policy_settled(engine_id, existing_policy_id)
                 agentcore_control.delete_policy(
                     policyEngineId=engine_id, policyId=existing_policy_id)
             except Exception as e:
@@ -236,6 +282,7 @@ def rebuild_tool_policy(tool_name):
         return
 
     if existing_policy_id:
+        _wait_for_policy_settled(engine_id, existing_policy_id)
         agentcore_control.update_policy(
             policyEngineId=engine_id,
             policyId=existing_policy_id,

@@ -188,10 +188,12 @@ _static_skills_plugin = AgentSkills(skills="./skills/")
 SYSTEM_PROMPT = """You are a smart home assistant.
 
 CAPABILITIES (only those registered as tools/skills/A2A agents in THIS turn are truly available; items below describe what *may* be registered):
-  1. Device control & querying — turn devices on/off, change modes, query current settings. Devices in scope: LED Matrix, Rice Cooker, Fan, Oven.
-  2. Enterprise knowledge base — product manuals, troubleshooting guides, company documents. Query it with query_knowledge_base when the user asks about information rather than control.
-  3. Image analysis — the user can attach photos or screenshots. Images are captioned upstream by a vision model; the caption is inserted into this conversation as a prior assistant message before your turn starts.
-  4. Specialist A2A agents — registered only when granted to this user, each exposed as an `a2a_*` tool for a specific domain (e.g. home security, energy optimization, appliance maintenance). If no matching `a2a_*` tool is listed in your tools this turn, you do NOT have that domain's expertise.
+  1. Device control — turn devices on/off, set brightness, colour, mode, speed or temperature. Call discover_devices for the fleet and its valid parameters; never recite devices from memory.
+  2. Device state & sensor readings — query_device_state returns what a device is doing RIGHT NOW (power, brightness, mode, sensor values, online/offline). query_sensor_history returns a metric over a time window with min / max / average / latest already computed. Use the first for "is it on" / "what is the temperature now", the second for trends and past values.
+  3. Page navigation — navigate_to_page turns a request to open an app page ("打开群控页面", "open the automation page") into a link the client follows. Pass the user's own words; if nothing matches, the tool returns the available pages and you should offer those. Never write a link yourself.
+  4. Enterprise knowledge base — product manuals, troubleshooting guides, company documents. Query it with query_knowledge_base when the user asks about information rather than control.
+  5. Image analysis — the user can attach photos or screenshots. Images are captioned upstream by a vision model; the caption is inserted into this conversation as a prior assistant message before your turn starts.
+  6. Specialist A2A agents — registered only when granted to this user, each exposed as an `a2a_*` tool for a specific domain (e.g. home security, energy optimization, appliance maintenance). If no matching `a2a_*` tool is listed in your tools this turn, you do NOT have that domain's expertise.
 
 Be helpful and concise. Confirm actions you take. Use what you remember about the user's preferences to personalize responses. You may also suggest creative lighting scenes, cooking presets, and comfort settings within the device scope above.
 
@@ -216,8 +218,10 @@ C. When you DO call a tool / skill / A2A agent:
 D. TRANSPARENCY: Whenever you used a tool, skill, or A2A agent to answer, name it in your reply so the user knows which capability handled the request.
 
 CRITICAL RULE — TOOL CALLING: When the user asks you to perform ANY action on devices (turn on, turn off, set mode, change settings, etc.), you MUST immediately call the appropriate tool in your VERY FIRST response. Do NOT describe what you plan to do, do NOT explain your steps, do NOT narrate your intentions — just call the tool directly. Action requests require tool calls, not text descriptions of tool calls.
-IMPORTANT: Always send the device control command when the user asks, even if you believe the device is already in the requested state. You do not have real-time device state — always execute the command.
+IMPORTANT: Always send the device control command when the user asks, even if query_device_state says the device is already in that state. A control request is an instruction, not a question.
 IMPORTANT: Do NOT list or describe devices from your own knowledge. You MUST use the discover_devices tool to find available devices. If that tool is unavailable or fails, apply rule C.
+
+DEVICE STATE AND SENSOR READINGS: Never state a device's current state, or a temperature / humidity / PM2.5 / CO2 / water level / filter life reading, from memory or from an earlier turn — call query_device_state (now) or query_sensor_history (over time) and report what came back. If the tool says a device has reported no state, tell the user the device simulator appears to be closed; do NOT report that as "off". When a reading has a unit, include it.
 
 KNOWLEDGE BASE: Use query_knowledge_base for questions that may relate to company documents, product manuals, troubleshooting guides, or internal knowledge. Cite the source document when presenting information retrieved from the knowledge base.
 
@@ -347,7 +351,19 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             # trailing suffix so we don't accidentally leave the raw MCP tool
             # in-list alongside our wrapper, and remember the exact MCP name
             # so the wrapper can call the original tool by its real name.
-            scoped_suffixes = ("query_knowledge_base", "control_device", "discover_devices")
+            # Every tool that reads or writes data belonging to ONE user belongs
+            # in this list. `navigate_to_page` deliberately does NOT: its result
+            # is a static superapp:// link that is identical for every user, so
+            # there is no identity to inject and no cross-user read to prevent.
+            # Its absence here is a decision, not an omission — see the
+            # nav-deeplink Lambda docstring.
+            scoped_suffixes = (
+                "query_knowledge_base", "control_device", "discover_devices",
+                # Read half of the device link. Their Lambda partitions on the
+                # caller's sub, so without a wrapper they would run unscoped and
+                # be rejected for want of an identity.
+                "query_device_state", "query_sensor_history",
+            )
             mcp_name_for = {}  # suffix -> actual MCP tool_name, e.g. "SmartHome___control_device"
             for t in mcp_tools:
                 for s in scoped_suffixes:
@@ -358,6 +374,28 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             non_scoped_tools = [t for t in mcp_tools if not _is_scoped(t.tool_name)]
             present_suffixes = set(mcp_name_for.keys())
 
+            def _mcp_text(result) -> str:
+                """Flatten an MCP tool result into the string a tool must return."""
+                if hasattr(result, 'content') and result.content:
+                    texts = [c.text for c in result.content if hasattr(c, 'text')]
+                    return "\n".join(texts) if texts else json.dumps(result.content, default=str)
+                return str(result)
+
+            def _call_scoped(suffix: str, args: dict) -> str:
+                """Call a per-user MCP tool with the runtime-validated identity.
+
+                `user_id` is set HERE rather than being a parameter, which is what
+                keeps it out of the LLM-facing signature — the model cannot name
+                another user's partition key because it never gets to supply one.
+                """
+                if user_sub_from_jwt:
+                    args = {**args, "user_id": user_sub_from_jwt}
+                return _mcp_text(mcp_client.call_tool_sync(
+                    tool_use_id=str(_uuid.uuid4()),
+                    name=mcp_name_for[suffix],
+                    arguments=args,
+                ))
+
             wrapped_tools = []
             if "query_knowledge_base" in present_suffixes:
                 @strands_tool
@@ -365,18 +403,17 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                     """Query the enterprise knowledge base to retrieve relevant documents.
                     Use this when users ask about company documents, product manuals,
                     troubleshooting guides, or internal knowledge."""
+                    # The KB scopes by EMAIL (actor_id), not by the Cognito sub the
+                    # device tools use, so this one cannot go through
+                    # _call_scoped — the two identifiers are not interchangeable.
                     args = {"query": query}
                     if kb_user_id:
                         args["user_id"] = kb_user_id
-                    result = mcp_client.call_tool_sync(
+                    return _mcp_text(mcp_client.call_tool_sync(
                         tool_use_id=str(_uuid.uuid4()),
                         name=mcp_name_for["query_knowledge_base"],
                         arguments=args,
-                    )
-                    if hasattr(result, 'content') and result.content:
-                        texts = [c.text for c in result.content if hasattr(c, 'text')]
-                        return "\n".join(texts) if texts else json.dumps(result.content, default=str)
-                    return str(result)
+                    ))
                 wrapped_tools.append(query_knowledge_base)
                 logger.info(f"KB tool wrapped with user_id={kb_user_id} (LLM cannot override)")
 
@@ -387,37 +424,56 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                     a short confirmation or error message. `device_type` is one of
                     led_matrix, rice_cooker, fan, oven. `command` is a JSON object with
                     an `action` field and action-specific parameters."""
-                    args = {"device_type": device_type, "command": command}
-                    if user_sub_from_jwt:
-                        args["user_id"] = user_sub_from_jwt
-                    result = mcp_client.call_tool_sync(
-                        tool_use_id=str(_uuid.uuid4()),
-                        name=mcp_name_for["control_device"],
-                        arguments=args,
-                    )
-                    if hasattr(result, 'content') and result.content:
-                        texts = [c.text for c in result.content if hasattr(c, 'text')]
-                        return "\n".join(texts) if texts else json.dumps(result.content, default=str)
-                    return str(result)
+                    return _call_scoped("control_device", {
+                        "device_type": device_type, "command": command})
                 wrapped_tools.append(control_device)
 
             if "discover_devices" in present_suffixes:
                 @strands_tool
                 def discover_devices() -> str:
                     """List the user's smart home devices and their supported actions."""
-                    args = {}
-                    if user_sub_from_jwt:
-                        args["user_id"] = user_sub_from_jwt
-                    result = mcp_client.call_tool_sync(
-                        tool_use_id=str(_uuid.uuid4()),
-                        name=mcp_name_for["discover_devices"],
-                        arguments=args,
-                    )
-                    if hasattr(result, 'content') and result.content:
-                        texts = [c.text for c in result.content if hasattr(c, 'text')]
-                        return "\n".join(texts) if texts else json.dumps(result.content, default=str)
-                    return str(result)
+                    return _call_scoped("discover_devices", {})
                 wrapped_tools.append(discover_devices)
+
+            # Read half of the device link. The write half (control_device) has
+            # existed since the beginning; without these the agent had no way to
+            # answer "is that light on" or "what is the temperature" and would
+            # either guess or refuse.
+            if "query_device_state" in present_suffixes:
+                @strands_tool
+                def query_device_state(device_id: str = "", device_type: str = "") -> str:
+                    """Read the CURRENT state of the user's devices — power, brightness,
+                    mode, speed, sensor readings, and whether the device is online.
+                    Pass `device_id` (from discover_devices) for one device, or neither
+                    argument to read every device. Use this instead of guessing: a
+                    device with no reported state comes back saying so, which means the
+                    simulator is closed rather than that the device is off."""
+                    args = {}
+                    if device_id:
+                        args["device_id"] = device_id
+                    if device_type:
+                        args["device_type"] = device_type
+                    return _call_scoped("query_device_state", args)
+                wrapped_tools.append(query_device_state)
+
+            if "query_sensor_history" in present_suffixes:
+                @strands_tool
+                def query_sensor_history(device_id: str = "", metric: str = "",
+                                         hours: int = 24) -> str:
+                    """Read a sensor metric's readings over a time window, with min /
+                    max / average / latest already computed. Use it for trends and past
+                    values ("temperature over the last 24 hours"); use
+                    query_device_state for the current value. `metric` is one of the
+                    device's readable metrics (temperature, humidity, pm25, co2,
+                    water_level, filter_life, bin_level) — omit it for all of them.
+                    `hours` is 1 to 168."""
+                    args = {"hours": hours}
+                    if device_id:
+                        args["device_id"] = device_id
+                    if metric:
+                        args["metric"] = metric
+                    return _call_scoped("query_sensor_history", args)
+                wrapped_tools.append(query_sensor_history)
 
             if user_sub_from_jwt:
                 logger.info(f"Device tools wrapped with user_sub={user_sub_from_jwt[:8]}... (LLM cannot override)")

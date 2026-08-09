@@ -254,6 +254,509 @@ def _ensure_runtime_endpoint(ac_control, runtime_id: str, name: str, version: st
         return existing["agentRuntimeEndpointArn"]
 
 
+def _catalog_metric_hint() -> str:
+    """List the readable metrics per device, straight from the shared catalog.
+
+    Built rather than hardcoded so the tool description can never drift from the
+    fleet the Lambdas actually validate against.
+    """
+    try:
+        path = os.path.join(PROJECT_ROOT, "shared", "device-catalog.json")
+        with open(path, encoding="utf-8") as fh:
+            catalog = json.load(fh)
+    except Exception:
+        return ""
+    parts = []
+    for d in catalog.get("devices", []):
+        readable = [
+            name for name, cap in (d.get("capabilities") or {}).items()
+            if cap.get("type") == "readonly"
+        ]
+        if readable:
+            parts.append(f"{d['deviceId']} ({', '.join(sorted(readable))})")
+    return "; ".join(parts)
+
+
+def _ensure_lambda_gateway_target(ac_control, gateway_id: str, name: str,
+                                  lambda_arn: str, tool_schema: list) -> str:
+    """Create-or-update a Lambda gateway target carrying an INLINE tool schema.
+
+    Inline rather than S3 for the same reason the KB target was moved to inline
+    below: `agentcore add gateway-target` uploads the schema to S3, which the
+    Gateway may serve from cache, so a schema edit can appear to deploy and then
+    not take effect. Inline makes the schema part of the target itself.
+
+    Idempotent, and it overwrites the schema on re-runs so a description or
+    parameter change actually lands.
+    """
+    existing_id = None
+    paginator = ac_control.get_paginator("list_gateway_targets")
+    for page in paginator.paginate(gatewayIdentifier=gateway_id):
+        for t in page.get("items", []):
+            if t.get("name") == name:
+                existing_id = t["targetId"]
+                break
+        if existing_id:
+            break
+
+    target_configuration = {
+        "mcp": {
+            "lambda": {
+                "lambdaArn": lambda_arn,
+                "toolSchema": {"inlinePayload": tool_schema},
+            },
+        },
+    }
+    creds = [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
+
+    if existing_id:
+        ac_control.update_gateway_target(
+            gatewayIdentifier=gateway_id,
+            targetId=existing_id,
+            name=name,
+            targetConfiguration=target_configuration,
+            credentialProviderConfigurations=creds,
+        )
+        print(f"  Updated gateway target {name} (inline schema, "
+              f"{len(tool_schema)} tool(s))")
+        return existing_id
+
+    resp = ac_control.create_gateway_target(
+        gatewayIdentifier=gateway_id,
+        name=name,
+        description=f"Lambda function target: {name}",
+        targetConfiguration=target_configuration,
+        credentialProviderConfigurations=creds,
+    )
+    print(f"  Created gateway target {name} (inline schema, "
+          f"{len(tool_schema)} tool(s))")
+    return resp["targetId"]
+
+
+def _iot_query_tool_schema() -> list:
+    """Tool schema for the read half of the device link (iot-query Lambda).
+
+    `user_id` is deliberately ABSENT from the schema even though the Lambda
+    requires it. The Gateway does not forward JWT claims, so the agent injects
+    the sub it decoded from the runtime-validated idToken — and measurement shows
+    the Gateway passes arguments through to the Lambda whether or not the schema
+    declares them. Leaving it out therefore costs nothing and means no model ever
+    sees a `user_id` field to fill in.
+
+    That matters because the schema is the model's whole view of the tool, and not
+    every client wraps tools the way the text agent does: the voice path hands
+    the gateway's tool list to Nova Sonic directly. A declared `user_id` — even
+    one described as "do not set this" — is an invitation to name another user's
+    partition key. Keeping it out of the schema removes the option rather than
+    discouraging it.
+    """
+    metric_hint = _catalog_metric_hint()
+    return [
+        {
+            "name": "query_device_state",
+            "description": (
+                "Read the CURRENT state of the user's smart home devices — power, "
+                "brightness, mode, speed, sensor readings, and whether the device "
+                "is online. Pass device_id for one device, or nothing to get all "
+                "of them. Use this to answer questions like 'is the living room "
+                "light on', 'what is the temperature now', 'how full is the "
+                "humidifier'. Do not guess device state; read it."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": (
+                            "Exact device id from discover_devices, e.g. "
+                            "living-sensor-1. Omit to read every device."
+                        ),
+                    },
+                    "device_type": {
+                        "type": "string",
+                        "description": (
+                            "Device type as a fallback when the id is unknown, e.g. "
+                            "sensor, light, fan. Ambiguous when several devices "
+                            "share a type — prefer device_id."
+                        ),
+                    },
+                },
+            },
+        },
+        {
+            "name": "query_sensor_history",
+            "description": (
+                "Read a sensor metric's readings over a time window, with min / "
+                "max / average / latest already computed. Use this for trends and "
+                "past values ('temperature over the last 24 hours', 'was the air "
+                "quality bad last night'), not for the current value — use "
+                "query_device_state for that."
+                + (f" Devices reporting metrics: {metric_hint}." if metric_hint else "")
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": (
+                            "Exact device id of the reporting device, e.g. "
+                            "living-sensor-1."
+                        ),
+                    },
+                    "device_type": {
+                        "type": "string",
+                        "description": (
+                            "Device type fallback when the id is unknown. Defaults "
+                            "to sensor."
+                        ),
+                    },
+                    "metric": {
+                        "type": "string",
+                        "description": (
+                            "One metric to read, e.g. temperature, humidity, pm25, "
+                            "co2, water_level, filter_life, bin_level. Omit for "
+                            "every metric the device reports."
+                        ),
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": (
+                            "Size of the window in hours, counted back from now. "
+                            "1 to 168, default 24."
+                        ),
+                    },
+                },
+            },
+        },
+    ]
+
+
+def _nav_deeplink_tool_schema() -> list:
+    """Tool schema for the navigation DeepLink Lambda.
+
+    No `user_id` field: the mapping is identical for every user and the result is
+    a static URL, so there is nothing to scope. This is why `navigate_to_page` is
+    deliberately absent from the agent's scoped_suffixes list.
+    """
+    return [
+        {
+            "name": "navigate_to_page",
+            "description": (
+                "Resolve a request to open an app page into a superapp:// deep "
+                "link the client can follow. Use it when the user asks to OPEN or "
+                "GO TO a page ('open the group control page', '打开自动化任务页面') "
+                "rather than to change a device. If nothing matches, the tool "
+                "returns the list of available pages — relay those instead of "
+                "inventing a link. Never construct a deep link yourself."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "string",
+                        "description": (
+                            "What the user asked to open, in their own words or as "
+                            "a known page name (home, device_list, group_control, "
+                            "light_effects, music_sync, video_sync, automation, "
+                            "one_tap, sensor_history, settings)."
+                        ),
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": (
+                            "Optional query parameters for the deep link, e.g. "
+                            "{\"room\": \"living\"}."
+                        ),
+                    },
+                },
+                "required": ["page"],
+            },
+        },
+    ]
+
+
+def _ensure_gateway_can_invoke(ac_control, gateway_id: str, lambda_arns: list) -> None:
+    """Let the Gateway's execution role invoke the given Lambdas.
+
+    CreateGatewayTarget validates this up front and fails with
+    "Gateway execution role lacks permission to invoke Lambda function ...",
+    so this has to happen before the target is registered.
+
+    The role's main policy (`...RoleDefaultPolicy...`) is owned by the agentcore
+    CLI's CloudFormation stack and only lists the Lambdas that were attached via
+    `agentcore add gateway-target` at project-creation time. Editing it would be
+    overwritten on the next `agentcore deploy`, so this writes a SEPARATE inline
+    policy — the same approach `user-init`'s `PolicyEngineAccess` grant takes.
+    Rewritten on every run so drift gets corrected.
+    """
+    gw = ac_control.get_gateway(gatewayIdentifier=gateway_id)
+    role_arn = gw.get("roleArn", "")
+    if not role_arn:
+        raise RuntimeError(f"gateway {gateway_id} has no roleArn")
+    role_name = role_arn.split("/")[-1]
+
+    resources = []
+    for arn in lambda_arns:
+        resources += [arn, f"{arn}:*"]
+
+    iam = boto3.client("iam", region_name=REGION)
+    iam.put_role_policy(
+        RoleName=role_name,
+        PolicyName="ToolTargetLambdaInvoke",
+        PolicyDocument=json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "lambda:InvokeFunction",
+                "Resource": resources,
+            }],
+        }),
+    )
+    print(f"  Granted lambda:InvokeFunction on {len(lambda_arns)} function(s) "
+          f"to gateway role {role_name}")
+    # IAM is eventually consistent and CreateGatewayTarget reads the policy
+    # synchronously, so a fresh grant is not yet visible to it.
+    time.sleep(10)
+
+
+def ensure_device_read_and_nav_tools(gateway_id: str, query_lambda_arn: str,
+                                     nav_lambda_arn: str,
+                                     skills_table_name: str) -> list:
+    """Register the device-read and navigation Gateway targets, then grant them.
+
+    Two halves, both required — a target nobody is permitted to call is
+    indistinguishable from a broken deploy:
+
+    1. Register `SmartHomeDeviceQuery` (iot-query: query_device_state /
+       query_sensor_history) and `SmartHomeNavigation` (nav-deeplink:
+       navigate_to_page) as Lambda targets carrying inline tool schemas.
+       iot-query shipped with CDK wiring and tests but was never registered, so
+       the agent could not see it and "what is the temperature now" had no data
+       source at all.
+    2. Back-fill the new tools onto every existing `__permissions__` row and
+       rebuild the Cedar policies. `user-init` auto-provisions all gateway tools,
+       but only for users confirmed AFTER the tool existed; everyone who signed
+       up earlier keeps their old list, so a new tool is default-denied for all
+       of them.
+
+    Returns the tool names that were registered. Idempotent: re-running updates
+    the schemas in place and skips users who already hold the tools.
+    """
+    new_tool_names = []
+    if not gateway_id or not (query_lambda_arn or nav_lambda_arn):
+        return new_tool_names
+
+    print("\nRegistering device-read and navigation Gateway targets...")
+    ac_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+
+    # Must precede CreateGatewayTarget — it validates the invoke permission and
+    # rejects the target outright when it is missing.
+    try:
+        _ensure_gateway_can_invoke(
+            ac_control, gateway_id,
+            [a for a in (query_lambda_arn, nav_lambda_arn) if a])
+    except Exception as e:
+        print(f"  Warning: could not grant gateway invoke permission: {e}")
+
+    if query_lambda_arn:
+        try:
+            _ensure_lambda_gateway_target(
+                ac_control, gateway_id, "SmartHomeDeviceQuery",
+                query_lambda_arn, _iot_query_tool_schema())
+            new_tool_names += ["query_device_state", "query_sensor_history"]
+        except Exception as e:
+            print(f"  Warning: Failed to register device-query target: {e}")
+    else:
+        print("  Skipped device-query target — stack has no IoTQueryLambdaArn "
+              "output yet (re-run cdk deploy).")
+
+    if nav_lambda_arn:
+        try:
+            _ensure_lambda_gateway_target(
+                ac_control, gateway_id, "SmartHomeNavigation",
+                nav_lambda_arn, _nav_deeplink_tool_schema())
+            new_tool_names.append("navigate_to_page")
+        except Exception as e:
+            print(f"  Warning: Failed to register navigation target: {e}")
+    else:
+        print("  Skipped navigation target — stack has no NavDeepLinkLambdaArn "
+              "output yet (re-run cdk deploy).")
+
+    if not new_tool_names:
+        return new_tool_names
+
+    print("\nGranting the new tools to existing users and rebuilding Cedar "
+          "policies...")
+    try:
+        lambda_client = boto3.client("lambda", region_name=REGION)
+        skills_table = boto3.resource(
+            "dynamodb", region_name=REGION).Table(skills_table_name)
+
+        scan_kwargs = {
+            "FilterExpression": "skillName = :sk",
+            "ExpressionAttributeValues": {":sk": "__permissions__"},
+        }
+        perm_rows = []
+        while True:
+            resp = skills_table.scan(**scan_kwargs)
+            perm_rows.extend(resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                break
+            scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+        # Write every user's row FIRST, then rebuild each tool's policy exactly
+        # once. Going through the admin Lambda's `PUT .../permissions` route per
+        # user would rebuild all three policies once per user (30 updates for 10
+        # users) — and because a Cedar policy rejects an update while the previous
+        # one is still settling, most of those fail. The policies are per-TOOL and
+        # rebuilt from a full table scan, so one rebuild after the last write
+        # covers everyone.
+        granted_users, grant_errors = 0, []
+        for row in perm_rows:
+            allowed = row.get("allowedTools", [])
+            if isinstance(allowed, set):
+                allowed = list(allowed)
+            missing = [t for t in new_tool_names if t not in allowed]
+            if not missing:
+                continue
+            try:
+                skills_table.update_item(
+                    Key={"userId": row["userId"], "skillName": "__permissions__"},
+                    UpdateExpression="SET allowedTools = :t, updatedAt = :u",
+                    ExpressionAttributeValues={
+                        ":t": list(allowed) + missing,
+                        ":u": datetime.now(timezone.utc).isoformat(
+                            timespec="milliseconds"),
+                    },
+                )
+                granted_users += 1
+            except Exception as e:
+                grant_errors.append(f"{row['userId']}: {e}")
+
+        print(f"  Granted {new_tool_names} to {granted_users} of "
+              f"{len(perm_rows)} existing user row(s)")
+        for err in grant_errors:
+            print(f"  Warning: row update failed for {err}")
+
+        # Rebuild through the admin Lambda rather than reimplementing Cedar
+        # statement construction here — a fourth copy of that builder would
+        # drift, and the Lambda already holds the IAM grants. The route needs a
+        # userId, so pass one whose row we just wrote and re-send its (already
+        # correct) tool list: rebuild_tool_policy scans the whole table, so the
+        # per-tool policy ends up covering every user regardless of which one the
+        # request names.
+        anchor = next((r for r in perm_rows if r.get("allowedTools")), None)
+        if anchor is None:
+            print("  Warning: no user has any tools — no Cedar policy to rebuild")
+        else:
+            anchor_tools = anchor.get("allowedTools", [])
+            if isinstance(anchor_tools, set):
+                anchor_tools = list(anchor_tools)
+            anchor_tools = sorted(set(list(anchor_tools) + new_tool_names))
+            payload = {
+                "resource": "/users/{userId}/permissions",
+                "httpMethod": "PUT",
+                "pathParameters": {"userId": anchor["userId"]},
+                "queryStringParameters": None,
+                "requestContext": {"authorizer": {"claims": {
+                    "cognito:groups": "admin",
+                    "email": "setup-agentcore-script",
+                }}},
+                "body": json.dumps({"allowedTools": anchor_tools}),
+            }
+            r = lambda_client.invoke(
+                FunctionName="smarthome-admin-api",
+                InvocationType="RequestResponse",
+                Payload=json.dumps(payload).encode(),
+            )
+            body = json.loads(r["Payload"].read() or b"{}")
+            if body.get("statusCode") != 200:
+                print(f"  Warning: policy rebuild returned {str(body)[:300]}")
+            else:
+                # The route answers 200 even when the Cedar half failed, listing
+                # the failures in `policyErrors` — so read that too.
+                inner = json.loads(body.get("body") or "{}")
+                if inner.get("policyErrors"):
+                    print(f"  Warning: policy rebuild errors: "
+                          f"{inner['policyErrors']}")
+                else:
+                    print(f"  Rebuilt Cedar policies for {new_tool_names}")
+
+        _verify_tool_policies(ac_control, skills_table, new_tool_names)
+    except Exception as e:
+        print(f"  Warning: new-tool grant/policy step failed: {e}")
+
+    return new_tool_names
+
+
+def _verify_tool_policies(ac_control, skills_table, tool_names: list) -> bool:
+    """Read each tool's Cedar policy back and report whether it can permit.
+
+    The authorisation path answers 200 while leaving a policy ineffective, so a
+    successful call proves nothing. Four things have to hold, and each has been
+    seen to fail on its own:
+      - a policy is recorded for the tool at all
+      - the policy is ACTIVE (not CREATE_FAILED / UPDATE_FAILED)
+      - enforcementMode is ACTIVE rather than LOG_ONLY
+      - the action name carries the `{Target}___{tool}` prefix and the statement
+        names at least one principal — a bare tool name matches nothing the
+        Gateway emits, which denies every caller with no error anywhere
+    """
+    engine_row = skills_table.get_item(
+        Key={"userId": "__system__", "skillName": "__policy_engine__"}
+    ).get("Item") or {}
+    engine_id = engine_row.get("policyEngineId", "")
+    if not engine_id:
+        print("  VERIFY FAIL: no policy engine recorded — Cedar is not enforcing "
+              "anything for the new tools")
+        return False
+
+    all_ok = True
+    for tool_name in tool_names:
+        row = skills_table.get_item(Key={
+            "userId": "__system__",
+            "skillName": f"__tool_policy_{tool_name}__",
+        }).get("Item")
+        if not row or not row.get("policyId"):
+            print(f"  VERIFY FAIL: no policy recorded for {tool_name} — the tool "
+                  f"will be denied for every user")
+            all_ok = False
+            continue
+        # A policy read straight after an update reports UPDATING, which is
+        # transient rather than a failure — wait for it to settle before judging.
+        try:
+            deadline = time.time() + 60
+            while True:
+                pol = ac_control.get_policy(
+                    policyEngineId=engine_id, policyId=row["policyId"])
+                if pol.get("status") not in ("CREATING", "UPDATING"):
+                    break
+                if time.time() >= deadline:
+                    break
+                time.sleep(3)
+        except Exception as e:
+            print(f"  VERIFY FAIL: could not read policy for {tool_name}: {e}")
+            all_ok = False
+            continue
+
+        stmt = pol.get("definition", {}).get("cedar", {}).get("statement", "")
+        status = pol.get("status", "")
+        mode = pol.get("enforcementMode", "")
+        action_prefixed = f'___{tool_name}"' in stmt
+        principals = stmt.count("principal.id")
+        print(f"  VERIFY {tool_name}: policy={row['policyId']} "
+              f"status={status or 'n/a'} mode={mode or 'n/a'} "
+              f"principals={principals} action_prefixed={action_prefixed}")
+        if status != "ACTIVE" or mode != "ACTIVE" or principals == 0 \
+                or not action_prefixed:
+            print(f"  VERIFY FAIL: {tool_name} policy exists but cannot permit "
+                  f"(status={status}, mode={mode}, principals={principals}, "
+                  f"action_prefixed={action_prefixed}). "
+                  f"Reasons: {pol.get('statusReasons')}")
+            all_ok = False
+    return all_ok
+
+
 def _ensure_role(iam, name: str, trust_service: str, inline_policy: dict, description: str) -> str:
     """Create-or-update an IAM role with the given trust policy and inline policy."""
     trust = {
@@ -633,6 +1136,13 @@ def main():
     client_id = outputs["UserPoolClientId"]
     lambda_arn = outputs["IoTControlLambdaArn"]
     discovery_lambda_arn = outputs["IoTDiscoveryLambdaArn"]
+    # Read half of the device link and the navigation lookup. Both are registered
+    # as Gateway targets further down so they land in Cedar and on the Admin
+    # Console's Tool Policy page like the write half does. `.get` rather than
+    # `[...]` so an older stack that predates these outputs still deploys — the
+    # registration block skips and says so.
+    query_lambda_arn = outputs.get("IoTQueryLambdaArn", "")
+    nav_lambda_arn = outputs.get("NavDeepLinkLambdaArn", "")
     kb_query_lambda_arn = outputs.get("KBQueryLambdaArn", "")
     kb_service_role_arn = outputs.get("KBServiceRoleArn", "")
     kb_docs_bucket = outputs.get("KBDocsBucketName", "")
@@ -823,16 +1333,17 @@ def main():
                     "Use this when users ask about company documents, product manuals, "
                     "troubleshooting guides, or internal knowledge."
                 ),
+                # `user_id` is intentionally not declared. The agent injects the
+                # caller's email and the Gateway forwards arguments the schema
+                # does not mention, so declaring it would only put a scoping
+                # field in front of every model — including Nova Sonic, which
+                # receives this schema verbatim on the voice path.
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "The search query to find relevant documents",
-                        },
-                        "user_id": {
-                            "type": "string",
-                            "description": "User email for scoped retrieval. The agent MUST pass the current user's email so they can access their private documents.",
                         },
                     },
                     "required": ["query"],
@@ -1803,7 +2314,7 @@ def main():
 
     # Patch KB Gateway target with inline tool schema.
     # agentcore deploy stores the schema in S3 which the Gateway may cache.
-    # Updating to inline guarantees the agent sees the latest schema (including user_id).
+    # Updating to inline guarantees the agent sees the latest schema.
     if gateway_id and kb_query_lambda_arn:
         print("Patching KB Gateway target with inline tool schema...")
         ac_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
@@ -1832,16 +2343,19 @@ def main():
                                                 "company documents, product manuals, troubleshooting "
                                                 "guides, or internal knowledge."
                                             ),
+                                            # No `user_id` property — see the
+                                            # note on the file-based copy of this
+                                            # schema above. The agent injects it
+                                            # and the Gateway forwards undeclared
+                                            # arguments, so declaring it would
+                                            # only expose a scoping field to the
+                                            # model.
                                             "inputSchema": {
                                                 "type": "object",
                                                 "properties": {
                                                     "query": {
                                                         "type": "string",
                                                         "description": "The search query to find relevant documents",
-                                                    },
-                                                    "user_id": {
-                                                        "type": "string",
-                                                        "description": "User email for scoped retrieval. MUST pass the current user email.",
                                                     },
                                                 },
                                                 "required": ["query"],
@@ -1853,10 +2367,22 @@ def main():
                         },
                         credentialProviderConfigurations=creds,
                     )
-                    print(f"  Updated target {t['name']} with inline schema (user_id included)")
+                    print(f"  Updated target {t['name']} with inline schema "
+                          f"(user_id withheld from the model-facing schema)")
                     break
         except Exception as e:
             print(f"  Warning: Failed to patch KB Gateway target: {e}")
+
+    # Register the read half of the device link and the navigation lookup, then
+    # make sure existing users are actually permitted to call them. Extracted
+    # into a function so it can be re-run on its own (`--only-tool-targets`)
+    # without recreating the whole agentcore project.
+    ensure_device_read_and_nav_tools(
+        gateway_id=gateway_id,
+        query_lambda_arn=query_lambda_arn,
+        nav_lambda_arn=nav_lambda_arn,
+        skills_table_name=outputs.get("SkillsTableName", "smarthome-skills"),
+    )
 
     # --------------------------------------------------------
     # Create AgentCore Registry for Skill ERP + admin Import feature
@@ -2119,9 +2645,43 @@ def main():
         print(f"\n  Admin Login:   {outputs['AdminUsername']} / {outputs.get('AdminPassword', '')}")
 
 
+def only_tool_targets():
+    """Register the device-read + navigation tools and nothing else.
+
+    `main()` recreates the whole agentcore project from scratch (it rmtree's
+    `.agentcore-project/`), which is far more than is needed to add a Gateway
+    target. This entry point touches only the two targets, the users'
+    permissions and the Cedar policies, so the change can be deployed and
+    verified on its own.
+    """
+    outputs = get_stack_outputs()
+    state_file = os.path.join(PROJECT_ROOT, "agentcore-state.json")
+    with open(state_file) as f:
+        state = json.load(f)
+    gateway_id = state.get("gatewayId", "")
+    if not gateway_id:
+        raise RuntimeError(
+            f"no gatewayId in {state_file} — run the full setup first")
+
+    registered = ensure_device_read_and_nav_tools(
+        gateway_id=gateway_id,
+        query_lambda_arn=outputs.get("IoTQueryLambdaArn", ""),
+        nav_lambda_arn=outputs.get("NavDeepLinkLambdaArn", ""),
+        skills_table_name=outputs.get("SkillsTableName", "smarthome-skills"),
+    )
+    if not registered:
+        raise RuntimeError(
+            "no tools were registered — check the warnings above; the stack may "
+            "predate the IoTQueryLambdaArn / NavDeepLinkLambdaArn outputs")
+    print(f"\n  Registered: {registered}")
+
+
 if __name__ == "__main__":
     try:
-        main()
+        if "--only-tool-targets" in sys.argv:
+            only_tool_targets()
+        else:
+            main()
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         sys.exit(1)

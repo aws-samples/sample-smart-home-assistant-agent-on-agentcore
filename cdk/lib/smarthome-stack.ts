@@ -341,6 +341,31 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // Lambda - Navigation DeepLink (AgentCore Gateway target)
+    //
+    // A keyword-to-URL lookup, so it needs no IAM permissions, no table and no
+    // caller identity. It is a Gateway target rather than an in-process agent
+    // tool so that it lands in Cedar and on the Admin Console's Tool Policy
+    // page like every other tool — see the Lambda's docstring for why a tool
+    // outside the control plane is not acceptable here.
+    // ========================
+    const navDeepLinkLambda = new lambda.Function(this, "NavDeepLinkLambda", {
+      functionName: "smarthome-nav-deeplink",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/nav-deeplink"), {
+        exclude: ["tests", "__pycache__", "*.pyc"],
+      }),
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    navDeepLinkLambda.addPermission("AgentCoreGatewayInvoke", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+    });
+
+    // ========================
     // Cognito Admin Group + Default Admin User
     // ========================
     new cognito.CfnUserPoolGroup(this, "AdminGroup", {
@@ -1350,6 +1375,8 @@ export class SmartHomeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, "IoTControlLambdaArn", { value: iotControlLambda.functionArn });
     new cdk.CfnOutput(this, "IoTDiscoveryLambdaArn", { value: iotDiscoveryLambda.functionArn });
+    new cdk.CfnOutput(this, "IoTQueryLambdaArn", { value: iotQueryLambda.functionArn });
+    new cdk.CfnOutput(this, "NavDeepLinkLambdaArn", { value: navDeepLinkLambda.functionArn });
     new cdk.CfnOutput(this, "ChatbotBucketName", { value: chatbotBucket.bucketName });
     new cdk.CfnOutput(this, "ChatbotDistributionId", { value: chatbotDistribution.distributionId });
     new cdk.CfnOutput(this, "DeviceSimBucketName", { value: deviceSimBucket.bucketName });

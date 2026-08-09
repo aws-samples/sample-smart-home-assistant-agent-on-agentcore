@@ -1421,9 +1421,19 @@ def _get_gateway_arn():
     return _get_gateway_arn._cache
 
 
-def _get_tool_action_map():
-    """Build a map of tool_name -> Cedar action name ({TargetName}___{toolName})."""
-    if not hasattr(_get_tool_action_map, '_cache'):
+def _get_tool_action_map(refresh=False):
+    """Build a map of tool_name -> Cedar action name ({TargetName}___{toolName}).
+
+    Cached for the life of the container, which is fine for reads but wrong right
+    after a new Gateway target is registered: a warm container keeps the old map,
+    build_cedar_statement falls back to the BARE tool name, and the resulting
+    policy names an action the Gateway never emits. The policy is then ACTIVE and
+    permits nothing — a silent deny that looks like a working deploy. Pass
+    refresh=True on the write path so a policy is never built from a stale map.
+    """
+    if refresh:
+        _get_tool_action_map._cache = None
+    if getattr(_get_tool_action_map, '_cache', None) is None:
         action_map = {}
         targets = agentcore_control.list_gateway_targets(gatewayIdentifier=GATEWAY_ID)
         for t in targets.get("items", []):
@@ -1467,7 +1477,21 @@ def build_cedar_statement(tool_name, user_ids):
       principal.id for user identity (from JWT)
     """
     action_map = _get_tool_action_map()
-    action_name = action_map.get(tool_name, tool_name)
+    action_name = action_map.get(tool_name)
+    if action_name is None:
+        # Re-read the targets once: a tool registered after this container warmed
+        # up is absent from the cached map, and the old fallback to the bare tool
+        # name produced a policy that permits nothing while reporting success.
+        action_map = _get_tool_action_map(refresh=True)
+        action_name = action_map.get(tool_name)
+    if action_name is None:
+        # Still unknown — the tool is not on any Gateway target. Refuse rather
+        # than writing a policy whose action the Gateway will never emit.
+        raise ValueError(
+            f"tool '{tool_name}' is not exposed by any gateway target, so no "
+            f"Cedar action name exists for it; refusing to write a policy that "
+            f"would silently permit nothing"
+        )
     gateway_arn = _get_gateway_arn()
 
     if not user_ids:
@@ -1486,6 +1510,32 @@ def build_cedar_statement(tool_name, user_ids):
         f'  ({conditions})\n'
         f'}};'
     )
+
+
+def _wait_for_policy_settled(engine_id, policy_id, timeout=30):
+    """Block until a policy leaves CREATING/UPDATING. Returns its final status.
+
+    UpdatePolicy and DeletePolicy both reject with ConflictException ("Policy
+    cannot be updated while it is in UPDATING status") while a previous edit is
+    still settling, and an update takes a few seconds to land. Two permission
+    saves in quick succession — or one save that touches several tools — would
+    otherwise have the second one fail, leaving DynamoDB saying the user has the
+    tool while Cedar still denies it.
+    """
+    deadline = time.time() + timeout
+    status = ""
+    while time.time() < deadline:
+        try:
+            status = agentcore_control.get_policy(
+                policyEngineId=engine_id, policyId=policy_id).get("status", "")
+        except Exception as e:
+            logger.warning(f"Could not read policy {policy_id} status: {e}")
+            return status
+        if status not in ("CREATING", "UPDATING"):
+            return status
+        time.sleep(2)
+    logger.warning(f"Policy {policy_id} still {status} after {timeout}s")
+    return status
 
 
 def rebuild_tool_policy(tool_name):
@@ -1525,6 +1575,7 @@ def rebuild_tool_policy(tool_name):
         # No users have this tool → delete the permit policy (default-deny blocks it)
         if existing_policy_id:
             try:
+                _wait_for_policy_settled(engine_id, existing_policy_id)
                 agentcore_control.delete_policy(
                     policyEngineId=engine_id, policyId=existing_policy_id)
             except Exception as e:
@@ -1535,7 +1586,10 @@ def rebuild_tool_policy(tool_name):
         return
 
     if existing_policy_id:
-        # Update existing policy
+        # A policy still settling from a previous edit rejects the update with
+        # ConflictException, which would leave DynamoDB and Cedar disagreeing
+        # about who may call this tool.
+        _wait_for_policy_settled(engine_id, existing_policy_id)
         agentcore_control.update_policy(
             policyEngineId=engine_id,
             policyId=existing_policy_id,

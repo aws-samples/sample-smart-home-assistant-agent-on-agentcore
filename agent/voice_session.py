@@ -317,6 +317,89 @@ def _extract_devices(mcp_response):
     return None
 
 
+# Gateway tools that reach a per-user backend and therefore need the caller's sub
+# injected. The text path wraps these already (agent.py's scoped_suffixes); the
+# voice path used to hand the gateway's tool list to Nova Sonic verbatim, so a
+# tool whose schema mentioned `user_id` let the model name another user's
+# partition key.
+#
+# Two independent defences, because either alone has a gap:
+#   1. The tool schemas registered by scripts/setup-agentcore.py do not declare
+#      `user_id` at all (the Gateway forwards arguments the schema omits), so no
+#      model is offered the field. This is the primary defence and it covers every
+#      client at once.
+#   2. The wrapper below injects the sub and discards any `user_id` that arrives
+#      anyway. This still matters: a target registered by some other path — or a
+#      schema someone re-adds the field to — must not become a cross-user read
+#      just because it slipped past (1).
+# Keep this list in step with agent.py's scoped_suffixes.
+_VOICE_SCOPED_SUFFIXES = (
+    "control_device", "discover_devices",
+    "query_device_state", "query_sensor_history",
+)
+
+
+def _strip_user_id_from_spec(tool):
+    """Remove `user_id` from a gateway tool's model-facing schema.
+
+    Nova Sonic is given `tool_registry.get_all_tool_specs()` verbatim, so a
+    `user_id` property in the spec is an invitation to fill it in. The Lambda
+    still receives one — `_wrap_scoped_voice_tool` injects it below — but the
+    model never sees that it exists.
+
+    Returns True when a `user_id` field was found and removed.
+    """
+    spec = getattr(tool, "tool_spec", None)
+    if not isinstance(spec, dict):
+        return False
+    # Strands wraps the JSON Schema as {"inputSchema": {"json": {...}}}.
+    schema = spec.get("inputSchema") or {}
+    inner = schema.get("json") if isinstance(schema.get("json"), dict) else schema
+    props = inner.get("properties") if isinstance(inner, dict) else None
+    if not isinstance(props, dict) or "user_id" not in props:
+        return False
+    props.pop("user_id", None)
+    required = inner.get("required")
+    if isinstance(required, list) and "user_id" in required:
+        inner["required"] = [r for r in required if r != "user_id"]
+    return True
+
+
+def _wrap_scoped_voice_tool(mcp_client, tool, user_sub):
+    """Return a Strands tool that calls `tool` with `user_id` forced to the sub.
+
+    Same guarantee as the text path: identity comes from the runtime-validated
+    idToken via a closure, never from the model's arguments, and any `user_id`
+    the model manages to emit is overwritten rather than merged.
+    """
+    import uuid as _uuid
+    from strands import tool as _strands_tool
+
+    mcp_name = getattr(tool, "tool_name", "")
+    spec = getattr(tool, "tool_spec", {}) or {}
+    description = spec.get("description") or f"Call {mcp_name}."
+
+    @_strands_tool(name=mcp_name, description=description)
+    def _scoped(**kwargs):
+        kwargs.pop("user_id", None)  # never trust a model-supplied identity
+        if user_sub:
+            kwargs["user_id"] = user_sub
+        return mcp_client.call_tool_sync(
+            tool_use_id=str(_uuid.uuid4()),
+            name=mcp_name,
+            arguments=kwargs,
+        )
+
+    # Carry the gateway's own input schema over (minus user_id) so Nova Sonic
+    # still knows the real parameters.
+    try:
+        if isinstance(spec.get("inputSchema"), dict):
+            _scoped.tool_spec["inputSchema"] = spec["inputSchema"]
+    except Exception as e:  # noqa: BLE001 — never break a voice session
+        logger.warning(f"Voice WS: could not copy schema for {mcp_name}: {e}")
+    return _scoped
+
+
 def _build_turn_on_all_tool(mcp_client):
     """Build a single Strands @tool that runs the full discover + power-on
     loop server-side. Nova Sonic's voice model only makes one tool call per
@@ -426,6 +509,10 @@ async def handle_voice_session(
     # instructions into the system prompt after rewriting tool names to their
     # MCP-prefixed form.
     actor_id = payload_user_id = "default"
+    # The Cognito `sub`, kept separately from actor_id: skills and prompts are
+    # keyed by email, but device rows are partitioned by sub. Used below to scope
+    # the gateway tools so the model cannot address another user's devices.
+    user_sub_from_jwt = None
     rh_for_id = getattr(context, "request_headers", None)
     if rh_for_id:
         lowered_headers = {str(k).lower(): v for k, v in rh_for_id.items()} if hasattr(rh_for_id, "items") else {}
@@ -438,6 +525,7 @@ async def handle_voice_session(
                     payload_raw = parts[1] + "=" * (-len(parts[1]) % 4)
                     claims = _json.loads(_b64.urlsafe_b64decode(payload_raw))
                     actor_id = claims.get("email") or claims.get("cognito:username") or claims.get("sub") or "default"
+                    user_sub_from_jwt = claims.get("sub") or None
             except Exception as e:
                 logger.warning(f"Could not parse idToken claims for skill loading: {e}")
 
@@ -575,7 +663,40 @@ async def handle_voice_session(
                     base_voice_prompt = prompt_result
                     logger.info(f"Voice WS: using per-user/global voice prompt override for actor={actor_id}")
                 logger.info(f"Voice WS: inlined {len(skill_blocks)} skill(s) for actor={actor_id}")
-                tools_list = list(tools)
+                # Wrap every user-scoped gateway tool so the sub is injected from
+                # the validated idToken, and strip `user_id` from the spec Nova
+                # Sonic is shown if a schema still carries it. See
+                # _VOICE_SCOPED_SUFFIXES for why this runs even though the
+                # registered schemas no longer declare the field.
+                tools_list = []
+                scoped_names, stripped_names = [], []
+                for t in tools:
+                    name = getattr(t, "tool_name", "")
+                    is_scoped = any(
+                        name == s or name.endswith("___" + s)
+                        for s in _VOICE_SCOPED_SUFFIXES
+                    )
+                    if not is_scoped:
+                        tools_list.append(t)
+                        continue
+                    if _strip_user_id_from_spec(t):
+                        stripped_names.append(name)
+                    tools_list.append(
+                        _wrap_scoped_voice_tool(mcp_client, t, user_sub_from_jwt))
+                    scoped_names.append(name)
+                if scoped_names:
+                    logger.info(
+                        f"Voice WS: scoped {len(scoped_names)} tool(s) to "
+                        f"sub={(user_sub_from_jwt or 'NONE')[:8]}...: {scoped_names}")
+                if stripped_names:
+                    logger.warning(
+                        f"Voice WS: these gateway schemas still expose `user_id` "
+                        f"to the model and were stripped locally — fix the "
+                        f"registered schema: {stripped_names}")
+                if not user_sub_from_jwt:
+                    logger.warning(
+                        "Voice WS: no sub from JWT — scoped tools will reach the "
+                        "Lambda without an identity and be rejected")
 
                 # Composite tool: Nova Sonic's voice model doesn't auto-chain
                 # tool calls the way text LLMs do — it typically makes one
