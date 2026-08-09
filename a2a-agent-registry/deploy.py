@@ -62,6 +62,7 @@ from common.agents import (  # noqa: E402
     RESOURCE_SERVER_ID,
     SCOPE_FULL,
     SCOPE_NAME,
+    REGISTRY_CLIENT,
     SECRET_NAME,
     USER_TOKEN_HEADER,
 )
@@ -617,25 +618,29 @@ def ensure_registry_record(
         token_url=state["deployed"]["cognito"]["tokenUrl"],
         scope=SCOPE_FULL,
     )
+    # GA: descriptors.a2aAgentCard.data — one level shallower than preview's
+    # descriptors.a2a.agentCard.inlineContent. The service validates the card
+    # against the full A2A schema, so render_card_for_registry's complete output is
+    # what makes this pass; a hand-trimmed card is rejected as "does not match any
+    # supported version".
     descriptor_payload = {
-        "a2a": {
-            "agentCard": {"inlineContent": json.dumps(card_for_registry)},
-        }
+        "a2aAgentCard": {"data": json.dumps(card_for_registry)},
     }
 
-    ac = boto3.client("bedrock-agentcore-control", region_name=state["region"])
+    # AWS Agent Registry (GA namespace) — Registry calls only.
+    registry_control = boto3.client(REGISTRY_CLIENT, region_name=state["region"])
 
     record_id = existing_record_id
     if record_id:
         try:
-            ac.get_registry_record(registryId=registry_id, recordId=record_id)
+            registry_control.get_registry_record(registryId=registry_id, recordId=record_id)
         except Exception:
             log(f"  [{agent}] prior recordId {record_id} missing — creating fresh")
             record_id = None
 
     if record_id:
         try:
-            ac.update_registry_record(
+            registry_control.update_registry_record(
                 registryId=registry_id,
                 recordId=record_id,
                 descriptors=descriptor_payload,
@@ -644,7 +649,7 @@ def ensure_registry_record(
         except Exception as e:
             log(f"  [{agent}] update failed, will recreate — {e}")
             try:
-                ac.delete_registry_record(registryId=registry_id, recordId=record_id)
+                registry_control.delete_registry_record(registryId=registry_id, recordId=record_id)
             except Exception:
                 pass
             record_id = None
@@ -655,9 +660,11 @@ def ensure_registry_record(
     # one we're about to create).
     if not record_id:
         try:
-            paginator = ac.get_paginator("list_registry_records")
+            paginator = registry_control.get_paginator("list_registry_records")
             for page in paginator.paginate(
-                registryId=registry_id, descriptorType="A2A", maxResults=50
+                registryId=registry_id,
+                filters=[{"name": "recordType", "values": ["AGENT"]}],
+                maxResults=50,
             ):
                 for rec in page.get("registryRecords", []):
                     if rec.get("name") != AGENT_LONG_NAMES[agent]:
@@ -666,7 +673,7 @@ def ensure_registry_record(
                     if not stale_rid:
                         continue
                     try:
-                        ac.delete_registry_record(
+                        registry_control.delete_registry_record(
                             registryId=registry_id, recordId=stale_rid
                         )
                         log(f"  [{agent}] deleted stale placeholder {stale_rid}")
@@ -677,24 +684,29 @@ def ensure_registry_record(
 
     if not record_id:
         try:
-            resp = ac.create_registry_record(
+            # GA: recordType replaces descriptorType; `name` is the dedup key and
+            # `displayName` carries the label preview kept in `name`.
+            resp = registry_control.create_registry_record(
                 registryId=registry_id,
                 name=AGENT_LONG_NAMES[agent],
+                displayName=AGENT_LONG_NAMES[agent],
                 description=card_dict.get("description", ""),
-                descriptorType="A2A",
+                recordType="AGENT",
                 descriptors=descriptor_payload,
                 recordVersion="0.1.0",
                 clientToken=str(uuid.uuid4()),
             )
-        except ac.exceptions.ConflictException:
+        except registry_control.exceptions.ConflictException:
             # Find existing by listing
             log(f"  [{agent}] name conflict; searching existing records")
-            paginator = ac.get_paginator("list_registry_records")
+            paginator = registry_control.get_paginator("list_registry_records")
             for page in paginator.paginate(registryId=registry_id):
                 for rec in page.get("registryRecords", []):
-                    if rec.get("name") == AGENT_LONG_NAMES[agent] and rec.get("descriptorType") == "A2A":
+                    name_matches = AGENT_LONG_NAMES[agent] in (
+                        rec.get("name"), rec.get("displayName"))
+                    if name_matches and rec.get("recordType") == "AGENT":
                         record_id = rec["recordId"]
-                        ac.update_registry_record(
+                        registry_control.update_registry_record(
                             registryId=registry_id,
                             recordId=record_id,
                             descriptors=descriptor_payload,
@@ -706,6 +718,8 @@ def ensure_registry_record(
             if not record_id:
                 raise
         else:
+            # GA returns recordArn, NOT recordId. Reading `recordId` here would
+            # store None and the record would look created but unfindable.
             arn = resp.get("recordArn", "")
             record_id = arn.split("/")[-1] if arn else ""
             log(f"  [{agent}] created record {record_id}")
@@ -714,14 +728,14 @@ def ensure_registry_record(
     deadline = time.time() + 15
     while time.time() < deadline:
         try:
-            st = ac.get_registry_record(registryId=registry_id, recordId=record_id).get("status", "")
+            st = registry_control.get_registry_record(registryId=registry_id, recordId=record_id).get("status", "")
             if st != "CREATING":
                 break
         except Exception:
             pass
         time.sleep(0.5)
     try:
-        ac.submit_registry_record_for_approval(registryId=registry_id, recordId=record_id)
+        registry_control.submit_registry_record_for_approval(registryId=registry_id, recordId=record_id)
         log(f"  [{agent}] submitted for approval (PENDING_APPROVAL)")
     except Exception as e:
         log(f"  [{agent}] submit_for_approval: {e} (likely already submitted/approved)")

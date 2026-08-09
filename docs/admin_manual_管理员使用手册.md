@@ -26,7 +26,7 @@
 | **Runtime** | 承载 Agent 代码 (`smarthome` 文本 + `smarthomevoice` 语音两个 Runtime),支持 `/invocations` 和 `/ws` | Sessions / Remote Shell / Agent Prompt |
 | **Gateway** | MCP Server,聚合设备控制、发现、KB 检索等 Lambda 工具;执行 Cedar 策略 | Tool Access / Integration Registry |
 | **Memory** | 短期会话 + 长期事实/偏好/摘要 (三种策略) | Memories |
-| **Registry** | Skill/A2A 描述符托管 + 审批工作流 | Skills → "Add approved skill from AgentCore Registry" |
+| **Registry** | Skill/A2A 描述符托管 + 审批工作流 | Skills → "Add approved skill from AWS Agent Registry" |
 | **Policy Engine** | Cedar 策略评估 (per-user tool permit + default-deny) | Tool Access |
 | **Identity** (Cognito) | 用户认证、`principal.id` 来源 | Models / Tool Access 的用户列表 |
 | **Evaluator** | 对话质量打分、数据集评测 | Quality Evaluation 入口 |
@@ -298,7 +298,7 @@ AWS 即将推出 **AgentCore Model Train**,提供低代码方式对 **open-weigh
 ```
   终端用户                 管理员                    Agent
 ───────────          ─────────────────           ─────────────
-Skill ERP          AgentCore Registry          Runtime / Gateway
+Skill ERP          AWS Agent Registry          Runtime / Gateway
 (自助发布)          (审批控制台)               (动态加载)
      │                    │                          │
 CreateRegistryRecord      │                          │
@@ -325,9 +325,9 @@ SubmitForApproval         │                          │
 | # | 角色 | 平台 | 动作 |
 |---|------|------|------|
 | 1 | 设备厂商员工 | **Skill ERP** | 登录 → Create Skill → 填 `name=air-purifier-control`,`description=控制空气净化器开关、风速、模式`,`allowed_tools=["control_device"]`,`instructions` 写 SKILL.md 正文 |
-| 2 | Skill ERP 后端 | **AgentCore Registry** | `CreateRegistryRecord(descriptorType="AGENT_SKILLS")` → 轮询等 `CREATING` → `SubmitRegistryRecordForApproval` ⇒ `PENDING_APPROVAL` |
-| 3 | 审批员 (Admin) | **AgentCore Registry 控制台** | 打开记录 → 审阅 SKILL.md → 控制台点 `Approve` / `Reject`(也可用 CLI: `aws bedrock-agentcore-control update-registry-record-status`)。可配合 EventBridge 接入工单/审批机器人 |
-| 4 | Admin | **Admin Console → Skills** | 点 `Add approved skill from AgentCore Registry` → 勾选 `air-purifier-control` → 选择 scope `__global__` → `Import` |
+| 2 | Skill ERP 后端 | **AWS Agent Registry** | `CreateRegistryRecord(descriptorType="AGENT_SKILLS")` → 轮询等 `CREATING` → `SubmitRegistryRecordForApproval` ⇒ `PENDING_APPROVAL` |
+| 3 | 审批员 (Admin) | **AWS Agent Registry 控制台** | 打开记录 → 审阅 SKILL.md → 控制台点 `Approve` / `Reject`(也可用 CLI: `aws agent-registry-control update-registry-record-status`)。可配合 EventBridge 接入工单/审批机器人 |
+| 4 | Admin | **Admin Console → Skills** | 点 `Add approved skill from AWS Agent Registry` → 勾选 `air-purifier-control` → 选择 scope `__global__` → `Import` |
 | 5 | Agent | Runtime | 下一次 `/invocations` 时 `load_skills_from_dynamodb("__global__")` 自动拉到新 skill,无需重启 |
 
 **验证**: 在 Chatbot 里问 "把空气净化器开到自动模式",观察 Agent 是否激活 `air-purifier-control` skill、工具调用是否正确。

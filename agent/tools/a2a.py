@@ -47,6 +47,28 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
+# AWS Agent Registry GA namespace. Duplicated from shared/agent_registry.py rather
+# than imported: only `agent/` is packaged into this runtime's CodeZip, and adding
+# a build-time copy step for two constants and one accessor would be more moving
+# parts than the duplication costs. shared/tests/test_registry_namespace.py
+# asserts the two stay in agreement.
+REGISTRY_CLIENT = "agent-registry-control"
+
+
+def read_agent_card(record: dict) -> str:
+    """The AgentCard JSON string from a Registry record.
+
+    GA flattened the descriptor and renamed the field; the preview path is tried
+    as a fallback so a record written before the migration still resolves.
+    Mirrors shared/agent_registry.read_agent_card.
+    """
+    descriptors = record.get("descriptors") or {}
+    ga = (descriptors.get("a2aAgentCard") or {}).get("data")
+    if ga:
+        return ga
+    preview = ((descriptors.get("a2a") or {}).get("agentCard") or {}).get("inlineContent")
+    return preview or ""
+
 _SLUG_RE = re.compile(r"[^a-z0-9_]+")
 
 
@@ -59,8 +81,20 @@ def _slug(raw: str) -> str:
 # ----------------------------------------------------------------------------
 
 def _registry_client():
+    """AWS Agent Registry control plane (GA namespace).
+
+    Registry moved to its own namespace at GA; the old `bedrock-agentcore`
+    namespace stops serving it on 2026-09-17. This is a Registry-only client — the
+    Gateway MCP calls elsewhere in this runtime stay where they are.
+
+    The runtime's execution role needs `agent-registry:GetRegistryRecord`
+    explicitly: the broad `bedrock-agentcore:*` grant it used to rely on does NOT
+    cover Registry after GA. That failure mode is silent — `build_a2a_tools`
+    warns and continues on a card it cannot fetch, so the A2A tools simply stop
+    appearing rather than erroring.
+    """
     return boto3.client(
-        "bedrock-agentcore-control",
+        REGISTRY_CLIENT,
         region_name=os.environ.get("AWS_REGION", "us-east-1"),
     )
 
@@ -74,10 +108,16 @@ def _fetch_agent_card_cached(registry_id: str, record_id: str, _time_bucket: int
     """
     ac = _registry_client()
     detail = ac.get_registry_record(registryId=registry_id, recordId=record_id)
-    a2a = (detail.get("descriptors") or {}).get("a2a", {}) or {}
-    raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+    # GA flattened the descriptor and renamed the field:
+    #   preview  descriptors.a2a.agentCard.inlineContent
+    #   GA       descriptors.a2aAgentCard.data
+    # `read_agent_card` tries GA first and falls back, so a record written before
+    # the migration still resolves.
+    raw = read_agent_card(detail)
     if not raw:
-        raise ValueError(f"record {record_id}: empty agentCard.inlineContent")
+        raise ValueError(
+            f"record {record_id}: no AgentCard in descriptors "
+            f"(looked for a2aAgentCard.data and the preview path)")
     return json.loads(raw)
 
 

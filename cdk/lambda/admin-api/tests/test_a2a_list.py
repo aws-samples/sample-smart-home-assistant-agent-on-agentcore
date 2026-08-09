@@ -58,9 +58,13 @@ def test_list_passes_correct_filters_to_boto():
     resp = index.list_a2a_agents(_event())
     assert resp["statusCode"] == 200, resp["body"]
 
+    # GA: descriptorType and the flat status parameter are gone, replaced by a
+    # structured filters list. recordType=AGENT is the equivalent of A2A.
     kw = _mock_ac.list_registry_records.call_args.kwargs
-    assert kw["descriptorType"] == "A2A"
-    assert kw["status"] == "APPROVED"
+    assert "descriptorType" not in kw
+    assert "status" not in kw
+    assert {"name": "recordType", "values": ["AGENT"]} in kw["filters"]
+    assert {"name": "status", "values": ["APPROVED"]} in kw["filters"]
 
 
 def test_list_joins_published_by_from_ownership_rows():
@@ -76,29 +80,25 @@ def test_list_joins_published_by_from_ownership_rows():
     _mock_ac.get_registry_record.side_effect = [
         {
             "recordId": "r1",
-            "descriptors": {"a2a": {
-                "agentCard": {"inlineContent": json.dumps({
+            "descriptors": {"a2aAgentCard": {"data": json.dumps({
                     "name": "agent-one", "description": "d1",
                     "url": "https://x/one", "version": "1",
                     "capabilities": {"streaming": True},
                     "authentication": {"schemes": ["none"]},
                     "tags": ["t1"],
                     "skills": [{"id": "s", "name": "S", "description": "", "examples": []}],
-                })}
-            }},
+                })}},
         },
         {
             "recordId": "r2",
-            "descriptors": {"a2a": {
-                "agentCard": {"inlineContent": json.dumps({
+            "descriptors": {"a2aAgentCard": {"data": json.dumps({
                     "name": "agent-two", "description": "d2",
                     "url": "https://x/two", "version": "1",
                     "capabilities": {},
                     "authentication": {"schemes": ["bearer"]},
                     "tags": [],
                     "skills": [{"id": "s", "name": "S", "description": "", "examples": []}],
-                })}
-            }},
+                })}},
         },
     ]
     _mock_table.scan.return_value = {"Items": [

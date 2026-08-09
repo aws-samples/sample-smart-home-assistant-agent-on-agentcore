@@ -14,6 +14,12 @@ import boto3
 REGION = os.environ.get("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2"))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+
+# AWS Agent Registry GA namespace — Registry only. Everything else this script
+# tears down (Gateway, Runtime, Memory, Policy, Optimization) stayed in
+# `bedrock-agentcore`. Mirrors shared/agent_registry.REGISTRY_CLIENT.
+REGISTRY_CLIENT = "agent-registry-control"
+
 STATE_FILE = os.path.join(PROJECT_ROOT, "agentcore-state.json")
 
 
@@ -209,6 +215,11 @@ def main():
 
     if registry_id:
         print(f"  Deleting registry: {registry_id}")
+        # AWS Agent Registry moved namespace at GA — `client` above is the
+        # Gateway/Runtime client and cannot reach the Registry. A teardown that
+        # quietly fails here is the worst case of the two: it reports success and
+        # leaves the registry (and its records) behind.
+        registry_control = boto3.client(REGISTRY_CLIENT, region_name=REGION)
         try:
             # Delete all records first — DeleteRegistry requires an empty registry
             token = None
@@ -216,10 +227,10 @@ def main():
                 kwargs = {"registryId": registry_id, "maxResults": 50}
                 if token:
                     kwargs["nextToken"] = token
-                resp = client.list_registry_records(**kwargs)
+                resp = registry_control.list_registry_records(**kwargs)
                 for r in resp.get("registryRecords", []):
                     try:
-                        client.delete_registry_record(
+                        registry_control.delete_registry_record(
                             registryId=registry_id, recordId=r["recordId"]
                         )
                     except Exception as e:
@@ -227,7 +238,7 @@ def main():
                 token = resp.get("nextToken")
                 if not token:
                     break
-            client.delete_registry(registryId=registry_id)
+            registry_control.delete_registry(registryId=registry_id)
             print("  Registry deleted.")
         except Exception as e:
             print(f"  Skipped (already deleted or not found): {e}")

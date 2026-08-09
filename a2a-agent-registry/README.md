@@ -1,6 +1,6 @@
 # A2A 示例 Agent
 
-三个部署到 AgentCore Runtime 的 A2A (Agent-to-Agent) 示例 agent, 注册到 AgentCore Registry:
+三个部署到 AgentCore Runtime 的 A2A (Agent-to-Agent) 示例 agent, 注册到 AWS Agent Registry:
 
 - `energy-optimization-agent` — Nova Lite, 能源节省与电价分析
 - `home-security-agent` — Nova Lite, 安全风险评估与应急响应
@@ -30,7 +30,7 @@ a2a-agent-registry/
 
 ## 前置条件
 
-- `./deploy.sh` 已成功执行 —— CDK 栈 + smarthome Runtime + AgentCore Registry 必须先存在
+- `./deploy.sh` 已成功执行 —— CDK 栈 + smarthome Runtime + AWS Agent Registry 必须先存在
 - 已安装 `agentcore` CLI (`scripts/01-install-deps.sh` 已装)
 - **不需要** 本地 docker daemon —— agentcore CLI 在 AWS 侧起 CodeBuild
 
@@ -161,7 +161,7 @@ python deploy.py --agent energy-optimization --skip registry
 
 *验证:* `python smoke_test.py` —— 直接用 m2m token 访问 A2A endpoint, 不走 Registry。应输出 `summary: {'energy-optimization': True}`。
 
-### Step 2 —— 注册到 AgentCore Registry
+### Step 2 —— 注册到 AWS Agent Registry
 
 用真实的 invocation URL + OAuth2 安全 scheme 渲染 AgentCard, 删除 `example.com` placeholder, 创建真实记录, 提交审批。
 
@@ -176,7 +176,7 @@ import boto3, json
 s = json.load(open('deployed-state.json'))
 e = next(a for a in s['agents'] if a['agent']=='energy-optimization')
 rid = json.load(open('../agentcore-state.json'))['registryId']
-ac = boto3.client('bedrock-agentcore-control', region_name='us-west-2')
+ac = boto3.client('agent-registry-control', region_name='us-west-2')  # AWS Agent Registry GA namespace
 r = ac.get_registry_record(registryId=rid, recordId=e['recordId'])
 print('status:', r['status'], '| recordId:', e['recordId'])"
 ```

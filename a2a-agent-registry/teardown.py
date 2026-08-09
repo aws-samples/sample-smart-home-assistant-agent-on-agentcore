@@ -39,6 +39,7 @@ from common.agents import (  # noqa: E402
     AGENT_NAMES,
     AGENT_SHORT_SLUG,
     M2M_CLIENT_NAME,
+    REGISTRY_CLIENT,
     RESOURCE_SERVER_ID,
     SECRET_NAME,
 )
@@ -109,7 +110,12 @@ def unregister_runtime_from_dashboard(runtime_arn: str, region: str) -> None:
 
 def teardown_agent(agent: str, entry: dict[str, Any], region: str, registry_id: str) -> None:
     log(f"\n=== {agent} ===")
+    # This function needs BOTH namespaces. AWS Agent Registry moved out of
+    # `bedrock-agentcore` at GA, but workload identities were deliberately left
+    # behind — so the record delete below goes through `registry_control` and the
+    # workload-identity delete stays on `ac`.
     ac = boto3.client("bedrock-agentcore-control", region_name=region)
+    registry_control = boto3.client(REGISTRY_CLIENT, region_name=region)
     cf = boto3.client("cloudformation", region_name=region)
 
     unregister_runtime_from_dashboard(entry.get("runtimeArn", ""), region)
@@ -117,7 +123,8 @@ def teardown_agent(agent: str, entry: dict[str, Any], region: str, registry_id: 
     rec_id = entry.get("recordId")
     if rec_id and registry_id:
         try:
-            ac.delete_registry_record(registryId=registry_id, recordId=rec_id)
+            registry_control.delete_registry_record(
+                registryId=registry_id, recordId=rec_id)
             log(f"  deleted registry record {rec_id}")
         except Exception as e:
             log(f"  registry record delete failed — {e}")

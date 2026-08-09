@@ -62,7 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         print("registryId missing from agentcore-state.json", file=sys.stderr)
         return 1
 
-    ac = boto3.client("bedrock-agentcore-control", region_name=region)
+    # AWS Agent Registry (GA namespace). Registry left `bedrock-agentcore` at GA.
+    sys.path.insert(0, str(HERE))
+    from common.agents import REGISTRY_CLIENT
+    ac = boto3.client(REGISTRY_CLIENT, region_name=region)
     for entry in agents:
         name = entry.get("agent", "")
         if wanted and name not in wanted:
@@ -76,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 registryId=registry_id,
                 recordId=rid,
                 status="APPROVED",
+                # Required by the GA model — omitting it is a ParamValidationError.
                 statusReason="test helper: approve_records.py",
             )
             print(f"  [{name}] {rid}: {resp.get('status')}")

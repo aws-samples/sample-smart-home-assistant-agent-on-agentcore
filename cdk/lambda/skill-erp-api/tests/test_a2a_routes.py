@@ -79,8 +79,9 @@ def test_post_rejects_invalid_form():
 
 def test_post_creates_record_and_submits_for_approval():
     import index
+    # GA ARN service is agent-registry, and GA returns recordArn (not recordId).
     _mock_ac.create_registry_record.return_value = {
-        "recordArn": "arn:aws:bedrock-agentcore:us-west-2:111:registry/r/record/rec-123"
+        "recordArn": "arn:aws:agent-registry:us-west-2:111:registry/r/record/rec-123"
     }
     _mock_ac.get_registry_record.return_value = {"status": "ACTIVE"}
 
@@ -88,10 +89,18 @@ def test_post_creates_record_and_submits_for_approval():
     resp = index.handler(ev, None)
     assert resp["statusCode"] == 201, resp["body"]
 
-    # CreateRegistryRecord called with A2A descriptor type
+    # GA shape: descriptorType is gone in favour of a top-level recordType, and
+    # the descriptor flattened from a2a.agentCard.inlineContent to
+    # a2aAgentCard.data. `name` is the dedup key; `displayName` holds what preview
+    # called `name`.
     kwargs = _mock_ac.create_registry_record.call_args.kwargs
-    assert kwargs["descriptorType"] == "A2A"
-    assert "agentCard" in kwargs["descriptors"]["a2a"]
+    assert "descriptorType" not in kwargs
+    assert kwargs["recordType"] == "AGENT"
+    assert kwargs["name"] == "my-agent"
+    assert kwargs["displayName"] == "my-agent"
+    assert set(kwargs["descriptors"]) == {"a2aAgentCard"}
+    assert "data" in kwargs["descriptors"]["a2aAgentCard"]
+    assert "inlineContent" not in json.dumps(kwargs["descriptors"])
 
     # Ownership row written with a2a: prefix
     put_kwargs = _mock_table.put_item.call_args.kwargs

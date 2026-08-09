@@ -23,7 +23,7 @@
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
 - [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
 - [9.7. Voice Mode (Nova Sonic Bi-directional Streaming)](#97-voice-mode-nova-sonic-bi-directional-streaming)
-- [9.8. Skill ERP & AgentCore Registry](#98-skill-erp--agentcore-registry)
+- [9.8. Skill ERP & AWS Agent Registry](#98-skill-erp--agentcore-registry)
 - [9.9. Integration Registry & A2A Agents](#99-integration-registry--a2a-agents)
 - [9.10. Remote Shell Commands per Session](#910-remote-shell-commands-per-session)
 - [9.11. Browser Use — Live Agent Web Automation](#911-browser-use--live-agent-web-automation)
@@ -56,7 +56,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent (code) | `code-interpreter` + AgentCore Code Interpreter (`aws.codeinterpreter.v1`) driven by the text agent's `execute_python` Strands tool | Live Python execution for data analysis, optimization, simulation, and charting over smart-home telemetry. Chatbot's right-side panel auto-opens a "CodeInterpreter" tab rendering each block's code + streamed stdout/stderr + inline matplotlib charts; charts land in `/mnt/workspace/<sid>/code/` (see §9.14). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
 | Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Control Center with AWS-Console-style left-nav: Discover (Overview, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations). Supports light/dark themes. |
-| Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AgentCore Registry for curator approval |
+| Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AWS Agent Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + **S3 Vectors** + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering. Vector store is the pay-per-vector S3 Vectors service (no fixed monthly floor). |
 | Infrastructure | AWS CDK (TypeScript) | One-click deployment of all resources |
 
@@ -1778,9 +1778,9 @@ admin-console/
 | Section | Page | Purpose |
 |---|---|---|
 | Discover | **Overview** | Product intro + architecture diagram (collapsed by default, so the metrics are on screen when the page opens) and the **agent operations dashboard** — a monitoring-wall view of six live metric groups (see [§9.15](#915-agent-operations-dashboard)). Demo launchers live in the side nav's **Demos** group rather than on this page, so they stay reachable from anywhere |
-| Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AgentCore Registry with publisher info; details modal shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
+| Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AWS Agent Registry with publisher info; details modal shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
 | Build | **Models** | Global default model + per-user model override table for both text agent (`modelId`) and vision agent (`visionModelId`); resolution priority: per-user > global > env var |
-| Build | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AgentCore Registry"** import flow |
+| Build | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AWS Agent Registry"** import flow |
 | Build | **Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
 | Build | **Tool Policy** | Per-user tool permissions. Lists built-in Strands/AgentCore tools (default-allowed) and Gateway-scanned tools (opt-in) side-by-side with Cloudscape `Badge`s tagging the source. Cedar policy enforcement with ENFORCE/LOG_ONLY toggle. |
 | Build | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory. Actor IDs are resolved back to the user's email via the sanitizer mirror. |
@@ -2606,7 +2606,7 @@ user/assistant messages. The write is best-effort — failures are
 logged and swallowed so a hiccup on the Memory API never kills the
 live voice stream.
 
-### 9.8 Skill ERP & AgentCore Registry
+### 9.8 Skill ERP & AWS Agent Registry
 
 **Goal.** Give regular (non-admin) users a self-service surface to publish
 their own skills, decouple authoring from curation, and let admins pull
@@ -2619,7 +2619,7 @@ vetted records into the skills catalog without ever opening raw YAML.
    — any confirmed user can sign in; no admin group required. The UI
    mirrors the admin console Skills form (name, description, instructions,
    allowed tools, license, compatibility, key/value metadata) but omits the
-   file manager, because the AgentCore Registry `agentSkills` descriptor
+   file manager, because the AWS Agent Registry `agentSkills` descriptor
    only carries SKILL.md + a schemaVersion 0.1.0 definition JSON — it has
    no provision for script/reference/asset attachments.
 
@@ -2634,7 +2634,7 @@ vetted records into the skills catalog without ever opening raw YAML.
    | PUT    | `/my-skills/{recordId}`   | Owner check + merge + `UpdateRegistryRecord` + re-submit for approval. |
    | DELETE | `/my-skills/{recordId}`   | Owner check + `DeleteRegistryRecord` + remove ownership row. |
 
-3. **Admin Console → Skills → "Add approved skill from AgentCore Registry"**.
+3. **Admin Console → Skills → "Add approved skill from AWS Agent Registry"**.
    Opens a modal that calls `GET /registry/records?status=APPROVED` on the
    admin API (backed by `ListRegistryRecords` filtered by
    `descriptorType=agentSkills`), lets the admin multi-select records and
@@ -2701,7 +2701,7 @@ The Admin Console's **Integration Registry** tab (renamed from
 | Sub-tab | Status |
 |---|---|
 | Overview | Active — a 4-row status table (Lambda Targets / MCP Servers / API Gateway / A2A Agents). Lambda Targets and A2A Agents are marked "active"; MCP Servers and API Gateway show "planned". |
-| A2A Agents | Active — lists approved A2A records from AgentCore Registry with publisher info and a details drawer. See below. |
+| A2A Agents | Active — lists approved A2A records from AWS Agent Registry with publisher info and a details drawer. See below. |
 | MCP Servers | Disabled placeholder ("Coming soon"). |
 | API Gateway | Disabled placeholder ("Coming soon"). |
 
@@ -2712,7 +2712,7 @@ the `A2A` records for display only (no import-to-DynamoDB in this release).
 
 **A2A data model.** Each A2A record stores a canonical A2A **AgentCard**
 as a JSON blob under `descriptors.a2a.agentCard.inlineContent`. The card's
-`protocolVersion` field (required by the AgentCore Registry validator, tested
+`protocolVersion` field (required by the AWS Agent Registry validator, tested
 at `"0.3.0"`) and a `provider` object with both `organization` and `url`
 fields are mandatory. Form fields (name / description / endpoint / version /
 auth scheme / capabilities / tags / sub-skills + examples) are rendered into
@@ -2802,7 +2802,7 @@ per-agent CDK project, deploys via CodeBuild (no local Docker daemon),
 then patches each Runtime with env vars + CUSTOM_JWT authorizer +
 `serverProtocol: A2A` (the CLI drops these during `agentcore deploy`,
 same limitation observed for the main smarthome Runtime). Finally it
-seeds/refreshes the matching AgentCore Registry record with the real
+seeds/refreshes the matching AWS Agent Registry record with the real
 invocation URL. Supports `--agent <name>` for partial deploys and
 `--only` / `--skip` step filtering.
 

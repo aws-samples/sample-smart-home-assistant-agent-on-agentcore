@@ -16,6 +16,9 @@ from agent_prompt_defaults import DEFAULTS as PROMPT_DEFAULTS
 
 import optimization  # AgentCore Optimization handlers; see optimization.py
 import dashboard  # Overview ops-dashboard aggregation; see dashboard.py
+# Copied in beside this file at build time by scripts/01-install-deps.sh — CDK
+# packages each Lambda with Code.fromAsset(<dir>), so shared/ is not deployed.
+import agent_registry as registry_ns
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -44,7 +47,13 @@ table = dynamodb.Table(TABLE_NAME)
 runtime_sessions_table = dynamodb.Table(RUNTIME_SESSIONS_TABLE_NAME)
 s3_client = boto3.client("s3", region_name=REGION)
 agentcore_client = boto3.client("bedrock-agentcore", region_name=REGION)
+# Gateway, Policy Engine, Runtime, Memory and Optimization. These did NOT move
+# namespace at Agent Registry GA and must stay here — repointing this client
+# wholesale would break all 15 of those calls.
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+# AWS Agent Registry only. Six call sites in this file use it; the rest keep the
+# client above. The old namespace stops serving Registry on 2026-09-17.
+registry_control = boto3.client(registry_ns.REGISTRY_CLIENT, region_name=REGION)
 cognito_client = boto3.client("cognito-idp", region_name=REGION)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=REGION)
 logs_client = boto3.client("logs", region_name=REGION)
@@ -1019,25 +1028,29 @@ def _fetch_approved_a2a_cards() -> list[dict]:
     out = []
     token = None
     while True:
+        # GA replaced the ad-hoc descriptorType / status parameters with a
+        # structured `filters` list, and descriptorType itself is gone —
+        # recordType=AGENT is the equivalent of the old A2A.
         kwargs = {
             "registryId": REGISTRY_ID,
             "maxResults": 50,
-            "descriptorType": "A2A",
-            "status": "APPROVED",
+            "filters": [
+                {"name": "recordType", "values": [registry_ns.RECORD_TYPE_AGENT]},
+                {"name": "status", "values": [registry_ns.STATUS_APPROVED]},
+            ],
         }
         if token:
             kwargs["nextToken"] = token
-        resp = agentcore_control.list_registry_records(**kwargs)
+        resp = registry_control.list_registry_records(**kwargs)
         for r in resp.get("registryRecords", []):
             rid = r.get("recordId", "")
             if not rid:
                 continue
             try:
-                detail = agentcore_control.get_registry_record(
+                detail = registry_control.get_registry_record(
                     registryId=REGISTRY_ID, recordId=rid
                 )
-                a2a = (detail.get("descriptors") or {}).get("a2a", {}) or {}
-                raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+                raw = registry_ns.read_agent_card(detail)
                 card = json.loads(raw) if raw else {}
             except Exception as e:
                 logger.warning("GetRegistryRecord failed for %s: %s", rid, e)
@@ -1963,17 +1976,24 @@ def list_registry_records(event):
     token = None
     try:
         while True:
+            # GA: structured filters, and descriptorType=AGENT_SKILLS becomes
+            # recordType=SKILL.
             kwargs = {"registryId": REGISTRY_ID, "maxResults": 50}
+            filters = [{"name": "recordType",
+                        "values": [registry_ns.RECORD_TYPE_SKILL]}]
             if status_filter and status_filter != "ALL":
-                kwargs["status"] = status_filter
-            kwargs["descriptorType"] = "AGENT_SKILLS"
+                filters.append({"name": "status", "values": [status_filter]})
+            kwargs["filters"] = filters
             if token:
                 kwargs["nextToken"] = token
-            resp = agentcore_control.list_registry_records(**kwargs)
+            resp = registry_control.list_registry_records(**kwargs)
             for r in resp.get("registryRecords", []):
                 records.append({
                     "recordId": r.get("recordId", ""),
-                    "name": r.get("name", ""),
+                    # GA moved the human-readable label to displayName and made
+                    # `name` the dedup key. Prefer displayName, fall back to name
+                    # so a preview-era record still shows something.
+                    "name": r.get("displayName") or r.get("name", ""),
                     "description": r.get("description", ""),
                     "status": r.get("status", ""),
                     "recordVersion": r.get("recordVersion", ""),
@@ -2007,21 +2027,22 @@ def import_registry_records(event):
     errors = []
     for rid in record_ids:
         try:
-            r = agentcore_control.get_registry_record(
+            r = registry_control.get_registry_record(
                 registryId=REGISTRY_ID, recordId=rid
             )
             if r.get("status", "") != "APPROVED":
                 errors.append(f"{rid}: skipped — not APPROVED")
                 continue
-            skill_name = r.get("name", "")
+            # displayName carries what preview called `name`; `name` is now the
+            # dedup key, which may have a collision suffix on it.
+            skill_name = r.get("displayName") or r.get("name", "")
             if not skill_name or not SKILL_NAME_RE.match(skill_name):
                 errors.append(f"{rid}: invalid name '{skill_name}'")
                 continue
 
-            descriptors = r.get("descriptors", {}) or {}
-            agent_skills = descriptors.get("agentSkills", {}) or {}
-            skill_md = (agent_skills.get("skillMd") or {}).get("inlineContent", "")
-            skill_def_raw = (agent_skills.get("skillDefinition") or {}).get("inlineContent", "")
+            # GA: agentSkillsDefinition.data + .additionalData.skillMd.data, with a
+            # preview fallback so an old record still imports.
+            skill_def_raw, skill_md = registry_ns.read_skill_definition(r)
 
             description_fm, instructions, allowed_tools, metadata = _parse_skill_md(skill_md)
             description = r.get("description") or description_fm
@@ -2111,12 +2132,15 @@ def list_a2a_agents(_event):
             kwargs = {
                 "registryId": REGISTRY_ID,
                 "maxResults": 50,
-                "descriptorType": "A2A",
-                "status": "APPROVED",
+                "filters": [
+                    {"name": "recordType",
+                     "values": [registry_ns.RECORD_TYPE_AGENT]},
+                    {"name": "status", "values": [registry_ns.STATUS_APPROVED]},
+                ],
             }
             if token:
                 kwargs["nextToken"] = token
-            resp = agentcore_control.list_registry_records(**kwargs)
+            resp = registry_control.list_registry_records(**kwargs)
             for r in resp.get("registryRecords", []):
                 records.append(r)
             token = resp.get("nextToken")
@@ -2135,12 +2159,10 @@ def list_a2a_agents(_event):
     for r in records:
         rid = r.get("recordId", "")
         try:
-            detail = agentcore_control.get_registry_record(
+            detail = registry_control.get_registry_record(
                 registryId=REGISTRY_ID, recordId=rid
             )
-            descriptors = detail.get("descriptors", {}) or {}
-            a2a = descriptors.get("a2a", {}) or {}
-            card_raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+            card_raw = registry_ns.read_agent_card(detail)
             try:
                 card = json.loads(card_raw) if card_raw else {}
             except Exception:

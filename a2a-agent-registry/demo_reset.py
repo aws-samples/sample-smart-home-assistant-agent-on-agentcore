@@ -42,6 +42,7 @@ from common.agents import (  # noqa: E402
     AGENT_LONG_NAMES,
     AGENT_NAMES,
     AGENT_SHORT_SLUG,
+    REGISTRY_CLIENT,
 )
 
 SKILLS_TABLE = "smarthome-skills"
@@ -114,20 +115,28 @@ def delete_registry_records(agent: str, region: str, registry_id: str, known_rec
     if not registry_id:
         log("  no registryId; skipping Registry cleanup")
         return
-    ac = boto3.client("bedrock-agentcore-control", region_name=region)
+    # AWS Agent Registry (GA namespace). The workload-identity delete further down
+    # keeps the old client — workload identities stayed in `bedrock-agentcore`.
+    registry_control = boto3.client(REGISTRY_CLIENT, region_name=region)
     long_name = AGENT_LONG_NAMES[agent]
     deleted = 0
     try:
-        paginator = ac.get_paginator("list_registry_records")
-        for page in paginator.paginate(registryId=registry_id, descriptorType="A2A", maxResults=50):
+        paginator = registry_control.get_paginator("list_registry_records")
+        # GA: structured filters; descriptorType="A2A" is now recordType="AGENT".
+        for page in paginator.paginate(
+                registryId=registry_id,
+                filters=[{"name": "recordType", "values": ["AGENT"]}],
+                maxResults=50):
             for rec in page.get("registryRecords", []):
-                if rec.get("name") != long_name:
+                # GA split the label into `displayName` and made `name` the dedup
+                # key, so match either.
+                if long_name not in (rec.get("name"), rec.get("displayName")):
                     continue
                 rid = rec.get("recordId", "")
                 if not rid:
                     continue
                 try:
-                    ac.delete_registry_record(registryId=registry_id, recordId=rid)
+                    registry_control.delete_registry_record(registryId=registry_id, recordId=rid)
                     deleted += 1
                     log(f"  deleted Registry record {rid}")
                 except Exception as e:
@@ -136,7 +145,7 @@ def delete_registry_records(agent: str, region: str, registry_id: str, known_rec
         log(f"  list Registry records failed: {e}")
     if known_record_id and deleted == 0:
         try:
-            ac.delete_registry_record(registryId=registry_id, recordId=known_record_id)
+            registry_control.delete_registry_record(registryId=registry_id, recordId=known_record_id)
             log(f"  deleted known Registry record {known_record_id}")
         except Exception as e:
             log(f"  delete known {known_record_id}: {e}")
@@ -218,11 +227,15 @@ def main(argv: list[str] | None = None) -> int:
         record_ids_to_clean.add(known_rid)
     if registry_id:
         try:
-            ac = boto3.client("bedrock-agentcore-control", region_name=region)
-            paginator = ac.get_paginator("list_registry_records")
-            for page in paginator.paginate(registryId=registry_id, descriptorType="A2A", maxResults=50):
+            registry_control = boto3.client(REGISTRY_CLIENT, region_name=region)
+            paginator = registry_control.get_paginator("list_registry_records")
+            for page in paginator.paginate(
+                    registryId=registry_id,
+                    filters=[{"name": "recordType", "values": ["AGENT"]}],
+                    maxResults=50):
                 for rec in page.get("registryRecords", []):
-                    if rec.get("name") == long_name and rec.get("recordId"):
+                    if (long_name in (rec.get("name"), rec.get("displayName"))
+                            and rec.get("recordId")):
                         record_ids_to_clean.add(rec["recordId"])
         except Exception as e:
             log(f"  list Registry records failed (non-fatal): {e}")

@@ -1103,15 +1103,19 @@ export class SmartHomeStack extends cdk.Stack {
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
     skillsTable.grantReadWriteData(skillErpLambda);
+    // AWS Agent Registry actions carry the `agent-registry:` prefix since GA.
+    // The old `bedrock-agentcore:` prefix no longer authorises Registry, and it
+    // fails as an authorisation error rather than an unknown-action error, so a
+    // stale prefix looks like a permissions misconfiguration.
     skillErpLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
-        "bedrock-agentcore:CreateRegistryRecord",
-        "bedrock-agentcore:GetRegistryRecord",
-        "bedrock-agentcore:ListRegistryRecords",
-        "bedrock-agentcore:UpdateRegistryRecord",
-        "bedrock-agentcore:DeleteRegistryRecord",
-        "bedrock-agentcore:SubmitRegistryRecordForApproval",
-        "bedrock-agentcore:GetRegistry",
+        "agent-registry:CreateRegistryRecord",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:DeleteRegistryRecord",
+        "agent-registry:SubmitRegistryRecordForApproval",
+        "agent-registry:GetRegistry",
       ],
       resources: ["*"],
     }));
@@ -1150,16 +1154,20 @@ export class SmartHomeStack extends cdk.Stack {
     myA2aRecordResource.addMethod("PUT", skillErpIntegration, skillErpAuthOpts);
     myA2aRecordResource.addMethod("DELETE", skillErpIntegration, skillErpAuthOpts);
 
-    // Grant admin Lambda Registry access (used by Skills tab "Import from Registry")
+    // Grant admin Lambda AWS Agent Registry access (Skills tab "Import from
+    // Registry", and the A2A records listing). `agent-registry:` prefix since GA —
+    // see the note on the Skill ERP statement above. The admin Lambda's Gateway and
+    // Policy Engine grants elsewhere keep `bedrock-agentcore:`; those services did
+    // not move.
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
-        "bedrock-agentcore:CreateRegistry",
-        "bedrock-agentcore:GetRegistry",
-        "bedrock-agentcore:ListRegistries",
-        "bedrock-agentcore:UpdateRegistry",
-        "bedrock-agentcore:GetRegistryRecord",
-        "bedrock-agentcore:ListRegistryRecords",
-        "bedrock-agentcore:UpdateRegistryRecordStatus",
+        "agent-registry:CreateRegistry",
+        "agent-registry:GetRegistry",
+        "agent-registry:ListRegistries",
+        "agent-registry:UpdateRegistry",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
+        "agent-registry:UpdateRegistryRecordStatus",
       ],
       resources: ["*"],
     }));

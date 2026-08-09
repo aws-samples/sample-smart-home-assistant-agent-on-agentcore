@@ -60,6 +60,14 @@ ALLOWED_SKILLS_HEADER = "X-A2A-Allowed-Skills"
 
 MAX_SLUG_LEN = 18
 
+# AWS Agent Registry GA namespace. Registry left the `bedrock-agentcore` namespace
+# at GA (2026-08-06) and the old one stops serving it on 2026-09-17. Runtime,
+# Gateway, Identity and workload identities did NOT move — a teardown that deletes
+# a workload identity still needs the old client for that call while using this one
+# for the record. Mirrors shared/agent_registry.REGISTRY_CLIENT; the deploy scripts
+# run from this directory and do not import shared/.
+REGISTRY_CLIENT = "agent-registry-control"
+
 
 def validate_roster() -> None:
     """Fail at import if a roster entry would break at deploy time.

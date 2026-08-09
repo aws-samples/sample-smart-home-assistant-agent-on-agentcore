@@ -1,4 +1,4 @@
-"""Skill ERP API Lambda — user-scoped CRUD for skill records in AgentCore Registry.
+"""Skill ERP API Lambda — user-scoped CRUD for records in AWS Agent Registry.
 
 Each authenticated Cognito user can:
   - List their own skill records
@@ -7,10 +7,12 @@ Each authenticated Cognito user can:
     a new approval if the content changed)
   - Delete one of their records
 
-Records are stored in AgentCore Registry as `agentSkills` descriptors. Ownership
-is tracked in DynamoDB (`userId=__erp_record_{recordId}__`, `skillName=<sub>`) so
-a user cannot see or modify someone else's records. The registry's own ACL is
-global per-registry, so we layer per-user ownership checks on top.
+Records live in AWS Agent Registry: skills as SKILL records carrying an
+`agentSkillsDefinition` descriptor, A2A agents as AGENT records carrying an
+`a2aAgentCard`. Ownership is tracked in DynamoDB
+(`userId=__erp_record_{recordId}__`, `skillName=<sub>`) so a user cannot see or
+modify someone else's records. The registry's own ACL is global per-registry, so
+we layer per-user ownership checks on top.
 """
 
 import json
@@ -31,6 +33,11 @@ from a2a_helpers import (
     validate_form as validate_a2a_form,
 )
 
+# Copied in beside this file at build time by scripts/01-install-deps.sh, the same
+# way device_catalog.py reaches the IoT Lambdas — CDK packages each Lambda with
+# Code.fromAsset(<dir>), so a module outside the directory is not deployed.
+import agent_registry as registry_ns
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -40,7 +47,18 @@ REGISTRY_ID = os.environ.get("REGISTRY_ID", "")
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
-agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+
+# AWS Agent Registry GA namespace. Every AgentCore call in this file is a Registry
+# call, so the whole module moves — unlike admin-api, which mixes Registry with
+# Gateway and Policy calls that stay on `bedrock-agentcore-control`.
+#
+# The old namespace stops serving Registry on 2026-09-17, and a brand-new account
+# never had Registry access through it at all, so a fresh deploy of this reference
+# solution would already fail at create_registry on the old client.
+#
+# The variable keeps its name so the ~20 call sites below read unchanged; only the
+# service it points at differs.
+agentcore_control = boto3.client(registry_ns.REGISTRY_CLIENT, region_name=REGION)
 
 # Strands SDK skill name pattern: lowercase alphanumeric + hyphens, 1-64 chars
 SKILL_NAME_RE = re.compile(r"^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$")
@@ -136,7 +154,12 @@ def _load_owner_sub(record_id):
 
 
 def _extract_record_id_from_arn(arn):
-    """recordArn format: arn:aws:bedrock-agentcore:<region>:<account>:registry/<regId>/record/<recordId>"""
+    """recordArn format, GA namespace:
+    arn:aws:agent-registry:<region>:<account>:registry/<regId>/record/<recordId>
+
+    Parsing the last segment works for both namespaces, so this needed no change
+    beyond the comment — but the ARN service really did change at GA.
+    """
     if not arn:
         return ""
     parts = arn.split("/")
@@ -183,10 +206,10 @@ def _fetch_record_detail(record_id):
     r = agentcore_control.get_registry_record(
         registryId=REGISTRY_ID, recordId=record_id
     )
-    descriptors = r.get("descriptors", {}) or {}
-    agent_skills = descriptors.get("agentSkills", {}) or {}
-    skill_md = (agent_skills.get("skillMd") or {}).get("inlineContent", "")
-    skill_def_raw = (agent_skills.get("skillDefinition") or {}).get("inlineContent", "")
+    # GA: descriptors.agentSkillsDefinition.data plus
+    # .additionalData.skillMd.data. The helper falls back to the preview paths so a
+    # record written before the migration still renders in the UI.
+    skill_def_raw, skill_md = registry_ns.read_skill_definition(r)
 
     description, instructions, allowed_tools, metadata = _parse_skill_md(skill_md)
     license_name = ""
@@ -227,11 +250,20 @@ def _iso(ts):
 # ---------------------------------------------------------------------------
 
 def _create_record_with_collision_fallback(
-    name, descriptor_type, descriptors, description, record_version="0.1.0", max_attempts=3
+    name, record_type, descriptors, description, record_version="0.1.0", max_attempts=3
 ):
     """Call CreateRegistryRecord; on ConflictException retry with a 6-hex suffix.
 
     Returns (recordArn, final_name). Raises ValueError if all attempts collide.
+
+    `record_type` replaces the preview `descriptor_type`: GA dropped
+    `descriptorType` for a top-level `recordType` (AGENT / SKILL / MCP / CUSTOM),
+    and the descriptor key now has to agree with it.
+
+    `name` is the GA dedup key — unique within the registry, and unique in
+    combination with `recordVersion` — which is why the collision retry matters
+    more than it did in preview, where `name` was just a label. `displayName`
+    carries the human-readable value that `name` used to hold.
     """
     attempt_name = name
     for attempt in range(max_attempts):
@@ -239,8 +271,9 @@ def _create_record_with_collision_fallback(
             resp = agentcore_control.create_registry_record(
                 registryId=REGISTRY_ID,
                 name=attempt_name,
+                displayName=name,
                 description=description,
-                descriptorType=descriptor_type,
+                recordType=record_type,
                 descriptors=descriptors,
                 recordVersion=record_version,
                 clientToken=str(uuid.uuid4()),
@@ -392,19 +425,19 @@ def create_my_record(event):
 
     # Record names must be unique within a registry. Suffix with a short random
     # hash on collision so two users can pick the same skill name.
-    descriptors = {
-        "agentSkills": {
-            "skillMd": {"inlineContent": skill_md},
-            "skillDefinition": {
-                "schemaVersion": "0.1.0",
-                "inlineContent": skill_def,
-            },
-        }
-    }
+    #
+    # The GA SKILL descriptor INVERTED the preview shape: `skillMd` and
+    # `skillDefinition` used to be siblings under `agentSkills`; now the definition
+    # is the parent (`agentSkillsDefinition`) and the markdown hangs off its
+    # `additionalData`. The helper also prepends the `---` frontmatter block GA
+    # requires of `skillMd` — plain markdown is rejected, and that constraint is in
+    # neither the docs nor the API model.
+    descriptors = registry_ns.skill_record_descriptors(
+        skill_def, skill_md=skill_md, name=skill_name, description=description)
     try:
         record_arn, attempt_name = _create_record_with_collision_fallback(
             name=skill_name,
-            descriptor_type="AGENT_SKILLS",
+            record_type=registry_ns.RECORD_TYPE_SKILL,
             descriptors=descriptors,
             description=description,
         )
@@ -477,21 +510,16 @@ def update_my_record(event):
     skill_md = _build_skill_md(name, description, instructions, allowed_tools, merged_metadata)
     skill_def = _build_skill_definition(license_name, compatibility)
 
+    # No `optionalValue` wrapper. The two update call sites in this repo disagreed
+    # about it — this one wrapped, a2a-agent-registry/deploy.py did not — so the
+    # shape was settled by reading the GA service model: `description` is a plain
+    # string and `descriptors` a plain structure, with no wrapper anywhere.
     agentcore_control.update_registry_record(
         registryId=REGISTRY_ID,
         recordId=record_id,
-        description={"optionalValue": description},
-        descriptors={
-            "optionalValue": {
-                "agentSkills": {
-                    "skillMd": {"inlineContent": skill_md},
-                    "skillDefinition": {
-                        "schemaVersion": "0.1.0",
-                        "inlineContent": skill_def,
-                    },
-                }
-            }
-        },
+        description=description,
+        descriptors=registry_ns.skill_record_descriptors(
+            skill_def, skill_md=skill_md, name=name, description=description),
     )
 
     # Re-submit for approval (any edit resets the curator flow)
@@ -538,9 +566,10 @@ def delete_my_record(event):
 
 def _a2a_fetch_detail(record_id):
     r = agentcore_control.get_registry_record(registryId=REGISTRY_ID, recordId=record_id)
-    descriptors = r.get("descriptors", {}) or {}
-    a2a = descriptors.get("a2a", {}) or {}
-    card_def_raw = (a2a.get("agentCard") or {}).get("inlineContent", "")
+    # GA: descriptors.a2aAgentCard.data — one level shallower than preview's
+    # descriptors.a2a.agentCard.inlineContent. The helper falls back to the preview
+    # path so records written before the migration still render.
+    card_def_raw = registry_ns.read_agent_card(r)
     form = parse_card_definition(card_def_raw)
     return {
         "recordId": r.get("recordId", ""),
@@ -606,19 +635,17 @@ def create_my_a2a(event):
     if not ok:
         return response(400, {"error": err})
 
-    descriptors = {
-        "a2a": {
-            # Wrapper has no schemaVersion — the card's protocolVersion
-            # (from build_card_definition) is what AgentCore validates.
-            "agentCard": {
-                "inlineContent": build_card_definition(form),
-            },
-        }
-    }
+    # GA flattened this: preview was descriptors.a2a.agentCard.inlineContent,
+    # GA is descriptors.a2aAgentCard.data. No dataSchemaVersion — the card's own
+    # protocolVersion (from build_card_definition) is what the service validates
+    # against, and it validates the WHOLE A2A schema: a card missing capabilities
+    # or securitySchemes is rejected as "does not match any supported version",
+    # which sounds like a version problem and is a completeness one.
+    descriptors = registry_ns.agent_record_descriptors(build_card_definition(form))
     try:
         record_arn, attempt_name = _create_record_with_collision_fallback(
             name=form["name"],
-            descriptor_type="A2A",
+            record_type=registry_ns.RECORD_TYPE_AGENT,
             descriptors=descriptors,
             description=form["description"],
         )
@@ -681,19 +708,14 @@ def update_my_a2a(event):
     # allow renaming records, and the UI disables the name field on edit.
     form["name"] = existing.get("name", form.get("name", ""))
 
+    # Plain values, no `optionalValue` wrapper — see the note on the skill update
+    # above for why that wrapper is gone.
     agentcore_control.update_registry_record(
         registryId=REGISTRY_ID,
         recordId=record_id,
-        description={"optionalValue": form["description"]},
-        descriptors={
-            "optionalValue": {
-                "a2a": {
-                    "agentCard": {
-                        "inlineContent": build_card_definition(form),
-                    },
-                }
-            }
-        },
+        description=form["description"],
+        descriptors=registry_ns.agent_record_descriptors(
+            build_card_definition(form)),
     )
     table.update_item(
         Key=_a2a_owner_key(record_id),

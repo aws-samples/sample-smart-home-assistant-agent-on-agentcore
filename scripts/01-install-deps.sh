@@ -31,16 +31,16 @@ echo "==> Installing CDK npm dependencies..."
 cd "$SCRIPT_DIR/cdk"
 npm install
 
-# scripts/setup-agentcore.py calls CreateRegistry / CreateRegistryRecord. An
-# older boto3 silently no-ops the registry section, because the code guards on
-# hasattr(client, 'create_registry') and an absent API just returns False.
+# scripts/setup-agentcore.py calls CreateRegistry / CreateRegistryRecord against
+# AWS Agent Registry, which lives in the `agent-registry-control` namespace since
+# it went GA on 2026-08-06.
 #
-# The floor is 1.43.67: that is the first release carrying the `agent-registry`
-# and `agent-registry-control` services that AWS Agent Registry moved to when it
-# went GA on 2026-08-06 (verified by inspecting boto3's own service model). The
-# old namespace still works until 2026-09-17, so this is not yet required for
-# the registry calls to succeed — but pinning it now means the migration is a
-# code change only, not a code-plus-environment change.
+# The floor is 1.43.67 — the first release carrying that service (verified by
+# inspecting boto3's own service model). This is now a HARD requirement, not
+# forward planning: the Registry code paths build an `agent-registry-control`
+# client, and an older boto3 raises UnknownServiceError. The old
+# `bedrock-agentcore` namespace stopped being used here when the migration
+# landed, and it stops serving Registry entirely on 2026-09-17.
 #
 # These installs used to end in `2>/dev/null || true`, which discarded both the
 # error text and the exit code — hiding the one failure this step exists to
@@ -65,7 +65,8 @@ def parts(v):
 if parts(boto3.__version__) < parts(minimum):
     sys.exit(
         f"boto3 {boto3.__version__} is below the required {minimum}. "
-        "The AgentCore registry APIs would silently no-op. "
+        "AWS Agent Registry needs the agent-registry-control service, "
+        "which that release does not carry. "
         "Upgrade the venv (or recreate it) and re-run."
     )
 print(f"    -> boto3 {boto3.__version__} (>= {minimum})")
@@ -89,6 +90,21 @@ for lambda_dir in iot-control iot-discovery iot-query; do
     [ -d "$target" ] || continue
     cp "$SCRIPT_DIR/shared/device-catalog.json" "$target/device-catalog.json"
     cp "$SCRIPT_DIR/shared/device_catalog.py"   "$target/device_catalog.py"
+    echo "    -> $lambda_dir"
+done
+
+# ------------------------------------------------------------------------------
+# Copy the AWS Agent Registry helper into the Lambdas that talk to the Registry.
+# Same reason as the catalog above: Code.fromAsset(<dir>) only packages the
+# directory, and the GA record shapes must not be re-derived per caller — the
+# preview-to-GA change renamed fields AND inverted the SKILL descriptor, so a
+# second hand-written copy would be a second chance to get it wrong.
+# ------------------------------------------------------------------------------
+echo "==> Copying the Agent Registry helper into Registry Lambda directories..."
+for lambda_dir in skill-erp-api admin-api; do
+    target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
+    [ -d "$target" ] || continue
+    cp "$SCRIPT_DIR/shared/agent_registry.py" "$target/agent_registry.py"
     echo "    -> $lambda_dir"
 done
 

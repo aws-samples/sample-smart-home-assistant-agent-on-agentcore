@@ -26,6 +26,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 AGENTCORE_DIR = os.path.join(PROJECT_ROOT, ".agentcore-project")
 
+# AWS Agent Registry GA namespace. Registry moved out of `bedrock-agentcore` at GA
+# and the old namespace stops serving it on 2026-09-17; Gateway / Runtime /
+# Identity / Policy / Memory did NOT move, so only Registry calls use this.
+# Mirrors shared/agent_registry.REGISTRY_CLIENT — this script is run from the repo
+# root by a shell wrapper and does not import shared/, so the constant is repeated
+# rather than imported. shared/tests/test_registry_namespace.py holds them together.
+REGISTRY_CLIENT = "agent-registry-control"
+
 
 def get_stack_outputs():
     cf = boto3.client("cloudformation", region_name=REGION)
@@ -49,8 +57,13 @@ def run(cmd, cwd=None):
     return r
 
 
-def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dynamo_table):
-    """Idempotently seed 3 demo A2A records + ownership rows. Prints progress."""
+def _seed_demo_a2a_records(registry_control, registry_id, admin_sub, admin_email, dynamo_table):
+    """Idempotently seed 3 demo A2A records + ownership rows. Prints progress.
+
+    Takes the AWS Agent Registry client (GA namespace) — every call in here is a
+    Registry call. The parameter was named `registry_control` when Registry lived in the
+    `bedrock-agentcore` namespace; the name is now misleading, so it changed.
+    """
     import json as _json
     import time as _time
     import uuid as _uuid
@@ -146,8 +159,13 @@ def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dyna
     # deploy.py — we don't want to add a placeholder alongside them).
     existing_names: set[str] = set()
     try:
-        paginator = ac_control.get_paginator("list_registry_records")
-        for page in paginator.paginate(registryId=registry_id, descriptorType="A2A", maxResults=50):
+        paginator = registry_control.get_paginator("list_registry_records")
+        # GA: structured filters; descriptorType="A2A" becomes
+        # recordType="AGENT".
+        for page in paginator.paginate(
+                registryId=registry_id,
+                filters=[{"name": "recordType", "values": ["AGENT"]}],
+                maxResults=50):
             for rec in page.get("registryRecords", []):
                 existing_names.add(rec.get("name", ""))
     except Exception as e:
@@ -158,24 +176,24 @@ def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dyna
             print(f"  [a2a-seed] {demo['name']} already exists — skip")
             continue
         try:
-            resp = ac_control.create_registry_record(
+            # GA: recordType replaces descriptorType, `name` is the dedup key and
+            # `displayName` holds the label, and the descriptor flattened to
+            # a2aAgentCard.data. No dataSchemaVersion — the card's own
+            # protocolVersion is what the service validates against, and it checks
+            # the full A2A schema, so the card must be complete.
+            resp = registry_control.create_registry_record(
                 registryId=registry_id,
                 name=demo["name"],
+                displayName=demo["name"],
                 description=demo["description"],
-                descriptorType="A2A",
+                recordType="AGENT",
                 descriptors={
-                    "a2a": {
-                        # Wrapper has no schemaVersion — the A2A protocolVersion
-                        # lives inside the card JSON itself (build_card_definition).
-                        "agentCard": {
-                            "inlineContent": _build_card_definition(demo),
-                        },
-                    }
+                    "a2aAgentCard": {"data": _build_card_definition(demo)},
                 },
                 recordVersion="0.1.0",
                 clientToken=str(_uuid.uuid4()),
             )
-        except ac_control.exceptions.ConflictException:
+        except registry_control.exceptions.ConflictException:
             print(f"  [a2a-seed] {demo['name']} already exists — skip")
             continue
         except Exception as e:
@@ -206,7 +224,7 @@ def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dyna
         deadline = _time.time() + 10
         while _time.time() < deadline:
             try:
-                s = ac_control.get_registry_record(
+                s = registry_control.get_registry_record(
                     registryId=registry_id, recordId=record_id
                 ).get("status")
                 if s != "CREATING":
@@ -216,7 +234,7 @@ def _seed_demo_a2a_records(ac_control, registry_id, admin_sub, admin_email, dyna
             _time.sleep(0.5)
 
         try:
-            ac_control.submit_registry_record_for_approval(
+            registry_control.submit_registry_record_for_approval(
                 registryId=registry_id, recordId=record_id
             )
             print(f"  [a2a-seed] {demo['name']}: created + submitted ({record_id})")
@@ -1930,6 +1948,28 @@ def main():
                         f"arn:aws:bedrock-agentcore:{REGION}:{account_id}:configuration-bundle/*"
                     ],
                 },
+                {
+                    # AWS Agent Registry — agent/tools/a2a.py resolves each granted
+                    # record's AgentCard here to build the a2a_* tools.
+                    #
+                    # This statement is NOT redundant with the
+                    # `bedrock-agentcore:*` grant above: Registry left that
+                    # namespace at GA, so the wildcard no longer authorises it.
+                    #
+                    # It has to be explicit because the failure is silent.
+                    # `build_a2a_tools` logs a warning and continues when a card
+                    # cannot be fetched, so losing this permission does not raise
+                    # anything — the A2A tools just stop appearing, the model says
+                    # it has no specialist for the request, and it reads like a
+                    # prompt problem. Read-only is enough; the runtime never writes
+                    # to the Registry.
+                    "Effect": "Allow",
+                    "Action": [
+                        "agent-registry:GetRegistryRecord",
+                        "agent-registry:ListRegistryRecords",
+                    ],
+                    "Resource": "*",
+                },
             ]
             # (No S3 permission needed — welcome clip is bundled into CodeZip.)
             policy_doc = json.dumps({
@@ -2500,15 +2540,20 @@ def main():
     # --------------------------------------------------------
     registry_id = ""
     try:
-        print("\nCreating AgentCore Registry for skill records...")
-        ac_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
-        # Fail loud if the local boto3 doesn't know about the Registry API —
-        # otherwise registry creation would silently no-op and the Skill ERP
-        # Lambda would keep REGISTRY_ID="PLACEHOLDER_SET_BY_SETUP_SCRIPT".
-        if not hasattr(ac_control, "create_registry"):
+        print("\nCreating AWS Agent Registry for skill records...")
+        # A SEPARATE client, and a separate NAME. `ac_control` is already bound in
+        # this function to the Gateway client, and this block used to rebind it —
+        # so every later reference silently meant the Registry client. Registry
+        # moved namespace at GA and Gateway did not, which turns that shadowing
+        # from a latent hazard into a real breakage.
+        registry_control = boto3.client(REGISTRY_CLIENT, region_name=REGION)
+        # Fail loud if the local boto3 predates the GA namespace. Without this the
+        # boto3.client() call above raises UnknownServiceError, which reads like a
+        # code bug rather than "your boto3 is too old".
+        if REGISTRY_CLIENT not in boto3.Session().get_available_services():
             raise RuntimeError(
-                "boto3 is too old — missing bedrock-agentcore-control.create_registry. "
-                f"Current version: {boto3.__version__}. "
+                f"boto3 is too old — no '{REGISTRY_CLIENT}' service. AWS Agent "
+                f"Registry GA needs boto3 >= 1.43.67; this is {boto3.__version__}. "
                 "Run scripts/01-install-deps.sh (which upgrades boto3 in the venv) "
                 "or `pip install --upgrade boto3` and retry."
             )
@@ -2521,7 +2566,7 @@ def main():
                 kwargs = {}
                 if token:
                     kwargs["nextToken"] = token
-                lst = ac_control.list_registries(**kwargs)
+                lst = registry_control.list_registries(**kwargs)
                 for reg in lst.get("registries", []):
                     if reg.get("name") == registry_name:
                         arn = reg.get("registryArn", "")
@@ -2531,16 +2576,21 @@ def main():
                     return None, None
 
         try:
-            reg_resp = ac_control.create_registry(
+            # GA moved authorizerType into discoveryConfiguration and replaced the
+            # `autoApproval: False` boolean with an empty rule list — per the docs,
+            # "not specifying (null) means approval is needed". Manual approval is
+            # deliberate: the curation gate is the point of the Skill ERP demo, so
+            # this must not become autoApprovalRules=["APPROVE_ALL"].
+            reg_resp = registry_control.create_registry(
                 name=registry_name,
                 description="Registry for skills published from the Skill ERP site",
-                authorizerType="AWS_IAM",
-                approvalConfiguration={"autoApproval": False},
+                discoveryConfiguration={"authorizerType": "AWS_IAM"},
+                approvalConfiguration={"autoApprovalRules": []},
             )
             registry_arn = reg_resp.get("registryArn", "")
             registry_id = registry_arn.split("/")[-1] if registry_arn else ""
             print(f"  Created registry {registry_name} — id={registry_id}")
-        except ac_control.exceptions.ConflictException:
+        except registry_control.exceptions.ConflictException:
             # Already exists — look it up
             registry_id, registry_arn = _find_existing_registry()
             if registry_id:
@@ -2564,7 +2614,7 @@ def main():
         if registry_id:
             for _ in range(15):
                 try:
-                    reg_info = ac_control.get_registry(registryId=registry_id)
+                    reg_info = registry_control.get_registry(registryId=registry_id)
                     if reg_info.get("status") == "ACTIVE":
                         break
                 except Exception:
@@ -2623,9 +2673,10 @@ def main():
             dynamo_res = boto3.resource("dynamodb", region_name=REGION)
             skills_table = dynamo_res.Table("smarthome-skills")
             _seed_demo_a2a_records(
-                ac_control, registry_id, admin_sub_for_seed, admin_email_for_seed, skills_table
+                registry_control, registry_id, admin_sub_for_seed,
+                admin_email_for_seed, skills_table
             )
-            print("  NOTE: approve the 3 A2A records in the AgentCore Registry console to see them in Admin → Integration Registry → A2A Agents.")
+            print("  NOTE: approve the 3 A2A records in the AWS Agent Registry console to see them in Admin → Integration Registry → A2A Agents.")
         except Exception as e:
             print(f"  [a2a-seed] unexpected failure (non-fatal): {e}")
     except Exception as e:
