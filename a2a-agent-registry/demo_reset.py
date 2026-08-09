@@ -36,17 +36,13 @@ DEPLOYED_STATE = HERE / "deployed-state.json"
 AGENTCORE_STATE = PROJECT_ROOT / "agentcore-state.json"
 AC_PROJECT_DIR = HERE / ".agentcore-project"
 
-AGENT_NAMES = ("energy-optimization", "home-security", "appliance-maintenance")
-AGENT_LONG_NAMES = {
-    "energy-optimization": "energy-optimization-agent",
-    "home-security": "home-security-agent",
-    "appliance-maintenance": "appliance-maintenance-agent",
-}
-AGENT_SHORT_SLUG = {
-    "energy-optimization": "sha2aenergy",
-    "home-security": "sha2asecurity",
-    "appliance-maintenance": "sha2amaintenance",
-}
+# Roster: see common/agents.py.
+sys.path.insert(0, str(HERE))
+from common.agents import (  # noqa: E402
+    AGENT_LONG_NAMES,
+    AGENT_NAMES,
+    AGENT_SHORT_SLUG,
+)
 
 SKILLS_TABLE = "smarthome-skills"
 

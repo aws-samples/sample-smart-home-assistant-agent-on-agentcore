@@ -48,27 +48,23 @@ AGENTCORE_STATE = PROJECT_ROOT / "agentcore-state.json"
 DEPLOYED_STATE = HERE / "deployed-state.json"
 AC_PROJECT_DIR = HERE / ".agentcore-project"
 
-AGENT_NAMES = ("energy-optimization", "home-security", "appliance-maintenance")
-AGENT_LONG_NAMES = {
-    "energy-optimization": "energy-optimization-agent",
-    "home-security": "home-security-agent",
-    "appliance-maintenance": "appliance-maintenance-agent",
-}
-# agentcore CLI caps project name at 23 chars, so we use short slugs for the
-# project / CFN stack / Runtime ID — but keep the human-readable long names
-# in AgentCard + Registry records.
-AGENT_SHORT_SLUG = {
-    "energy-optimization": "sha2aenergy",
-    "home-security": "sha2asecurity",
-    "appliance-maintenance": "sha2amaintenance",
-}
-
-# Cognito resource server / scope identifiers
-RESOURCE_SERVER_ID = "a2a-server"
-SCOPE_NAME = "invoke"
-SCOPE_FULL = f"{RESOURCE_SERVER_ID}/{SCOPE_NAME}"
-M2M_CLIENT_NAME = "smarthome-a2a-m2m"
-SECRET_NAME = "smarthome/a2a/m2m-credentials"
+# The roster and the Cognito identifiers live in common/agents.py — one
+# definition, imported by deploy / teardown / demo_reset / smoke_test. They used
+# to be copy-pasted into all four, which meant a roster edit that missed a copy
+# failed at a different stage depending on which script ran.
+sys.path.insert(0, str(HERE))
+from common.agents import (  # noqa: E402
+    AGENT_LONG_NAMES,
+    AGENT_NAMES,
+    AGENT_SHORT_SLUG,
+    ALLOWED_SKILLS_HEADER,
+    M2M_CLIENT_NAME,
+    RESOURCE_SERVER_ID,
+    SCOPE_FULL,
+    SCOPE_NAME,
+    SECRET_NAME,
+    USER_TOKEN_HEADER,
+)
 
 ALL_STEPS = ("cognito", "render", "deploy", "workload", "registry", "persist", "patch-text-agent")
 
@@ -118,6 +114,12 @@ def load_state() -> dict[str, Any]:
     return {
         "region": region,
         "user_pool_id": cdk_out["UserPoolId"],
+        # The chatbot's app client — the `aud` of the user idTokens that get
+        # forwarded on an A2A hop. Distinct from the m2m client id in
+        # `deployed.cognito.clientId`, which is the `client_id` of the service
+        # token in the Authorization header. Verifying a user token against the
+        # m2m client would reject every real user.
+        "user_pool_client_id": cdk_out.get("UserPoolClientId", ""),
         "cognito_domain": cdk_out["CognitoDomain"],
         "registry_id": agentcore_out.get("registryId", ""),
         "text_agent_runtime_id": agentcore_out.get("runtimeId", ""),
@@ -246,13 +248,23 @@ def ensure_cognito(state: dict[str, Any]) -> dict[str, Any]:
 # Step 3: Render per-agent agentcore project
 # ------------------------------------------------------------------
 
+def _module_name(agent: str) -> str:
+    """Importable package name for an agent directory.
+
+    Directory names carry hyphens (`device-control`), which are not valid in an
+    import path, so a tools-bearing agent's directory has to be copied under an
+    underscored name for `from device_control.tools import build_tools` to work.
+    """
+    return agent.replace("-", "_")
+
+
 def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
     """Materialize one agentcore-CLI project for a sample agent.
 
     The CLI lays out ``<slug>/app/<slug>/`` as the code root. We wipe its
-    stub, copy ``common/`` and ``<agent>/`` flat into that dir (so the
-    entrypoint ``<agent>/agent.py`` can ``from common.server import ...``),
-    then seed ``aws-targets.json`` for non-interactive deploy.
+    stub, copy ``common/`` and ``<agent>/`` flat into that dir (so the generated
+    ``main.py`` can ``from common.server import ...``), then seed
+    ``aws-targets.json`` for non-interactive deploy.
     """
     slug = AGENT_SHORT_SLUG[agent]
     AC_PROJECT_DIR.mkdir(exist_ok=True)
@@ -262,8 +274,20 @@ def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
     if project_dir.exists():
         shutil.rmtree(project_dir)
 
+    # agentcore CLI 0.26.0 stopped accepting a bare `--defaults` for a
+    # non-interactive create: it now wants the framework / model-provider /
+    # memory choices spelled out ("Use --no-agent for project-only, or provide
+    # all: --framework, --model-provider, --memory"). Pass them explicitly rather
+    # than relying on a default set that has already changed once. The stub the
+    # CLI generates is deleted below regardless — only the project scaffolding
+    # (agentcore/ dir, CDK app) is kept.
     log(f"  [{agent}] agentcore create --name {slug} --protocol A2A ...")
-    run(f"agentcore create --name {slug} --protocol A2A --defaults", cwd=AC_PROJECT_DIR)
+    run(
+        f"agentcore create --name {slug} --protocol A2A --defaults "
+        f"--framework Strands --model-provider Bedrock --memory none "
+        f"--build CodeZip --language Python",
+        cwd=AC_PROJECT_DIR,
+    )
 
     code_root = project_dir / "app" / slug
     # Clear stub sources (keep pyproject.toml / README — we rewrite them below)
@@ -279,16 +303,44 @@ def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
                     ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
     shutil.copytree(src_root / agent, code_root / agent,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # A tools-bearing agent also needs an importable copy: `device-control` is a
+    # fine directory name but not a module name, and main.py has to be able to
+    # `from device_control.tools import build_tools`. The hyphenated directory
+    # stays because the card and prompt are loaded by path, not by import.
+    if (src_root / agent / "tools.py").exists() and _module_name(agent) != agent:
+        shutil.copytree(src_root / agent, code_root / _module_name(agent),
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        (code_root / _module_name(agent) / "__init__.py").touch()
 
     # main.py at code-root — agentcore CLI expects entrypoint at top level.
-    (code_root / "main.py").write_text(
-        "# Auto-generated entrypoint — delegates to common.server.run_agent()\n"
-        "from common.server import run_agent\n"
-        f"run_agent(\n"
-        f"    system_prompt_path=\"{agent}/system_prompt.md\",\n"
-        f"    card_json_path=\"{agent}/card.json\",\n"
-        f")\n"
-    )
+    #
+    # An agent that needs tools ships a `tools.py` next to its card exporting
+    # `build_tools(caller)`. It is passed as a FACTORY, not a list: the tools carry
+    # the calling user's identity, so they have to be rebuilt per request (see
+    # common/server.py). Agents without that file get the prompt-only path, byte
+    # for byte what they had before tools existed.
+    has_tools = (src_root / agent / "tools.py").exists()
+    if has_tools:
+        (code_root / "main.py").write_text(
+            "# Auto-generated entrypoint — delegates to common.server.run_agent()\n"
+            "from common.server import run_agent\n"
+            f"from {_module_name(agent)}.tools import build_tools\n"
+            f"run_agent(\n"
+            f"    system_prompt_path=\"{agent}/system_prompt.md\",\n"
+            f"    card_json_path=\"{agent}/card.json\",\n"
+            f"    tools_factory=build_tools,\n"
+            f")\n"
+        )
+    else:
+        (code_root / "main.py").write_text(
+            "# Auto-generated entrypoint — delegates to common.server.run_agent()\n"
+            "from common.server import run_agent\n"
+            f"run_agent(\n"
+            f"    system_prompt_path=\"{agent}/system_prompt.md\",\n"
+            f"    card_json_path=\"{agent}/card.json\",\n"
+            f")\n"
+        )
+    log(f"  [{agent}] tools: {'per-request factory' if has_tools else 'none'}")
 
     # pyproject.toml — hatchling builds the wheel the CodeBuild stage runs.
     (code_root / "pyproject.toml").write_text(
@@ -309,6 +361,15 @@ def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
         "    \"uvicorn[standard] >= 0.27\",\n"
         "    \"httpx >= 0.28\",\n"
         "    \"botocore[crt] >= 1.35.0\",\n"
+        # Verifying the forwarded user idToken needs a JWT library, and calling
+        # the Gateway as that user needs an MCP client. Both were missing, which
+        # is why common/jwt_verify.py could never have run in the deployed
+        # container: `from jose import jwt` would have ImportError'd at startup.
+        # A dependency list that omits what the code imports is how that module
+        # sat here looking functional without ever executing.
+        "    \"python-jose[cryptography] >= 3.3.0\",\n"
+        "    \"boto3 >= 1.42.93\",\n"
+        "    \"mcp >= 1.9.0\",\n"
         "]\n\n"
         "[tool.hatch.build.targets.wheel]\n"
         "packages = [\".\"]\n"
@@ -345,6 +406,9 @@ def patch_agentcore_json(agent: str, project_dir: Path, state: dict[str, Any]) -
             "EXPECTED_SCOPE": SCOPE_FULL,
             "A2A_TOKEN_URL": cognito["tokenUrl"],
             "EXPECTED_CLIENT_ID": cognito["clientId"],
+            # Audience for the forwarded USER idToken — the chatbot's app client,
+            # not the m2m client above. Without it the audience check is skipped.
+            "COGNITO_APP_CLIENT_ID": state.get("user_pool_client_id", ""),
         }
     cfg_file.write_text(json.dumps(cfg, indent=2))
 
@@ -406,8 +470,15 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         "EXPECTED_SCOPE": SCOPE_FULL,
         "A2A_TOKEN_URL": cognito["tokenUrl"],
         "EXPECTED_CLIENT_ID": cognito["clientId"],
+        # Audience for the forwarded USER idToken (chatbot app client). The
+        # agentcore CLI drops custom env on deploy, so this has to be re-applied
+        # here as well as in agentcore.json.
+        "COGNITO_APP_CLIENT_ID": state.get("user_pool_client_id", ""),
         "BYPASS_TOOL_CONSENT": "true",
     })
+    if not state.get("user_pool_client_id"):
+        log(f"  [{agent}] WARNING: no UserPoolClientId in cdk-outputs.json — the "
+            f"forwarded user token's audience will NOT be checked")
     if default_model:
         env["MODEL_ID"] = default_model
     update_kwargs = dict(
@@ -423,9 +494,21 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
                 "allowedClients": [cognito["clientId"]],
             }
         },
+        # Without this the Runtime edge DROPS both custom headers before the
+        # container sees them, and it does it silently: the request arrives
+        # looking like one that simply chose not to send them. Measured — with no
+        # allowlist the server's skill check refused a request whose client had
+        # definitely sent X-A2A-Allowed-Skills. The main smarthome runtime needs
+        # the same treatment for its own auth-token header, so the mechanism is
+        # not new, just never applied to the A2A agents (which had nothing to pass
+        # through until now).
+        requestHeaderConfiguration={
+            "requestHeaderAllowlist": [ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER],
+        },
     )
     ac.update_agent_runtime(**update_kwargs)
     log(f"  [{agent}] patched env + CUSTOM_JWT auth (discovery={discovery_url})")
+    log(f"  [{agent}] header allowlist: {ALLOWED_SKILLS_HEADER}, {USER_TOKEN_HEADER}")
 
     return {
         "cfnStack": cfn_stack,

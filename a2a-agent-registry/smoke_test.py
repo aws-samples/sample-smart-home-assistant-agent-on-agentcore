@@ -41,11 +41,11 @@ PROMPTS = {
     ),
 }
 
-AGENT_SHORT_TO_LONG = {
-    "energy-optimization": "energy-optimization-agent",
-    "home-security": "home-security-agent",
-    "appliance-maintenance": "appliance-maintenance-agent",
-}
+# Roster: see common/agents.py. A stale copy here makes the smoke test skip an
+# agent silently, which is the opposite of what a smoke test is for.
+sys.path.insert(0, str(HERE))
+from common.agents import AGENT_LONG_NAMES as AGENT_SHORT_TO_LONG  # noqa: E402
+from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER  # noqa: E402
 
 
 def fetch_m2m_token(region: str, token_url: str, scope: str, secret_arn: str) -> str:
@@ -61,7 +61,14 @@ def fetch_m2m_token(region: str, token_url: str, scope: str, secret_arn: str) ->
     return r.json()["access_token"]
 
 
-async def smoke_one(entry: dict, token: str) -> bool:
+def _card_skill_ids(agent: str) -> list[str]:
+    """Read the skill ids this agent publishes straight from its card.json."""
+    card_path = HERE / agent / "card.json"
+    card = json.loads(card_path.read_text(encoding="utf-8"))
+    return [s["id"] for s in (card.get("skills") or []) if s.get("id")]
+
+
+async def smoke_one(entry: dict, token: str, user_token: str | None = None) -> bool:
     agent_long = AGENT_SHORT_TO_LONG[entry["agent"]]
     prompt, marker = PROMPTS[agent_long]
     invocation_url = entry["invocationUrl"]
@@ -71,9 +78,18 @@ async def smoke_one(entry: dict, token: str) -> bool:
     # the container exposes — AgentCore's edge passes that GET through.
     endpoint = invocation_url.rsplit("/invocations", 1)[0]
 
-    headers = {"Authorization": f"Bearer {token}"}
+    # The skills header is now ENFORCED server-side, so the smoke test has to send
+    # a real grant like the orchestrator does. Sending every skill the agent
+    # publishes is the right analogue of a fully-granted user.
+    headers = {
+        "Authorization": f"Bearer {token}",
+        ALLOWED_SKILLS_HEADER: ",".join(_card_skill_ids(entry["agent"])),
+    }
+    if user_token:
+        headers[USER_TOKEN_HEADER] = user_token
     print(f"\n=== {agent_long} ===")
     print(f"  endpoint: {endpoint}")
+    print(f"  granted skills: {headers[ALLOWED_SKILLS_HEADER]}")
     async with httpx.AsyncClient(headers=headers, timeout=120) as http:
         try:
             # AgentCore Runtime likely serves the card under /invocations
@@ -130,6 +146,60 @@ async def smoke_one(entry: dict, token: str) -> bool:
             return False
 
 
+async def expect_refusal(entry: dict, token: str, skills_header: str | None,
+                         label: str) -> bool:
+    """Send a request that SHOULD be refused and report whether it was.
+
+    This is the half of the smoke test that proves the server-side check exists.
+    The header used to be advisory, so anything holding the shared m2m token could
+    call any skill on any agent; a passing positive test says nothing about that.
+
+    A refusal arrives as an ordinary agent reply beginning "Request refused:" —
+    the orchestrator shows tool output to its own model, so a readable refusal is
+    more useful than an opaque 500.
+    """
+    invocation_url = entry["invocationUrl"]
+    headers = {"Authorization": f"Bearer {token}"}
+    if skills_header is not None:
+        headers[ALLOWED_SKILLS_HEADER] = skills_header
+
+    print(f"\n--- negative: {label} ({entry['agent']}) ---")
+    async with httpx.AsyncClient(headers=headers, timeout=120) as http:
+        try:
+            card = await A2ACardResolver(http, invocation_url).get_agent_card()
+            card.url = invocation_url
+            factory = ClientFactory(ClientConfig(httpx_client=http, streaming=False))
+            client = factory.create(card)
+            msg = Message(
+                message_id=str(uuid.uuid4()),
+                role=Role.user,
+                parts=[Part(root=TextPart(text="hello"))],
+            )
+            reply = None
+            async for event in client.send_message(msg):
+                items = event if isinstance(event, tuple) else (event,)
+                for item in items:
+                    if item is None:
+                        continue
+                    for art in getattr(item, "artifacts", None) or []:
+                        for p in getattr(art, "parts", None) or []:
+                            r = getattr(p, "root", p)
+                            if getattr(r, "kind", "") == "text":
+                                reply = r.text
+                    for p in getattr(item, "parts", None) or []:
+                        r = getattr(p, "root", p)
+                        if getattr(r, "kind", "") == "text" and not reply:
+                            reply = r.text
+            refused = bool(reply) and "refused" in reply.lower()
+            print(f"  refused: {refused}")
+            print(f"  reply: {(reply or '(none)')[:220]}")
+            return refused
+        except Exception as e:
+            # A transport-level rejection also counts as a refusal.
+            print(f"  refused at transport: {e}")
+            return True
+
+
 async def main() -> int:
     state = json.loads(DEPLOYED_STATE.read_text())
     cognito = state["cognito"]
@@ -147,12 +217,25 @@ async def main() -> int:
     )
     print(f"fetched m2m token ({len(token)} chars)")
 
-    results = []
+    results = {}
     for entry in state["agents"]:
-        results.append(await smoke_one(entry, token))
+        results[entry["agent"]] = await smoke_one(entry, token)
+
+    # Negative cases, run against one agent — the check is in shared code, so one
+    # agent exercises the same path all of them use.
+    if state["agents"]:
+        probe = state["agents"][0]
+        results["negative:no-skills-header"] = await expect_refusal(
+            probe, token, None, "no skills header")
+        results["negative:empty-skills-header"] = await expect_refusal(
+            probe, token, "", "empty skills header")
+        results["negative:other-agents-skill"] = await expect_refusal(
+            probe, token, "some_skill_this_agent_does_not_publish",
+            "a skill this agent does not publish")
+
     print()
-    print("summary:", dict(zip([a["agent"] for a in state["agents"]], results)))
-    return 0 if all(results) else 1
+    print("summary:", results)
+    return 0 if all(results.values()) else 1
 
 
 if __name__ == "__main__":

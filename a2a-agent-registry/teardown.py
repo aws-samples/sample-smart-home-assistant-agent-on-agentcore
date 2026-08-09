@@ -30,21 +30,18 @@ AGENTCORE_STATE = PROJECT_ROOT / "agentcore-state.json"
 DEPLOYED_STATE = HERE / "deployed-state.json"
 AC_PROJECT_DIR = HERE / ".agentcore-project"
 
-AGENT_NAMES = ("energy-optimization", "home-security", "appliance-maintenance")
-AGENT_LONG_NAMES = {
-    "energy-optimization": "energy-optimization-agent",
-    "home-security": "home-security-agent",
-    "appliance-maintenance": "appliance-maintenance-agent",
-}
-AGENT_SHORT_SLUG = {
-    "energy-optimization": "sha2aenergy",
-    "home-security": "sha2asecurity",
-    "appliance-maintenance": "sha2amaintenance",
-}
-
-RESOURCE_SERVER_ID = "a2a-server"
-M2M_CLIENT_NAME = "smarthome-a2a-m2m"
-SECRET_NAME = "smarthome/a2a/m2m-credentials"
+# Roster and Cognito identifiers: see common/agents.py. Teardown reading a stale
+# copy is the worst case of the four — it leaves runtimes running while reporting
+# success.
+sys.path.insert(0, str(HERE))
+from common.agents import (  # noqa: E402
+    AGENT_LONG_NAMES,
+    AGENT_NAMES,
+    AGENT_SHORT_SLUG,
+    M2M_CLIENT_NAME,
+    RESOURCE_SERVER_ID,
+    SECRET_NAME,
+)
 
 
 def log(msg: str) -> None:

@@ -12,8 +12,12 @@
 
 ```
 a2a-agent-registry/
-├── common/                         # 共享的 A2A server 代码 (Starlette + a2a-sdk + JWT 中间件)
-├── energy-optimization/            # agent.py + system_prompt.md + card.json + Dockerfile
+├── common/                         # 共享的 A2A server 代码
+│   ├── agents.py                   # agent 名单的唯一来源 (名字 / slug / Cognito 标识)
+│   ├── server.py                   # A2A server 组装 + 按请求重建 tools + skill 强制
+│   ├── user_identity.py            # 转发来的用户 idToken 验签 (JWKS / iss / aud / exp)
+│   └── card.py                     # AgentCard 渲染
+├── energy-optimization/            # system_prompt.md + card.json (纯 prompt 顾问, 无 tools)
 ├── home-security/                  # 同上
 ├── appliance-maintenance/          # 同上
 ├── deploy.py                       # 幂等部署脚本 (无需本地 docker; agentcore CLI 走 CodeBuild)
