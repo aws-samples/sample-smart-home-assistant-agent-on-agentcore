@@ -457,6 +457,41 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // DynamoDB - Scenarios Table
+    // Scene definitions and reusable templates for the scene-orchestration
+    // agent: a trigger, a list of device actions, and whether it is active.
+    //
+    // A separate table rather than more prefixes on skillsTable. That table
+    // already carries eleven reserved `skillName` prefixes (__settings__,
+    // __permissions__, __prompt_*__, __a2a_permissions__, __tenant_env_*__,
+    // __opt_*__, __policy_engine__, __tool_policy_*__, __erp_owner__), and the
+    // decisive reason is authorization rather than tidiness: the scenario agent
+    // needs WRITE access, and writing to skillsTable would let it edit the
+    // permission and prompt rows that govern it. That is a privilege escalation,
+    // not a schema preference.
+    //
+    // TemplateIndex exists so listing templates is a Query. The predecessor
+    // design scanned a table with no GSI and filtered client-side, which is the
+    // kind of thing that works at demo scale and quietly does not later.
+    // ========================
+    const scenariosTable = new dynamodb.Table(this, "ScenariosTable", {
+      tableName: "smarthome-scenarios",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "scenarioKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    scenariosTable.addGlobalSecondaryIndex({
+      indexName: "TemplateIndex",
+      // A constant partition key ("template") so every template lives in one
+      // partition and can be listed newest-first by the sort key. The row count
+      // is bounded by the template library, not by user count, so the usual
+      // hot-partition objection to a constant PK does not apply here.
+      partitionKey: { name: "templateScope", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
+    });
+
+    // ========================
     // DynamoDB - Browser Sessions Table
     // Tracks live AgentCore browser sessions so the chatbot can surface
     // liveViewUrl and status. ttl auto-evicts stale rows after 1h.

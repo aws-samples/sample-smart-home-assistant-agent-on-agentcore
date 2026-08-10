@@ -63,6 +63,7 @@ from common.agents import (  # noqa: E402
     SCOPE_FULL,
     SCOPE_NAME,
     REGISTRY_CLIENT,
+    SCENARIO_AGENT,
     SECRET_NAME,
     USER_TOKEN_HEADER,
 )
@@ -73,6 +74,10 @@ ALL_STEPS = ("cognito", "render", "deploy", "workload", "registry", "persist", "
 # the CDK stack (`skillsTable`) and hardcoded there too; a sub-agent reads it to
 # resolve its governed prompt. Same literal the setup script uses.
 SKILLS_TABLE = "smarthome-skills"
+# The scene-orchestration agent's own table. It is the ONLY table that agent may
+# write, which is why scenes did not go into the skills table: writing there would
+# let it edit the permission and prompt rows that govern it.
+SCENARIOS_TABLE = "smarthome-scenarios"
 
 
 # ------------------------------------------------------------------
@@ -342,6 +347,17 @@ def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (code_root / _module_name(agent) / "__init__.py").touch()
 
+    # `shared/` — the device catalog and the scenario model, which the repo's
+    # Lambdas already import. A sub-agent that validates a device command or a
+    # scene has to agree with them exactly: a second copy of "what speeds does the
+    # fan accept" is a copy that will disagree, and it would disagree by storing a
+    # scene that the execution path then refuses. Copied rather than pip-installed
+    # because these are repo modules, not a package.
+    shared_src = PROJECT_ROOT / "shared"
+    if shared_src.is_dir():
+        shutil.copytree(shared_src, code_root / "shared",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc"))
+
     # main.py at code-root — agentcore CLI expects entrypoint at top level.
     #
     # An agent that needs tools ships a `tools.py` next to its card exporting
@@ -511,6 +527,10 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         # are applied together rather than in separate steps.
         "SKILLS_TABLE_NAME": SKILLS_TABLE,
     })
+    # Only the agent that owns scenes learns the table's name. An agent with no
+    # reason to touch it should not be able to name it.
+    if (HERE / agent / "tools.py").exists() and agent == SCENARIO_AGENT:
+        env["SCENARIOS_TABLE_NAME"] = SCENARIOS_TABLE
     if not state.get("user_pool_client_id"):
         log(f"  [{agent}] WARNING: no UserPoolClientId in cdk-outputs.json — the "
             f"forwarded user token's audience will NOT be checked")
@@ -564,6 +584,8 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
     log(f"  [{agent}] header allowlist: {ALLOWED_SKILLS_HEADER}, {USER_TOKEN_HEADER}")
 
     _grant_prompt_table_read(agent, rt_info["roleArn"], state)
+    if agent == SCENARIO_AGENT:
+        _grant_scenarios_table_access(agent, rt_info["roleArn"], state)
 
     return {
         "cfnStack": cfn_stack,
@@ -571,6 +593,48 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         "runtimeArn": runtime_arn,
         "invocationUrl": invocation_url,
     }
+
+
+def _grant_scenarios_table_access(agent: str, role_arn: str,
+                                 state: dict[str, Any]) -> None:
+    """Let the scene-orchestration agent read and write its own scenarios table.
+
+    The only sub-agent that gets write access to anything, and the grant is
+    deliberately narrow in two ways:
+
+      - one table. Not the skills table, which holds the permission and prompt
+        rows that govern this very agent — an agent able to rewrite those governs
+        itself. That is the reason scenes are a separate table rather than more
+        `skillName` prefixes.
+      - no IoT, no Gateway. The agent stores actions and hands them back; the
+        orchestrator applies them under the user's identity so Cedar authorises
+        each one. Write access here does not become device access.
+
+    The index ARN is listed separately: a Query against TemplateIndex is denied by
+    a policy that names only the table, and the resulting failure looks like an
+    empty template library rather than a permissions error.
+    """
+    role_name = role_arn.split("/")[-1]
+    account_id = role_arn.split(":")[4]
+    table_arn = (f"arn:aws:dynamodb:{state['region']}:"
+                 f"{account_id}:table/{SCENARIOS_TABLE}")
+    doc = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query",
+                       "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+            "Resource": [table_arn, f"{table_arn}/index/*"],
+        }],
+    }
+    try:
+        boto3.client("iam").put_role_policy(
+            RoleName=role_name, PolicyName="A2AScenariosTableAccess",
+            PolicyDocument=json.dumps(doc))
+        log(f"  [{agent}] granted read/write on {SCENARIOS_TABLE} (+ its indexes)")
+    except Exception as exc:  # noqa: BLE001
+        log(f"  [{agent}] WARNING: could not grant {SCENARIOS_TABLE} access — "
+            f"{exc}. Every scene tool will fail at runtime.")
 
 
 def _grant_prompt_table_read(agent: str, role_arn: str, state: dict[str, Any]) -> None:

@@ -1,0 +1,45 @@
+{
+  "name": "scene-orchestration-agent",
+  "description": "A specialist agent that turns a described routine into a saved scene: a trigger (a time, a device's state, or a sensor threshold) plus the device actions to apply. It stores and manages scenes and reusable templates, and returns the actions for the caller to execute — it never controls a device itself.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/scene-orchestration-agent"
+  },
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "skills": [
+    {
+      "id": "compose_scenario",
+      "name": "Compose a scene",
+      "description": "Turn a described routine into a stored scene — build the trigger, resolve the device actions, reuse a matching template when there is one, and save it. This is the write capability.",
+      "tags": ["automation", "scene", "write"],
+      "examples": [
+        "Every night at 11pm turn off the lights and set the fan to low",
+        "When the temperature goes above 27 turn on the fan and the purifier",
+        "Set up a movie night scene for the living room"
+      ]
+    },
+    {
+      "id": "manage_scenario",
+      "name": "Manage saved scenes",
+      "description": "List, inspect, rename, enable or disable the scenes already saved for this user, and report what each one is triggered by.",
+      "tags": ["automation", "scene", "lifecycle"],
+      "examples": [
+        "What automations do I have?",
+        "Turn off my sleep mode scene",
+        "Change my morning scene to 7:30"
+      ]
+    },
+    {
+      "id": "suggest_automation",
+      "name": "Suggest an automation",
+      "description": "Advise on what routine would suit a described situation and which triggers and devices it would use, without saving anything. A read-only advisory capability, so an administrator can grant advice without granting the ability to write scenes.",
+      "tags": ["automation", "advice", "read-only"],
+      "examples": [
+        "What automations would help me sleep better?",
+        "How could I cut standby power use?",
+        "What could I automate with the air quality sensor?"
+      ]
+    }
+  ]
+}

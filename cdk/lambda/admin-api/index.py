@@ -1480,18 +1480,27 @@ def ensure_gateway_policy_engine(policy_engine_arn):
         except Exception as e:
             logger.warning(f"Failed to grant PolicyEngineAccess to gateway role: {e}")
 
-    # UpdateGateway requires re-supplying existing fields
+    # UpdateGateway requires re-supplying existing fields: gatewayIdentifier,
+    # name, roleArn and authorizerType are the API's required members, so they are
+    # read straight off the GetGateway response.
     update_kwargs = dict(
         gatewayIdentifier=GATEWAY_ID,
         name=gw["name"],
         roleArn=gw["roleArn"],
-        protocolType=gw["protocolType"],
         authorizerType=gw["authorizerType"],
         policyEngineConfiguration={
             "arn": policy_engine_arn,
             "mode": "ENFORCE",
         },
     )
+    # `protocolType` is OPTIONAL on UpdateGateway and GetGateway no longer returns
+    # it, so `gw["protocolType"]` raised KeyError and took the whole request down.
+    # The handler died before returning, so API Gateway answered with a bare 502
+    # carrying no CORS header — and the browser reported a CORS failure, which is
+    # what makes this worth a comment: the visible symptom named the wrong system
+    # entirely, and the Admin Console meanwhile showed the checkboxes as saved.
+    if gw.get("protocolType"):
+        update_kwargs["protocolType"] = gw["protocolType"]
     if gw.get("authorizerConfiguration"):
         update_kwargs["authorizerConfiguration"] = gw["authorizerConfiguration"]
     agentcore_control.update_gateway(**update_kwargs)
@@ -2420,6 +2429,26 @@ def handle_code_sessions_active(event):
 # ---------------------------------------------------------------------------
 
 def handler(event, context):
+    """Entry point. Never lets an exception escape.
+
+    An unhandled exception means API Gateway answers with its own 502, and that
+    response carries NO CORS header — so a browser reports "blocked by CORS
+    policy" and says nothing about the actual error. That misdirection cost real
+    time once already: a KeyError in the Cedar policy rebuild presented as a CORS
+    failure while the Admin Console showed the permission checkboxes as saved.
+
+    Converting it here to a 500 WITH the CORS headers means the browser shows the
+    real exception, and the page can display it instead of appearing to succeed.
+    """
+    try:
+        return _dispatch(event, context)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("unhandled error in %s %s",
+                         event.get("httpMethod", ""), event.get("resource", ""))
+        return response(500, {"error": type(exc).__name__, "message": str(exc)})
+
+
+def _dispatch(event, context):
     logger.info("Event: %s", json.dumps(event, default=str))
 
     method = event.get("httpMethod", "")

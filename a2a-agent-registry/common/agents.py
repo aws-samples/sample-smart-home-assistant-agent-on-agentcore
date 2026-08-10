@@ -36,7 +36,17 @@ AGENTS: dict[str, tuple[str, str]] = {
     "device-control": ("device-control-agent", "sha2adevice"),
     "light-effect": ("light-effect-agent", "sha2alight"),
     "knowledge-qa": ("knowledge-qa-agent", "sha2aqa"),
+    # Writes scene definitions to its own DynamoDB table and returns the device
+    # actions for the ORCHESTRATOR to execute — it never controls a device itself.
+    # See shared/scenarios.py: that split is what keeps every scene-driven command
+    # inside Cedar's reach.
+    "scene-orchestration": ("scene-orchestration-agent", "sha2ascene"),
 }
+
+# The one agent that owns a DynamoDB table of its own. deploy.py gives only this
+# agent the table name and the IAM grant, so a new sub-agent does not silently
+# inherit write access to someone else's data.
+SCENARIO_AGENT = "scene-orchestration"
 
 AGENT_NAMES: tuple[str, ...] = tuple(AGENTS)
 AGENT_LONG_NAMES: dict[str, str] = {k: v[0] for k, v in AGENTS.items()}

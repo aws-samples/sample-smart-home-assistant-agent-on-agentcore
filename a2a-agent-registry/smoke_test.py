@@ -57,6 +57,12 @@ PROMPTS = {
         "What animation modes does the LED matrix support?",
         "⟦A2A:knowledge-qa⟧",
     ),
+    # Reads rather than writes: the smoke test should not leave a scene behind
+    # that a scheduler would then start firing.
+    "scene-orchestration-agent": (
+        "What automations do I have saved?",
+        "⟦A2A:scene-orchestration⟧",
+    ),
 }
 
 # Roster: see common/agents.py. A stale copy here makes the smoke test skip an
@@ -119,6 +125,13 @@ def _card_skill_ids(agent: str) -> list[str]:
 
 async def smoke_one(entry: dict, token: str, user_token: str | None = None) -> bool:
     agent_long = AGENT_SHORT_TO_LONG[entry["agent"]]
+    if agent_long not in PROMPTS:
+        # A new agent added to the roster without a probe here would otherwise
+        # crash the whole run with a KeyError, taking the other agents' results
+        # with it — the report would look like a total outage.
+        print(f"\n=== {agent_long} ===")
+        print(f"  FAIL: no smoke-test prompt for {agent_long}; add one to PROMPTS")
+        return False
     prompt, marker = PROMPTS[agent_long]
     invocation_url = entry["invocationUrl"]
     # The invocation URL ends with /invocations; A2A expects the endpoint root.

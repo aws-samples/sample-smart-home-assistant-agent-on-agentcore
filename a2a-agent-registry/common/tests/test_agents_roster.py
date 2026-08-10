@@ -137,7 +137,8 @@ def test_the_tool_using_agents_are_the_expected_ones():
         name for name in agents.AGENT_NAMES
         if os.path.exists(os.path.join(REGISTRY_DIR, name, "tools.py"))
     }
-    assert with_tools == {"device-control", "light-effect", "knowledge-qa"}, with_tools
+    assert with_tools == {"device-control", "light-effect", "knowledge-qa",
+                          "scene-orchestration"}, with_tools
     # The three original advisors stay prompt-only — they touch no user data, and
     # requiring an identity they never had would break them.
     prompt_only = set(agents.AGENT_NAMES) - with_tools
@@ -157,22 +158,54 @@ def test_every_tools_module_exports_build_tools():
         assert re.search(r"^def build_tools\(", src, re.M), f"{name}/tools.py"
 
 
+# Parameter names that would let the model choose whose data a tool acts on.
+# Identity is closed over from the verified caller (see common/gateway_tools.py and
+# scene-orchestration/tools.py) and must never appear in a model-facing signature.
+FORBIDDEN_PARAMS = frozenset({
+    "user_id", "userid", "user", "sub", "email", "actor_id", "actorid",
+    "authorization", "token", "id_token", "access_token", "principal", "scope",
+})
+
+
 def test_no_tools_module_exposes_identity_to_the_model():
     """A tool signature carrying user_id / sub / email would let the model name
-    someone else's scope. Identity is injected in common/gateway_tools.py and must
-    never be a parameter."""
-    import re
+    someone else's scope — or a prompt injection could.
+
+    Matched on parameter NAMES parsed from the AST, not as substrings of the
+    signature text. The substring form flagged `subject` (a trigger field: which
+    device or metric a scene watches) because it contains "sub", and a false
+    positive on a legitimate parameter is how a check like this gets loosened until
+    it stops catching the real thing.
+    """
+    import ast
     for name in agents.AGENT_NAMES:
         path = os.path.join(REGISTRY_DIR, name, "tools.py")
         if not os.path.exists(path):
             continue
         src = open(path, encoding="utf-8").read()
-        # Every @strands_tool-decorated def, with its parameter list.
-        for match in re.finditer(r"@strands_tool[^\n]*\n\s*def \w+\(([^)]*)\)", src):
-            params = match.group(1)
-            for forbidden in ("user_id", "sub", "email", "authorization", "token"):
-                assert forbidden not in params, (
-                    f"{name}/tools.py exposes {forbidden} to the model: {params}")
+        tree = ast.parse(src)
+        checked = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorated = any(
+                (isinstance(d, ast.Name) and d.id == "strands_tool")
+                or (isinstance(d, ast.Attribute) and d.attr == "strands_tool")
+                or (isinstance(d, ast.Call) and getattr(d.func, "id", "") == "strands_tool")
+                for d in node.decorator_list)
+            if not decorated:
+                continue
+            checked += 1
+            args = node.args
+            params = [a.arg for a in
+                      (args.posonlyargs + args.args + args.kwonlyargs)]
+            bad = sorted(set(p.lower() for p in params) & FORBIDDEN_PARAMS)
+            assert not bad, (
+                f"{name}/tools.py tool {node.name!r} exposes {bad} to the model: "
+                f"{params}")
+        # A tools.py with no decorated tool means the decorator was renamed and
+        # this check silently stopped applying.
+        assert checked, f"{name}/tools.py has no @strands_tool functions to check"
 
 
 def test_the_scripts_no_longer_define_their_own_copies():
