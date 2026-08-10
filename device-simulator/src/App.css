@@ -935,3 +935,94 @@ body {
   color: #fff;
   font-weight: 600;
 }
+
+/* ---------------------------------------------------------------------------
+   Scene props: the virtual clock and the screen/speaker source.
+
+   Side by side above the device wall and outside `.dashboard-grid`, because the
+   grid is rendered from the device catalog and neither of these is a device.
+   They wrap on a narrow viewport rather than squeezing the canvas, which would
+   make the edge swatches too small to compare against the picture.
+   --------------------------------------------------------------------------- */
+.sim-props-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.sim-clock,
+.sim-media {
+  background: var(--color-background-container-content, #fff);
+  border: 1px solid var(--color-border-divider-default, #e9ebed);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.sim-clock {
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Tabular numerals: at 3600x the digits change several times a second, and
+   proportional figures make the whole line jitter as the glyph widths change. */
+.sim-clock-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.sim-clock-zone {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--color-text-body-secondary, #5f6b7a);
+}
+
+.sim-media {
+  min-width: 340px;
+}
+
+.sim-media-screen {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.sim-media-screen canvas {
+  border-radius: 8px;
+  /* The glow is the point of a backlight, so the screen gets one too — it makes
+     the relationship between the picture and the strip legible at a glance. */
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+  display: block;
+}
+
+.sim-media-edges {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.sim-media-edge {
+  flex: 1 1 0;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border-divider-default, #e9ebed);
+}
+
+.sim-beat-meter {
+  width: 70px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--color-background-layout-main, #f2f3f3);
+  overflow: hidden;
+}
+
+.sim-beat-fill {
+  height: 100%;
+  background: var(--color-text-status-error, #d91515);
+  /* No transition: the envelope IS the animation, and easing it would smear the
+     attack that makes the pulse read as a beat. */
+}

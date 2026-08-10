@@ -13,6 +13,8 @@ import { SensorDevice } from './components/SensorDevice';
 import Fan from './components/Fan';
 import Oven from './components/Oven';
 import RiceCooker from './components/RiceCooker';
+import VirtualClock from './components/VirtualClock';
+import MediaSync from './components/MediaSync';
 import LoginPage from './auth/LoginPage';
 import { getCurrentSession, refreshSession, getUserSub, ensureIotPolicyAttached, signOut, AuthTokens } from './auth/CognitoAuth';
 import { useI18n } from './i18n';
@@ -109,6 +111,12 @@ const App: React.FC = () => {
     return <LoginPage onAuthenticated={handleAuthenticated} />;
   }
 
+  // The screen-sync master. Looked up rather than hardcoded: the catalog marks it
+  // with a `sync_mode` capability, so a second syncable light would be found here
+  // without an edit — and if the device is ever removed, the panel disappears
+  // instead of crashing on an undefined lookup.
+  const tvBacklight = DEVICES.find((d) => d.capabilities.sync_mode);
+
   const topNav = (
     <TopNavigation
       identity={{
@@ -164,6 +172,16 @@ const App: React.FC = () => {
               ) : (
                 <StatusIndicator type="stopped">{t('app.disconnected')}</StatusIndicator>
               )}
+            </div>
+            {/* The props a scene needs, above the device wall: a clock, because a
+                scheduled scene is keyed on a wall-clock time and "every day at
+                23:00" is abstract without one; and a screen plus a speaker, so
+                "movie night" and "music feast" drive the backlight from something
+                rather than just setting a colour. Both sit outside the grid — they
+                are not devices, and the grid is rendered from the catalog. */}
+            <div className="sim-props-row">
+              <VirtualClock />
+              {tvBacklight && <MediaSync device={tvBacklight} userSub={userSub} />}
             </div>
             {/* Rendered from the catalog rather than a hardcoded list, so a
                 device added there appears here with controls bounded by the

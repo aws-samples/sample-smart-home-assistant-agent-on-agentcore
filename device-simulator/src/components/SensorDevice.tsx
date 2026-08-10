@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DeviceCard } from './DeviceCard';
 import { MqttClient } from '../mqtt/MqttClient';
+import { getMultiplier, nowSeconds, subscribe as subscribeClock } from '../devices/virtualClock';
 import { DeviceDef } from '../devices/catalog';
 import { reportSensorHistory, reportState } from '../state/publishState';
 import { useI18n } from '../i18n';
@@ -36,6 +37,10 @@ export function SensorDevice({ device, userSub }: Props) {
   const [readings, setReadings] = useState<Record<string, number>>({});
   const [history, setHistory] = useState<Record<string, number[]>>({});
   const seeded = useRef(false);
+  // Sampling cadence follows the virtual clock's speed, so this has to re-run the
+  // live-sampling effect when the multiplier changes.
+  const [multiplier, setMultiplierState] = useState(() => getMultiplier());
+  useEffect(() => subscribeClock((c) => setMultiplierState(c.multiplier)), []);
 
   // The backfill is a single large publish, so it has to wait for the MQTT
   // handshake — sending it on mount drops the whole day of history into a closed
@@ -47,7 +52,7 @@ export function SensorDevice({ device, userSub }: Props) {
     if (!userSub || !connected || seeded.current) return;
     seeded.current = true;
 
-    const now = Math.floor(Date.now() / 1000);
+    const now = nowSeconds();
     const count = (BACKFILL_HOURS * 3600) / SAMPLE_SECONDS;
     const points: Array<{ ts: number; metric: string; value: number }> = [];
     const series: Record<string, number[]> = {};
@@ -95,7 +100,7 @@ export function SensorDevice({ device, userSub }: Props) {
   useEffect(() => {
     if (!userSub || !connected) return;
     const timer = setInterval(() => {
-      const now = Math.floor(Date.now() / 1000);
+      const now = nowSeconds();
       const points: Array<{ ts: number; metric: string; value: number }> = [];
       setReadings((prev) => {
         const next: Record<string, number> = {};
@@ -121,10 +126,17 @@ export function SensorDevice({ device, userSub }: Props) {
         reportState(userSub, device.deviceId, next);
         return next;
       });
-    }, LIVE_INTERVAL_MS);
+      // Sample on VIRTUAL time. At 60x the timestamps advance five virtual hours
+      // between real-time ticks, so a fixed 30s interval would leave the history a
+      // handful of points scattered across a simulated day — a threshold trigger
+      // reading that series would see almost nothing. Re-armed each tick rather
+      // than using a fixed interval so a multiplier change takes effect at once.
+    }, Math.max(500, LIVE_INTERVAL_MS / getMultiplier()));
     return () => clearInterval(timer);
+    // Re-arm when the multiplier changes: `clock` is state fed by the clock's own
+    // subscription, so this effect re-runs and the interval is recomputed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userSub, connected, device.deviceId]);
+  }, [userSub, connected, device.deviceId, multiplier]);
 
   const label = (metric: string) => {
     const key = `metric.${metric}`;
