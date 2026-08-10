@@ -2154,6 +2154,106 @@ def list_registry_records(event):
     return response(200, {"records": records})
 
 
+# ---------------------------------------------------------------------------
+# Skill approval (POST /registry/records?action=review)
+#
+# The approval state machine is Registry-managed and, until now, had no caller.
+# `agent-registry:UpdateRegistryRecordStatus` was already granted to this Lambda
+# in the CDK stack and never used, so a skill published from the Skill ERP sat in
+# PENDING_APPROVAL with the only way to move it being the AWS console. Reviewing
+# in the Admin Console is what makes the curation gate part of the product rather
+# than a manual step someone has to be told about.
+#
+# Transitions measured against a throwaway record rather than read off the docs:
+#
+#   DRAFT            -> PENDING_APPROVAL | DEPRECATED | DRAFT   (not REJECTED)
+#   PENDING_APPROVAL -> APPROVED | REJECTED
+#   REJECTED         -> APPROVED                                (reversible)
+#
+# So a DRAFT record cannot be rejected outright — it has to be submitted first,
+# which is why `approve` handles both and `reject` refuses with an explanation
+# rather than a raw ValidationException listing enum members.
+# ---------------------------------------------------------------------------
+
+_REVIEWABLE = ("approve", "reject", "deprecate")
+
+
+def review_registry_record(event):
+    """POST /registry/records?action=review — approve, reject or deprecate.
+
+    Body: {recordId, decision: approve|reject|deprecate, reason?}. The reason is
+    stored as the record's `statusReason`, which is the only place the Registry
+    keeps *why* — so it is required for a rejection and optional otherwise. A
+    rejected skill whose reason is blank tells the author nothing.
+    """
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    body = json.loads(event.get("body") or "{}")
+    record_id = (body.get("recordId") or "").strip()
+    decision = (body.get("decision") or "").strip().lower()
+    reason = (body.get("reason") or "").strip()
+
+    if not record_id:
+        return response(400, {"error": "recordId is required"})
+    if decision not in _REVIEWABLE:
+        return response(400, {
+            "error": f"decision must be one of {list(_REVIEWABLE)}"})
+    if decision == "reject" and not reason:
+        # The author sees only the statusReason, so an unexplained rejection is
+        # indistinguishable from the system losing their skill.
+        return response(400, {
+            "error": "a reason is required when rejecting — it is the only "
+                     "feedback the skill's author receives"})
+
+    reviewer = _caller_identity(event)
+    try:
+        current = registry_control.get_registry_record(
+            registryId=REGISTRY_ID, recordId=record_id)
+    except Exception as e:  # noqa: BLE001
+        return response(404, {"error": f"no such record: {e}"})
+    status = current.get("status", "")
+
+    stamped = f"{reason or decision} (by {reviewer})" if reviewer else (reason or decision)
+
+    try:
+        if decision == "approve":
+            # approve_record submits first when the record is still DRAFT, because
+            # DRAFT cannot go straight to APPROVED.
+            final = registry_ns.approve_record(
+                registry_control, REGISTRY_ID, record_id, reason=stamped)
+        elif decision == "deprecate":
+            registry_ns.set_record_status(
+                registry_control, REGISTRY_ID, record_id,
+                registry_ns.STATUS_DEPRECATED, reason=stamped)
+            final = registry_ns.STATUS_DEPRECATED
+        else:
+            if status == registry_ns.STATUS_DRAFT:
+                return response(409, {
+                    "error": "a DRAFT record cannot be rejected — it has not been "
+                             "submitted for review yet. Deprecate it instead, or "
+                             "wait for the author to submit it.",
+                    "status": status})
+            registry_ns.set_record_status(
+                registry_control, REGISTRY_ID, record_id,
+                registry_ns.STATUS_REJECTED, reason=stamped)
+            final = registry_ns.STATUS_REJECTED
+    except Exception as e:  # noqa: BLE001
+        logger.exception("review failed for %s", record_id)
+        return response(500, {"error": str(e), "status": status})
+
+    logger.info("record %s: %s -> %s by %s", record_id, status, final, reviewer)
+    return response(200, {"recordId": record_id, "previousStatus": status,
+                          "status": final, "decision": decision,
+                          "reviewedBy": reviewer, "reason": reason})
+
+
+def _caller_identity(event) -> str:
+    claims = (event.get("requestContext", {})
+              .get("authorizer", {}).get("claims", {}))
+    return claims.get("email") or claims.get("cognito:username") or claims.get("sub", "")
+
+
 def import_registry_records(event):
     """POST /registry/import  body: {recordIds: [...], userId: "__global__" | <userId>}
 
@@ -2723,6 +2823,10 @@ def _dispatch(event, context):
         if action == "sync-schedules":
             return sync_scenario_schedules(event)
         return list_registry_records(event)
+    if resource == "/registry/records" and method == "POST":
+        # Rides on the existing resource: the admin Lambda's auto-generated API
+        # Gateway resource policy is near the 20 KB cap, so a new path is not free.
+        return review_registry_record(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)
 

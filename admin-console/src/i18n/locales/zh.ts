@@ -772,6 +772,16 @@ const zh: Record<string, string> = {
   'dashboard.strip.noEvalData': '暂无评估数据',
   'users.toolConsumersHint': '会调用该工具的 Agent。撤销后它们都会停止，包括以该用户身份运行的定时场景。',
   'optimization.agentTypeHint': '分析哪个 Agent 的 trace。子 Agent 部署后自动出现。',
+  'registry.reviewTitle': '待审批',
+  'registry.reviewDesc': '从 Skill ERP 发布、等待决定的 Skill。批准后即可在下方导入。',
+  'registry.reviewReason': '原因',
+  'registry.reviewReasonPlaceholder': '驳回时必填 —— 作者只能看到这句话',
+  'registry.reviewReasonRequired': '驳回必须填写原因：这是 Skill 作者唯一能收到的反馈。',
+  'registry.approve': '批准',
+  'registry.reject': '驳回',
+  'registry.reviewDone': '记录状态现为 {status}（审批人 {by}）。',
+  'registry.colActions': '操作',
+  'registry.colStatus': '状态',
 };
 
 export default zh;

@@ -227,6 +227,11 @@ def _fetch_record_detail(record_id):
         "name": r.get("name", ""),
         "description": r.get("description") or description,
         "status": r.get("status", ""),
+        # Why the curator decided what they decided. `statusReason` is the only
+        # place the Registry records it, and the Admin Console now REQUIRES one to
+        # reject — which was pointless while this list showed the author a bare
+        # "Rejected" and nothing else.
+        "statusReason": r.get("statusReason", ""),
         "createdAt": _iso(r.get("createdAt")),
         "updatedAt": _iso(r.get("updatedAt")),
         "instructions": instructions,
@@ -576,6 +581,7 @@ def _a2a_fetch_detail(record_id):
         "name": r.get("name", "") or form.get("name", ""),
         "description": r.get("description", "") or form.get("description", ""),
         "status": r.get("status", ""),
+        "statusReason": r.get("statusReason", ""),
         "createdAt": _iso_or_empty(r.get("createdAt")),
         "updatedAt": _iso_or_empty(r.get("updatedAt")),
         "card": form,

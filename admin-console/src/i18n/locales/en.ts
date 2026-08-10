@@ -772,6 +772,16 @@ const en: Record<string, string> = {
   'dashboard.strip.noEvalData': 'No evaluation data',
   'users.toolConsumersHint': 'Agents that call this tool. Revoking it stops all of them, including scheduled scenes that run as this user.',
   'optimization.agentTypeHint': 'Which agent\'s traces to analyse. Sub-agents appear once deployed.',
+  'registry.reviewTitle': 'Awaiting review',
+  'registry.reviewDesc': 'Skills published from the Skill ERP, waiting on a decision. Approving one makes it importable below.',
+  'registry.reviewReason': 'Reason',
+  'registry.reviewReasonPlaceholder': 'Required to reject — the author sees only this',
+  'registry.reviewReasonRequired': 'A reason is required when rejecting: it is the only feedback the skill\'s author receives.',
+  'registry.approve': 'Approve',
+  'registry.reject': 'Reject',
+  'registry.reviewDone': 'Record is now {status} (reviewed by {by}).',
+  'registry.colActions': 'Actions',
+  'registry.colStatus': 'Status',
 };
 
 export default en;

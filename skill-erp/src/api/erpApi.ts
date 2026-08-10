@@ -11,6 +11,12 @@ export interface MyRecord {
   name: string;
   description: string;
   status: string;
+  /**
+   * The curator's reason, from the Registry's `statusReason`. Shown beside a
+   * REJECTED status: the Admin Console requires a reason to reject, and this is
+   * the only place the author can read it.
+   */
+  statusReason?: string;
   createdAt: string;
   updatedAt: string;
   instructions?: string;
@@ -153,6 +159,12 @@ export interface MyA2aRecord {
   name: string;
   description: string;
   status: string;
+  /**
+   * The curator's reason, from the Registry's `statusReason`. Shown beside a
+   * REJECTED status: the Admin Console requires a reason to reject, and this is
+   * the only place the author can read it.
+   */
+  statusReason?: string;
   createdAt: string;
   updatedAt: string;
   card: A2ACard;

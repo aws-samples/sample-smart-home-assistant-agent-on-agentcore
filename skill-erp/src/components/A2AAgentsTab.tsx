@@ -145,12 +145,24 @@ const A2AAgentsTab: React.FC = () => {
     return v === k ? s : v;
   };
 
-  const renderStatus = (status: string) => {
+  const renderStatus = (status: string, reason?: string) => {
     const label = statusLabel(status);
     const s = status.toUpperCase();
     if (s === 'APPROVED' || s === 'PUBLISHED') return <StatusIndicator type="success">{label}</StatusIndicator>;
     if (s === 'PENDING' || s === 'REVIEW') return <StatusIndicator type="pending">{label}</StatusIndicator>;
-    if (s === 'REJECTED') return <StatusIndicator type="error">{label}</StatusIndicator>;
+    if (s === 'REJECTED') {
+      // The curator's reason, next to the status. The Admin Console requires one
+      // to reject; showing only "Rejected" here made that requirement pointless —
+      // the author was told no and never told why.
+      return (
+        <SpaceBetween size="xxs">
+          <StatusIndicator type="error">{label}</StatusIndicator>
+          {!!reason && (
+            <Box variant="small" color="text-status-error">{reason}</Box>
+          )}
+        </SpaceBetween>
+      );
+    }
     return <Badge>{label}</Badge>;
   };
 
@@ -350,7 +362,7 @@ const A2AAgentsTab: React.FC = () => {
             { id: 'name', header: t('table.name'), cell: (r) => r.name },
             { id: 'description', header: t('table.description'), cell: (r) => r.description },
             { id: 'endpoint', header: t('erp.a2a.list.colEndpoint'), cell: (r) => r.card.endpoint },
-            { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status) },
+            { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
             {
               id: 'updated',
               header: t('table.updated'),

@@ -174,9 +174,15 @@ def approve_record(client, registry_id: str, record_id: str,
         client.submit_registry_record_for_approval(
             registryId=registry_id, recordId=record_id)
         status = _wait()
-    if status == STATUS_PENDING_APPROVAL:
+    # REJECTED goes straight to APPROVED — measured against a real record, and it
+    # is what lets a reviewer change their mind without asking the author to
+    # republish. Handled explicitly because this function previously fell through
+    # for anything that was neither DRAFT nor PENDING_APPROVAL and RETURNED THAT
+    # STATUS, so an approve on a rejected record reported "REJECTED" as though the
+    # call had succeeded.
+    if status in (STATUS_PENDING_APPROVAL, STATUS_REJECTED):
         set_record_status(client, registry_id, record_id, STATUS_APPROVED,
-                          reason or "approved by deploy script")
+                          reason or "approved")
         status = _wait()
     return status
 

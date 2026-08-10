@@ -32,6 +32,7 @@ import {
   startKBSync,
   getKBSyncStatus,
   listRegistryRecords,
+  reviewRegistryRecord,
   importRegistryRecords,
   listA2aAgents,
   A2AAgentRecord,
@@ -2038,6 +2039,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [registrySelections, setRegistrySelections] = useState<Record<string, boolean>>({});
   const [registryTargetUser, setRegistryTargetUser] = useState<string>('__global__');
   const [registryImporting, setRegistryImporting] = useState(false);
+  // Skills awaiting a decision, and the recordId currently being reviewed so the
+  // right row shows a spinner rather than the whole table.
+  const [pendingRecords, setPendingRecords] = useState<RegistryRecord[]>([]);
+  const [reviewing, setReviewing] = useState('');
+  const [rejectReason, setRejectReason] = useState<Record<string, string>>({});
 
   // User settings (model ID)
   const [modelId, setModelId] = useState('');
@@ -2537,12 +2543,57 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     setRegistrySelections({});
     setRegistryTargetUser(selectedUserId);
     try {
-      const records = await listRegistryRecords('APPROVED');
+      // Two lists: what can be imported, and what is waiting on a decision.
+      // Loaded together because a reviewer opening this modal is usually here to
+      // do both, and the pending queue was previously invisible in the product —
+      // a skill published from the Skill ERP sat in PENDING_APPROVAL with only
+      // the AWS console able to move it.
+      // REJECTED is in the queue too, not only PENDING_APPROVAL. The Registry
+      // allows REJECTED -> APPROVED (measured), so a reviewer who changes their
+      // mind should not have to ask the author to republish — and a rejected
+      // record that vanished from every screen was effectively unrecoverable
+      // without the AWS console.
+      const [records, pending, rejected] = await Promise.all([
+        listRegistryRecords('APPROVED'),
+        listRegistryRecords('PENDING_APPROVAL').catch(() => []),
+        listRegistryRecords('REJECTED').catch(() => []),
+      ]);
       setRegistryRecords(records);
+      setPendingRecords([...pending, ...rejected]);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setRegistryLoading(false);
+    }
+  };
+
+  const handleReview = async (
+    recordId: string, decision: 'approve' | 'reject' | 'deprecate') => {
+    clearMessages();
+    const reason = (rejectReason[recordId] || '').trim();
+    if (decision === 'reject' && !reason) {
+      // Enforced server-side too; asking here saves a round trip and says why.
+      setError(t('registry.reviewReasonRequired'));
+      return;
+    }
+    setReviewing(recordId);
+    try {
+      const out = await reviewRegistryRecord(recordId, decision, reason);
+      setSuccess(t('registry.reviewDone')
+        .replace('{status}', out.status)
+        .replace('{by}', out.reviewedBy || ''));
+      // Reload both lists: an approval moves a record from one to the other.
+      const [approved, pending, rejected] = await Promise.all([
+        listRegistryRecords('APPROVED'),
+        listRegistryRecords('PENDING_APPROVAL').catch(() => []),
+        listRegistryRecords('REJECTED').catch(() => []),
+      ]);
+      setRegistryRecords(approved);
+      setPendingRecords([...pending, ...rejected]);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setReviewing('');
     }
   };
 
@@ -2880,6 +2931,74 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           }
         >
           <SpaceBetween size="m">
+            {/* The review queue. Placed above the import list because a skill has
+                to be approved before it can be imported, so this is the first
+                thing a reviewer needs — and because the queue was invisible in the
+                product until now: the Registry holds the state machine and nothing
+                here called it. */}
+            {pendingRecords.length > 0 && (
+              <Container header={
+                <CloudscapeHeader variant="h3" description={t('registry.reviewDesc')}
+                                  counter={`(${pendingRecords.length})`}>
+                  {t('registry.reviewTitle')}
+                </CloudscapeHeader>
+              }>
+                <Table
+                  variant="embedded"
+                  contentDensity="compact"
+                  items={pendingRecords}
+                  trackBy="recordId"
+                  columnDefinitions={[
+                    { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
+                    {
+                      id: 'status',
+                      header: t('registry.colStatus'),
+                      cell: (r) => (r.status === 'REJECTED'
+                        ? <StatusIndicator type="error">{r.status}</StatusIndicator>
+                        : <StatusIndicator type="pending">{r.status}</StatusIndicator>),
+                    },
+                    { id: 'description', header: t('registry.colDescription'),
+                      cell: (r) => r.description },
+                    {
+                      id: 'reason',
+                      header: t('registry.reviewReason'),
+                      minWidth: 200,
+                      // Required to reject: statusReason is the only feedback the
+                      // skill's author ever sees, so an unexplained rejection is
+                      // indistinguishable from the system losing their work.
+                      cell: (r) => (
+                        <Input
+                          value={rejectReason[r.recordId] || ''}
+                          placeholder={t('registry.reviewReasonPlaceholder')}
+                          onChange={({ detail }) =>
+                            setRejectReason((prev) => ({ ...prev, [r.recordId]: detail.value }))}
+                        />
+                      ),
+                    },
+                    {
+                      id: 'actions',
+                      header: t('registry.colActions'),
+                      minWidth: 210,
+                      cell: (r) => (
+                        <SpaceBetween direction="horizontal" size="xxs">
+                          <Button variant="primary"
+                                  loading={reviewing === r.recordId}
+                                  onClick={() => handleReview(r.recordId, 'approve')}>
+                            {t('registry.approve')}
+                          </Button>
+                          {r.status !== 'REJECTED' && (
+                            <Button loading={reviewing === r.recordId}
+                                    onClick={() => handleReview(r.recordId, 'reject')}>
+                              {t('registry.reject')}
+                            </Button>
+                          )}
+                        </SpaceBetween>
+                      ),
+                    },
+                  ]}
+                />
+              </Container>
+            )}
             <p>{t('registry.modalHint')}</p>
             <FormField label={t('registry.targetScope')}>
               <Select

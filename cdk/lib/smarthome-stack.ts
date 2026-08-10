@@ -1213,6 +1213,11 @@ export class SmartHomeStack extends cdk.Stack {
     const registryResource = adminApi.root.addResource("registry");
     const registryRecordsResource = registryResource.addResource("records");
     registryRecordsResource.addMethod("GET", adminIntegration, authMethodOptions);
+    // POST on the same resource is the skill review action (approve / reject /
+    // deprecate). Sharing the resource rather than adding a path: the admin
+    // Lambda's auto-generated API Gateway resource policy is near the 20 KB cap,
+    // which is the same reason the fleet and scenario reads ride on GET here.
+    registryRecordsResource.addMethod("POST", adminIntegration, authMethodOptions);
     const registryImportResource = registryResource.addResource("import");
     registryImportResource.addMethod("POST", adminIntegration, authMethodOptions);
     // A2A agents listing reuses the existing /registry/records GET with an

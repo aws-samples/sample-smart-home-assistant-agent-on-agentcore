@@ -745,6 +745,35 @@ export async function listRegistryRecords(status: string = 'APPROVED'): Promise<
   return data.records || [];
 }
 
+/**
+ * Approve, reject or deprecate a published skill.
+ *
+ * The approval state machine is Registry-managed; until now nothing in this
+ * product called it, so a skill published from the Skill ERP sat in
+ * PENDING_APPROVAL and only the AWS console could move it.
+ *
+ * `reason` is stored as the record's `statusReason`, which is the only place the
+ * Registry keeps *why* — and therefore the only feedback the skill's author gets.
+ * The backend requires it for a rejection.
+ */
+export async function reviewRegistryRecord(
+  recordId: string,
+  decision: 'approve' | 'reject' | 'deprecate',
+  reason = ''
+): Promise<{ status: string; previousStatus: string; reviewedBy: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/records`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ recordId, decision, reason }),
+  });
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) {
+    throw new Error(body.error || `Failed to review record (${res.status})`);
+  }
+  return body;
+}
+
 export interface ImportRegistryRecordsResult {
   imported: Array<{ recordId: string; skillName: string; userId: string }>;
   errors: string[];
