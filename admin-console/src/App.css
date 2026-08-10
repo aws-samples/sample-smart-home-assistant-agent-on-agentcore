@@ -1217,3 +1217,13 @@ a.btn {
 .drawer-access-list li {
   margin: 2px 0;
 }
+
+/* Which agents call a Gateway tool, on the Tool Policy row. Muted and last: the
+   checkbox and the tool name are what an admin acts on, and this is the
+   consequence they need to see before acting. */
+.perm-tool-consumers {
+  font-size: 11px;
+  color: var(--color-text-status-inactive, #8d99a8);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}

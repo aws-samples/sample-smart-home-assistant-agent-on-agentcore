@@ -770,6 +770,8 @@ const zh: Record<string, string> = {
   'dashboard.strip.driftAlerts': '{n} 个评估器下滑',
   'dashboard.strip.version': '生产版本',
   'dashboard.strip.noEvalData': '暂无评估数据',
+  'users.toolConsumersHint': '会调用该工具的 Agent。撤销后它们都会停止，包括以该用户身份运行的定时场景。',
+  'optimization.agentTypeHint': '分析哪个 Agent 的 trace。子 Agent 部署后自动出现。',
 };
 
 export default zh;

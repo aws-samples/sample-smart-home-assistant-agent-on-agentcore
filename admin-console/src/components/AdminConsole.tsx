@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   listSkills,
   createSkill,
@@ -48,12 +48,14 @@ import {
   getRecommendation,
   deleteRecommendation,
   applyRecommendation,
+  listAgentFleet,
   listBundles,
   listABTests,
   startABTest,
   stopABTest,
   getABToggle,
   setABToggle,
+  FleetAgent,
   OptAgentType,
   OptRecommendation,
   OptBundle,
@@ -1385,7 +1387,11 @@ const EVALUATORS = [
 // AgentTypes the redesigned UI exposes. Voice was removed because the
 // optimization gateway proxies HTTP only — voice traffic stays on its
 // dedicated runtime via WSS direct-to-runtime. See spec §2.3.
-type OptUiAgentType = 'text' | 'tool_desc';
+// `text` and `tool_desc` are the built-in targets; any other value is a deployed
+// agent's id, which the backend resolves to that agent's own runtime. A closed
+// union here would mean editing the frontend every time a specialist is deployed,
+// which is the config.js problem this page was supposed to avoid.
+type OptUiAgentType = 'text' | 'tool_desc' | (string & {});
 
 interface OptimizationTabProps {
   error: string;
@@ -1402,6 +1408,9 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
   const [scope, setScope] = useState<string>('__global__');
   const [agentType, setAgentType] = useState<OptUiAgentType>('text');
   const [previewUnavailable, setPreviewUnavailable] = useState(false);
+  // Optimisation targets: the two built-ins plus every deployed agent. Loaded
+  // from the fleet so the list cannot drift from what is actually running.
+  const [fleet, setFleet] = useState<FleetAgent[]>([]);
 
   const [recs, setRecs] = useState<OptRecommendation[]>([]);
   const [bundles, setBundles] = useState<OptBundle[]>([]);
@@ -1438,6 +1447,26 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
       setLoading(false);
     }
   }, [scope, agentType, setError]);
+
+  useEffect(() => {
+    // A failure here leaves the two built-in targets, which is the behaviour this
+    // page had before — degraded, not broken.
+    listAgentFleet().then(setFleet).catch(() => setFleet([]));
+  }, []);
+
+  const optTargets = useMemo(() => {
+    const base = [
+      { value: 'text', label: t('prompts.textAgent') },
+      { value: 'tool_desc', label: t('optimization.toolDesc') },
+    ];
+    // Only runtimes can be optimised: a Gateway tool has no traces to analyse,
+    // and the A/B variant runs the orchestrator's image so its prompt is the
+    // orchestrator's.
+    const agents = fleet
+      .filter((a) => a.kind === 'specialist' || a.kind === 'voice')
+      .map((a) => ({ value: a.agentId, label: a.displayName || a.agentId }));
+    return [...base, ...agents];
+  }, [fleet, t]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -1532,15 +1561,22 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
                 />
               </div>
             </FormField>
-            <FormField label={t('optimization.agentType')}>
-              <SegmentedControl
-                selectedId={agentType}
-                options={[
-                  { id: 'text', text: t('prompts.textAgent') },
-                  { id: 'tool_desc', text: t('optimization.toolDesc') },
-                ]}
-                onChange={({ detail }) => setAgentType(detail.selectedId as OptUiAgentType)}
-              />
+            <FormField label={t('optimization.agentType')}
+                       description={t('optimization.agentTypeHint')}>
+              {/* Options come from the fleet read model, so a newly deployed
+                  sub-agent is optimisable without a frontend change. The two
+                  built-ins stay first because they are what most runs target. */}
+              <div style={{ maxWidth: 320 }}>
+                <Select
+                  selectedOption={
+                    optTargets.find((o: { value: string }) => o.value === agentType)
+                    ?? optTargets[0]
+                  }
+                  onChange={({ detail }) =>
+                    setAgentType(detail.selectedOption.value as OptUiAgentType)}
+                  options={optTargets}
+                />
+              </div>
             </FormField>
           </SpaceBetween>
         </SpaceBetween>
@@ -3472,6 +3508,16 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                           )}
                           <span className="perm-tool-desc">{tool.description}</span>
                           <span className="perm-tool-target">{tool.targetName}</span>
+                          {/* Who breaks if this is revoked. The list was flat
+                              before, so nothing said that turning off
+                              control_device also stops the scheduled scenes and
+                              two specialists. */}
+                          {!!tool.consumers?.length && (
+                            <span className="perm-tool-consumers"
+                                  title={t('users.toolConsumersHint')}>
+                              {tool.consumers.join(', ')}
+                            </span>
+                          )}
                         </label>
                       ))}
                     </div>

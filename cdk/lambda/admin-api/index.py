@@ -1037,11 +1037,18 @@ def list_gateway_tools(_event):
                             tool_defs = json.loads(obj["Body"].read())
 
                 for tool_def in tool_defs:
+                    import tool_consumers
+
                     tools.append({
                         "name": tool_def.get("name", ""),
                         "description": tool_def.get("description", ""),
                         "targetName": target_name,
                         "source": "gateway",
+                        # Which agents call this tool, so the Tool Policy page can
+                        # say who breaks when it is revoked. Derived from each
+                        # agent's declared tool list — see tool_consumers.py.
+                        "consumers": tool_consumers.consumers_for(
+                            tool_def.get("name", "")),
                     })
             except Exception as e:
                 logger.warning(f"Failed to get target {target_id}: {e}")

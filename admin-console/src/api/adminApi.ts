@@ -319,6 +319,13 @@ export interface GatewayTool {
   targetName: string;
   /** Tagged by the admin API so the UI can group and default-check built-ins. */
   source?: 'builtin' | 'gateway';
+  /**
+   * Agent ids that call this tool, derived from each agent's declared tool list.
+   * Shown next to the checkbox so revoking a tool says who it breaks — the flat
+   * list gave no hint that `control_device` also carries the scheduled scenes and
+   * two specialists.
+   */
+  consumers?: string[];
 }
 
 export interface UserPermissions {
@@ -967,7 +974,13 @@ export async function listA2aGrantsForRecord(
 // AgentCore Optimization (recommendations, configuration bundles, A/B tests).
 // See docs/superpowers/specs/2026-05-14-agentcore-optimization-design.md.
 // ---------------------------------------------------------------------------
-export type OptAgentType = 'text' | 'voice' | 'tool_desc';
+/**
+ * An optimisation target. The three built-ins, plus any deployed agent's id —
+ * the backend resolves an unrecognised value against the fleet and analyses THAT
+ * agent's traces. A closed union would have to be edited for every new
+ * specialist, which is the drift this page exists to avoid.
+ */
+export type OptAgentType = 'text' | 'voice' | 'tool_desc' | (string & {});
 export type OptRecStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'DELETING';
 export type OptABExecutionStatus = 'NOT_STARTED' | 'PAUSED' | 'RUNNING' | 'STOPPED';
 export type OptABStatus =

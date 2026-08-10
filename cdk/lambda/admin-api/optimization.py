@@ -129,13 +129,64 @@ def _load_current_prompt(scope: str, agent_type: str) -> str:
 
 
 # --- Validation --------------------------------------------------------------
+# The three built-in optimization targets. `text` and `voice` are runtimes;
+# `tool_desc` optimises a Gateway tool's description and is not trace-driven.
+# A deployed sub-agent's id is also accepted — see `_valid_agent_type` — so
+# optimization is not pinned to the orchestrator.
 _VALID_AGENT_TYPES = ("text", "voice", "tool_desc")
 
 
+def _fleet_runtime_arns() -> dict[str, str]:
+    """agentId -> runtime ARN, for every runtime the dashboard knows about.
+
+    Derived from the same ARN list the fleet page and the span filter use, so a
+    sub-agent deployed with `deploy.py` becomes an optimization target with no
+    code change here. The id matches the fleet's `agentId`, which is what lets
+    the console offer a selector whose options come from real data rather than
+    from a hardcoded list in config.js.
+    """
+    import dashboard
+
+    out: dict[str, str] = {}
+    for arn in dashboard._all_runtime_arns():
+        runtime_id = _runtime_id_from_arn(arn)
+        name = _runtime_short_name(runtime_id)
+        head, _, tail = name.partition("_")
+        agent_id = (name if tail and tail != head else head) or name
+        if agent_id:
+            out.setdefault(agent_id, arn)
+    return out
+
+
+def _valid_agent_type(agent_type: str) -> bool:
+    """True for a built-in target or any deployed agent id."""
+    if agent_type in _VALID_AGENT_TYPES:
+        return True
+    return agent_type in _fleet_runtime_arns()
+
+
 def _runtime_arn_for(agent_type: str) -> str:
+    """The runtime ARN an optimization target runs on.
+
+    `text` and `voice` keep their env vars — they are the two runtimes the setup
+    script provisions by name. Anything else is looked up in the fleet, so an
+    optimization run against a sub-agent analyses THAT agent's traces.
+
+    The previous version returned the text runtime for every non-voice value,
+    which meant an optimization run naming a sub-agent silently analysed the
+    orchestrator's traces and produced a recommendation for the wrong prompt.
+    """
     if agent_type == "voice":
         return os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
-    return os.environ.get("AGENT_RUNTIME_ARN", "")
+    if agent_type == "text":
+        return os.environ.get("AGENT_RUNTIME_ARN", "")
+    arn = _fleet_runtime_arns().get(agent_type, "")
+    if arn:
+        return arn
+    # Unknown id: return "" rather than the orchestrator's ARN. An empty ARN
+    # fails the log-group validation with a clear message; falling back would
+    # analyse the wrong agent and look like it worked.
+    return ""
 
 
 def _runtime_id_from_arn(arn: str) -> str:
@@ -191,7 +242,7 @@ def start_recommendation(event):
     body = json.loads(event.get("body") or "{}")
     scope = body.get("scope", "__global__")
     agent_type = body.get("agentType", "")
-    if agent_type not in _VALID_AGENT_TYPES:
+    if not _valid_agent_type(agent_type):
         return _resp(400, {"error": "ValidationException", "message": "agentType must be text|voice|tool_desc"})
     log_group_arn = body.get("logGroupArn") or _default_log_group_arn(agent_type)
     err = _validate_log_group(log_group_arn, agent_type)
