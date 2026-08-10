@@ -172,6 +172,13 @@ export interface SessionInfo {
   sessionId: string;
   lastActiveAt: string;
   totalTokens7d?: number;
+  /**
+   * The 7-day total split by agent, keyed by the same `agentId` the fleet page
+   * uses. Usually one entry: a sub-agent's runtime stamps its own session id
+   * rather than inheriting the orchestrator's, so a delegated turn's tokens land
+   * under a different session than the turn that caused them.
+   */
+  tokensByAgent?: Record<string, number>;
   // Which runtime the session lives on — the admin Lambda derives this from
   // the DynamoDB sort key (`__session_text__` vs `__session_voice__`) so the
   // stop-session call targets the correct runtime ARN.

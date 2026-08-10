@@ -3316,7 +3316,29 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               {
                 id: 'tokens7d',
                 header: t('sessions.colTokens7d'),
-                cell: (s) => (typeof s.totalTokens7d === 'number' ? s.totalTokens7d.toLocaleString() : '-'),
+                // The agent is named next to the number when the split says which
+                // one it was. Until now every session's tokens were one figure
+                // with no owner, which is unreadable once nine runtimes report
+                // into the same log group.
+                cell: (s) => {
+                  if (typeof s.totalTokens7d !== 'number') return '-';
+                  const split = Object.entries(s.tokensByAgent || {});
+                  return (
+                    <span title={split.map(([a, n]) => `${a}: ${n.toLocaleString()}`).join('\n')}>
+                      {s.totalTokens7d.toLocaleString()}
+                      {split.length === 1 && (
+                        <CloudscapeBox variant="small" color="text-body-secondary" display="inline">
+                          {` ${split[0][0]}`}
+                        </CloudscapeBox>
+                      )}
+                      {split.length > 1 && (
+                        <CloudscapeBox variant="small" color="text-body-secondary" display="inline">
+                          {` ${split.length} agents`}
+                        </CloudscapeBox>
+                      )}
+                    </span>
+                  );
+                },
               },
               {
                 id: 'actions',

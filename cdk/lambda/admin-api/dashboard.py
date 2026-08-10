@@ -85,7 +85,39 @@ NON_RATIO_EVALUATORS = {"smarthome_SmartHomeQuality"}
 # Service name as it appears on spans/eval metrics for the text runtime.
 # Kept as its own constant because the A/B block's per-variant dimensions are
 # text-runtime-only (the control/treatment endpoints hang off this runtime).
-SERVICE_NAME = "smarthome_smarthome.DEFAULT"
+# The orchestrator's own service.name. Kept as a constant because two things
+# genuinely are orchestrator-specific rather than fleet-wide:
+#
+#  - the A/B evaluation metrics, which are emitted by the online-eval configs
+#    attached to the text runtime and to no other (verified against
+#    Bedrock-AgentCore/Evaluations: only this service.name has them);
+#  - the fallback entry in `_service_names()`, so the fleet filter still names the
+#    orchestrator even if the ARN env vars are empty.
+#
+# Everything that IS fleet-wide derives its list from the runtime ARNs instead —
+# see `_service_names()` — so a new sub-agent needs no code change here.
+ORCHESTRATOR_SERVICE_NAME = "smarthome_smarthome.DEFAULT"
+
+
+def service_name_for(agent_id: str) -> str:
+    """The `service.name` a given fleet agentId reports spans under.
+
+    Derived from the configured runtime ARNs, so it answers for any deployed
+    agent rather than only the orchestrator. Returns "" for an unknown id, which
+    callers treat as "no per-agent data" rather than silently falling back to the
+    orchestrator's — attributing one agent's metrics to another is worse than
+    showing none.
+    """
+    if not agent_id:
+        return ""
+    for arn in _all_runtime_arns():
+        svc = _service_name_from_arn(arn)
+        name = svc.split(".")[0]
+        head, _, tail = name.partition("_")
+        candidate = (name if tail and tail != head else head) or name
+        if candidate == agent_id:
+            return svc
+    return ""
 
 _clients = {}
 
@@ -173,8 +205,8 @@ def _service_names():
         svc = _service_name_from_arn(arn)
         if svc and svc not in out:
             out.append(svc)
-    if SERVICE_NAME not in out:
-        out.insert(0, SERVICE_NAME)
+    if ORCHESTRATOR_SERVICE_NAME not in out:
+        out.insert(0, ORCHESTRATOR_SERVICE_NAME)
     return out
 
 
@@ -508,7 +540,14 @@ def _fetch_ab_comparison(days):
                         "MetricName": name,
                         "Dimensions": [
                             {"Name": "onlineEvaluationConfigId", "Value": cfg},
-                            {"Name": "service.name", "Value": SERVICE_NAME},
+                            # The A/B evaluators are attached to the
+                            # orchestrator's runtime and to no other, so this
+                            # dimension is correctly orchestrator-specific rather
+                            # than a missed parameterisation. Confirmed against
+                            # Bedrock-AgentCore/Evaluations, where only this
+                            # service.name carries evaluation metrics.
+                            {"Name": "service.name",
+                             "Value": ORCHESTRATOR_SERVICE_NAME},
                         ],
                     },
                     "Period": 86400,

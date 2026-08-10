@@ -583,11 +583,33 @@ def _fetch_token_totals_7d():
     """
     end_time = int(time.time())
     start_time = end_time - 7 * 24 * 3600
+    # `aws/spans` is an account-wide log group — around forty unrelated runtimes
+    # share it in this account. Without a service filter this sums every project's
+    # tokens and attributes them to our sessions; it happens to be harmless today
+    # only because no other project logged Strands token spans in the window.
+    # dashboard.py already derives the exact list from the runtime ARNs, so a new
+    # sub-agent is covered by DASHBOARD_EXTRA_RUNTIME_ARNS with no code change.
+    #
+    # Grouped by service.name as well as session.id so a row can be attributed to
+    # one agent rather than to the fleet.
+    #
+    # Measured caveat, worth stating because it bounds what this page can claim: a
+    # sub-agent's runtime stamps its OWN session id (a bare UUID) rather than
+    # inheriting the orchestrator's `user-session-*`. AgentCore assigns
+    # runtimeSessionId per runtime, and the A2A hop does not propagate it. So a
+    # delegated turn's tokens are recorded under a session id this table has no row
+    # for, and they surface in the per-agent split of a session that is not listed
+    # here rather than alongside the orchestrator turn that caused them. Joining
+    # the two would need the orchestrator to pass its session id across the A2A
+    # hop; until then, per-agent totals are correct and per-TURN attribution across
+    # a delegation is not available.
     query = (
         'filter scope.name = "strands.telemetry.tracer"\n'
+        + dashboard._spans_service_filter() +
         '| filter ispresent(attributes.gen_ai.usage.total_tokens)\n'
         '| stats sum(attributes.gen_ai.usage.total_tokens) as totalTokens '
-        'by attributes.session.id as sessionId\n'
+        'by attributes.session.id as sessionId, '
+        'resource.attributes.service.name as serviceName\n'
         '| limit 10000'
     )
     try:
@@ -629,18 +651,46 @@ def _fetch_token_totals_7d():
             pass
         return {}
 
-    totals = {}
+    # {sessionId: {"total": int, "byAgent": {agentId: int}}}. The rows now arrive
+    # split by service.name, so they are summed into a total AND kept per agent —
+    # a delegated turn spends tokens in the sub-agent's runtime under the same
+    # session id, and folding those into one number is what made per-agent cost
+    # unanswerable from this page.
+    totals: dict[str, dict] = {}
     for row in res.get("results", []):
         record = {field["field"]: field["value"] for field in row}
         session_id = record.get("sessionId") or record.get("attributes.session.id", "")
-        raw = record.get("totalTokens", "0")
         if not session_id:
             continue
         try:
-            totals[session_id] = int(float(raw))
+            tokens = int(float(record.get("totalTokens", "0")))
         except (TypeError, ValueError):
             continue
+        service = (record.get("serviceName")
+                   or record.get("resource.attributes.service.name", ""))
+        # `smarthome_smarthome.DEFAULT` -> `smarthome`: the same agent id the
+        # fleet page uses, so a token figure here can be matched to a row there.
+        agent_id = _agent_id_from_service_name(service)
+        slot = totals.setdefault(session_id, {"total": 0, "byAgent": {}})
+        slot["total"] += tokens
+        if agent_id:
+            slot["byAgent"][agent_id] = slot["byAgent"].get(agent_id, 0) + tokens
     return totals
+
+
+def _agent_id_from_service_name(service: str) -> str:
+    """`smarthome_smarthome.DEFAULT` -> `smarthome`, matching the fleet's agentId.
+
+    Mirrors agents.py: the runtime name is `<project>_<runtime>` and the project
+    half is the id, except where the two halves differ (`smarthome_bundles`), in
+    which case the full name is the id so the A/B variant does not collapse onto
+    the orchestrator.
+    """
+    name = (service or "").split(".")[0]
+    if not name:
+        return ""
+    head, _, tail = name.partition("_")
+    return (name if tail and tail != head else head) or name
 
 
 def list_sessions(_event):
@@ -666,7 +716,12 @@ def list_sessions(_event):
 
     token_totals = _fetch_token_totals_7d()
     for s in sessions:
-        s["totalTokens7d"] = token_totals.get(s["sessionId"], 0)
+        entry = token_totals.get(s["sessionId"]) or {}
+        s["totalTokens7d"] = entry.get("total", 0)
+        # Per-agent split, so a session's spend can be attributed to the
+        # orchestrator versus the specialists it delegated to. Empty when the
+        # session predates the split or made no delegated call.
+        s["tokensByAgent"] = entry.get("byAgent", {})
 
     return response(200, {"sessions": sessions})
 
