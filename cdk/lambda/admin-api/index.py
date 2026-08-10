@@ -13,6 +13,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 from agent_prompt_defaults import DEFAULTS as PROMPT_DEFAULTS
+from a2a_prompt_defaults import A2A_DEFAULTS
 
 import optimization  # AgentCore Optimization handlers; see optimization.py
 import dashboard  # Overview ops-dashboard aggregation; see dashboard.py
@@ -141,7 +142,11 @@ def list_skills(event):
     user_id = params.get("userId", "__global__")
 
     if params.get("promptBundle") == "1":
-        out = {agent_type: _read_prompt_record(user_id, agent_type) for agent_type in PROMPT_AGENT_TYPES}
+        # The bundle is the two built-in runtimes only. A sub-agent's prompt is
+        # read one at a time from the agent detail page, because bundling all
+        # eight would make the Prompt tab pay for six reads it does not render.
+        out = {agent_type: _read_prompt_record(user_id, agent_type)
+               for agent_type in BUILTIN_AGENT_TYPES}
         out["userId"] = user_id
         return response(200, out)
 
@@ -351,8 +356,72 @@ def update_settings(event):
 # Agent System Prompts
 # ---------------------------------------------------------------------------
 
-PROMPT_AGENT_TYPES = ("text", "voice")
+# The two runtimes whose prompts ship in the agent image. Both have a built-in
+# default in agent_prompt_defaults, so "Revert to Default" has something to show.
+BUILTIN_AGENT_TYPES = ("text", "voice")
 PROMPT_MAX_LEN = 16 * 1024  # 16 KB ceiling to avoid accidentally saving a doc
+
+# Approved A2A agent names, cached per container. Populated from the Registry
+# rather than hardcoded so a newly deployed sub-agent becomes governable without
+# a Lambda change — the same reason the fleet page derives its list.
+_A2A_PROMPT_AGENTS: set[str] | None = None
+
+
+def _a2a_prompt_agents(refresh: bool = False) -> set[str]:
+    """AgentCard names of the approved A2A agents, as prompt agent types.
+
+    The card `name` is the key because it is the one identifier the console, the
+    Registry record and the running sub-agent each derive independently — the
+    runtime name and the directory slug are known to only some of the three.
+
+    Cached for the container's life, since a roster change means a deploy anyway.
+    """
+    global _A2A_PROMPT_AGENTS
+    if _A2A_PROMPT_AGENTS is not None and not refresh:
+        return _A2A_PROMPT_AGENTS
+    names: set[str] = set()
+    if REGISTRY_ID:
+        try:
+            for rec in registry_ns.list_records(
+                    registry_control, REGISTRY_ID,
+                    record_type=registry_ns.RECORD_TYPE_AGENT,
+                    status=registry_ns.STATUS_APPROVED):
+                name = rec.get("displayName") or rec.get("name") or ""
+                if name:
+                    names.add(name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not list A2A agents for prompt scope: %s", e)
+            # Do NOT cache a failed lookup as an empty set: that would turn a
+            # transient Registry error into "this agent does not exist" for the
+            # rest of the container's life, and the caller would get a 400 that
+            # looks like a bad request rather than a backend problem.
+            return _A2A_PROMPT_AGENTS or set()
+    _A2A_PROMPT_AGENTS = names
+    return names
+
+
+def _valid_agent_type(agent_type: str) -> bool:
+    """True when `agent_type` names an agent whose prompt we govern.
+
+    Re-reads the Registry on a miss before rejecting. A stale cache is exactly
+    how the Cedar action map silently authorised nothing: an agent deployed after
+    this container warmed up would otherwise be permanently unaddressable, and the
+    400 would point at the caller rather than at the cache.
+    """
+    if not agent_type:
+        return False
+    if agent_type in BUILTIN_AGENT_TYPES:
+        return True
+    if agent_type in _a2a_prompt_agents():
+        return True
+    return agent_type in _a2a_prompt_agents(refresh=True)
+
+
+def _agent_type_error(agent_type: str) -> dict:
+    known = list(BUILTIN_AGENT_TYPES) + sorted(_a2a_prompt_agents())
+    return response(400, {
+        "error": f"unknown agentType {agent_type!r}; expected one of {known}",
+    })
 
 
 def _prompt_sk(agent_type: str) -> str:
@@ -403,7 +472,11 @@ def _read_prompt_record(user_id: str, agent_type: str) -> dict:
         "updatedBy": scope_rec["updatedBy"],
         "isOverride": scope_rec["isOverride"],
         "globalBody": global_rec["body"],
-        "builtinDefault": PROMPT_DEFAULTS.get(agent_type, ""),
+        # The prompt the agent ships with, so the editor can show what an
+        # override replaces and offer "Revert to Default". A sub-agent's lives in
+        # a2a_prompt_defaults (generated from its system_prompt.md) because this
+        # Lambda is packaged without the a2a-agent-registry tree.
+        "builtinDefault": PROMPT_DEFAULTS.get(agent_type) or A2A_DEFAULTS.get(agent_type, ""),
     }
 
 
@@ -426,8 +499,8 @@ def get_prompt_record(event):
     user_id = unquote(path_params.get("userId", ""))
     skill_name = path_params.get("skillName", "")
     agent_type = _agent_type_from_sk(skill_name)
-    if agent_type not in PROMPT_AGENT_TYPES:
-        return response(400, {"error": f"agentType must be one of {list(PROMPT_AGENT_TYPES)}"})
+    if not _valid_agent_type(agent_type):
+        return _agent_type_error(agent_type)
     rec = _read_prompt_record(user_id, agent_type)
     rec["userId"] = user_id
     rec["agentType"] = agent_type
@@ -451,8 +524,8 @@ def save_prompt_record(event):
 
     if not user_id:
         return response(400, {"error": "userId is required"})
-    if agent_type not in PROMPT_AGENT_TYPES:
-        return response(400, {"error": f"agentType must be one of {list(PROMPT_AGENT_TYPES)}"})
+    if not _valid_agent_type(agent_type):
+        return _agent_type_error(agent_type)
     if not isinstance(prompt_body, str) or not prompt_body.strip():
         return response(400, {"error": "promptBody is required and must be non-empty"})
     if len(prompt_body) > PROMPT_MAX_LEN:
@@ -488,8 +561,8 @@ def delete_prompt_record(event):
     user_id = unquote(path_params.get("userId", ""))
     skill_name = path_params.get("skillName", "")
     agent_type = _agent_type_from_sk(skill_name)
-    if agent_type not in PROMPT_AGENT_TYPES:
-        return response(400, {"error": f"agentType must be one of {list(PROMPT_AGENT_TYPES)}"})
+    if not _valid_agent_type(agent_type):
+        return _agent_type_error(agent_type)
     table.delete_item(Key={"userId": user_id, "skillName": _prompt_sk(agent_type)})
     return response(200, {"message": f"{agent_type} prompt override removed for '{user_id}'"})
 

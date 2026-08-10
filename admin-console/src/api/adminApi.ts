@@ -182,7 +182,16 @@ export interface SessionInfo {
 // Agent System Prompts (text / voice)
 // ---------------------------------------------------------------------------
 
-export type AgentType = 'text' | 'voice';
+/**
+ * A prompt-governed agent.
+ *
+ * `text` and `voice` are the two runtimes whose prompts ship in the agent image.
+ * Any other value is an A2A sub-agent's AgentCard name (`light-effect-agent`) —
+ * a plain string rather than a union, because the roster is derived from the
+ * Registry at runtime and a closed union here would mean editing the frontend
+ * every time a specialist is deployed.
+ */
+export type AgentType = 'text' | 'voice' | (string & {});
 
 export interface PromptRecord {
   // Saved row at the requested scope — "" when the scope has no override.
@@ -206,11 +215,33 @@ export interface AgentPromptsResponse {
 }
 
 // Prompts are stored in the same DynamoDB skills table under reserved sort
-// keys (`__prompt_text__` / `__prompt_voice__`) and served through the
-// existing /skills endpoints to avoid adding Lambda resource-policy entries
-// (admin Lambda's policy is already at the 20 KB cap).
+// keys (`__prompt_text__` / `__prompt_voice__`, or `__prompt_<cardName>__` for a
+// sub-agent) and served through the existing /skills endpoints to avoid adding
+// Lambda resource-policy entries (admin Lambda's policy is already at the 20 KB
+// cap).
 
 const promptSk = (agentType: AgentType) => `__prompt_${agentType}__`;
+
+/**
+ * One prompt record. The bundle endpoint returns text+voice only, so a
+ * sub-agent's prompt is fetched individually — bundling all eight would make the
+ * Prompt tab pay for six reads it does not render.
+ */
+export async function getAgentPrompt(
+  userId: string,
+  agentType: AgentType
+): Promise<PromptRecord & { userId: string; agentType: string }> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/skills/${encodeURIComponent(userId)}/${promptSk(agentType)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to load prompt (${res.status})`);
+  }
+  return res.json();
+}
 
 export async function getAgentPrompts(userId: string): Promise<AgentPromptsResponse> {
   const headers = await authHeaders();

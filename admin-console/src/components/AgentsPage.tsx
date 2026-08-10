@@ -9,7 +9,8 @@ import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
-import { FleetAgent, listAgentFleet } from '../api/adminApi';
+import { CognitoUserInfo, FleetAgent, listAgentFleet, listCognitoUsers } from '../api/adminApi';
+import { AgentDetailPage } from './AgentDetailPage';
 import { useI18n } from '../i18n';
 
 /**
@@ -48,16 +49,18 @@ const KIND_COLOR: Record<string, 'blue' | 'green' | 'grey' | 'severity-neutral'>
   tool: 'severity-neutral',
 };
 
-interface Props {
-  /** Set when a row is opened; P2 renders the detail view from it. */
-  onSelect?: (agent: FleetAgent) => void;
-}
-
-export function AgentsPage({ onSelect }: Props) {
+export function AgentsPage() {
   const { t, language } = useI18n();
   const [agents, setAgents] = useState<FleetAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The list and the detail view are one tab rather than two routable pages: the
+  // console has no router, and a second hash route would need its agent id to
+  // survive a reload, which means re-fetching the fleet to resolve it anyway.
+  const [selected, setSelected] = useState<FleetAgent | null>(null);
+  // Scope options for the prompt editor. Fetched here, once, rather than by the
+  // detail view — otherwise every row click re-lists Cognito.
+  const [cognitoUsers, setCognitoUsers] = useState<CognitoUserInfo[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,6 +78,14 @@ export function AgentsPage({ onSelect }: Props) {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    // A failure here only costs the per-user scope options, so the page still
+    // renders and the global prompt is still editable.
+    listCognitoUsers()
+      .then(setCognitoUsers)
+      .catch(() => setCognitoUsers([]));
+  }, []);
+
   const label = (a: FleetAgent) =>
     (language === 'zh' && a.displayNameZh) || a.displayName || a.agentId;
 
@@ -83,6 +94,19 @@ export function AgentsPage({ onSelect }: Props) {
   // orphaned, or a deploy skipped its `patch-text-agent` step so the dashboard's
   // runtime allowlist never learned the ARN. The second is invisible otherwise.
   const orphaned = agents.filter((a) => !a.live);
+
+  if (selected) {
+    // Re-read the row from the freshly loaded fleet so metrics are not frozen at
+    // whatever they were when the row was clicked.
+    const current = agents.find((a) => a.agentId === selected.agentId) ?? selected;
+    return (
+      <AgentDetailPage
+        agent={current}
+        onBack={() => setSelected(null)}
+        cognitoUsers={cognitoUsers}
+      />
+    );
+  }
 
   return (
     <SpaceBetween size="l">
@@ -133,20 +157,17 @@ export function AgentsPage({ onSelect }: Props) {
               {
                 id: 'name',
                 header: t('agents.col.name'),
-                cell: (a) =>
-                  onSelect ? (
-                    <Link
-                      href="#"
-                      onFollow={(e) => {
-                        e.preventDefault();
-                        onSelect(a);
-                      }}
-                    >
-                      {label(a)}
-                    </Link>
-                  ) : (
-                    label(a)
-                  ),
+                cell: (a) => (
+                  <Link
+                    href="#"
+                    onFollow={(e) => {
+                      e.preventDefault();
+                      setSelected(a);
+                    }}
+                  >
+                    {label(a)}
+                  </Link>
+                ),
                 sortingField: 'displayName',
               },
               {

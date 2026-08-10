@@ -510,10 +510,16 @@ interface AgentPromptTabProps {
   cognitoUsers: CognitoUserInfo[];
 }
 
-interface PromptEditorCardProps {
+export interface PromptEditorCardProps {
   agentType: AgentType;
   title: string;
   hint: string;
+  /**
+   * Editor height. Defaulted from the agent's prompt size rather than fixed:
+   * the voice prompt is a dozen lines and the orchestrator's is ten times that,
+   * so one height is either cramped or mostly blank.
+   */
+  rows?: number;
   scope: string;
   record: PromptRecord;
   draft: string;
@@ -538,10 +544,11 @@ const PROMPT_TEXTAREA_STYLE: React.CSSProperties = {
   boxSizing: 'border-box',
 };
 
-const PromptEditorCard: React.FC<PromptEditorCardProps> = ({
+export const PromptEditorCard: React.FC<PromptEditorCardProps> = ({
   agentType,
   title,
   hint,
+  rows,
   scope,
   record,
   draft,
@@ -581,9 +588,9 @@ const PromptEditorCard: React.FC<PromptEditorCardProps> = ({
       ? <StatusIndicator type="success">{t('prompts.badgeUserSet')}</StatusIndicator>
       : <StatusIndicator type="stopped">{t('prompts.badgeUserEmpty')}</StatusIndicator>;
 
-  const editorRows = isGlobalScope
+  const editorRows = rows ?? (isGlobalScope
     ? agentType === 'voice' ? 12 : 18
-    : agentType === 'voice' ? 8 : 10;
+    : agentType === 'voice' ? 8 : 10);
 
   return (
     <div style={{ flex: '1 1 0', minWidth: '320px' }}>
@@ -2538,10 +2545,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
   return (
     <div className="admin-console">
-      {/* Agents (fleet). A self-contained component rather than another block in
-          this 4000-line file: the tab needs its own data loading, and every
-          existing tab's state already lives in one shared component. Detail view
-          lands in P2 — the row link is wired then. */}
+      {/* Agents (fleet + per-agent detail). A self-contained component rather
+          than another block in this 4000-line file: the tab needs its own data
+          loading, and every existing tab's state already lives in one shared
+          component. It owns the list/detail switch internally — see AgentsPage. */}
       {activeTab === 'agents' && <AgentsPage />}
       {activeTab === 'overview' && (
         <SpaceBetween size="l">

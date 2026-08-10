@@ -337,3 +337,91 @@ def test_marker_is_derived_from_the_card_name():
     # Matches the convention the prompt-only agents already emit by hand.
     assert server._marker_for({"name": "nameless"}) == "⟦A2A:nameless⟧"
     assert server._marker_for({}) == ""
+
+
+# ---------------------------------------------------------------------------
+# The governed prompt reaches the request Agent
+# ---------------------------------------------------------------------------
+
+def test_the_request_agent_uses_the_governed_prompt():
+    """The resolver is unit-tested separately; what this pins down is the WIRING.
+    A resolver that is never called is indistinguishable from one that always
+    returns the shipped prompt — the agent works, and every admin override is
+    silently ignored."""
+    class FakeBase:
+        def __init__(self, agent):
+            self.agent = agent
+
+        async def execute(self, context, event_queue):
+            pass
+
+    cls = server._make_per_request_executor(
+        FakeBase, dict(system_prompt="SHIPPED", model_id="m",
+                       name="light-effect-agent", description="d"),
+        lambda caller: [], require_user_identity=False)
+    ex = cls("startup-agent")
+
+    import asyncio
+    built = {}
+    with patch.object(server, "resolve_system_prompt",
+                      side_effect=lambda name, shipped, user_id=None:
+                          f"GOVERNED({name},{shipped},{user_id!r})") as resolver, \
+         patch.object(server, "_build_strands_agent",
+                      side_effect=lambda **kw: built.update(kw) or "agent"):
+        # `estimate_savings` because _SKILL_IDS is module state that the earlier
+        # tests set; the skill gate is not what this test is about.
+        asyncio.run(ex.execute(_context({ALLOWED_SKILLS_HEADER: "estimate_savings"}),
+                               MagicMock()))
+
+    # Called with the card name and the shipped prompt, not with something derived
+    # from the runtime name or the directory slug.
+    resolver.assert_called_once()
+    assert resolver.call_args.args == ("light-effect-agent", "SHIPPED")
+    assert built["system_prompt"] == "GOVERNED(light-effect-agent,SHIPPED,'')"
+
+
+def test_resolving_the_prompt_does_not_mutate_the_startup_kwargs():
+    """agent_kwargs is shared across every request. Writing the resolved prompt
+    into it would make request N+1 resolve against request N's result, so one
+    user's addendum would leak into the next caller's prompt."""
+    class FakeBase:
+        def __init__(self, agent):
+            self.agent = agent
+
+        async def execute(self, context, event_queue):
+            pass
+
+    kwargs = dict(system_prompt="SHIPPED", model_id="m", name="n", description="d")
+    cls = server._make_per_request_executor(
+        FakeBase, kwargs, lambda caller: [], require_user_identity=False)
+    ex = cls("startup-agent")
+
+    import asyncio
+    with patch.object(server, "resolve_system_prompt",
+                      side_effect=lambda name, shipped, user_id=None: shipped + "+X"), \
+         patch.object(server, "_build_strands_agent", side_effect=lambda **kw: "a"):
+        for _ in range(3):
+            asyncio.run(ex.execute(_context({ALLOWED_SKILLS_HEADER: "estimate_savings"}),
+                                   MagicMock()))
+
+    assert kwargs["system_prompt"] == "SHIPPED"
+
+
+def test_the_marker_is_not_conditional_on_having_tools():
+    """A prompt-only agent used to be trusted to emit its own marker, because the
+    instruction to do so lived in its system_prompt.md. That prompt is now
+    admin-editable, and a global override REPLACES it — so the instruction leaves
+    with it and the reply arrives unattributed, with nothing raised. Verified
+    against the deployed home-security agent before this was changed.
+
+    Asserted on the source because `run_agent` binds uvicorn and cannot be called
+    from a test; what matters is that the gate is gone, and _MarkedResult already
+    makes unconditional prefixing safe (tested above).
+    """
+    import inspect
+
+    src = inspect.getsource(server.run_agent)
+    assert "marker = _marker_for(card_dict)" in src
+    assert "_marker_for(card_dict) if tools_factory" not in src, (
+        "the marker is gated on tools again — an admin who overrides a prompt-only "
+        "agent's prompt will silently lose its routing marker")

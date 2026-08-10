@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 # Import via the package so a stale copy on sys.path can't shadow these.
 from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER
+from common.governed_prompt import resolve_system_prompt
 
 # The skill ids this agent publishes, read from card.json at startup. Module-level
 # because the request path reads it and there is no way to thread an argument
@@ -294,10 +295,22 @@ def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
                                    f"could not prepare tools: {exc}")
                 return
 
+            # The admin-governed prompt, read per request. Not cached: the whole
+            # point of governance is that an edit takes effect, and a TTL here
+            # would make a saved prompt look like it had been ignored for as long
+            # as the TTL lasted. A DynamoDB GetItem is nothing beside the LLM call
+            # that follows, and the orchestrator reads its own prompt per request
+            # for the same reason.
+            kwargs = dict(agent_kwargs)
+            kwargs["system_prompt"] = resolve_system_prompt(
+                agent_kwargs["name"], agent_kwargs["system_prompt"],
+                user_id=caller.sub,
+            )
+
             # Swap in a request-scoped Agent for the duration of this call. The
             # executor instance is shared, so this must not outlive the request.
             previous = self.agent
-            request_agent = _build_strands_agent(tools=tools, **agent_kwargs)
+            request_agent = _build_strands_agent(tools=tools, **kwargs)
             if marker:
                 request_agent = _marker_prefixing_agent(request_agent, marker)
             self.agent = request_agent
@@ -402,11 +415,18 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
     # as they did.
     from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
-    # Prefix the routing marker only for tool-using agents. A prompt-only agent
-    # emits its own reliably; one that has just summarised a tool result does not,
-    # and the marker is an assertion about routing rather than something to leave
-    # to the model. Prefixing unconditionally would double it on the other three.
-    marker = _marker_for(card_dict) if tools_factory else ""
+    # Prefix the routing marker for EVERY agent. It used to be tool-using agents
+    # only, on the grounds that a prompt-only agent emits its own reliably from
+    # its system_prompt.md — which was true until that prompt became admin-editable.
+    # A global override REPLACES the shipped prompt, so the instruction to emit the
+    # marker goes with it, and the reply arrives unattributed: the orchestrator
+    # cannot say which specialist answered, and nothing errors. Expecting an admin
+    # to know they must reproduce a marker convention is not governance.
+    #
+    # Safe to apply unconditionally: _MarkedResult returns the text unchanged when
+    # it already starts with the marker, so a model that still emits it is not
+    # doubled.
+    marker = _marker_for(card_dict)
 
     executor_cls = _make_per_request_executor(
         StrandsA2AExecutor, agent_kwargs, tools_factory, require_user_identity,

@@ -69,6 +69,11 @@ from common.agents import (  # noqa: E402
 
 ALL_STEPS = ("cognito", "render", "deploy", "workload", "registry", "persist", "patch-text-agent")
 
+# The single-table store the Admin Console writes prompt overrides into. Named by
+# the CDK stack (`skillsTable`) and hardcoded there too; a sub-agent reads it to
+# resolve its governed prompt. Same literal the setup script uses.
+SKILLS_TABLE = "smarthome-skills"
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -500,6 +505,11 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         # here as well as in agentcore.json.
         "COGNITO_APP_CLIENT_ID": state.get("user_pool_client_id", ""),
         "BYPASS_TOOL_CONSENT": "true",
+        # Prompt governance: common/governed_prompt reads the admin's override
+        # from this table per request. Absent, the agent silently uses the prompt
+        # baked into its image — which is why the env var and the IAM grant below
+        # are applied together rather than in separate steps.
+        "SKILLS_TABLE_NAME": SKILLS_TABLE,
     })
     if not state.get("user_pool_client_id"):
         log(f"  [{agent}] WARNING: no UserPoolClientId in cdk-outputs.json — the "
@@ -553,12 +563,56 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
     log(f"  [{agent}] patched env + CUSTOM_JWT auth (discovery={discovery_url})")
     log(f"  [{agent}] header allowlist: {ALLOWED_SKILLS_HEADER}, {USER_TOKEN_HEADER}")
 
+    _grant_prompt_table_read(agent, rt_info["roleArn"], state)
+
     return {
         "cfnStack": cfn_stack,
         "runtimeId": runtime_id,
         "runtimeArn": runtime_arn,
         "invocationUrl": invocation_url,
     }
+
+
+def _grant_prompt_table_read(agent: str, role_arn: str, state: dict[str, Any]) -> None:
+    """Let this sub-agent's runtime role read its governed prompt.
+
+    Read-only, and scoped to the one table. A sub-agent resolves its own prompt
+    override; it has no reason to write governance state, and the whole point of
+    the design is that the Admin Console is the only writer.
+
+    Written as its own inline policy rather than merged into `A2AM2MSecretRead`:
+    `put_role_policy` REPLACES a policy document, so sharing one name means
+    whichever step runs last wins and the other grant vanishes. Same trap the
+    tools-Gateway grant hit in setup-agentcore.py.
+
+    Failure is logged, not raised — but loudly, because the symptom is subtle: the
+    agent keeps working, using the prompt baked into its image, and an admin's
+    saved override appears to be ignored for no visible reason.
+    """
+    # `arn:aws:iam::<account>:role/<name>` — the account is already here, so no
+    # STS round-trip, and it is by construction the account the role lives in.
+    role_name = role_arn.split("/")[-1]
+    account_id = role_arn.split(":")[4]
+    table_arn = (f"arn:aws:dynamodb:{state['region']}:"
+                 f"{account_id}:table/{SKILLS_TABLE}")
+    doc = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": ["dynamodb:GetItem"],
+            "Resource": [table_arn],
+        }],
+    }
+    try:
+        boto3.client("iam").put_role_policy(
+            RoleName=role_name, PolicyName="A2APromptTableRead",
+            PolicyDocument=json.dumps(doc))
+        log(f"  [{agent}] granted dynamodb:GetItem on {SKILLS_TABLE} "
+            f"(prompt governance)")
+    except Exception as exc:  # noqa: BLE001
+        log(f"  [{agent}] WARNING: could not grant {SKILLS_TABLE} read — {exc}. "
+            f"Admin prompt overrides will be SILENTLY IGNORED by this agent; it "
+            f"will keep using the prompt from its image.")
 
 
 # ------------------------------------------------------------------
