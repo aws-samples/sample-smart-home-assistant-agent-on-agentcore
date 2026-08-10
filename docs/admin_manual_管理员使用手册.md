@@ -14,6 +14,8 @@
 7. [模型后训练 (Model Train)](#7-模型后训练-model-train)
 8. [Skill 发布/审批/下发](#8-skill-发布审批下发)
 9. [Session 调试与 Remote Shell](#9-session-调试与-remote-shell)
+   - [9.5 Agents 页 —— 机队总览与逐个 Agent 治理](#95-agents-页--机队总览与逐个-agent-治理)
+   - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)
 10. [Agent 运维统计大屏与演示前数据准备](#10-agent-运维统计大屏与演示前数据准备)
 11. [其他重要事项](#11-其他重要事项)
 
@@ -23,14 +25,16 @@
 
 | 组件 | 本方案中的作用 | Admin Console 对应入口 |
 |------|---------------|----------------------|
-| **Runtime** | 承载 Agent 代码 (`smarthome` 文本 + `smarthomevoice` 语音两个 Runtime),支持 `/invocations` 和 `/ws` | Sessions / Remote Shell / Agent Prompt |
-| **Gateway** | MCP Server,聚合设备控制、发现、KB 检索等 Lambda 工具;执行 Cedar 策略 | Tool Access / Integration Registry |
+| **Runtime** | 承载 Agent 代码。共 **10 个 Runtime**:`smarthome`(文本主 Agent)、`smarthomevoice`(语音)、`smarthome_bundles`(A/B 变体)、以及 7 个 A2A 专家子 Agent | **Agents** / Sessions / Remote Shell / Prompt |
+| **Runtime (A2A)** | 7 个独立子 Agent:设备控制、灯效、问答、场景编排、安防、能耗、家电保养。走标准 A2A 协议(9000 端口、挂载 `/`),**携带调用者身份**访问同一个 Gateway | **Agents**(详情页可改各自 prompt) |
+| **Gateway** | MCP Server,聚合设备控制、发现、KB 检索等 Lambda 工具;执行 Cedar 策略 | Tool Policy / Integration Registry |
 | **Memory** | 短期会话 + 长期事实/偏好/摘要 (三种策略) | Memories |
-| **Registry** | Skill/A2A 描述符托管 + 审批工作流 | Skills → "Add approved skill from AWS Agent Registry" |
-| **Policy Engine** | Cedar 策略评估 (per-user tool permit + default-deny) | Tool Access |
-| **Identity** (Cognito) | 用户认证、`principal.id` 来源 | Models / Tool Access 的用户列表 |
+| **Registry** | Skill/A2A 描述符托管 + 审批工作流。**审批已搬进 Admin Console**(§8.6) | Skills → "Add approved skill from AWS Agent Registry" |
+| **Policy Engine** | Cedar 策略评估 (per-user tool permit + default-deny)。**定时场景也走这条链** | Tool Policy |
+| **Identity** (Cognito) | 用户认证、`principal.id` 来源 | Identity / Models / Tool Policy 的用户列表 |
 | **Evaluator** | 对话质量打分、数据集评测 | Quality Evaluation 入口 |
 | **Knowledge Base** (Bedrock KB + S3 Vectors) | RAG 检索,按 scope 元数据隔离 | Knowledge Base |
+| **EventBridge Scheduler** | 定时场景的触发器:每个时间型场景一条 cron,加一条 5 分钟的条件巡检 | Agents(场景由 chatbot 创建) |
 
 ---
 
@@ -167,6 +171,19 @@ permit(
    - 对 `discover_devices` 和 `query_knowledge_base`,把 Carol 的 sub 加进 permit 白名单。
 5. **Mode Toggle**: Policy Engine 有 `ENFORCE` / `LOG_ONLY` 两档。调试时切到 LOG_ONLY 观察命中情况,正式切回 ENFORCE。
 
+> **每个 Gateway 工具旁边会列出"谁在用它"。** 撤销一个工具的影响面不止聊天:撤掉 `control_device` 会同时停掉该用户的聊天指令、**定时场景**、灯效子 Agent 和设备控制子 Agent。这一列是从各 Agent 自己声明的工具清单生成的(子 Agent 的 `tools.py` 里的 `WANTED`,主 Agent 的 `scoped_suffixes`),不是手写的表 —— 手写的表会在某个 Agent 改工具时**静默过期**,页面照样渲染,只是答案错了。
+>
+> | Gateway 工具 | 使用者 |
+> |---|---|
+> | `control_device` | `smarthome`、`sha2adevice`、`sha2alight` |
+> | `discover_devices` | `smarthome`、`sha2adevice`、`sha2alight` |
+> | `query_device_state` | `smarthome`、`sha2adevice`、`sha2alight` |
+> | `query_sensor_history` | `smarthome`、`sha2adevice` |
+> | `query_knowledge_base` | `smarthome`、`sha2aqa` |
+> | `navigate_to_page` | `smarthome` |
+>
+> **定时场景受同一套授权约束** —— 这是刻意设计的,不是副作用。执行 Lambda 完全没有 IoT 权限,它以场景所属用户的身份过 Gateway,所以撤销 `control_device` 之后该用户的 07:30 自动化也会停(实测验证过:撤销 → 策略 ACTIVE → 触发 → 被拒、设备未动、拒绝原因写回场景行)。
+
 > **⚠️ 保存成功不等于授权生效 —— 一定要复核策略状态。**
 >
 > 页面提示保存成功(API 返回 200)、DynamoDB 也写进去了、Cedar 语句里确实能看到该用户的 sub —— 但策略仍可能落到 `UPDATE_FAILED`。一旦如此,**Gateway 会对该用户返回 0 个工具**,Agent 表现为"抱歉,这超出我的知识范围",看起来像模型能力不足,实际是授权链断了。而且全链路没有任何报错:API 200、Cedar 内容正确、连 `DenyDecisions` 都是 0(请求根本没走到授权评估)。
@@ -190,7 +207,7 @@ permit(
 
 ### 4.3 试用与演示
 
-`Tool Access` 每行有 **Demo Links** 列,一键跳 `chatbot?username=carol@example.com`(已预填邮箱),管理员只需输入密码即可模拟该用户体验。
+`Tool Policy` 每行有 **Demo Links** 列,一键跳 `chatbot?username=carol@example.com`(已预填邮箱),管理员只需输入密码即可模拟该用户体验。
 
 ### 4.4 生产落地建议
 
@@ -305,7 +322,7 @@ CreateRegistryRecord      │                          │
      │───────────────────►│                          │
 SubmitForApproval         │                          │
      │ ==> PENDING_APPROVAL                          │
-                    Approve / Reject                 │
+      Admin Console: Skills → 待审批队列 (§8.6)      │
                           │                          │
      Admin Console: Skills → Add from Registry       │
                           │                          │
@@ -326,8 +343,8 @@ SubmitForApproval         │                          │
 |---|------|------|------|
 | 1 | 设备厂商员工 | **Skill ERP** | 登录 → Create Skill → 填 `name=air-purifier-control`,`description=控制空气净化器开关、风速、模式`,`allowed_tools=["control_device"]`,`instructions` 写 SKILL.md 正文 |
 | 2 | Skill ERP 后端 | **AWS Agent Registry** | `CreateRegistryRecord(descriptorType="AGENT_SKILLS")` → 轮询等 `CREATING` → `SubmitRegistryRecordForApproval` ⇒ `PENDING_APPROVAL` |
-| 3 | 审批员 (Admin) | **AWS Agent Registry 控制台** | 打开记录 → 审阅 SKILL.md → 控制台点 `Approve` / `Reject`(也可用 CLI: `aws agent-registry-control update-registry-record-status`)。可配合 EventBridge 接入工单/审批机器人 |
-| 4 | Admin | **Admin Console → Skills** | 点 `Add approved skill from AWS Agent Registry` → 勾选 `air-purifier-control` → 选择 scope `__global__` → `Import` |
+| 3 | 审批员 (Admin) | **Admin Console → Skills** | 点 `Add approved skill from AWS Agent Registry` → 顶部**待审批**队列里审阅 → `Approve` 或 `Reject`(驳回必须填原因,见 §8.6)。也可用 CLI: `aws agent-registry-control update-registry-record-status`;可配合 EventBridge 接入工单/审批机器人 |
+| 4 | Admin | **同一个弹窗** | 批准后记录出现在下方"可导入"列表 → 勾选 `air-purifier-control` → 选择 scope `__global__` → `Import` |
 | 5 | Agent | Runtime | 下一次 `/invocations` 时 `load_skills_from_dynamodb("__global__")` 自动拉到新 skill,无需重启 |
 
 **验证**: 在 Chatbot 里问 "把空气净化器开到自动模式",观察 Agent 是否激活 `air-purifier-control` skill、工具调用是否正确。
@@ -337,7 +354,7 @@ SubmitForApproval         │                          │
 **路径 A - 用户自己的草案改版**:
 
 1. Skill ERP → My Skills → 编辑 → Save → Lambda 执行 `UpdateRegistryRecord` + 重新 `SubmitRegistryRecordForApproval` → 状态回到 `PENDING_APPROVAL`。
-2. 审批员在 Registry 控制台 Approve。
+2. 审批员在 **Admin Console → Skills → Add from Registry → 待审批** 里 Approve(§8.6)。
 3. 管理员在 Admin Console **重新 Import**(覆盖 DynamoDB 里的行)。
 
 **路径 B - 管理员直接热修复**:
@@ -359,9 +376,57 @@ DynamoDB 存两条记录:`__global__/{skillName}` 和 `{userEmail}/{skillName}`�
 
 ---
 
+### 8.6 审批 / 驳回 Skill(在 Admin Console 里做)
+
+审批状态机由 Registry 托管,但在此之前**仓库里没有任何调用方** ——
+`agent-registry:UpdateRegistryRecordStatus` 早已授给 admin Lambda 却从未被调用,
+所以用户从 Skill ERP 发布的 skill 会停在 `PENDING_APPROVAL`,只能去 AWS 控制台推进。
+现在这一步在 Admin Console 里完成。
+
+**操作路径**: Admin Console → **Skills** → `Add approved skill from AWS Agent Registry`
+→ 弹窗顶部的 **待审批** 区块。
+
+| 动作 | 效果 | 注意 |
+|------|------|------|
+| **Approve** | → `APPROVED`,记录随即出现在下方"可导入"列表 | 仍需再点 Import 才会写进 skill 目录 |
+| **Reject** | → `REJECTED` | **必须填原因** |
+| Deprecate(API 支持,UI 暂未暴露) | → `DEPRECATED` | DRAFT 记录唯一的退出路径 |
+
+**为什么驳回必须填原因**: `statusReason` 是 Registry 里唯一记录"为什么"的字段,
+也是 skill 作者唯一能看到的反馈。不写原因的驳回,对作者来说和"系统把我的东西弄丢了"
+没有区别。审批人的邮箱会自动附加在原因后面,所以记录同时回答了"是谁批的"。
+
+**状态机(在真实记录上实测得出,不是照文档抄的)**:
+
+```
+DRAFT             → PENDING_APPROVAL | DEPRECATED | DRAFT     (不能直接 REJECTED)
+PENDING_APPROVAL  → APPROVED | REJECTED
+REJECTED          → APPROVED                                  (可逆)
+```
+
+所以:
+
+- **DRAFT 记录无法驳回**。API 会报错,但错误信息只是一串枚举值
+  ("PENDING_APPROVAL, DEPRECATED, DRAFT, UPDATING"),看不出"其实是还没提交审批"。
+  界面把它翻译成一句人话,并提示改用 deprecate。
+- **驳回是可逆的**。审批人改主意不必让作者重新发布 —— 待审批队列里同时列出
+  `PENDING_APPROVAL` 和 `REJECTED`,已驳回的行只显示 Approve 按钮。
+
+**作者侧**: 驳回原因会显示在 Skill ERP 的 `My Skill Records` 表格里,状态下方一行红字。
+
+---
+
 ## 9. Session 调试与 Remote Shell
 
 **Sessions** tab 包含:User / Kind(Text/Voice)/ Session ID / Last Active / 7d Total Tokens / **Remote Shell** / Stop。
+
+> **Token 数现在会标出归属的 agent**(悬停看逐个 agent 的拆分)。之前是一个没有归属的
+> 数字 —— 九个 Runtime 往同一个日志组里写,合成一个数就没法回答"这个 agent 花了多少"。
+>
+> 一个已知口径限制:**子 Agent 会打自己的 session id**(一串裸 UUID,不是主 Agent 的
+> `user-session-*`)。AgentCore 的 `runtimeSessionId` 是按 Runtime 分配的,A2A 这一跳
+> 不传递它,所以一次委派产生的 token 落在本表没有对应行的 session 下。
+> **按 agent 的总量是准的,跨委派的按轮次归因目前拿不到。**
 
 ### 9.1 Stop Session
 
@@ -396,6 +461,125 @@ curl -s -o /dev/null -w "%{http_code}\n" "$AGENTCORE_GATEWAY_SMARTHOMEDEVICECONT
 **输入约束**(官方): `timeout` 1-3600s,默认 300s;`runtimeSessionId` ≥ 33 字符(本方案用 Cognito sub UUID = 36 字符);单条 `command` 上限依 AWS SDK 限制(此方案前端限 ≤ 64 KB 以匹配容器 stdin buffer)。
 
 > ⚠️ 当前 `InvokeAgentRuntimeCommand` 权限挂在共享 Cognito 认证角色上,Admin-only 保护**仅在前端**;生产环境建议分拆 Identity Pool 为 `admin` / `user` 两组 role,已在 roadmap。
+
+---
+
+## 9.5 Agents 页 —— 机队总览与逐个 Agent 治理
+
+"Agent" 以前不是管控面里的一等实体:一等实体是 Cognito 用户和 skill,agent 只是
+prompt 和 optimization 两个页面里 `text | voice` 的二选一。现在有 1 主 + 6 子 +
+1 语音 + 1 A/B 变体 + 1 Tool,`#/agents` 回答"有哪些 agent、跑在哪、有没有出问题"。
+
+**列表是推导出来的,不是维护出来的** —— 由 Runtime ARN + Registry 已批准记录 +
+可选的元数据行三方按 runtime 名 join。所以新部署一个子 Agent 会自动出现,不需要改前端。
+
+| kind | 含义 |
+|------|------|
+| `Orchestrator` | 主 Agent,用户直接对话的入口 |
+| `Specialist` | 通过 A2A 委派到的子 Agent |
+| `Voice` | 语音 Runtime |
+| `A/B variant` | `smarthome_bundles` —— 主 Agent 的同一镜像 + `ENABLE_BUNDLE_HOOK=1`,只在 `ab-bundles` 模式下被访问。列成第二个主 Agent 会夸大机队规模,隐藏则它的 token 花费无法归因 |
+| `Tool` | 导航 DeepLink —— 是 Gateway Lambda target 而非 agent,但它是客户架构里七个实体之一,管理员找它时应该在这里找到 |
+
+### 9.5.1 "No runtime" 告警是真信号,不是噪音
+
+一行显示 `No runtime`,意思是 Registry 里有已批准记录但 ARN 白名单里没有对应
+Runtime。两种可能:记录成了孤儿,或者某次部署漏跑了 `patch-text-agent`,
+`DASHBOARD_EXTRA_RUNTIME_ARNS` 没学到这个 ARN。**后者用别的方式看不出来** ——
+这个告警第一次上线就抓到了一例(3 个子 Agent 不在白名单里)。
+
+处理: `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。
+
+### 9.5.2 逐个 Agent 改 prompt
+
+点列表里的 agent 名进详情页:卡片元数据、公开的 skill、实时指标,以及**该 agent 的
+system prompt**。编辑器与 Prompt 页是同一个组件,所以"恢复默认"和"按用户追加"
+两个语义在两处不会漂移。
+
+- 子 Agent 的 prompt 以 **AgentCard 名**为 key(`__prompt_light-effect-agent__`),
+  这是控制台、Registry 记录、运行中的容器三方各自独立推导出来、且一致的唯一标识。
+- **保存后下一次请求即生效**,不用重新部署容器。运行时每次请求都读一遍,故意不加缓存:
+  加了 TTL 就会出现"我明明存了但看起来被忽略"的现象,而那正是这个功能要消灭的问题。
+- 全局覆盖是**替换**镜像里自带的 prompt;按用户覆盖是**追加**在全局结果之后。
+- `Tool` 和 `A/B variant` 两行会说明自己为什么没有 prompt,而不是给一个坏掉的编辑器。
+
+> **改 prompt 时不要删掉路由标记的相关约定**,但也不必自己写它 —— 标记
+> `⟦A2A:<domain>⟧` 由服务端加在**结果**上,不依赖模型遵守 prompt。早期只对带工具的
+> agent 这么做,理由是纯 prompt agent 会自己稳定输出;prompt 变成可编辑之后这个假设
+> 就不成立了(全局覆盖会把那条指令一起替换掉),所以现在对所有 agent 无条件加。
+
+---
+
+## 9.6 场景联动与定时自动化
+
+用户在 chatbot 里说"每天晚上 11 点关灯、风扇调到 1 档",主 Agent 委派给
+**场景编排子 Agent**,后者把它存成一个场景(触发器 + 设备动作),
+EventBridge Scheduler 到点触发执行。
+
+### 9.6.1 授权链:定时任务不是后门
+
+```
+EventBridge Scheduler
+  ├── 每个时间型场景一条 cron
+  └── 一条 5 分钟巡检(阈值型触发器没有"点"可以定)
+        ↓
+  smarthome-scenario-runner  ← 完全没有 IoT 权限
+        ↓  用场景所属用户的身份
+  Gateway → Cedar → iot-control → MQTT
+```
+
+参考设计里写的是"Lambda 直接调 iot-control,不经过 LLM"。那样定时场景就会成为
+**唯一一条 Cedar 看不到的设备控制路径** —— 管理员在 Tool Policy 里撤销某用户的
+`control_device`,他的聊天指令会停,但 07:30 的自动化不会。所以执行 Lambda 走
+Gateway、以用户身份、受同一套策略约束。
+
+### 9.6.2 定时执行需要一份用户凭证(这是真实的新增攻击面)
+
+以"不在线的用户"的身份执行需要凭证,几个方案都实测过:
+
+| 方案 | 结果 |
+|------|------|
+| `GetWorkloadAccessTokenForUserId` | 形态正确(无需用户在线即可为某 userId 换 token),但 **Gateway 返回 401 `Invalid Bearer token`** —— 它是 KMS 加密的不透明 AgentCore token,不是带正确 audience 的 JWT |
+| 直接问 Cedar | 没有公开 API(Verified Permissions 是另一个服务,AgentCore 的 `AuthorizeAction` 是 Gateway 内部动作) |
+| Cognito refresh token → `REFRESH_TOKEN_AUTH` | 能换出 Gateway 接受的真 idToken(实测 200,返回 6 个经 Cedar 过滤的工具) |
+
+所以存的是 refresh token,**这确实是一份 30 天有效的用户凭证落在了系统里**。
+对应的收敛措施:
+
+- 存在 Secrets Manager,专用的客户托管 KMS 密钥(已开启轮换);
+- **一个用户一个 secret**(`smarthome/scenario-tokens/{sub}`),可单独吊销;
+- 只有执行 Lambda 的 role 能读,且 `kms:Decrypt` 用 `kms:ViaService` 收窄;
+- **绝不写日志**;
+- 没有存 token 的用户,其定时场景直接不执行(fail closed)。
+
+> 只给 Secrets Manager 权限是不够的:用客户托管密钥时 `GetSecretValue` 会被 **KMS**
+> 拒绝,而表象是"没有可用的调度凭证",看起来像 secret 不存在而不是缺权限。
+
+### 9.6.3 触发器支持哪三种
+
+| 类型 | 例子 | 说明 |
+|------|------|------|
+| `time` | 每天 23:00 | 24 小时制 `HH:MM`,**按 UTC 调度** —— schema 里还没有时区字段,猜一个偏移会让场景在用户没说过的时间触发,而且比统一用 UTC 难发现得多 |
+| `device_state` | 风扇打开时 | subject 必须是真实 device id |
+| `sensor` | 温度高于 27 | 真传感器阈值(`temperature` / `humidity` / `pm25` / `co2`)。**必须显式写 above 还是 below** —— "高于 26"和"低于 26"是两个相反的场景,猜错会让它在完全错误的时机触发 |
+
+条件型触发器按**边沿**触发而非电平:场景行上的 `lastReading` 保证"温度高于 27"
+只在跨过阈值时执行一次,而不是整个下午每 5 分钟执行一次。
+
+### 9.6.4 运维要点
+
+- **场景存在独立的 `smarthome-scenarios` 表**,不在万能表 `smarthome-skills` 里。
+  原因是授权而非整洁:场景 Agent 需要**写**权限,而万能表里放着治理它自己的
+  `__permissions__` 和 `__prompt_*__` 行 —— 能改这些的 agent 等于自己管自己。
+- **改动场景后需要对账 Scheduler**:调用
+  `GET /registry/records?action=sync-schedules`。它是**对账**而不是增量更新,
+  所以"场景删了但 schedule 还在空转"这种孤儿会在下次对账时自愈。
+- **`lastRunAt` / `lastRunOk` 写在场景行上**。没有这个,"07:30 到底跑了没有"
+  只能翻 CloudWatch —— 而那个时间点没人在看。
+- 想立刻验证一个时间型场景,不要等真实时间:直接用 Scheduler 里那条 schedule 的
+  payload 调一次执行 Lambda(它是幂等的,接受的就是 Scheduler 发的同一个入参)。
+  设备模拟器里的**虚拟时钟**只加速模拟器自身的时间(传感器曲线 + 屏幕上的钟),
+  **不会**改变 AWS 侧的真实触发时间。
 
 ---
 
@@ -560,16 +744,47 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 1. **Sessions tab 确认用户 session 还活着** → 必要时 Stop 让其重建。
 2. **Remote Shell 查环境变量 + skill 加载** → 80% 配置类问题在此暴露。
 3. **CloudWatch Logs `aws/spans` 看 `chat` span** → token 用量、工具路径、报错 stacktrace。
-4. **Tool Access 切 LOG_ONLY 重放** → 鉴别是 Cedar 拒绝还是模型没调工具。
+4. **Tool Policy 切 LOG_ONLY 重放** → 鉴别是 Cedar 拒绝还是模型没调工具。
 5. **Quality Evaluation 跑一次 offline eval** → 判断回归是提示词还是模型引起。
 
 ### 11.7 变更安全清单
 
 - 改 Prompt / Skill → DynamoDB 即时生效,不需 `agentcore deploy`。
 - 改 Agent Python 代码 → 必须 `bash scripts/06-deploy-agentcore.sh`。
-- 改 CDK (Lambda / IAM / API GW) → `bash scripts/04-cdk-deploy.sh`。
+- 改 CDK (Lambda / IAM / API GW) → `bash scripts/04-cdk-deploy.sh`,**然后必须再跑
+  `python scripts/setup-agentcore.py`** —— 见下条。
 - 改 Cognito 用户组 / 添加 admin → Cognito 控制台直接操作,不走 CDK。
+
+### 11.8 ⚠️ `cdk deploy` 会静默抹掉 admin Lambda 的一半环境变量
+
+admin Lambda 的环境变量来自两处:CDK 声明 7 个,`setup-agentcore.py` 在部署后补 10 个
+(`GATEWAY_ID`、`MEMORY_ID`、`REGISTRY_ID`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、
+7 个 `OPTIMIZATION_*` / `AB_TEST_*` ARN),因为它们指向 synth 时还不存在的资源。
+
+CloudFormation 里 `environment` 是**整张表**,所以任何一次 `cdk deploy` 都会把函数重置回
+CDK 的那 7 个,其余全部丢失。**全过程没有任何报错**,而症状离病因很远:
+
+| 丢失的变量 | 表象 |
+|---|---|
+| `GATEWAY_ID` | `/tools` 只返回内置工具 → **Tool Policy 弹窗里一个 Gateway 工具都没有**,管理员根本无法授权/撤销 `control_device` |
+| `REGISTRY_ID` | A2A 目录为空 → 保存权限时报 "recordId … is not an approved A2A record";或 `registryId` 正则校验失败 |
+| `OPTIMIZATION_*` | `/optimization/*` 返回 ConfigurationError |
+| `DASHBOARD_EXTRA_RUNTIME_ARNS` | 大屏漏掉子 Agent 的 token;**Optimization 的 agent 下拉框认不出子 Agent**(报 "agentType must be text&#124;voice&#124;tool_desc") |
+
+**修复**: 重跑 `python scripts/setup-agentcore.py`(它是往现有环境变量上合并,不是覆盖),
+然后 `cd a2a-agent-registry && python deploy.py --only patch-text-agent` 补回 A2A 的
+8 条 Runtime ARN。
+
+**核对**:
+
+```bash
+aws lambda get-function-configuration --function-name smarthome-admin-api \
+  --query "length(Environment.Variables)"      # 期望 28,不是 14
+```
+
+`cdk/lambda/admin-api/tests/test_env_contract.py` 记录了哪一侧拥有哪个变量,
+新增变量时按它选边。
 
 ---
 
-*最后更新: 2026-04-28*
+*最后更新: 2026-08-10*
