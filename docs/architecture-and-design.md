@@ -1450,7 +1450,7 @@ The setup deploys the optimization infrastructure but stops short of producing *
 
 **5. Image-only turns are unevaluable.** Vision-bypass (§8.11) calls `bedrock-runtime.converse` directly without going through Strands, so no `strands.telemetry.tracer` `chat` span is emitted for that turn. The online-eval pipeline filters by "supported scope names" and silently records a `ValidationException: No spans with supported scope names found for traces: []` for any session whose only chat-span is the vision call. Drive **text-only** prompts when running an A/B test if you want every session counted.
 
-**6. The runbook in practice** (replicated as `tests/abtest-runbook.md`):
+**6. The runbook in practice** (the steps below are the whole of it — there is no separate runbook file):
 
 ```
 1. Lower sessionTimeoutMinutes on both eval configs (5 → 1):
