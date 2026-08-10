@@ -2187,6 +2187,93 @@ def list_a2a_agents(_event):
 
 
 # ---------------------------------------------------------------------------
+# Agent fleet (GET /registry/records?action=fleet)
+#
+# Rides on the existing /registry/records resource rather than adding a path:
+# the admin Lambda's auto-generated API Gateway resource policy is already near
+# the 20 KB cap, and a new resource would push it over. Same reason the a2a-list
+# and a2a-grants actions live there.
+# ---------------------------------------------------------------------------
+
+def list_agent_fleet(event):
+    """Every agent in the fleet, derived from runtimes + Registry + metadata.
+
+    Deliberately tolerant: each of the three sources is optional. A missing
+    Registry (or one this caller cannot read) still yields the runtime list, and a
+    dashboard health call that fails still yields the fleet without its metrics.
+    An operator opening this page during a partial outage should see what IS
+    working, not an error.
+    """
+    import agents as fleet_model
+
+    runtime_arns = []
+    try:
+        runtime_arns = dashboard._all_runtime_arns()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not resolve runtime ARNs: %s", e)
+
+    registry_records = []
+    if REGISTRY_ID:
+        try:
+            for rec in registry_ns.list_records(
+                    registry_control, REGISTRY_ID,
+                    record_type=registry_ns.RECORD_TYPE_AGENT,
+                    status=registry_ns.STATUS_APPROVED):
+                rid = rec.get("recordId", "")
+                if not rid:
+                    continue
+                try:
+                    detail = registry_control.get_registry_record(
+                        registryId=REGISTRY_ID, recordId=rid)
+                    raw = registry_ns.read_agent_card(detail)
+                    card = json.loads(raw) if raw else {}
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("fleet: card unreadable for %s: %s", rid, e)
+                    card = {}
+                registry_records.append({
+                    "recordId": rid,
+                    "displayName": rec.get("displayName") or rec.get("name", ""),
+                    "name": rec.get("name", ""),
+                    "status": rec.get("status", ""),
+                    "card": card,
+                })
+        except Exception as e:  # noqa: BLE001
+            logger.warning("fleet: Registry listing failed: %s", e)
+
+    metadata = fleet_model.load_metadata(table)
+
+    # Per-runtime metrics the dashboard already computes. Reused rather than
+    # re-queried: CloudWatch GetMetricData is the expensive part of that call and
+    # the fleet page needs exactly the same numbers.
+    health_runtimes = []
+    try:
+        # 24h window: the fleet page wants "is this agent being used", not a
+        # month's trend, and the shorter window is the cheaper CloudWatch call.
+        health = dashboard._fetch_health(1)
+        health_runtimes = (health or {}).get("runtimes") or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fleet: health breakdown unavailable: %s", e)
+
+    # The navigation DeepLink is a Gateway target, not an agent — included so an
+    # operator can see where the seventh entity of the architecture went.
+    gateway_tools = []
+    try:
+        listed = json.loads(list_gateway_tools(event).get("body") or "{}")
+        gateway_tools = listed.get("tools") or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fleet: gateway tool listing failed: %s", e)
+
+    fleet = fleet_model.build_fleet(
+        runtime_arns=runtime_arns,
+        registry_records=registry_records,
+        metadata=metadata,
+        health_runtimes=health_runtimes,
+        gateway_tools=gateway_tools,
+    )
+    return response(200, {"agents": fleet, "count": len(fleet)})
+
+
+# ---------------------------------------------------------------------------
 # Browser sessions / workspace files (user-facing; chatbot polls these)
 # ---------------------------------------------------------------------------
 
@@ -2399,6 +2486,8 @@ def handler(event, context):
             return list_a2a_agents(event)
         if action == "a2a-grants":
             return list_a2a_grants_for_record(event)
+        if action == "fleet":
+            return list_agent_fleet(event)
         return list_registry_records(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

@@ -779,6 +779,49 @@ export interface A2AAgentRecord {
   publishedBy: string;
 }
 
+/** One entry in the agent fleet. */
+export interface FleetAgent {
+  agentId: string;
+  displayName: string;
+  displayNameZh?: string;
+  runtimeName: string;
+  runtimeArn: string;
+  runtimeId: string;
+  /** orchestrator | specialist | voice | tool */
+  kind: string;
+  description: string;
+  version?: string;
+  skills: { id: string; name: string; description: string }[];
+  recordId: string;
+  registryStatus?: string;
+  invocationUrl?: string;
+  orchestrator?: string;
+  targetName?: string;
+  /** False for an approved Registry record with no live runtime behind it. */
+  live: boolean;
+  /** 24h CloudWatch totals; null when the metric had no datapoints. */
+  invocations: number | null;
+  errors: number | null;
+  throttles?: number | null;
+  latencyP95Ms: number | null;
+}
+
+/** The whole fleet: runtimes joined with their Registry records and metadata. */
+export async function listAgentFleet(): Promise<FleetAgent[]> {
+  const headers = await authHeaders();
+  // Same consolidated resource as the A2A actions — a new API Gateway path would
+  // push the admin Lambda's resource policy past its 20KB cap.
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=fleet`, {
+    headers,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list the agent fleet (${res.status})`);
+  }
+  const data = await res.json();
+  return data.agents || [];
+}
+
 export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
   const headers = await authHeaders();
   // Reuses /registry/records?action=a2a-list — consolidated on a single API

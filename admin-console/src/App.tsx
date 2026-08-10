@@ -11,7 +11,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import SideNavigation from '@cloudscape-design/components/side-navigation';
 import LoginPage from './auth/LoginPage';
-import AdminConsole, { ActiveTab } from './components/AdminConsole';
+import AdminConsole, { ActiveTab, tabFromHash } from './components/AdminConsole';
 import { getCurrentSession, refreshSession, signOut, getIsAdmin, getCurrentUserEmail, AuthTokens } from './auth/CognitoAuth';
 import { getConfig } from './config';
 import { useI18n } from './i18n';
@@ -42,7 +42,13 @@ const App: React.FC = () => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [theme, setLocalTheme] = useState<Theme>(() => detectInitialTheme());
-  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
+  // Seeded from the URL so a deep link works: `#/agents` used to render the
+  // overview, because the tab was always initialised to 'overview' and the hash
+  // was never read. An unknown hash still falls back to the overview rather than
+  // rendering nothing.
+  const [activeTab, setActiveTab] = useState<ActiveTab>(
+    () => tabFromHash(window.location.hash) ?? 'overview',
+  );
   // Used to prefill `?username=` on the demo links so the admin only has to
   // type a password when opening an end-user app.
   const [currentEmail, setCurrentEmail] = useState('');
@@ -52,6 +58,28 @@ const App: React.FC = () => {
     // Re-apply on mount in case system preference has changed since module-load.
     setTheme(theme);
   }, [theme]);
+
+  // Keep the URL and the rendered tab in step, in both directions:
+  //  - writing the hash is what makes a tab shareable and bookmarkable, and it
+  //    is what `window.location.hash = '#/optimization'` inside AdminConsole
+  //    relies on to actually navigate;
+  //  - listening for hashchange is what makes the browser Back button work,
+  //    since nothing else would tell React the hash moved.
+  useEffect(() => {
+    const target = `#/${activeTab}`;
+    if (window.location.hash !== target) {
+      window.history.replaceState(null, '', target);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const tab = tabFromHash(window.location.hash);
+      if (tab) setActiveTab(tab);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   useEffect(() => {
     // Refresh the Cognito token on page load/reload so the first admin API
@@ -209,6 +237,9 @@ const App: React.FC = () => {
       defaultExpanded: true,
       items: [
         { type: 'link' as const, text: t('tab.overview'), href: '#/overview' },
+        // The fleet list sits directly under Overview: the aggregate answers "is
+        // anything wrong", this answers "which agent".
+        { type: 'link' as const, text: t('tab.agents'), href: '#/agents' },
         { type: 'link' as const, text: t('tab.integrations'), href: '#/integrations' },
       ],
     },

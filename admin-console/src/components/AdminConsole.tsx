@@ -100,24 +100,45 @@ import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
 import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
 import { DashboardSection } from './Dashboard/DashboardSection';
+import { AgentsPage } from './AgentsPage';
 import architectureDiagram from '../assets/architecture.drawio.png';
 
-export type ActiveTab =
-  | 'overview'
-  | 'integrations'
-  | 'models'
-  | 'skills'
-  | 'agentPrompts'
-  | 'users'
-  | 'memories'
-  | 'identity'
-  | 'instanceType'
-  | 'sessions'
-  | 'guardrails'
-  | 'observability'
-  | 'evaluations'
-  | 'optimization'
-  | 'knowledgeBase';
+/**
+ * Every routable tab, as a runtime value.
+ *
+ * A bare union type cannot be checked against `location.hash` at runtime, so a
+ * deep link had no way to be validated and `#/agents` silently rendered the
+ * overview instead. Deriving `ActiveTab` from this array keeps one list: adding a
+ * tab here makes it both type-checkable and deep-linkable.
+ */
+export const ACTIVE_TABS = [
+  'overview',
+  'agents',
+  'integrations',
+  'models',
+  'skills',
+  'agentPrompts',
+  'users',
+  'memories',
+  'identity',
+  'instanceType',
+  'sessions',
+  'guardrails',
+  'observability',
+  'evaluations',
+  'optimization',
+  'knowledgeBase',
+] as const;
+
+export type ActiveTab = (typeof ACTIVE_TABS)[number];
+
+/** The tab a hash names, or null when it names nothing we render. */
+export function tabFromHash(hash: string): ActiveTab | null {
+  const name = hash.replace(/^#\/?/, '');
+  return (ACTIVE_TABS as readonly string[]).includes(name)
+    ? (name as ActiveTab)
+    : null;
+}
 
 interface ActorRow {
   actorId: string;
@@ -2517,6 +2538,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
   return (
     <div className="admin-console">
+      {/* Agents (fleet). A self-contained component rather than another block in
+          this 4000-line file: the tab needs its own data loading, and every
+          existing tab's state already lives in one shared component. Detail view
+          lands in P2 — the row link is wired then. */}
+      {activeTab === 'agents' && <AgentsPage />}
       {activeTab === 'overview' && (
         <SpaceBetween size="l">
           {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
