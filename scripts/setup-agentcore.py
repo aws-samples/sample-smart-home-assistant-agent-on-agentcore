@@ -2559,6 +2559,10 @@ def main():
             )
         registry_name = "SmartHomeSkillsRegistry"
 
+        class _AlreadyHaveRegistry(Exception):
+            """Raised to skip creation when one already exists, so the existing
+            error handling below stays in one place."""
+
         def _find_existing_registry():
             """Return (id, arn) of an existing registry with our name, or (None, None)."""
             token = None
@@ -2575,7 +2579,20 @@ def main():
                 if not token:
                     return None, None
 
+        # Look BEFORE creating. The preview API raised ConflictException on a
+        # duplicate name, so create-then-catch was safe; GA does not — it happily
+        # creates a second registry with the same name and returns a new id. That
+        # is silently destructive: the new registry is empty, every Lambda gets
+        # repointed at it, and all the approved agent records still live in the
+        # original. The visible symptom was "0 approved A2A records", which reads
+        # as an approval problem rather than a wrong-registry one.
+        registry_id, registry_arn = _find_existing_registry()
+        if registry_id:
+            print(f"  Reusing registry {registry_name} — id={registry_id}")
+
         try:
+            if registry_id:
+                raise _AlreadyHaveRegistry
             # GA moved authorizerType into discoveryConfiguration and replaced the
             # `autoApproval: False` boolean with an empty rule list — per the docs,
             # "not specifying (null) means approval is needed". Manual approval is
@@ -2590,6 +2607,8 @@ def main():
             registry_arn = reg_resp.get("registryArn", "")
             registry_id = registry_arn.split("/")[-1] if registry_arn else ""
             print(f"  Created registry {registry_name} — id={registry_id}")
+        except _AlreadyHaveRegistry:
+            pass
         except registry_control.exceptions.ConflictException:
             # Already exists — look it up
             registry_id, registry_arn = _find_existing_registry()

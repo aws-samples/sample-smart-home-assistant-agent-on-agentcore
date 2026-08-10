@@ -37,8 +37,9 @@ COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
 REGISTRY_ID = os.environ.get("REGISTRY_ID", "")
 KB_DOCS_BUCKET = os.environ.get("KB_DOCS_BUCKET", "")
-AOSS_ENDPOINT = os.environ.get("AOSS_ENDPOINT", "")
-AOSS_COLLECTION_ARN = os.environ.get("AOSS_COLLECTION_ARN", "")
+# AOSS_ENDPOINT / AOSS_COLLECTION_ARN were dropped here: the knowledge base moved
+# from OpenSearch Serverless to S3 Vectors, and nothing set or read them
+# afterwards. Left in place they read as configuration this Lambda needs.
 KB_SERVICE_ROLE_ARN = os.environ.get("KB_SERVICE_ROLE_ARN", "")
 KB_ID = os.environ.get("KB_ID", "")
 KB_DATA_SOURCE_ID = os.environ.get("KB_DATA_SOURCE_ID", "")
@@ -2356,6 +2357,71 @@ def list_agent_fleet(event):
 
 
 # ---------------------------------------------------------------------------
+# Scenarios (GET /registry/records?action=scenarios | sync-schedules)
+#
+# Rides on /registry/records for the same reason the fleet does: the admin
+# Lambda's auto-generated API Gateway resource policy is near the 20 KB cap and a
+# new path would push it over.
+# ---------------------------------------------------------------------------
+
+SCENARIOS_TABLE_NAME = os.environ.get("SCENARIOS_TABLE_NAME", "smarthome-scenarios")
+
+
+def _scenarios_table():
+    return boto3.resource("dynamodb", region_name=REGION).Table(SCENARIOS_TABLE_NAME)
+
+
+def list_scenarios(event):
+    """Every saved scene, across users, with its schedule state.
+
+    An operator's view: which automations exist, what fires them, and whether the
+    last run worked. `lastRunAt`/`lastRunOk` come from the runner, and they are the
+    only way to answer "did it fire" for something that runs at 07:30 when nobody
+    is watching.
+    """
+    import scenarios as sc
+
+    items = []
+    try:
+        table = _scenarios_table()
+        kwargs = {}
+        while True:
+            resp = table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not list scenarios: %s", e)
+        return response(200, {"scenarios": [], "count": 0, "error": str(e)[:200]})
+
+    out = []
+    for item in items:
+        row = sc.summarise(item)
+        row["userId"] = item.get("userId", "")
+        row["scheduled"] = bool(sc.cron_for(item.get("trigger") or {}))
+        row["cron"] = sc.cron_for(item.get("trigger") or {})
+        row["lastRunAt"] = item.get("lastRunAt", "")
+        row["lastRunOk"] = item.get("lastRunOk")
+        row["lastRunDetail"] = item.get("lastRunDetail", "")
+        out.append(row)
+    out.sort(key=lambda r: r.get("updatedAt", ""), reverse=True)
+    return response(200, {"scenarios": out, "count": len(out)})
+
+
+def sync_scenario_schedules(event):
+    """Reconcile EventBridge Scheduler against the saved scenes.
+
+    Exposed as an endpoint rather than run only on write, because the scenes are
+    written by an A2A sub-agent that has no business holding Scheduler permissions
+    — it stores data, and this control plane turns that data into schedules.
+    """
+    import scenario_schedules
+
+    return response(200, scenario_schedules.sync_schedules(_scenarios_table()))
+
+
+# ---------------------------------------------------------------------------
 # Browser sessions / workspace files (user-facing; chatbot polls these)
 # ---------------------------------------------------------------------------
 
@@ -2590,6 +2656,10 @@ def _dispatch(event, context):
             return list_a2a_grants_for_record(event)
         if action == "fleet":
             return list_agent_fleet(event)
+        if action == "scenarios":
+            return list_scenarios(event)
+        if action == "sync-schedules":
+            return sync_scenario_schedules(event)
         return list_registry_records(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

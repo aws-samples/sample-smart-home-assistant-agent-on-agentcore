@@ -85,13 +85,26 @@ done
 # replaces. Source of truth is shared/; these are build outputs (gitignored).
 # ------------------------------------------------------------------------------
 echo "==> Copying shared device catalog into IoT Lambda directories..."
-for lambda_dir in iot-control iot-discovery iot-query; do
+for lambda_dir in iot-control iot-discovery iot-query scenario-runner; do
     target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
     [ -d "$target" ] || continue
     cp "$SCRIPT_DIR/shared/device-catalog.json" "$target/device-catalog.json"
     cp "$SCRIPT_DIR/shared/device_catalog.py"   "$target/device_catalog.py"
     echo "    -> $lambda_dir"
 done
+
+# ------------------------------------------------------------------------------
+# The scenario model, for the Lambda that executes a due scene. Same reason as
+# the catalog: it decides whether a trigger has fired and which actions to
+# apply, and a second copy of that logic would let the stored scene and the
+# executed one disagree — which is unobservable, because nobody is watching at
+# 07:30. The scene-orchestration A2A agent gets its copy from deploy.py.
+# ------------------------------------------------------------------------------
+echo "==> Copying the scenario model into the scenario runner..."
+if [ -d "$SCRIPT_DIR/cdk/lambda/scenario-runner" ]; then
+    cp "$SCRIPT_DIR/shared/scenarios.py" "$SCRIPT_DIR/cdk/lambda/scenario-runner/scenarios.py"
+    echo "    -> scenario-runner"
+fi
 
 # ------------------------------------------------------------------------------
 # Copy the AWS Agent Registry helper into the Lambdas that talk to the Registry.

@@ -90,3 +90,6 @@ cdk/lambda/*/device_catalog.py
 # Same arrangement for the Agent Registry helper.
 # Source of truth is shared/agent_registry.py.
 cdk/lambda/*/agent_registry.py
+# And for the scenario model, which the scenario runner and the admin API both
+# need. Source of truth is shared/scenarios.py.
+cdk/lambda/*/scenarios.py

@@ -11,6 +11,7 @@ import * as cr from "aws-cdk-lib/custom-resources";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
+import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import { Construct } from "constructs";
 import * as path from "path";
 
@@ -1450,6 +1451,161 @@ export class SmartHomeStack extends cdk.Stack {
     new cdk.CfnOutput(this, "SkillErpUrl", {
       value: `https://${skillErpDistribution.distributionDomainName}`,
     });
+    // ========================
+    // Scenario runner — makes a saved scene an automation
+    //
+    // EventBridge Scheduler invokes this: one schedule per time-triggered scene,
+    // plus one recurring sweep for the condition-triggered ones (a sensor
+    // threshold has no clock to fire on).
+    //
+    // The important thing about this Lambda is what it CANNOT do. It holds no IoT
+    // permission. It authenticates as the scene's owner and applies each action
+    // through the Gateway, so Cedar authorises it exactly as it authorises the
+    // same command typed into the chatbot. Calling iot-control directly would
+    // have been simpler and would have made scheduled scenes the one device path
+    // the Admin Console cannot govern: revoking a user's control_device in Tool
+    // Policy would stop their chat commands and not their 07:30 automation.
+    // ========================
+    const scenarioRunner = new lambda.Function(this, "ScenarioRunnerLambda", {
+      functionName: "smarthome-scenario-runner",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/scenario-runner")),
+      // A sweep can touch several users' scenes, each needing a token exchange
+      // and a Gateway handshake; 15s would time out mid-run and leave half a
+      // scene applied.
+      timeout: cdk.Duration.seconds(120),
+      memorySize: 512,
+      environment: {
+        SCENARIOS_TABLE_NAME: scenariosTable.tableName,
+        DEVICE_STATE_TABLE: deviceStateTable.tableName,
+        SENSOR_HISTORY_TABLE: sensorHistoryTable.tableName,
+        USER_POOL_CLIENT_ID: userPoolClient.userPoolClientId,
+        SCENARIO_SECRET_PREFIX: "smarthome/scenario-tokens/",
+        // The Gateway URL is not known at synth time (setup-agentcore.py creates
+        // the gateway), so it is patched in afterwards like the runtime's own
+        // gateway env vars.
+        SCENARIO_GATEWAY_URL: "",
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    scenariosTable.grantReadWriteData(scenarioRunner);
+    // The admin API reads scenes for the operator view and reconciles Scheduler
+    // against them. Read-only on the table: the console displays automations, the
+    // agent creates them.
+    scenariosTable.grantReadData(adminLambda);
+    adminLambda.addEnvironment("SCENARIOS_TABLE_NAME", scenariosTable.tableName);
+    adminLambda.addEnvironment("SCENARIO_SCHEDULE_GROUP", "smarthome-scenarios");
+    adminLambda.addEnvironment("SCENARIO_RUNNER_ARN", scenarioRunner.functionArn);
+    deviceStateTable.grantReadData(scenarioRunner);
+    sensorHistoryTable.grantReadData(scenarioRunner);
+
+    // Read the per-user scheduling credential, and nothing else. Scoped to the
+    // prefix so this role cannot read the m2m secret or any other secret in the
+    // account — the refresh tokens are a real credential at rest and this is the
+    // only principal that needs them.
+    scenarioRunner.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:smarthome/scenario-tokens/*`,
+      ],
+      conditions: { Bool: { "aws:SecureTransport": "true" } },
+    }));
+    // The secrets are encrypted with a dedicated customer-managed key, so the
+    // Secrets Manager grant above is not sufficient on its own — GetSecretValue
+    // fails with AccessDeniedException from KMS, which surfaces as "no usable
+    // scheduling credential" and looks like a missing secret rather than a missing
+    // permission. Scoped by `kms:ViaService` so this role cannot use the key for
+    // anything except decrypting through Secrets Manager.
+    scenarioRunner.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["kms:Decrypt", "kms:DescribeKey"],
+      resources: [`arn:aws:kms:${this.region}:${this.account}:key/*`],
+      conditions: {
+        StringEquals: {
+          "kms:ViaService": `secretsmanager.${this.region}.amazonaws.com`,
+        },
+      },
+    }));
+    // cognito-idp:InitiateAuth with REFRESH_TOKEN_AUTH is an unauthenticated API
+    // — it needs no IAM permission — so there is deliberately no Cognito grant
+    // here. The credential IS the refresh token, which is why it is the thing
+    // being protected.
+
+    // ========================
+    // Scheduler — a group to hold the per-scenario schedules, and the role it
+    // assumes to invoke the runner. The admin API creates and deletes the
+    // schedules themselves, because a scene is created at runtime by an agent.
+    // ========================
+    const scheduleGroup = new scheduler.CfnScheduleGroup(this, "ScenarioScheduleGroup", {
+      name: "smarthome-scenarios",
+    });
+
+    const schedulerRole = new iam.Role(this, "ScenarioSchedulerRole", {
+      roleName: "smarthome-scenario-scheduler",
+      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com", {
+        conditions: {
+          // Confused-deputy guard: only this account's schedules may assume it.
+          StringEquals: { "aws:SourceAccount": this.account },
+        },
+      }),
+      description: "Lets EventBridge Scheduler invoke the scenario runner",
+    });
+    schedulerRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["lambda:InvokeFunction"],
+      resources: [scenarioRunner.functionArn],
+    }));
+
+    // The condition sweep: one schedule for every sensor and device-state
+    // trigger in the deployment. Five minutes is the sampling period of the
+    // simulator's sensor, so a shorter interval would re-evaluate the same
+    // reading, and a longer one would miss a threshold crossing that reverses.
+    new scheduler.CfnSchedule(this, "ScenarioConditionSweep", {
+      name: "smarthome-scenario-sweep",
+      groupName: scheduleGroup.name,
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(5 minutes)",
+      target: {
+        arn: scenarioRunner.functionArn,
+        roleArn: schedulerRole.roleArn,
+        input: JSON.stringify({ mode: "sweep" }),
+      },
+    });
+
+    // Scheduler management, scoped to the one group. The admin API creates a
+    // schedule per time-triggered scene; it has no reason to touch schedules
+    // anywhere else in the account.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["scheduler:CreateSchedule", "scheduler:UpdateSchedule",
+                "scheduler:DeleteSchedule", "scheduler:GetSchedule"],
+      resources: [
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule/smarthome-scenarios/*`,
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule-group/smarthome-scenarios`,
+      ],
+    }));
+    // ListSchedules authorizes against `schedule/*/*` even when the call passes
+    // GroupName — it is a list operation, so the resource is the collection rather
+    // than any one schedule. Scoping it to the group is rejected with
+    // AccessDeniedException naming `schedule/*/*`, so it gets its own statement.
+    // Read-only, and the group filter still limits what comes back.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["scheduler:ListSchedules", "scheduler:ListScheduleGroups"],
+      resources: [`arn:aws:scheduler:${this.region}:${this.account}:schedule/*/*`],
+    }));
+    // Creating a schedule means handing Scheduler a role to assume, and IAM
+    // requires the caller to be allowed to pass it. Scoped to that one role, so
+    // this cannot be used to pass a more privileged one.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PassRole"],
+      resources: [schedulerRole.roleArn],
+      conditions: { StringEquals: { "iam:PassedToService": "scheduler.amazonaws.com" } },
+    }));
+    adminLambda.addEnvironment("SCENARIO_SCHEDULER_ROLE_ARN", schedulerRole.roleArn);
+
+    new cdk.CfnOutput(this, "ScenarioRunnerLambdaArn", { value: scenarioRunner.functionArn });
+    new cdk.CfnOutput(this, "ScenarioScheduleGroupName", { value: scheduleGroup.name! });
+    new cdk.CfnOutput(this, "ScenarioSchedulerRoleArn", { value: schedulerRole.roleArn });
+
     new cdk.CfnOutput(this, "SkillErpApiUrl", { value: skillErpApi.url });
   }
 }

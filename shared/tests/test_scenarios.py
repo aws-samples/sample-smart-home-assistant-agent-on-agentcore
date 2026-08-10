@@ -368,3 +368,90 @@ def test_booleans_are_left_alone():
     """bool is not a float, and a Decimal power flag would be wrong on the wire."""
     actions, _ = sc.validate_actions(_led_off())
     assert actions[0]["command"]["power"] is False
+
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+
+def test_a_time_trigger_becomes_a_six_field_cron():
+    """EventBridge Scheduler requires six fields with `?` in day-of-month or
+    day-of-week; a five-field Unix expression is rejected outright."""
+    trigger, _ = sc.validate_trigger({"sceneType": "time", "conditionValue": "23:00"})
+    assert sc.cron_for(trigger) == "cron(0 23 * * ? *)"
+
+
+def test_leading_zeros_are_dropped_from_the_cron():
+    """`cron(05 07 ...)` is not accepted; the fields are numbers."""
+    trigger, _ = sc.validate_trigger({"sceneType": "time", "conditionValue": "07:05"})
+    assert sc.cron_for(trigger) == "cron(5 7 * * ? *)"
+
+
+@pytest.mark.parametrize("scene,extra", [
+    ("sensor", {"subject": "temperature", "conditionValue": 27,
+                "calculationType": "above"}),
+    ("device_state", {"subject": "living-fan-1", "conditionValue": "on"}),
+])
+def test_a_condition_trigger_gets_no_schedule_of_its_own(scene, extra):
+    """A threshold has no clock to fire on. Giving each one a schedule would mean
+    a schedule that fires to check a condition, which is what the sweep is."""
+    trigger, _ = sc.validate_trigger({"sceneType": scene, **extra})
+    assert sc.cron_for(trigger) == ""
+
+
+# ---------------------------------------------------------------------------
+# Firing conditions
+# ---------------------------------------------------------------------------
+
+def _sensor(calc="above", value=27):
+    trigger, _ = sc.validate_trigger(
+        {"sceneType": "sensor", "subject": "temperature",
+         "conditionValue": value, "calculationType": calc})
+    return trigger
+
+
+def test_a_threshold_fires_only_when_crossed():
+    above = _sensor("above", 27)
+    assert sc.should_fire(above, 27.5) is True
+    assert sc.should_fire(above, 27) is False   # strictly above
+    assert sc.should_fire(above, 26) is False
+
+
+def test_a_below_threshold_is_the_mirror_image():
+    below = _sensor("below", 18)
+    assert sc.should_fire(below, 17.9) is True
+    assert sc.should_fire(below, 18) is False
+
+
+def test_no_reading_never_fires():
+    """A scene that runs because a sensor went quiet is worse than one that does
+    not run — the reading is unknown, not zero."""
+    assert sc.should_fire(_sensor(), None) is False
+
+
+def test_a_non_numeric_reading_never_fires():
+    assert sc.should_fire(_sensor(), "warm") is False
+
+
+def test_a_device_state_matches_across_boolean_and_word_forms():
+    """The simulator reports `power: true` and the user says "on". Comparing them
+    literally would make the trigger silently never fire."""
+    trigger, _ = sc.validate_trigger(
+        {"sceneType": "device_state", "subject": "living-fan-1",
+         "conditionValue": "on"})
+    assert sc.should_fire(trigger, True) is True
+    assert sc.should_fire(trigger, "on") is True
+    assert sc.should_fire(trigger, "true") is True
+    assert sc.should_fire(trigger, False) is False
+    assert sc.should_fire(trigger, "off") is False
+
+
+def test_change_is_satisfied_by_any_reading():
+    """`should_fire` answers "is the condition true now". Whether that is a NEW
+    event is the caller's question, because only the caller knows the last value."""
+    trigger, _ = sc.validate_trigger(
+        {"sceneType": "device_state", "subject": "living-fan-1",
+         "calculationType": "change", "conditionValue": "any"})
+    assert sc.should_fire(trigger, True) is True
+    assert sc.should_fire(trigger, False) is True
+    assert sc.should_fire(trigger, None) is False

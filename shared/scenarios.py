@@ -386,6 +386,72 @@ def pending_actions(item: dict) -> list[dict]:
             for a in (item.get("deviceActions") or [])]
 
 
+def cron_for(trigger: dict) -> str:
+    """The EventBridge Scheduler expression for a time trigger, or "".
+
+    Only a `time` trigger gets its own schedule. A device-state or sensor trigger
+    has no clock to fire on — it is evaluated against the current reading on a
+    sweep, so those share one recurring schedule rather than each holding one of
+    their own.
+
+    `cron(m H * * ? *)`, not `rate(...)`: Scheduler's cron requires six fields with
+    `?` in either day-of-month or day-of-week, and a five-field Unix expression is
+    rejected. The minute and hour come from a `conditionValue` that TIME_RE has
+    already proven is 24-hour HH:MM, so there is nothing to parse defensively here.
+    """
+    if trigger.get("sceneType") != SCENE_TIME:
+        return ""
+    hour, minute = trigger["conditionValue"].split(":")
+    return f"cron({int(minute)} {int(hour)} * * ? *)"
+
+
+def should_fire(trigger: dict, reading) -> bool:
+    """Whether a non-time trigger is satisfied by the latest reading.
+
+    `reading` is the device's current state value or the sensor's latest sample;
+    None means "no data", which is never a reason to fire — a scene that runs
+    because a sensor went quiet is worse than one that does not run.
+
+    Edge detection is deliberately NOT done here. This answers "is the condition
+    true now", and the caller decides whether that is a new event, because only
+    the caller knows what it saw last time.
+    """
+    if reading is None:
+        return False
+    calc = trigger.get("calculationType")
+    expected = trigger.get("conditionValue")
+
+    if calc == CALC_CHANGE:
+        # Any reading at all satisfies "changed"; the caller compares against the
+        # value it recorded on the previous sweep.
+        return True
+
+    if calc in (CALC_ABOVE, CALC_BELOW):
+        try:
+            left, right = float(reading), float(expected)
+        except (TypeError, ValueError):
+            return False
+        return left > right if calc == CALC_ABOVE else left < right
+
+    if calc == CALC_EQUAL:
+        # A device state compared as a string, so "on"/True/"true" all match. The
+        # simulator reports booleans and a user says "on"; treating those as
+        # different values would make the trigger silently never fire.
+        return _as_state(reading) == _as_state(expected)
+    return False
+
+
+def _as_state(value) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    text = str(value).strip().lower()
+    if text in ("true", "1", "on", "yes"):
+        return "on"
+    if text in ("false", "0", "off", "no"):
+        return "off"
+    return text
+
+
 def summarise(item: dict) -> dict:
     """A compact view for a tool result or a list — no raw DynamoDB types."""
     return {
