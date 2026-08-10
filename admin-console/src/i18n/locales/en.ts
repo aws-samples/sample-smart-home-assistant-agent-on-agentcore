@@ -681,7 +681,7 @@ const en: Record<string, string> = {
   'dashboard.kpi.activeSessionsHint': 'CloudWatch exposes ActiveSessionCount only at account level (Service=AgentCore.Runtime) with no per-runtime dimension, so this figure covers every AgentCore runtime in the account.',
   'dashboard.kpi.sessionsInWindow': '{n} sessions in window',
   'dashboard.kpi.ttft': 'Time to first token P95',
-  'dashboard.kpi.ttftHint': 'TTFT is not a CloudWatch metric. It comes from the gen_ai.server.time_to_first_token attribute on Strands chat spans in the aws/spans log group. The value shown is the upper envelope of per-day P95 (Logs Insights cannot merge percentiles across time bins).',
+  'dashboard.kpi.ttftHint': 'TTFT is not a CloudWatch metric. It comes from the gen_ai.server.time_to_first_token attribute on Strands chat spans in the aws/spans log group. The value shown is the upper envelope of per-day P95 (Logs Insights cannot merge percentiles across time bins). A turn that delegates to a specialist agent raises TTFT substantially: the A2A hop is non-streaming, so the orchestrator emits nothing until the specialist has finished its own LLM turn. Measured at roughly 15s for a direct answer against 30s for a delegated one. That is the cost of the delegation, not a regression in the model.',
   'dashboard.kpi.errorRate': 'Error rate',
   'dashboard.kpi.errorRateHint': '(UserErrors + SystemErrors) / Invocations from AWS/Bedrock-AgentCore metrics. Shows -- rather than 0% when there was no traffic in the window.',
   'dashboard.kpi.noTraffic': 'No traffic in window',

@@ -62,7 +62,8 @@ def _patch_send(monkeypatch, replies):
     """replies: dict[endpoint_url, callable(message, allowed_skill_ids) -> str]"""
     from tools import a2a as a2a_mod
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider):
+    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+                   user_token=None, card_dict=None):
         # Ensure token_provider is callable (matches production contract).
         assert callable(token_provider)
         handler = replies.get(endpoint_url)
@@ -202,7 +203,7 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     calls = []
 
     def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
-                   user_token=None):
+                   user_token=None, card_dict=None):
         calls.append({
             "endpoint": endpoint_url,
             "message": message,
@@ -258,7 +259,7 @@ def _capture_sends(monkeypatch):
     calls = []
 
     def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
-                   user_token=None):
+                   user_token=None, card_dict=None):
         calls.append({"user_token": user_token,
                       "allowed": list(allowed_skill_ids)})
         return "⟦A2A⟧ ok"
@@ -352,3 +353,156 @@ def test_bearer_prefix_is_stripped_before_the_header_is_set(monkeypatch):
     assert sent["X-SuperApp-User-Token"] == "user.id.token"
     assert sent["Authorization"] == "Bearer m2m-token"
     assert sent["X-A2A-Allowed-Skills"] == "estimate_savings"
+
+
+# ---------------------------------------------------------------------------
+# Latency: the local card, the shared loop, the breaker
+# ---------------------------------------------------------------------------
+
+def test_the_registry_card_is_passed_to_the_send_so_no_fetch_is_needed(monkeypatch):
+    """`get_agent_card()` was a whole round trip to the sub-agent whose only used
+    field, `card.url`, was overwritten on the next line. build_a2a_tools already
+    holds the full card, so it is threaded through instead."""
+    from tools import a2a as a2a_mod
+    from tools.a2a import build_a2a_tools
+
+    seen = {}
+
+    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+                   user_token=None, card_dict=None):
+        seen["card"] = card_dict
+        return "ok"
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
+
+    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
+                            registry_id="reg", token_provider=lambda: "m2m")
+    _invoke_tool(tools[0], "hi")
+    assert seen["card"], "the card was not threaded through; a fetch would happen"
+    assert seen["card"]["name"] == "energy-optimization-agent"
+    assert seen["card"]["skills"]
+
+
+def test_a_local_card_carries_the_granted_url_not_the_agents_own():
+    """The endpoint we were GRANTED is authoritative. A sub-agent's self-reported
+    URL was already overridden; now it is never consulted at all."""
+    from tools import a2a as a2a_mod
+
+    card = a2a_mod._local_agent_card(
+        {"name": "x-agent", "description": "d", "version": "2.0.0",
+         "url": "https://the-agent-says-this/",
+         "skills": [{"id": "s1", "name": "S1", "description": "does s1"}]},
+        "https://the-registry-granted-this/invocations")
+    assert card is not None
+    assert str(card.url) == "https://the-registry-granted-this/invocations"
+    assert [s.id for s in card.skills] == ["s1"]
+
+
+def test_a_card_that_cannot_be_built_falls_back_rather_than_sending_garbage():
+    """A malformed record must not produce a half-built card — a wrong card is
+    worse than a slow one, so the caller pays for the fetch instead."""
+    from tools import a2a as a2a_mod
+
+    # AgentCard validates types, not emptiness, so these would otherwise build a
+    # card with an empty name and URL and send it to be rejected downstream.
+    assert a2a_mod._local_agent_card({}, "") is None
+    assert a2a_mod._local_agent_card({"name": "n"}, "") is None, (
+        "a card with no endpoint must not be built")
+    assert a2a_mod._local_agent_card({}, "https://x/invocations") is None, (
+        "a card with no agent name must not be built")
+
+
+def test_the_event_loop_is_reused_across_delegations():
+    """`asyncio.run` closes the loop it creates, so every delegation built a fresh
+    one and none could share a connection pool. Three delegations stacked to
+    15-45s."""
+    from tools import a2a as a2a_mod
+
+    a2a_mod._loop = None
+    first = a2a_mod._get_loop()
+    assert a2a_mod._get_loop() is first
+    assert not first.is_closed()
+    first.close()
+    a2a_mod._loop = None
+
+
+def test_a_closed_loop_is_replaced_rather_than_reused():
+    from tools import a2a as a2a_mod
+
+    a2a_mod._loop = None
+    loop = a2a_mod._get_loop()
+    loop.close()
+    replacement = a2a_mod._get_loop()
+    assert replacement is not loop
+    assert not replacement.is_closed()
+    replacement.close()
+    a2a_mod._loop = None
+
+
+def test_the_breaker_opens_after_repeated_failures_and_then_cools_down(monkeypatch):
+    """A dead specialist should cost one timeout, not one per turn. Per-endpoint,
+    so one sick agent does not silence the others."""
+    from tools import a2a as a2a_mod
+
+    a2a_mod._breaker.clear()
+    endpoint = "https://sick-agent/invocations"
+
+    for _ in range(a2a_mod._BREAKER_THRESHOLD - 1):
+        a2a_mod._record_failure(endpoint)
+    assert a2a_mod._breaker_open(endpoint) is False, "opened too early"
+
+    a2a_mod._record_failure(endpoint)
+    assert a2a_mod._breaker_open(endpoint) is True
+    assert a2a_mod._breaker_open("https://healthy-agent/invocations") is False
+
+    # After the cooldown exactly ONE probe is let through — not a full reset, so a
+    # still-broken endpoint re-opens on its next failure rather than retrying the
+    # whole threshold again. Advance from the REAL opened_at that _record_failure
+    # stamped, rather than an arbitrary epoch: the check is
+    # `now - opened_at >= cooldown`, so a fixed fake clock in the past keeps it shut.
+    opened_at = a2a_mod._breaker[endpoint][1]
+    monkeypatch.setattr(a2a_mod.time, "time",
+                        lambda: opened_at + a2a_mod._BREAKER_COOLDOWN_SECONDS + 1)
+    assert a2a_mod._breaker_open(endpoint) is False
+    a2a_mod._record_failure(endpoint)
+    assert a2a_mod._breaker_open(endpoint) is True
+    a2a_mod._breaker.clear()
+
+
+def test_a_success_clears_the_failure_count():
+    from tools import a2a as a2a_mod
+
+    a2a_mod._breaker.clear()
+    endpoint = "https://flaky/invocations"
+    a2a_mod._record_failure(endpoint)
+    a2a_mod._record_success(endpoint)
+    assert endpoint not in a2a_mod._breaker
+
+
+def test_an_open_breaker_reports_unavailable_rather_than_a_failed_call(monkeypatch):
+    """The distinction matters to the model: "unavailable" means it was never
+    asked, so it should say so rather than imply the specialist answered badly."""
+    from tools import a2a as a2a_mod
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
+                            registry_id="reg", token_provider=lambda: "m2m")
+
+    a2a_mod._breaker.clear()
+    for _ in range(a2a_mod._BREAKER_THRESHOLD):
+        a2a_mod._record_failure(CARD_ENERGY["url"])
+    out = _invoke_tool(tools[0], "hi")
+    a2a_mod._breaker.clear()
+    assert out.startswith("A2A agent unavailable:")
+
+
+def test_the_timeouts_are_tiered_rather_than_one_number():
+    """Connect fast, read slow: an unreachable agent should fail in a second, but
+    one that is thinking has an LLM turn behind it and needs real time. A single
+    60s value could not express both."""
+    from tools import a2a as a2a_mod
+
+    assert a2a_mod._CONNECT_TIMEOUT < 10
+    assert a2a_mod._READ_TIMEOUT > 30

@@ -681,7 +681,7 @@ const zh: Record<string, string> = {
   'dashboard.kpi.activeSessionsHint': 'CloudWatch 的 ActiveSessionCount 只有账号级维度（Service=AgentCore.Runtime），没有按单个 Runtime 拆分的版本，因此该数值涵盖账号下所有 AgentCore Runtime。',
   'dashboard.kpi.sessionsInWindow': '窗口内会话 {n}',
   'dashboard.kpi.ttft': '首 Token 延迟 P95',
-  'dashboard.kpi.ttftHint': 'TTFT 不存在于 CloudWatch 指标中，来自 aws/spans 日志组里 Strands chat span 的 gen_ai.server.time_to_first_token 属性。展示值为各天 P95 的上包络（Logs Insights 无法跨时间桶合并分位数）。',
+  'dashboard.kpi.ttftHint': 'TTFT 不存在于 CloudWatch 指标中，来自 aws/spans 日志组里 Strands chat span 的 gen_ai.server.time_to_first_token 属性。展示值为各天 P95 的上包络（Logs Insights 无法跨时间桶合并分位数）。委派给子 Agent 的轮次会显著拉高 TTFT：A2A 这一跳不走流式，主 Agent 在子 Agent 完成自己那次 LLM 调用之前不会输出任何内容。实测直接回答约 15 秒，委派约 30 秒 —— 这是委派的固有代价，不是模型退化。',
   'dashboard.kpi.errorRate': '错误率',
   'dashboard.kpi.errorRateHint': '(UserErrors + SystemErrors) / Invocations，取自 AWS/Bedrock-AgentCore 指标。窗口内无请求时显示为 --，而不是 0%。',
   'dashboard.kpi.noTraffic': '窗口内无请求',

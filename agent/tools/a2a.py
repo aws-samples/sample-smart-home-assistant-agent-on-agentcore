@@ -183,6 +183,10 @@ def build_a2a_tools(
                 allowed_skill_ids=list(skill_ids),
                 token_provider=token_provider,
                 user_token=user_token,
+                # The card we already have. Passing it removes the per-call
+                # GET /.well-known/agent-card.json whose only used field was
+                # overwritten on the next line anyway.
+                card_dict=card,
             )
             if tool is not None:
                 tools.append(tool)
@@ -197,6 +201,7 @@ def _make_skill_tool(
     allowed_skill_ids: list[str],
     token_provider: Callable[[], str],
     user_token: str | None = None,
+    card_dict: dict | None = None,
 ):
     tool_name = f"a2a_{_slug(agent_name)}_{_slug(skill.get('id', 'x'))}"
     desc_parts = [skill.get("description", "").strip() or skill.get("name", "")]
@@ -213,6 +218,7 @@ def _make_skill_tool(
     _allowed = list(allowed_skill_ids)
     _token = token_provider
     _user_token = user_token
+    _card = dict(card_dict or {})
 
     @strands_tool(name=tool_name, description=doc)
     def _invoke(message: str) -> str:
@@ -224,7 +230,14 @@ def _make_skill_tool(
                 allowed_skill_ids=_allowed,
                 token_provider=_token,
                 user_token=_user_token,
+                card_dict=_card,
             )
+        except A2AUnavailable as e:
+            # Distinguished from a failure: the call was never attempted, so the
+            # model should say the specialist is unavailable rather than imply it
+            # was asked and gave a bad answer.
+            logger.info("A2A call %s skipped by breaker: %s", tool_name, e)
+            return f"A2A agent unavailable: {e}"
         except Exception as e:
             logger.warning("A2A call %s failed: %s", tool_name, e)
             return f"A2A agent call failed: {e}"
@@ -236,22 +249,156 @@ def _make_skill_tool(
 # JSON-RPC message/send transport
 # ----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# Latency: one event loop, one connection pool, a local card, and a breaker
+#
+# Three measured costs on the delegation path, all avoidable (spec 3 §2.5, §4.4):
+#
+#  1. `asyncio.run` per call built a NEW event loop every time, so two
+#     delegations in one turn could not overlap and neither could reuse a
+#     connection. Three delegations stacked to 15-45s.
+#  2. `A2ACardResolver.get_agent_card()` was a whole extra round trip to the
+#     sub-agent whose only used field — `card.url` — was overwritten on the very
+#     next line. The Registry record already carries the full card.
+#  3. A bare 60s timeout with no retry and no breaker: one sick sub-agent cost
+#     every turn a full minute before the model could say anything.
+# ----------------------------------------------------------------------------
+
+# Connect fast, read slow. A sub-agent that cannot be reached fails in a second;
+# one that is thinking gets time to answer, because an LLM turn behind it is
+# genuinely slow. A single 60s number could not express both.
+_CONNECT_TIMEOUT = 5.0
+_READ_TIMEOUT = 55.0
+
+# Circuit breaker. After this many consecutive failures an endpoint is skipped
+# outright until the cooldown passes, so a dead specialist costs one timeout
+# rather than one per turn. Deliberately small: the point is to stop repeating a
+# known failure inside a single conversation, not to model uptime.
+_BREAKER_THRESHOLD = 3
+_BREAKER_COOLDOWN_SECONDS = 60.0
+
+# endpoint -> [consecutive_failures, opened_at]
+_breaker: dict[str, list[float]] = {}
+
+
+class A2AUnavailable(RuntimeError):
+    """Raised when the breaker is open, so the caller reports it as a refusal."""
+
+
+def _breaker_open(endpoint: str) -> bool:
+    state = _breaker.get(endpoint)
+    if not state:
+        return False
+    failures, opened_at = state
+    if failures < _BREAKER_THRESHOLD:
+        return False
+    if time.time() - opened_at >= _BREAKER_COOLDOWN_SECONDS:
+        # Cooldown elapsed: allow one probe through rather than resetting
+        # outright, so a still-broken endpoint re-opens on its next failure.
+        _breaker[endpoint] = [_BREAKER_THRESHOLD - 1, opened_at]
+        return False
+    return True
+
+
+def _record_failure(endpoint: str) -> None:
+    state = _breaker.setdefault(endpoint, [0.0, 0.0])
+    state[0] += 1
+    if state[0] >= _BREAKER_THRESHOLD:
+        state[1] = time.time()
+
+
+def _record_success(endpoint: str) -> None:
+    _breaker.pop(endpoint, None)
+
+
+_loop: Any = None
+
+
+def _get_loop():
+    """One event loop for the process, reused across delegations.
+
+    A per-call loop is why two delegations in a turn could not share a
+    connection pool. Created on demand rather than at import so a fork-based
+    worker does not inherit a loop bound to the parent.
+    """
+    global _loop
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+    return _loop
+
+
+def _local_agent_card(card_dict: dict, endpoint_url: str):
+    """Build an AgentCard from the Registry record instead of fetching it.
+
+    `ClientFactory.create()` needs a card object, which is the only reason the
+    HTTP fetch existed — its `url` was overwritten with the Registry's
+    invocation URL immediately afterwards, so the round trip bought nothing. The
+    Registry record already holds every required field.
+
+    Returns None if the record cannot satisfy the model, in which case the caller
+    falls back to fetching, because a wrong card is worse than a slow one.
+    """
+    from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+
+    # AgentCard validates TYPES, not emptiness — `AgentCard(name="", url="")`
+    # constructs happily and would be sent, to be rejected at the far end as a
+    # malformed request. Check the two fields that must be real before building.
+    if not card_dict.get("name") or not endpoint_url:
+        return None
+
+    try:
+        skills = [
+            AgentSkill(
+                id=s.get("id", ""),
+                name=s.get("name", s.get("id", "")),
+                description=s.get("description", ""),
+                tags=list(s.get("tags") or []),
+                examples=list(s.get("examples") or []),
+            )
+            for s in (card_dict.get("skills") or [])
+        ]
+        return AgentCard(
+            name=card_dict.get("name", ""),
+            description=card_dict.get("description", ""),
+            version=card_dict.get("version", "1.0.0"),
+            # The URL we were GRANTED, not one the sub-agent reports about
+            # itself. This was already the behaviour; now it is the only source.
+            url=endpoint_url,
+            capabilities=AgentCapabilities(streaming=False),
+            default_input_modes=card_dict.get("defaultInputModes") or ["text"],
+            default_output_modes=card_dict.get("defaultOutputModes") or ["text"],
+            skills=skills,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not build a local AgentCard (%s); will fetch", exc)
+        return None
+
+
 def _send_a2a_message(
     endpoint_url: str,
     message: str,
     allowed_skill_ids: list[str],
     token_provider: Callable[[], str],
     user_token: str | None = None,
+    card_dict: dict | None = None,
 ) -> str:
     """Send one A2A ``message/send`` and collect the reply text.
 
-    Uses a2a-sdk's ClientFactory with streaming=False so the server emits a
-    single Task with artifacts — we extract the agent_response text from
-    artifacts[0].parts and return it to the LLM.
+    streaming=False so the server emits a single Task with artifacts; the reply
+    text comes out of artifacts[0].parts. Left non-streaming deliberately — the
+    change is wide and the sub-agent's marker is applied to the RESULT, not the
+    stream (see a2a-agent-registry/common/server.py). The cost is that a
+    delegated turn is silent until the specialist answers, which raises TTFT;
+    that is documented on the Overview dashboard rather than hidden.
     """
     import httpx
     from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
     from a2a.types import Message, Part, Role, TextPart
+
+    if _breaker_open(endpoint_url):
+        raise A2AUnavailable(
+            "this specialist has failed repeatedly and is being skipped for a "
+            "short cooldown; report it as unavailable rather than retrying")
 
     async def _run() -> str:
         headers = {
@@ -266,13 +413,14 @@ def _send_a2a_message(
             if token.lower().startswith("bearer "):
                 token = token.split(" ", 1)[1].strip()
             headers["X-SuperApp-User-Token"] = token
-        async with httpx.AsyncClient(headers=headers, timeout=60) as http:
-            resolver = A2ACardResolver(http, endpoint_url)
-            card = await resolver.get_agent_card()
-            # Server card.url may be different from the invocation URL we got
-            # from the Registry; pin the URL we were granted so SigV4-style
-            # edges (AgentCore Runtime /invocations/) receive the right path.
-            card.url = endpoint_url
+        timeout = httpx.Timeout(_READ_TIMEOUT, connect=_CONNECT_TIMEOUT)
+        async with httpx.AsyncClient(headers=headers, timeout=timeout) as http:
+            card = _local_agent_card(card_dict or {}, endpoint_url)
+            if card is None:
+                # Fallback: the record could not produce a valid card, so pay for
+                # the round trip rather than sending a malformed one.
+                card = await A2ACardResolver(http, endpoint_url).get_agent_card()
+                card.url = endpoint_url
             factory = ClientFactory(
                 ClientConfig(httpx_client=http, streaming=False)
             )
@@ -301,4 +449,12 @@ def _send_a2a_message(
                             reply_text = r.text
             return reply_text or "(no response from A2A agent)"
 
-    return asyncio.run(_run())
+    # The shared loop, driven with run_until_complete. `asyncio.run` would close
+    # the loop it creates, which is what made every call build a fresh one.
+    try:
+        result = _get_loop().run_until_complete(_run())
+    except Exception:
+        _record_failure(endpoint_url)
+        raise
+    _record_success(endpoint_url)
+    return result
