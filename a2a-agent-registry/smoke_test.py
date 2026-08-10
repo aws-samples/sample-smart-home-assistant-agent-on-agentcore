@@ -39,11 +39,23 @@ PROMPTS = {
         "When should I replace my AC filter?",
         "⟦A2A:appliance-maintenance⟧",
     ),
-    # This one has real tools, so the prompt asks it to READ rather than control:
-    # a smoke test should not leave the user's devices in a different state.
+    # These have real tools, so the prompts ask them to READ rather than write
+    # where possible: a smoke test should not leave the user's devices in a
+    # different state than it found them.
     "device-control-agent": (
         "What is the living room environment sensor reading right now?",
         "⟦A2A:device-control⟧",
+    ),
+    # Lighting is the exception — this agent exists to change the lights, and a
+    # read-only prompt would not exercise the path that matters. It picks a mild
+    # effect on the TV backlight, which also covers segment truncation (4 segments).
+    "light-effect-agent": (
+        "Give the TV backlight a calm ocean feel.",
+        "⟦A2A:light-effect⟧",
+    ),
+    "knowledge-qa-agent": (
+        "What animation modes does the LED matrix support?",
+        "⟦A2A:knowledge-qa⟧",
     ),
 }
 

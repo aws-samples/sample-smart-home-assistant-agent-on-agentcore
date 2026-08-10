@@ -128,14 +128,51 @@ def test_every_agent_has_the_files_deploy_expects():
             assert skill.get("id"), f"{name} has a skill with no id"
 
 
-def test_device_control_is_the_agent_with_tools():
-    """The tools path is chosen by the presence of tools.py, so which agents have
-    one is a fact worth pinning."""
+def test_the_tool_using_agents_are_the_expected_ones():
+    """deploy.py picks the tools path by the presence of tools.py, and a
+    tool-using agent additionally requires a verified user identity on every
+    request. Which agents cross that line is worth pinning: adding tools.py to an
+    agent silently changes its auth requirements."""
     with_tools = {
         name for name in agents.AGENT_NAMES
         if os.path.exists(os.path.join(REGISTRY_DIR, name, "tools.py"))
     }
-    assert with_tools == {"device-control"}, with_tools
+    assert with_tools == {"device-control", "light-effect", "knowledge-qa"}, with_tools
+    # The three original advisors stay prompt-only — they touch no user data, and
+    # requiring an identity they never had would break them.
+    prompt_only = set(agents.AGENT_NAMES) - with_tools
+    assert prompt_only == {"energy-optimization", "home-security",
+                           "appliance-maintenance"}, prompt_only
+
+
+def test_every_tools_module_exports_build_tools():
+    """deploy.py generates `from <pkg>.tools import build_tools`, so a tools.py
+    without that name fails at container start rather than at render."""
+    import re
+    for name in agents.AGENT_NAMES:
+        path = os.path.join(REGISTRY_DIR, name, "tools.py")
+        if not os.path.exists(path):
+            continue
+        src = open(path, encoding="utf-8").read()
+        assert re.search(r"^def build_tools\(", src, re.M), f"{name}/tools.py"
+
+
+def test_no_tools_module_exposes_identity_to_the_model():
+    """A tool signature carrying user_id / sub / email would let the model name
+    someone else's scope. Identity is injected in common/gateway_tools.py and must
+    never be a parameter."""
+    import re
+    for name in agents.AGENT_NAMES:
+        path = os.path.join(REGISTRY_DIR, name, "tools.py")
+        if not os.path.exists(path):
+            continue
+        src = open(path, encoding="utf-8").read()
+        # Every @strands_tool-decorated def, with its parameter list.
+        for match in re.finditer(r"@strands_tool[^\n]*\n\s*def \w+\(([^)]*)\)", src):
+            params = match.group(1)
+            for forbidden in ("user_id", "sub", "email", "authorization", "token"):
+                assert forbidden not in params, (
+                    f"{name}/tools.py exposes {forbidden} to the model: {params}")
 
 
 def test_the_scripts_no_longer_define_their_own_copies():

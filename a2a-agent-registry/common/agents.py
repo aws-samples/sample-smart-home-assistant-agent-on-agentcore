@@ -30,10 +30,12 @@ AGENTS: dict[str, tuple[str, str]] = {
     "energy-optimization": ("energy-optimization-agent", "sha2aenergy"),
     "home-security": ("home-security-agent", "sha2asecurity"),
     "appliance-maintenance": ("appliance-maintenance-agent", "sha2amaintenance"),
-    # The first agent with tools: it ships a tools.py, so deploy.py generates a
-    # main.py that passes the factory and the server requires a verified user
-    # identity on every request.
+    # Agents with tools ship a tools.py, so deploy.py generates a main.py that
+    # passes the factory and the server requires a verified user identity on every
+    # request. Their Gateway plumbing is shared — see common/gateway_tools.py.
     "device-control": ("device-control-agent", "sha2adevice"),
+    "light-effect": ("light-effect-agent", "sha2alight"),
+    "knowledge-qa": ("knowledge-qa-agent", "sha2aqa"),
 }
 
 AGENT_NAMES: tuple[str, ...] = tuple(AGENTS)

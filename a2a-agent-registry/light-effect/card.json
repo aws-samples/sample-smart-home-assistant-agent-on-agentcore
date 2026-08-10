@@ -1,0 +1,33 @@
+{
+  "name": "light-effect-agent",
+  "description": "A specialist agent that turns a description or mood into concrete lighting effect parameters — colours, animation, speed — and applies them to the user's lights, adapting to each fixture's segment count and supported effects.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/light-effect-agent"
+  },
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "skills": [
+    {
+      "id": "compose_effect",
+      "name": "Compose a lighting effect",
+      "description": "Turn a described mood, scene or theme into a concrete lighting effect — a colour palette, an animation from the fixture's supported set, and a speed — then apply it to the right lights.",
+      "tags": ["lighting", "effects", "creative"],
+      "examples": [
+        "I want an ocean effect in the living room",
+        "Make the light strip feel like a sunset",
+        "Something cosy for reading tonight"
+      ]
+    },
+    {
+      "id": "effect_from_description",
+      "name": "Effect from an image description",
+      "description": "Take a description of an image — its colours, mood and composition, produced upstream by a vision model — and build a lighting effect that echoes it. Use when the user attached a photo rather than describing a mood in words.",
+      "tags": ["lighting", "effects", "vision"],
+      "examples": [
+        "Match the lights to this photo of a forest at dusk",
+        "The image shows a neon city street at night — use those colours"
+      ]
+    }
+  ]
+}

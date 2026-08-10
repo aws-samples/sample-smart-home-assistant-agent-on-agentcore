@@ -1,0 +1,34 @@
+{
+  "name": "knowledge-qa-agent",
+  "description": "A specialist agent that answers questions from the enterprise knowledge base — product manuals, troubleshooting guides, FAQs and internal documents — citing the source it retrieved from and saying so when the answer is not there.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/knowledge-qa-agent"
+  },
+  "defaultModelId": "us.amazon.nova-lite-v1:0",
+  "skills": [
+    {
+      "id": "answer_from_docs",
+      "name": "Answer from the knowledge base",
+      "description": "Retrieve the relevant passages for a question and answer from them, citing the source document. Covers product capabilities, setup, specifications and company documents.",
+      "tags": ["rag", "knowledge-base", "faq"],
+      "examples": [
+        "What animation modes does the LED matrix support?",
+        "How do I clean the air purifier filter?",
+        "What temperature range does the oven support?"
+      ]
+    },
+    {
+      "id": "troubleshoot_from_docs",
+      "name": "Troubleshoot from the guides",
+      "description": "Find the documented troubleshooting procedure for a symptom and relay it as ordered steps, rather than improvising a diagnosis.",
+      "tags": ["rag", "troubleshooting", "support"],
+      "examples": [
+        "The fan is making a rattling noise",
+        "My rice cooker keeps switching to keep-warm early",
+        "The light strip flickers at low brightness"
+      ]
+    }
+  ]
+}
