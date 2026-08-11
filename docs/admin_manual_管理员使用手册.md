@@ -15,9 +15,10 @@
 8. [Skill 发布/审批/下发](#8-skill-发布审批下发)
 9. [Session 调试与 Remote Shell](#9-session-调试与-remote-shell)
    - [9.5 Agents 页 —— 机队总览与逐个 Agent 治理](#95-agents-页--机队总览与逐个-agent-治理)
-   - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)（含[场景即代码](#965-场景即代码导出--导入-json)、[JSON 模式](#966-结构化输出json-模式)、[委派进度与追踪](#968-委派时的进度提示)、[共享记忆](#969-跨-agent-共享记忆)）
+   - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)（含[场景即代码](#965-场景即代码导出--导入-json)、[JSON 模式](#966-结构化输出json-模式)、[委派进度与追踪](#968-委派时的进度提示)、[共享记忆](#969-跨-agent-共享记忆)、[示例提示词库](#9610-示例提示词库chatbot)）
 10. [Agent 运维统计大屏与演示前数据准备](#10-agent-运维统计大屏与演示前数据准备)
 11. [其他重要事项](#11-其他重要事项)
+    - [11.11 A2A 目录为空:Registry ID 与 botocore 版本](#1111--a2a-目录为空registry-id-与-botocore-版本)
 
 ---
 
@@ -722,6 +723,28 @@ Agent 做场景时它就会用暖色调。
   能用、私有、只有一半内容的记忆,症状是「子 Agent 从来不记得我说过的话」。
 - **Memory 不可用时子 Agent 照常回答**(软失败),只是答得没那么贴合。
 
+### 9.6.10 示例提示词库(Chatbot)
+
+Chatbot 输入框左侧有一个图标按钮,打开右侧的**示例提示词抽屉**:56 条示例、17 个能力
+分组、可按中英文搜索。点一条示例只会把它**填进输入框**,不会直接发出去 —— 演示时讲解
+者需要先说明这条要演什么。
+
+对运维/演示来说有三点值得知道:
+
+- **任何时候都能打开。** 欢迎页的快捷 chips 依然保留,但那些只在「还没说过话」时显示;
+  抽屉不受此限制。此前唯一能看到「这个 Agent 会什么」的地方就是欢迎页,**一开口就永久
+  消失了**。
+- **和模拟数据是同一份来源。** 示例正文存在 `shared/prompt-examples.json`,Chatbot 渲染
+  它,`scripts/simulate-users.py` 也读它来生成演示流量(§10.3)。所以「演示覆盖了什么」
+  和「Chatbot 里能点到什么」不会各说一套。
+- **有覆盖率测试兜底。** `shared/tests/test_prompt_examples.py` 会解析 8 个 AgentCard,
+  断言 18 个已发布 skill 每一个都被某条示例覆盖;反向也断言示例没有指向已不存在的
+  skill。新增一个 skill 却忘了写示例 → 测试失败,而不是等到演示当天才发现「这个 Agent
+  没人演」。
+
+标了「较慢」徽章的示例(browser-use / code-interpreter)实测单轮 19-141 秒,演示排期时
+留够时间。
+
 ---
 
 ## 10. Agent 运维统计大屏与演示前数据准备
@@ -730,7 +753,7 @@ Agent 做场景时它就会用暖色调。
 
 **Admin Console → Discover → Overview**,在 Demos 下方。按运维监控大屏布局:顶部一条六信号状态条(活跃会话 / TTFT P95 / 错误率 / QPS / Token 合计 / 评估质量均分),下面三行成对面板。
 
-- **时间范围**:24h / 7d / 30d 分段切换。
+- **时间范围**:24h / 7d / 30d / 60d / 90d 分段切换。60d/90d 是 2026-08-11 加的,加之前先测了:90 天单次 Logs Insights 查询 **3.2s / 22s 预算**,扫描量从 30d 到 90d 只涨 8%,所以长窗口不需要分片、不需要改查询。
 - **成本归因维度**:按用户 / 按入口环境 / 按 Agent 运行时。
 - **每张图都有表格视图**,数值不必靠悬浮才能看到。
 - **数据缓存 5 分钟**,右上角"刷新"可强制重新聚合。
@@ -746,7 +769,7 @@ Agent 做场景时它就会用暖色调。
 | 成本预算消耗 | ❌ 模拟 | 项目没有计费模块 |
 | 评估通过率与漂移 | ✅ 单变体真实 | **A/B 对比目前无数据**(配置存在但 A/B test 已 STOPPED),显示空状态而非编造曲线 |
 | 活跃版本与发布状态 | ✅ 版本真实 | **灰度阶段是推导值**,由 Gateway A/B test + `tenant_env` 推出,不是 AgentCore 原生字段 |
-| 用户满意度 | ❌ 模拟 | Chatbot 目前没有赞踩埋点;最接近的真实替代是评估卡里的 Helpfulness / GoalSuccessRate |
+| 用户满意度 | ✅ 真实(2026-08-11 起) | 来自 Chatbot 每轮回复下的 👍/👎,写入 `smarthome-feedback` 表。含 CSAT、赞踩比、逐日负评率、**按被委派专家 Agent 的拆分**、最近的反馈原因。**没有投票时显示「尚无反馈」,不会显示 CSAT 0** |
 
 > **口径提醒**:TTFT 不存在于 CloudWatch 指标中,只能从 `aws/spans` 里 Strands `chat` span 的 `gen_ai.server.time_to_first_token` 取,所以这部分加载要 5-20 秒(快指标先出,Token 卡片后填充)。错误率在窗口内无流量时显示 `--` 而不是 `0%`。
 
@@ -755,6 +778,8 @@ Agent 做场景时它就会用暖色调。
 刚部署完、或者环境闲置几天后,大屏和 AgentCore Evaluation 都是空的 —— 它们只反映**真实流量**。演示前用模拟用户脚本跑一遍,大屏就会有完整数据。
 
 `scripts/simulate-users.py` 会创建几个测试用户,让它们像真实用户一样和 Agent 对话,覆盖 Agent 的全部功能。测试用户通过 Cognito 登录、走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径,所以产生的 span、Token、会话和评估分与真实流量**无法区分** —— 不是往数据库里塞假数据。
+
+对话内容来自 `shared/prompt-examples.json`,和 Chatbot 里的「示例提示词」抽屉是**同一份文件**(见 [§9.6.10](#9610-示例提示词库chatbot))。所以「演示能覆盖什么」和「Chatbot 里能点到什么」永远一致,新增能力写一条示例即可同时进入两边。
 
 #### 前置条件
 
@@ -771,10 +796,11 @@ cd <repo-root>
 source venv/bin/activate
 export SIM_USER_PASSWORD='SomeStrong#Pass1'
 
-# ① 创建并配置 5 个 persona(幂等 —— 已存在则复用,可反复跑)
+# ① 创建并配置 9 个 persona(幂等 —— 已存在则复用,可反复跑)
 python3 scripts/simulate-users.py setup
 
-# ② 生成对话数据(轻量层,23 轮对话,约 1.5-3.5 分钟)
+# ② 生成对话数据(轻量层,52 轮对话,约 3.5-5 分钟)
+#    跑完会自动按 persona 的满意度倾向投真实的赞/踩票
 python3 scripts/simulate-users.py run
 
 # ③ 等 2-3 分钟,然后打开 Admin Console → Overview,时间范围切 24h
@@ -785,6 +811,14 @@ python3 scripts/simulate-users.py run
 ```bash
 python3 scripts/simulate-users.py run --heavy --personas dave,erin
 ```
+
+**演示要展示 60d / 90d 长时间范围时**,让投票铺开到过去若干天,否则长窗口里所有数据挤在今天一根柱子上:
+
+```bash
+python3 scripts/simulate-users.py run --days-back 45
+```
+
+> **`--days-back` 只能移动本脚本自己写的行**(反馈投票)。span 和评估分的时间戳由 AgentCore 写,**无法伪造** —— 所以 90 天视图里今天之前的曲线本来就是稀疏的,那是真实情况,不是 bug。想填满就得往真实遥测里注入假数据,那等于把演示效果建立在被污染的观测数据上。
 
 #### 四个子命令
 
@@ -799,13 +833,15 @@ python3 scripts/simulate-users.py run --heavy --personas dave,erin
 
 | 参数 | 属于 | 作用 |
 |------|------|------|
-| `--personas alice,bob` | `setup` / `run` | 只处理指定 persona(默认全部 5 个) |
+| `--personas alice,bob` | `setup` / `run` | 只处理指定 persona(默认全部 9 个) |
 | `--heavy` | `run` | 追加 code-interpreter 和 browser-use 场景 |
 | `--rounds N` | `run` | 重复整套场景 N 次,想要更多数据点时用 |
 | `--no-grant erin` | `setup` | 故意不给某个 persona 授权,用来产生"工具不可用"的真实错误数据 |
+| `--days-back N` | `run` | 把满意度投票铺开到过去 N 天,让 60d/90d 视图有数据(默认 0 = 全在今天) |
+| `--no-feedback` | `run` | 跳过投票,只产生对话流量 |
 | `--yes` | `teardown` | 跳过确认提示 |
 
-#### 5 个 persona 覆盖什么
+#### 9 个 persona 覆盖什么
 
 每个 persona 刻意配了不同的模型、入口环境和场景侧重,这样大屏的成本归因图表会出现**多行真实数据**,而不是全塞进一个桶 —— 这正是演示"千人千面"要看到的效果。
 
@@ -816,8 +852,20 @@ python3 scripts/simulate-users.py run --heavy --personas dave,erin
 | `carol` | Haiku 4.5 | ab-bundles | 多轮记忆延续(第三轮要求复现前两轮偏好)、用户反馈技能 |
 | `dave` | Kimi K2.5 | ab-targets | code-interpreter 数据分析 + 绘图(heavy) |
 | `erin` | Sonnet 4.5 | default | browser-use 真实网页操作(heavy)、拒答、模糊指令澄清 |
+| `frank` | Sonnet 4.6 | default | **灯效 Agent + 场景联动 Agent**(氛围灯、音乐/观影盛宴) |
+| `grace` | Haiku 4.5 | ab-bundles | **任务管理 Agent**(含日出日落触发)、多设备编排 |
+| `henry` | Opus 4.6 | ab-targets | **能耗优化 + 家庭安全 Agent** |
+| `iris` | Sonnet 4.5 | default | **家电维护、文档问答、三专家并发委派** |
 
-实测单轮耗时:轻量场景 3-25 秒;heavy 场景 19-141 秒(browser-use 是最慢的那个,且会占用真实 DCV 浏览器会话)。persona 之间并发跑,单个 persona 内部串行(对话本身有先后顺序)。
+后四个是 2026-08-11 加的,补的是一个真实缺口:**在此之前 8 个专家 Agent 一个都没有流量**,所以大屏「按 Agent 运行时」归因无从归因,演示也根本演不出委派。全套 55 轮(轻量 52 + heavy 3),此前是 26 轮。
+
+实测单轮耗时:轻量场景 3-25 秒;heavy 场景 19-141 秒(browser-use 是最慢的那个,且会占用真实 DCV 浏览器会话);三专家并发那一轮实测 52-69 秒。persona 之间并发跑,单个 persona 内部串行(对话本身有先后顺序)。
+
+#### 满意度投票
+
+`run` 结束后,每个 persona 会对自己刚才的对话投赞/踩票,走的是**和真人完全相同**的那个 API,行上标 `source="sim"`。每个 persona 有自己的满意度倾向(0.7-0.8),所以卡片上是一条真实分布,而不是一个平的数字。
+
+大屏会注明「其中 N% 的投票来自用户模拟器」。**只有管理员 token 能写 `source=sim` 或指定 `ts`** —— 这条披露是这张卡唯一的诚实性保障,如果任何客户端都能把票标成模拟,那个百分比就没有意义了。
 
 #### 跑完检查什么
 
@@ -826,6 +874,7 @@ python3 scripts/simulate-users.py run --heavy --personas dave,erin
 - **状态条**有值:活跃会话数、TTFT P95、Token 消耗合计、评估质量均分
 - **Token 成本归因**切"按用户"能看到多个 `simuser+*` 行;切"按入口环境"能看到 default / ab-bundles / ab-targets;切"按 Agent 运行时"只会看到 `smarthome_smarthome.DEFAULT` **一行** —— 模拟流量全部走 text runtime,这是预期的(表格视图能看到该运行时用过的多个模型)
 - **评估通过率与漂移**表格里有 8 个评估器出分
+- **用户满意度**有 CSAT 分数和赞踩比,并注明模拟流量占比;「按被委派专家 Agent」能看到分拆
 - **错误率**应该是 0.0%(若明显偏高,见下方排障)
 
 运行日志在 `scripts/sim-results/{persona}.jsonl`(已 gitignore),每行含耗时、HTTP 状态、回复片段、是否命中工具 —— 排查某轮为什么失败时看这个。
@@ -839,6 +888,8 @@ python3 scripts/simulate-users.py run --heavy --personas dave,erin
 | 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
 | 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
 | `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
+| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Integration Registry** 里给。注意目前 registry 里只有 3 个专家有已批准记录,其余 5 个无法授权(见 [§11.11](#1111--a2a-目录为空registry-id-与-botocore-版本)) |
+| 满意度卡片显示「尚无反馈」 | 该时间范围内没有投票。跑 `run`(会自动投票)或在 Chatbot 里点几下赞/踩。**空表不会显示成 CSAT 0** —— 那会把「没数据」画成「评分极低」 |
 | 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 这三个环境变量推导出的 Runtime。修复:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),A2A 则重跑 `python a2a-agent-registry/deploy.py --only patch-text-agent`。**注意**:2026-08-05 之前部署的环境没有 `DASHBOARD_EXTRA_RUNTIME_ARNS`,升级后必须重跑一次才会生效 |
 
 #### 安全边界
@@ -991,6 +1042,56 @@ runtime 没见过的 session id 约 7s,复用的约 0.4s。所以"16s 快路径"
 [`measurements/spec5-report.md`](measurements/spec5-report.md);每一列可以支撑什么结论见
 [`measurements/README.md`](measurements/README.md);背后的设计取舍见
 [`agent-design-principles-zh.md`](agent-design-principles-zh.md)。
+
+---
+
+### 11.11 ⚠️ A2A 目录为空:Registry ID 与 botocore 版本
+
+**症状**:Admin Console → Integration Registry 里可授权的 A2A Agent 列表是**空的**,或者
+只有 3 个;给用户授权后,问安全/能耗类问题仍然回「超出我当前的工具、技能与代理能力范围」。
+接口返回 200,日志里只有一条 warning。
+
+这里有**三个相互独立**的原因,排查时逐个确认:
+
+**① `agentcore-state.json` 里的 `registryId` 可能已失效。** 实测该文件里记录的 registry
+调用 `GetRegistry` 直接 `ResourceNotFoundException` —— registry 在某次操作中被重建过,而
+这个文件没跟着更新。真正持有 A2A 记录的是另一个 registry。确认方法:
+
+```bash
+# 列出账号下所有 registry,逐个数记录条数
+for rid in $(aws bedrock-agentcore-control list-registries \
+               --query 'registries[].registryId' --output text); do
+  echo "=== $rid"
+  aws bedrock-agentcore-control list-registry-records --registry-id "$rid" \
+    --max-results 50 --query 'registryRecords[].{id:recordId,n:name,s:status}' \
+    --output table 2>/dev/null | head -12
+done
+```
+
+找到真正有 `*-agent` 记录的那个,写进 admin Lambda 的 `REGISTRY_ID`。**注意 `REGISTRY_ID`
+是在模块导入时读取的**,改完环境变量后暖容器仍然用旧值 —— 要强制冷启动(改一次
+`--description` 即可)才会生效。
+
+**② admin Lambda 内置的 botocore 版本可能早于 Registry GA 的 API 形状。** 实测容器里是
+**botocore 1.42.97**,它的 `ListRegistryRecords` 只接受 `status` / `descriptorType`
+(GA 前的参数),而 `agent_registry.py` 发的是 GA 的 `filters` 列表,于是抛
+`ParamValidationError`。这个异常被 catch 成一条 warning,**目录静默返回空列表**。
+
+仓库里 vendored 了 1.43.68,但 AWS 内置的那份在 `sys.path` 上优先,所以只放文件不够 ——
+需要打成 Lambda Layer,或在 handler 里把 vendored 路径插到 `sys.path` 最前。
+
+**③ Lambda 角色可能缺 `bedrock-agentcore:ListRegistryRecords`** 在该 registry 上的权限。
+参数修对之后仍会 `AccessDeniedException`。
+
+诊断这三者最快的办法是在 Lambda 里跑一次探针(而不是在本地跑 —— 本地 botocore 是新的,
+问题复现不出来):打印 `botocore.__version__`、`ListRegistryRecords` 接受的参数列表,以及
+分别用两种参数形状调用的结果。
+
+> **当前状态(2026-08-11)**:①已修(admin Lambda 的 `REGISTRY_ID` 已指向
+> `gqrzwR9mtoL1Y0UK`);②③**未修**。后果是 8 个专家里只有 3 个
+> (energy-optimization、appliance-maintenance、home-security)有已批准的 registry 记录
+> 可授权,另外 5 个暂时无法通过控制台授权给用户。委派本身是好的 —— `probe-routing.py`
+> 读 span 确认 5 个专家 skill 都被真实调用过,只是要求调用者已持有对应授权。
 
 ---
 

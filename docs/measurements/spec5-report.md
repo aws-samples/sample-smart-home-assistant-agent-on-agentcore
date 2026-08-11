@@ -271,6 +271,49 @@ for every reply, the harness enforces it rather than the prompt asking.
 
 ---
 
+## Addendum, 2026-08-11: the dashboard's long ranges
+
+Widening the Overview dashboard to 60d/90d was expected to need paged reads. It
+did not, and the batching attempt is recorded here because the numbers are the
+whole argument.
+
+| Window | Single query | Records scanned |
+|---|---|---|
+| 7d | 1.8s | 327,845 |
+| 30d | 3.2s | 798,232 |
+| 60d | 4.1s | 831,357 |
+| **90d** | **3.2s** | **865,019** |
+
+Budget is `SPANS_QUERY_BUDGET_SECONDS = 22` (API Gateway's 29s integration
+timeout is hard). So 90 days runs at **7× inside budget**, and scanning grows
+**8%** from 30d to 90d rather than the 3× a naive reading of the window would
+predict — the older weeks simply hold little data.
+
+**Chunking, measured and rejected.** 18 × 5d in parallel: wall 2.6s, i.e. 0.6s
+faster, with two failure modes reproduced against the live account:
+
+```
+d-90..d-85  with aws/spans → 400 MalformedQueryException
+d-90..d-85  runtime only   → Complete, 0 rows
+d-90..now   with aws/spans → Complete, 16 rows   ← same span as ONE window
+
+d-30..d-25  without aws/spans → 0 rows
+d-30..d-25  with aws/spans    → 1 row (2026-07-14)   ← 1 real day lost, silently
+```
+
+A chunk lying entirely outside a group's retention is a hard 400; the obvious
+guard against that drops `aws/spans` from older chunks and silently loses days
+held only there. `tests/test_dashboard_ranges.py` now asserts one `start_query`
+per query regardless of window length. See design principles §1.9.1.
+
+**Also corrected:** the span-history horizon. Reading the oldest log group's
+`creationTime` gives 2026-04-12 on this account — true, but the group held no
+smarthome spans until 2026-07-14, and that reading suppressed the UI's caveat in
+exactly the case it exists for. `dataFrom` is now derived from the first day that
+returned data.
+
+---
+
 ## Reproducing
 
 ```bash

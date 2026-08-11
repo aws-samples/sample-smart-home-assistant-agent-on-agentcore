@@ -133,7 +133,8 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 4. **语音模式**：浏览器弹出麦克风授权 → 听到预渲染欢迎语"欢迎使用智能家居设备助手" → 开始语音对话，Nova Sonic 双向流式处理
 5. 语音模式下说"把风扇打开到中档"等指令，Agent 会通过 MCP 网关真实触发 IoT 设备命令
 6. **浏览器实时预览**（右侧默认折叠的 rail，点击展开）：问 Agent 任何需要查实时网页的问题（"example.com 现在显示什么"、"去淘宝上搜 iPhone 16"、"Amazon 上 100 美元以下耳机排名"），无需手动说"use browse_web"—— skill 描述会让 Kimi 自行调用。右侧 DCV 实时流按 1280×800 渲染（窗口更小时自动出现滚动条），每步截图保存到 Agent 的 `/mnt/workspace/<session>/browser/`，"文件"标签页可下载。任务完成后 AgentCore 会话保持 **15 分钟** 不关，点 **"接管控制"** 就能自己继续浏览/验证码/点筛选，不需要重新触发一次工具。详见 [架构文档 §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation)
-7. **欢迎屏示例提示**：分 5 组（智能设备 / 知识库 / 天气 / 实时网页浏览 / 图片分析），覆盖所有能力，点击即填入输入框
+7. **示例提示词库**：输入框左侧图标打开右侧抽屉 —— **56 条示例、17 个能力分组**、可按中英文搜索，覆盖八个专家 Agent 的全部 18 个 skill（灯效、场景联动、日出日落定时、能耗、安全、维护、文档问答、多域并发）。点一条只填入输入框、不自动发送。抽屉**任何时候都能打开**；欢迎屏的快捷 chips 依然保留，但那些只在还没说过话时显示。示例正文来自 `shared/prompt-examples.json`，模拟用户脚本读的是**同一份文件**，且有覆盖率测试断言每个已发布 skill 都被覆盖 —— 详见[架构文档 §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library)
+8. **逐轮反馈**：每条回复下有 👍/👎，点 👎 可补一句原因。投票携带该轮的委派 trace，写入 `smarthome-feedback` 表，直接驱动 Overview 的「用户满意度」卡片
 
 ### 管理控制台 —— Agent Harness Control Center
 
@@ -165,7 +166,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 #### Agent 运维统计大屏（Overview 页内）
 
-面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。架构图默认折叠，打开页面即见运维数据。顶部可切换时间范围（24h / 7d / 30d，作用于全部面板）；成本归因维度（按用户 / 入口环境 / Agent 运行时）位于「Token 成本归因」面板内，因为它只影响该面板。每张图都配表格视图。
+面向"统一入口 Super App"管理员的运维视图，按监控大屏布局：顶部一条六信号状态条，下面三行成对面板。架构图默认折叠，打开页面即见运维数据。顶部可切换时间范围（24h / 7d / 30d / 60d / 90d，作用于全部面板）；成本归因维度（按用户 / 入口环境 / Agent 运行时）位于「Token 成本归因」面板内，因为它只影响该面板。每张图都配表格视图。
 
 > **「按入口环境」不是按客户计费。** 它聚合的是 `tenant_env` 的三种模式（`default` / `ab-bundles` / `ab-targets`），也就是 A/B 分流组之间的成本对比 —— 本项目没有独立的租户实体。真正的按客户归因需要先引入 tenant 实体（如 Cognito 组或 `tenantId` 属性）。
 
@@ -176,9 +177,9 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | 成本预算消耗 | — | ❌ 模拟数据 |
 | 评估通过率与漂移 | `Bedrock-AgentCore/Evaluations` | ✅ 单变体；❌ A/B 对比 |
 | 活跃版本与发布状态 | Runtime Endpoint/Version + CloudTrail | ✅ 版本；⚠️ 灰度阶段为推导值 |
-| 用户满意度（CSAT、赞踩、升级率） | — | ❌ 模拟数据 |
+| 用户满意度（CSAT、赞踩比、逐日负评率、按被委派专家拆分） | `smarthome-feedback` 表，来自 Chatbot 每轮回复下的 👍/👎 | ✅ |
 
-无真实数据来源的卡片会显示 **演示数据** 标记，点开有说明"要变成真实数据需要什么"。几个口径要点：**TTFT 不存在于 CloudWatch 指标中**，只能从 span 属性取；**美元成本无法按用户/Agent 拆分**（Cost Explorer 只到账号级），所以只归因 Token 数量；**灰度阶段没有原生字段**，由 Gateway A/B test 与 `tenant_env` 推导而来；**每个 Runtime 必须显式登记** —— span 与评估指标上的 `service.name` 是精确匹配，大屏聚合的是由 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 构成的白名单（A2A 部署脚本会自动登记自己）。详见 [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard)。
+无真实数据来源的卡片会显示 **演示数据** 标记，点开有说明"要变成真实数据需要什么" —— 现在只剩「成本预算消耗」一张（Cost Explorer 只到账号级，无法按用户/Agent 拆分）。满意度卡片 2026-08-11 起是真实的：Chatbot 每轮回复下加了 👍/👎，投票携带该轮的**委派 trace**，所以「哪个专家招来的踩」第一次可回答；**没有投票时显示「尚无反馈」而不是 CSAT 0** —— 把「没数据」画成「评分极低」和编造数据是同一类错误。几个口径要点：**TTFT 不存在于 CloudWatch 指标中**，只能从 span 属性取；**美元成本无法按用户/Agent 拆分**（Cost Explorer 只到账号级），所以只归因 Token 数量；**灰度阶段没有原生字段**，由 Gateway A/B test 与 `tenant_env` 推导而来；**每个 Runtime 必须显式登记** —— span 与评估指标上的 `service.name` 是精确匹配，大屏聚合的是由 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 构成的白名单（A2A 部署脚本会自动登记自己）。详见 [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard)。
 
 > 大屏默认是空的 —— 需要真实流量才有数据。用下面的[模拟用户脚本](#生成测试数据模拟真实用户)一条命令生成。
 
@@ -272,6 +273,12 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 
 猜错的代价是不对称的：把 `pairing` 当失败，是让用户去重连一个两秒后就能用的音箱；把 `idle` 当成功，是让用户对着一屋子不动的灯发愣。
 
+### 发现能力：示例提示词库
+
+Chatbot 输入框左侧的图标打开右侧抽屉：**56 条示例、17 个能力分组**、中英文可搜，覆盖八个专家 Agent 的全部 18 个 skill。点一条只填入输入框、不自动发送 —— 演示时讲解者需要先说明这条要演什么。抽屉任何时候都能开；欢迎屏 chips 只在还没说过话时显示。
+
+这份清单**只有一处来源**（`shared/prompt-examples.json`）：Chatbot 渲染它，模拟用户脚本也读它。此前两边各写一份（TS 的 i18n key 和 Python 的场景列表），而两份清单不一致**不会报错** —— 症状是演示当天才发现没人演过安全 Agent。现在有覆盖率测试：18 个已发布 skill 每个都必须被某条示例覆盖，反向也断言示例没指向已删除的 skill。
+
 ### 面向开发者的四件事
 
 客户产品在开发者社区有大量用户，所以有四个功能是给「宁愿写脚本、不想聊天」的人准备的。全部 opt-in，默认路径不变。
@@ -285,6 +292,8 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 **3. 结构化输出。** 请求带 `{"responseFormat": "json"}`，设备状态就变成 `{"deviceId": "bedroom-light-1", "power": false, "brightness": 80}` 而不是一段描述亮度的话。**格式变、路由不变** —— JSON 请求该问专家 Agent 还是会问。
 
 **4. 场景即代码。** Admin Console → Scenarios → 「场景即代码」，把用户的场景导出成 JSON、改完再导入。校验走 Agent 用的**同一份**代码（`scenarios.build_scenario`），所以导入的场景不可能存下一个执行端随后会拒绝的动作。导入只存不排期，之后需要手动点一次「同步定时任务」—— 解析一份文档不应该顺带开始触发自动化。
+
+**另外：逐轮反馈。** 每条回复下 👍/👎，点 👎 可补一句原因。投票带上该轮的委派 trace 存进 `smarthome-feedback` 表，所以「哪个专家招来的踩」可以直接查。这张卡在 2026-08-11 之前是**假数据**，原因很直接：Chatbot 根本没有反馈控件 —— 唯一的反馈路径是 `user-feedback` 技能往容器里写 JSON 文件，只能靠 Remote Shell 一个个看，无法聚合成数字。
 
 自助发布 skill / A2A Agent 见 **Skill ERP** 站点（任何已确认的 Cognito 用户都能发，审批后进目录）。
 
@@ -335,14 +344,15 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 ```bash
 export SIM_USER_PASSWORD='SomeStrong#Pass1'   # 需满足 Cognito 密码策略
 
-python3 scripts/simulate-users.py setup       # 创建并配置 5 个 persona（幂等）
-python3 scripts/simulate-users.py run         # 轻量层，约 3.5 分钟
+python3 scripts/simulate-users.py setup       # 创建并配置 9 个 persona（幂等）
+python3 scripts/simulate-users.py run         # 轻量层，52 轮，约 3.5-5 分钟（含自动投票）
 python3 scripts/simulate-users.py run --heavy # 追加 code-interpreter + browser-use
+python3 scripts/simulate-users.py run --days-back 45   # 投票铺开到过去 45 天，供 60d/90d 视图
 python3 scripts/simulate-users.py status      # 查看现有模拟用户及其配置
 python3 scripts/simulate-users.py teardown --yes
 ```
 
-5 个 persona 各带不同的模型、租户模式和场景侧重，这样大屏的成本归因图表才会出现多行真实数据、而不是全塞进一个桶：
+9 个 persona 各带不同的模型、租户模式和场景侧重，这样大屏的成本归因图表才会出现多行真实数据、而不是全塞进一个桶：
 
 | persona | 模型 | 租户模式 | 覆盖 |
 |---|---|---|---|
@@ -351,8 +361,16 @@ python3 scripts/simulate-users.py teardown --yes
 | `carol` | Haiku 4.5 | ab-bundles | 多轮记忆延续、用户反馈 |
 | `dave` | Kimi K2.5 | ab-targets | code-interpreter 数据分析（heavy） |
 | `erin` | Sonnet 4.5 | default | browser-use 网页操作（heavy）、拒答、模糊指令 |
+| `frank` | Sonnet 4.6 | default | **灯效 + 场景联动专家** |
+| `grace` | Haiku 4.5 | ab-bundles | **任务管理（含日出日落触发）、多设备编排** |
+| `henry` | Opus 4.6 | ab-targets | **能耗优化 + 家庭安全专家** |
+| `iris` | Sonnet 4.5 | default | **家电维护、文档问答、三专家并发委派** |
 
-测试用户通过 Cognito 登录、走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径，所以产生的 span、Token、会话和评估分与真实流量无法区分。
+后四个补的是一个真实缺口：**在此之前八个专家 Agent 一个都没有流量**，所以大屏「按 Agent 运行时」归因无从归因，演示也演不出委派。对话内容来自 Chatbot 那份同样的 `shared/prompt-examples.json`，所以「演示覆盖了什么」和「界面上能点到什么」不会各说一套。
+
+测试用户通过 Cognito 登录、走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径，所以产生的 span、Token、会话和评估分与真实流量无法区分。跑完还会按各自的满意度倾向投**真实的**赞/踩票（标 `source="sim"`，大屏注明占比）。
+
+> **`--days-back` 只能移动本脚本自己写的行**（反馈投票）。span 和评估分的时间戳由 AgentCore 写、无法伪造，所以 90 天视图里今天之前的曲线本来就是稀疏的 —— 那是真实情况。填满它就得往真实遥测里注入假数据。
 
 > **安全边界**：一切都限定在 `simuser+` 邮箱前缀内，代码里有 guard 对其他邮箱直接抛异常，所以 `teardown` 不可能误删真实用户。
 >
@@ -726,7 +744,8 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 4. **Voice mode**: browser prompts for mic access → you hear the pre-rendered welcome clip "欢迎使用智能家居设备助手" → start talking, Nova Sonic does bi-directional streaming
 5. Voice-mode commands like "打开风扇到中档" trigger actual MQTT device commands via the MCP gateway
 6. **Live browser preview** (right-side rail, collapsed by default — click a label to expand): ask the agent any live-web question ("what does example.com say right now?", "find top 3 wireless earbuds under $100 on Amazon", "summarize the Python Wikipedia page") without saying `browse_web` — the skill description auto-routes it to the tool. The right panel streams the real Chrome via DCV at 1280×800 (scrollbars appear when the panel is narrower); each step is screenshotted into the agent's `/mnt/workspace/<session>/browser/` which the Files tab can browse and download. After the tool returns, the AgentCore session stays alive for **15 minutes** — click **Take control** to drive the browser manually (fill captchas, click filters, etc.) without a new tool call. See [architecture §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation).
-7. **Grouped starter prompts on the welcome screen**: 5 labelled groups (Smart devices / Knowledge base / Weather / Live web browser / Image analysis) cover every capability — click a chip to stage its prompt.
+7. **Example prompt library**: an icon beside the input opens a right-hand drawer — **56 examples in 17 capability groups**, searchable in both languages, covering all 18 skills across the eight specialist agents (lighting moods, live scene sync, sunrise/sunset schedules, energy, security, maintenance, docs Q&A, concurrent delegation). Clicking one stages it in the input rather than sending it. The drawer opens at **any** point in a conversation; the welcome-screen chips remain but only show before the first message. The text comes from `shared/prompt-examples.json`, which the simulated-users script reads too — and a coverage test asserts every published skill is covered. See [architecture §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library).
+8. **Per-turn feedback**: 👍/👎 under every reply, with an optional reason after a 👎. Each vote carries that turn's delegation trace and lands in the `smarthome-feedback` table, driving the Overview **User satisfaction** card directly.
 
 ### Admin Console — Agent Harness Control Center
 
@@ -758,7 +777,7 @@ The side navigation groups 17 pages by agent lifecycle stage:
 
 #### Agent operations dashboard (on Overview)
 
-A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. The architecture diagram is collapsed by default so the metrics are on screen when the page opens. Time range (24h / 7d / 30d) sits at the top and scopes every panel; the cost-attribution dimension (by user / entry environment / agent runtime) lives inside the **Token cost attribution** panel because it only affects that panel. Every chart has a table view.
+A monitoring-wall view for the administrator of a unified consumer entry point: a six-signal status strip on top, then three rows of paired panels. The architecture diagram is collapsed by default so the metrics are on screen when the page opens. Time range (24h / 7d / 30d / 60d / 90d) sits at the top and scopes every panel; the cost-attribution dimension (by user / entry environment / agent runtime) lives inside the **Token cost attribution** panel because it only affects that panel. Every chart has a table view.
 
 > **"By entry environment" is not per-customer billing.** It aggregates the three `tenant_env` modes (`default` / `ab-bundles` / `ab-targets`) — a cost comparison across A/B routing groups. This project has no separate tenant entity; real per-customer attribution would need one first (a Cognito group or a `tenantId` attribute).
 
@@ -769,9 +788,9 @@ A monitoring-wall view for the administrator of a unified consumer entry point: 
 | Budget consumption | — | ❌ simulated |
 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
 | Active version & release state | Runtime Endpoint/Version + CloudTrail | ✅ versions; ⚠️ rollout stage derived |
-| User satisfaction (CSAT, thumbs, escalation) | — | ❌ simulated |
+| User satisfaction (CSAT, thumbs ratio, daily negative rate, per-specialist split) | `smarthome-feedback`, written by the chatbot's per-turn 👍/👎 | ✅ |
 
-Cards without a real source carry a **Demo data** badge whose popover states what a real source would require. Four caveats worth knowing: **TTFT is not a CloudWatch metric** (it exists only as a span attribute); **dollar cost cannot be split per user or agent** (Cost Explorer resolves only to account level), so only token counts are attributed; **rollout stage has no native field** — it is derived from Gateway A/B tests plus `tenant_env`; and **every runtime must be registered explicitly** — `service.name` on spans and eval metrics is an exact match, so the dashboard aggregates over an allowlist built from `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` (the A2A deploy script registers its own runtimes). Full detail in [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard).
+Cards without a real source carry a **Demo data** badge whose popover states what a real source would require — just one card now (budget: Cost Explorer resolves only to account level). Satisfaction became real on 2026-08-11: the chatbot grew a per-turn 👍/👎 and each vote carries that turn's **delegation trace**, so "which specialist draws the thumbs-down" is answerable for the first time. With no votes the card says "no feedback yet" rather than reporting a CSAT of 0 — drawing missing data as a bad score is the same class of mistake as inventing a good one. Four caveats worth knowing: **TTFT is not a CloudWatch metric** (it exists only as a span attribute); **dollar cost cannot be split per user or agent** (Cost Explorer resolves only to account level), so only token counts are attributed; **rollout stage has no native field** — it is derived from Gateway A/B tests plus `tenant_env`; and **every runtime must be registered explicitly** — `service.name` on spans and eval metrics is an exact match, so the dashboard aggregates over an allowlist built from `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` (the A2A deploy script registers its own runtimes). Full detail in [`docs/architecture-and-design.md` §9.15](docs/architecture-and-design.md#915-agent-operations-dashboard).
 
 > The dashboard starts empty — it needs real traffic. Generate some with the [simulated-users script](#generate-test-data-simulated-users).
 
@@ -868,6 +887,12 @@ The cost of guessing is asymmetric: reading `pairing` as failure tells the user 
 
 `bluetooth` is a **readonly** capability: the catalog declares no action that writes it, and `validate_command` drops any parameter an action does not declare, so a command — including one a prompt injection talked a model into phrasing — cannot assert a link state the device alone may report.
 
+### Discovery: the example prompt library
+
+An icon beside the chatbot's input opens a right-hand drawer: **56 examples in 17 capability groups**, searchable in both languages, covering all 18 skills across the eight specialist agents. Clicking one stages it in the input rather than sending it — a presenter needs a beat to say what the example is about to demonstrate. The drawer opens at any point in a conversation; the welcome-screen chips only show before the first message.
+
+The list has **exactly one source** (`shared/prompt-examples.json`): the chatbot renders it and the simulated-users script reads it. The two used to be maintained separately — TypeScript i18n keys and Python scenario lists — and two copies of one list do not fail loudly. The symptom is discovering mid-demo that nothing ever exercised the security agent. A coverage test now asserts every one of the 18 published skills is covered, and that no example points at a skill that no longer exists.
+
 ### Four things for developers
 
 The customer's product has a large developer audience, so four features exist for users who would rather script the agent than converse with it. All four are opt-in; the default path is unchanged.
@@ -881,6 +906,8 @@ The customer's product has a large developer audience, so four features exist fo
 **3. Structured output.** `{"responseFormat": "json"}` turns a device state into `{"deviceId": "bedroom-light-1", "power": false, "brightness": 80}` instead of a sentence about brightness. **Format changes, routing does not** — a JSON request still consults the specialist that covers it.
 
 **4. Scenes as code.** Admin Console → Scenarios → **Scenes as Code** exports a user's scenes as JSON and imports them back. Validation runs through **the same code the agent uses** (`scenarios.build_scenario`), so an imported scene cannot store an action the execution path would then refuse. Import stores but does not schedule — run Reconcile afterwards, since parsing a document should not start firing automations.
+
+**Also: per-turn feedback.** 👍/👎 under every reply, with an optional reason after a 👎. Each vote carries that turn's delegation trace into the `smarthome-feedback` table, so "which specialist draws the thumbs-down" is directly queryable. This card was **mock data** until 2026-08-11 for a simple reason: the chatbot had no feedback control at all — the only path was the `user-feedback` skill writing JSON files into the container, readable one at a time through Remote Shell and never aggregatable into a figure.
 
 Self-service skill / A2A publishing is the **Skill ERP** site: any confirmed Cognito user can publish, and a curator approves before it reaches the catalog.
 
@@ -931,14 +958,15 @@ Right after deploy the ops dashboard and AgentCore Evaluations are empty — the
 ```bash
 export SIM_USER_PASSWORD='SomeStrong#Pass1'   # must satisfy the Cognito password policy
 
-python3 scripts/simulate-users.py setup       # create + configure 5 personas (idempotent)
-python3 scripts/simulate-users.py run         # light tier, ~3.5 min
+python3 scripts/simulate-users.py setup       # create + configure 9 personas (idempotent)
+python3 scripts/simulate-users.py run         # light tier, 52 turns, ~3.5-5 min (votes included)
 python3 scripts/simulate-users.py run --heavy # adds code-interpreter + browser-use
+python3 scripts/simulate-users.py run --days-back 45   # spread votes for the 60d/90d views
 python3 scripts/simulate-users.py status      # who exists, with what config
 python3 scripts/simulate-users.py teardown --yes
 ```
 
-The five personas deliberately differ in model, tenant mode and scenario mix, so the dashboard's attribution charts show several real rows instead of collapsing into one bucket:
+The nine personas deliberately differ in model, tenant mode and scenario mix, so the dashboard's attribution charts show several real rows instead of collapsing into one bucket:
 
 | persona | model | tenant env | exercises |
 |---|---|---|---|
@@ -947,8 +975,16 @@ The five personas deliberately differ in model, tenant mode and scenario mix, so
 | `carol` | Haiku 4.5 | ab-bundles | multi-turn memory recall, user feedback |
 | `dave` | Kimi K2.5 | ab-targets | code-interpreter data analysis (heavy) |
 | `erin` | Sonnet 4.5 | default | browser-use web automation (heavy), refusal, ambiguity |
+| `frank` | Sonnet 4.6 | default | **light-effect + scene-sync specialists** |
+| `grace` | Haiku 4.5 | ab-bundles | **task-management (incl. solar triggers), device orchestration** |
+| `henry` | Opus 4.6 | ab-targets | **energy-optimization + home-security specialists** |
+| `iris` | Sonnet 4.5 | default | **appliance-maintenance, docs Q&A, concurrent delegation** |
 
-Test users sign in through Cognito and use the **same** SigV4 `/invocations` path as the chatbot, so the spans, tokens, sessions and evaluation scores they produce are indistinguishable from real usage.
+The last four close a real gap: before them **not one of the eight specialist agents ever saw traffic**, so the dashboard's per-runtime attribution had nothing to attribute and a demo could not show delegation at all. Their prompts come from the same `shared/prompt-examples.json` the chatbot renders, so "what the demo covers" and "what you can click in the UI" cannot diverge.
+
+Test users sign in through Cognito and use the **same** SigV4 `/invocations` path as the chatbot, so the spans, tokens, sessions and evaluation scores they produce are indistinguishable from real usage. Each persona also files **real** 👍/👎 votes on its own turns afterwards, tagged `source="sim"` with the share disclosed on the card.
+
+> **`--days-back` only moves rows this script writes** (the votes). Span and evaluation-score timestamps are stamped by AgentCore and cannot be faked, so the 90d view stays honestly sparse before today. Filling it in would mean injecting fabricated telemetry.
 
 > **Safety boundary**: everything is scoped to the `simuser+` email prefix, and a guard in the code raises on any other address — `teardown` cannot delete real users.
 >

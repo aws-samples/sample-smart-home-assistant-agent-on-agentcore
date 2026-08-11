@@ -36,7 +36,7 @@
 - [9.17. Task Management & Scheduled Automations](#917-task-management--scheduled-automations)
 - [9.18. The Agents Page (Fleet & Per-Agent Governance)](#918-the-agents-page-fleet--per-agent-governance)
 - [9.19. Simulator Props: Virtual Clock, Screen and Speaker](#919-simulator-props-virtual-clock-screen-and-speaker)
-- [9.20. Developer-Facing Surfaces](#920-developer-facing-surfaces)
+- [9.20. Discovery and Developer-Facing Surfaces](#920-discovery-and-developer-facing-surfaces)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -383,6 +383,7 @@ Internet
 | iot-discovery Lambda | (none) | Returns mock device list |
 | admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
 | admin-api Lambda | dynamodb:Scan, GetItem, UpdateItem, DeleteItem | `arn:...:table/smarthome-runtime-sessions` |
+| admin-api Lambda | dynamodb:PutItem, Scan | `arn:...:table/smarthome-feedback` (write a vote, aggregate for the dashboard) |
 | admin-api Lambda | s3:GetObject, PutObject, DeleteObject, ListBucket | `arn:...:smarthome-skill-files-*` |
 | admin-api Lambda | cognito-idp:ListUsers, AdminListGroupsForUser | Cognito User Pool |
 | admin-api Lambda | bedrock-agentcore:ListActors, ListMemoryRecords | `*` (AgentCore Memory) |
@@ -1937,6 +1938,7 @@ admin-console/
 | `smarthome-admin-console-{accountId}` S3 Bucket | Static assets |
 | `smarthome-skill-files-{accountId}` S3 Bucket | Skill directory files (scripts, references, assets) with CORS |
 | `smarthome-runtime-sessions` DynamoDB Table | Per-login AgentCore Runtime session log (PK `userId`, SK `"{kind}#{sessionId}"`). Backs the admin Sessions tab and redeploy-time invalidation. |
+| `smarthome-feedback` DynamoDB Table | Per-turn user 👍/👎 (PK `userId`, SK `"{sessionId}#{turnId}"`). Backs the Overview satisfaction card, which was mock data until this table existed (§9.15.3). Keyed by turn, not by timestamp, so re-voting overwrites instead of double-counting. |
 | `smarthome-kb-docs-{accountId}` S3 Bucket | Knowledge base documents organized by scope prefix (`__shared__/`, `user@email/`) |
 | `smarthome-kb-vectors-{accountId}` S3 Vector bucket + `smarthome-kb-index` | Vector store for KB document embeddings (S3 Vectors, created imperatively by `setup-agentcore.py` — no CDK L1 construct exists yet) |
 | Bedrock Knowledge Base (`SmartHomeEnterpriseKB`) | Semantic retrieval with `cohere.embed-multilingual-v3` embedding model, `storageConfiguration.type=S3_VECTORS` |
@@ -3983,7 +3985,14 @@ does this table:
 | 3 | Budget consumption | — | ❌ simulated |
 | 4 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
 | 5 | Active version & release state | `ListAgentRuntimeEndpoints` / `…Versions`, CloudTrail | ✅ versions; ⚠️ rollout stage derived |
-| 6 | User satisfaction (CSAT, thumbs, escalation) | — | ❌ simulated |
+| 6 | User satisfaction (CSAT, thumbs ratio, negative-rate trend, per-specialist split) | `smarthome-feedback`, written by the chatbot's per-turn 👍/👎 | ✅ |
+
+**Time ranges: 24h / 7d / 30d / 60d / 90d.** The two long windows were added on
+2026-08-11, after measuring rather than before: a single 90d Logs Insights query
+runs in **3.2s against the 22s budget**, and bytes scanned grow only **8% from
+30d to 90d** (798k → 865k records) because the older weeks hold little data. So
+the long ranges needed no chunking, no query rewrite and no new index — see
+§9.15.1 for the chunking idea that was measured and rejected.
 
 The constraints below all came from measurement rather than assumption:
 
@@ -4120,6 +4129,110 @@ facets. Status colours (good/warning/serious/critical) are reserved and always
 ship with an icon and text label, never colour alone. See
 `admin-console/src/components/Dashboard/palette.ts`.
 
+#### 9.15.1 Why the spans query is NOT chunked
+
+Widening the range raised an obvious question: read the window in slices (say 5
+days at a time) so a long view paints progressively. It was measured against the
+live account and **rejected** — 18 × 5d in parallel finishes in 2.6s versus 3.2s
+for one query, buying 0.6s at the cost of two failure modes, both reproduced:
+
+1. **A chunk lying entirely outside a group's retention is a hard 400**
+   (`MalformedQueryException`), not an empty result. `aws/spans` keeps 30 rolling
+   days, so every chunk older than that fails outright. One wide window is fine:
+   it overlaps retention, and CloudWatch clips it itself.
+
+   ```
+   d-90..d-85  with aws/spans  → 400 MalformedQueryException
+   d-90..d-85  runtime only    → Complete, 0 rows
+   d-90..now   with aws/spans  → Complete, 16 rows   ← same span, one window
+   ```
+
+2. **Guarding against (1) by dropping `aws/spans` from the older chunks silently
+   loses days held only there.** Measured: a `d-30..d-25` chunk returned one real
+   day with the group present and zero without it, no error either way.
+
+That second point is the whole reason for the decision. The guard against a loud
+failure becomes a silent data-loss bug, and it loses the *oldest* data — exactly
+what a long range exists to show. `tests/test_dashboard_ranges.py` asserts one
+`start_query` per query regardless of window length, so this cannot be
+"optimised" back in without a red test.
+
+#### 9.15.2 The span-history note (`dataFrom`)
+
+A 90d window reaches back past the point where span data exists. Rendering those
+days as zero would state that the system was idle, so the response carries
+`dataFrom` and the UI notes it under the chart instead.
+
+It is derived from **the first day that returned data**, and the first attempt got
+this wrong in an instructive way: it read the oldest span log group's
+`creationTime`, which on this account is 2026-04-12. That answer is true — the
+group did exist — but useless, because the group held no smarthome spans until
+July. Worse, it *suppressed* the note in exactly the case the note exists for:
+any sufficiently old log group makes the horizon look older than any window, so
+the caveat never appeared. `dataFrom` is `null` when the data reaches the start of
+the window, because then there is nothing to caveat.
+
+A literal date would be wrong within a day and wrong in the direction that
+invents history: `aws/spans` retention rolls forward every night.
+
+#### 9.15.3 User satisfaction, from real votes
+
+Card 6 was hardcoded mock data until 2026-08-11, and the reason is worth stating
+plainly: **the chatbot had no feedback control at all.** The only feedback path
+was the `user-feedback` skill writing JSON files into a runtime's
+`/mnt/workspace/feedback/`, readable one file at a time through Remote Shell and
+never aggregatable into a figure. `mockData.ts` documented that gap honestly, and
+the card carried a **Demo data** badge.
+
+**The table.** `smarthome-feedback`, partitioned by `userId` with sort key
+`<sessionId>#<turnId>`:
+
+| Field | Purpose |
+|---|---|
+| `vote` | `up` \| `down` |
+| `reason` | Optional free text, only prompted after a 👎, capped at 1000 chars |
+| `source` | `user` \| `sim` — only an admin may write `sim` |
+| `agentDim` | The turn's delegation trace: which specialists it consulted |
+| `turnPrompt` | What was asked, truncated to 200 chars |
+| `ts` | Server-stamped; a caller-supplied value is honoured only for an admin |
+
+**The sort key leads with the turn, not the timestamp.** Leading with `ts` looked
+attractive (a per-day range query instead of an attribute filter) and broke the
+one thing the key exists for: the server stamps a fresh `ts` per request, so a 👎
+followed by its reason wrote **two rows and counted as two negatives**. Verified
+live before the key was changed. The unit test that was supposed to cover this
+passed a fixed `ts` and therefore never saw it; it now posts the way the real
+client does, with no `ts` at all.
+
+**`agentDim` is free.** The chatbot already collects the delegation trace for the
+"asking the … specialist" indicator (§9.20), so attaching it to a vote costs
+nothing and makes "which specialist draws the 👎" answerable for the first time. A
+turn that consulted several specialists counts once for each: the question is
+whether an agent correlates with dissatisfaction, not who is to blame.
+
+**Route.** `POST /sessions?action=feedback`, dispatched **before** the
+`check_admin` gate. Every voter is an ordinary user, so behind the gate all of
+them would 403 — and the chatbot's failure mode for that is a button that appears
+to do nothing, which reads as a frontend bug. Piggybacking on `/sessions` rather
+than taking a new API Gateway method follows the pattern established for
+`browser-active` / `code-active`; measured headroom on the admin Lambda's resource
+policy is ~8.5 KB (12,422 bytes of 20,480 after this change, ~428 bytes per
+authorised method), so a new method would not have failed — it simply was not
+necessary, and the policy has a hard ceiling.
+
+**Empty is not zero.** With no votes the card renders "no feedback yet" and
+nothing else — no CSAT of 0, no flat line along the bottom. An empty table and
+universal dissatisfaction produce identical pixels on a gauge and mean opposite
+things; inventing the pessimistic reading of missing data is the same mistake as
+inventing the optimistic one.
+
+**Simulated votes are labelled, not hidden.** `scripts/simulate-users.py` files
+votes through the *same* API a human uses so a fresh environment has a populated
+card, and the dashboard states the share (`"96% of these votes were filed by the
+user simulator"`). Only an admin token may set `source=sim` or backdate `ts`,
+because that disclosure is the only thing keeping the card honest — if any client
+could file votes as simulated, the percentage would mean nothing.
+
 ### 9.16 Simulated End Users (Test Data Generation)
 
 `scripts/simulate-users.py` plus `scripts/sim/` generates real agent traffic on
@@ -4130,9 +4243,10 @@ tokens, sessions and evaluation scores are indistinguishable from real usage.
 
 ```bash
 export SIM_USER_PASSWORD='SomeStrong#Pass1'
-python3 scripts/simulate-users.py setup      # 5 personas, idempotent
+python3 scripts/simulate-users.py setup      # 9 personas, idempotent
 python3 scripts/simulate-users.py run        # light tier, ~3.5 min
 python3 scripts/simulate-users.py run --heavy
+python3 scripts/simulate-users.py run --days-back 45   # spread votes for 60d/90d views
 python3 scripts/simulate-users.py status
 python3 scripts/simulate-users.py teardown --yes
 ```
@@ -4148,10 +4262,52 @@ attribution charts show several real rows instead of collapsing into one bucket
 | `carol` | Haiku 4.5 | ab-bundles | multi-turn memory recall, user feedback |
 | `dave` | Kimi K2.5 | ab-targets | code-interpreter (heavy) |
 | `erin` | Sonnet 4.5 | default | browser-use (heavy), refusal, ambiguity |
+| `frank` | Sonnet 4.6 | default | **light-effect + scene-sync specialists** |
+| `grace` | Haiku 4.5 | ab-bundles | **task-management (incl. solar triggers), device-control** |
+| `henry` | Opus 4.6 | ab-targets | **energy-optimization + home-security specialists** |
+| `iris` | Sonnet 4.5 | default | **appliance-maintenance, knowledge-qa, concurrent delegation** |
+
+The last four were added on 2026-08-11 and close a real gap: before them **not
+one of the eight A2A specialists ever saw traffic**, so the dashboard's
+per-specialist attribution had nothing to attribute and a demo could not show
+delegation at all. The roster went from 26 to 55 turns (52 light + 3 heavy).
 
 Measured turn latency: light 3–25s, heavy 19–141s (browser-use is the 141s case
-and occupies a real DCV session). Personas run concurrently; turns within a
-persona stay sequential because a conversation is ordered.
+and occupies a real DCV session; a three-specialist concurrent turn measured
+52–69s). Personas run concurrently; turns within a persona stay sequential
+because a conversation is ordered.
+
+**Scenarios come from the shared example library** (§9.20.1) rather than from a
+private copy in `personas.py`, so a capability becomes demo traffic as soon as
+someone writes its example, with no second edit to forget.
+
+**Satisfaction votes.** After the conversations, each persona votes on its own
+turns through the real feedback API (§9.15.3), tagged `source="sim"`. Each carries
+a `feedback_up_rate` so the card shows a distribution rather than one flat value.
+`--days-back N` spreads the votes over the past N days so the 60d/90d views are
+not a single column on today.
+
+The split had two bugs worth recording, because both filed real votes and
+reported complete success:
+
+- `(i % 100) < rate * 100` — a persona has 6–8 turns, so `i` never reached the
+  threshold and **every vote was positive**. The run printed "29 filed, 0 failed"
+  and the card showed a plausible CSAT of exactly 5.0/5 containing none of the
+  per-persona variation the rates describe. The only way to notice was to compare
+  the output against the rates that were supposed to produce it.
+- `(i % 10)` — puts every negative slot at positions 7–9, which a persona with 6
+  turns never reaches.
+
+It is now a Bresenham-style accumulator that spreads negatives evenly, and
+`scripts/sim/tests/test_vote_distribution.py` asserts *per persona* that its own
+turn count yields a mixed result. Rates also have to be reachable at these turn
+counts: 6 turns at 0.85 rounds to 0.9 negatives, i.e. none, so the roster stays at
+or below 0.8.
+
+**`--days-back` only moves rows we write.** Span and evaluation-score timestamps
+are stamped by AgentCore and cannot be backdated, so the long-range views stay
+honestly sparse before today. Filling them in would mean injecting fabricated
+telemetry — building the demo on polluted observability data.
 
 **Module boundaries.** `sim/agent_client.py` is the auth + invoke wrapper
 (Cognito → Identity Pool → SigV4), `sim/personas.py` is pure scenario data,
@@ -4500,11 +4656,58 @@ watching the screen follow, in both modes.
 
 ---
 
-### 9.20 Developer-Facing Surfaces
+### 9.20 Discovery and Developer-Facing Surfaces
 
-The customer's product has a large developer audience, so four features exist for
-users who would rather script the agent than converse with it. All four are
-opt-in; none changes the default path.
+Two different audiences, two kinds of surface.
+
+**Discovery** — §9.20.1, the shared example library — answers "what can this
+thing do?", for a new user, a presenter mid-demo, and the simulated-traffic
+script alike.
+
+**Scripting** — the remaining four — exist because the customer's product has a
+large developer audience who would rather script the agent than converse with it.
+All four are opt-in; none changes the default path.
+
+#### 9.20.1 The shared example library
+
+`shared/prompt-examples.json` is the single source for "what can this system do":
+56 examples in 17 capability groups. **Two consumers read the same file** — the
+chatbot renders it as an example drawer plus the welcome-screen chips, and
+`scripts/sim/personas.py` drives real demo traffic from it (§9.16).
+
+They used to be maintained separately, in TypeScript i18n keys and in Python
+scenario lists, and that is the case §2.7 of the design principles is about: the
+same fact stored twice. The drift does not fail — the symptom is discovering
+mid-demo that nothing exercises the security agent, with no error anywhere. The
+old form had 40 hardcoded `chat.chip.*` keys covering only the orchestrator's own
+MCP tools; **not one of the eight specialists appeared in either list.**
+
+**The coverage test is the load-bearing part.**
+`shared/tests/test_prompt_examples.py` parses all eight `card.json` files, collects
+the 18 published skill ids, and fails if any is not named by some example's
+`covers`. It also fails on the reverse — a `covers` entry for a skill that no
+longer exists, which is invisible otherwise: the example still renders, still
+runs, and quietly exercises the orchestrator's fallback instead of the specialist
+it claims to demo. That turns "the examples cover every feature" from a claim
+nobody re-checks into an executable assertion.
+
+`covers` uses `<agentDir>.<skillId>` from the AgentCard, **not** the `a2a_*` tool
+name. Tool names are derived by the orchestrator from the card's `name`; asserting
+against the card asserts against the source, so a change to the derivation rule
+does not invalidate the file.
+
+**Example text lives in the JSON** (with `zh` / `en` fields) rather than going
+through i18n, because the sim side needs the same strings and Python cannot read a
+`.ts` module. Only the drawer's shell is translated. The build copies the file into
+`chatbot/src/generated/` in `scripts/01-install-deps.sh`, the same pattern as
+`device_brief.py` and the device catalog.
+
+**Two deliberate UI behaviours.** Clicking an example **stages it in the input box
+rather than sending it** — a presenter needs a beat to say what the example is
+about to demonstrate, and someone exploring wants to edit first. And the drawer
+opens from the input row at **any** point in a conversation: the chips it
+supplements live behind `messages.length === 0`, so the only visible catalogue of
+the agent's capabilities used to vanish permanently the moment anyone said hello.
 
 #### Progress streaming and the delegation trace
 
@@ -4688,6 +4891,23 @@ through the Lambda; the chatbot calls `bedrock-agentcore:
 InvokeAgentRuntimeCommand` and `bedrock-agentcore:UpdateBrowserStream`
 directly with Identity-Pool credentials (same pattern as §9.10 Remote
 Shell).
+
+#### Admin-API `POST /sessions?action=feedback` (chatbot-facing)
+
+Records one 👍/👎 on one agent turn (§9.15.3). Same `?action=` dispatch and the
+same self-or-admin rule as above, and like those it is handled **before** the
+`check_admin` gate — every voter is an ordinary user, so behind the gate all of
+them would 403 and the chatbot would show a button that appears to do nothing.
+
+- **Request:** `Authorization: Bearer <idToken>`; body
+  `{userId, vote: "up"|"down", turnId, sessionId?, reason?, turnPrompt?, agentDim?[]}`.
+  `source: "sim"` and a caller-supplied `ts` are accepted **only** from an admin
+  token — the dashboard's "N% simulated" disclosure is the only thing keeping the
+  card honest, so an arbitrary client must not be able to file votes as simulated
+  or backdate them.
+- **Response:** `{ok: true, feedbackKey}`. Writing the same `turnId` again
+  overwrites, so changing a vote (or adding a reason after the fact) cannot
+  double-count.
 
 ### 10.2 AgentCore Gateway (MCP Server)
 

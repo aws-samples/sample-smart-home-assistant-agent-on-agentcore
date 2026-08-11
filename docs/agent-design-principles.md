@@ -117,10 +117,39 @@ specialist was never asked instead of implying it answered badly.
 | S4 parallel delegation | needs building | already concurrent; the **transport** was broken |
 | S4 prewarming | remove a cold start | **~0.3s** after 100 min idle — nothing to win |
 | S5 stream the A2A hop | TTFT 30s → single digits | **impossible**; prose can't precede the tool result |
+| chunk the 90d spans query | long window needs slicing | **3.2s of a 22s budget**; nothing to win |
 
 Prompt caching cuts billed input tokens from 15,839 to 329 and is worth having —
 but it is a **cost** optimisation, and calling it a latency one would have been a
 claim the numbers do not support. Prewarming was dropped outright.
+
+The last row is the cheapest lesson on the list: widening the dashboard to 90 days
+looked like it needed paged reads, and one measurement said the window was already
+7× inside budget and that scanning grows 8% from 30d, not 3×. **The work that a
+measurement deletes is the highest-return measurement you can make.**
+
+### 1.9.1 A guard against a loud failure can be a silent one
+
+Chunking that query was also *tried*, and it is worth recording why it lost. It
+saved 0.6s and introduced two failure modes, both reproduced against the live
+account:
+
+1. A chunk lying entirely outside a log group's retention is a **hard 400**, not
+   an empty result. `aws/spans` keeps 30 rolling days, so every older chunk fails
+   outright — while one wide window is fine, because it overlaps retention and
+   CloudWatch clips it itself.
+2. Guarding against (1) by dropping `aws/spans` from the older chunks **silently
+   loses days held only there.** Measured: a `d-30..d-25` chunk returned one real
+   day with the group and zero without it, no error either way.
+
+The second is the one that matters. A loud failure invited a guard, and the guard
+turned it into a quiet one — losing the *oldest* data, which is exactly what a
+long range exists to show. Trading a 400 for missing rows is only an improvement
+if you never look at the rows.
+
+The countermeasure is a test that pins the decision rather than the code: one
+`start_query` per query regardless of window length. A future "optimisation" back
+into slices now fails a test instead of a dashboard.
 
 ### 1.10 One shared memory, and only one writer
 
@@ -170,6 +199,17 @@ Nearly every bug in this system's history reported success:
 | tool docstring beat the system prompt | correct answers, optimisation never happened |
 | Cedar policy attach | permissions API returned 200 while the policy stayed inactive |
 | IoT topic rule | published messages went nowhere, no error |
+| simulated vote distribution | "29 filed, 0 failed" and a CSAT of exactly 5.0/5 — every vote positive |
+| feedback sort key led with `ts` | one 👎 plus its reason wrote two rows and counted as two negatives |
+
+The two new rows are the same shape as the rest. The vote split used `i % 100`
+against a threshold of `rate * 100` while a persona has 6-8 turns, so `i` never
+reached it; the run reported complete success and produced a plausible number
+containing none of the per-persona variation that was supposed to produce it. The
+only way to notice was to compare the output against the rates. **A number that
+looks reasonable is not evidence that it was computed correctly** — check it
+against the inputs that should have produced it, not against your expectations of
+its shape.
 
 The response is the same each time: **assert the thing you actually want, from
 outside the code that claims to do it.** Read spans, not reply text. Validate
@@ -246,6 +286,18 @@ bug rather than a naming one. The same argument makes `shared/device_catalog.py`
 single source for what a device accepts: a second copy of "what speeds does the fan
 take" is a copy that will disagree, and it will disagree by storing a scene the
 execution path then refuses.
+
+The principle also holds for a shared **list**, not just shared code, and the
+failure there is even quieter. `shared/prompt-examples.json` states what the system
+can do; the chatbot renders it as suggestions and the traffic simulator drives demo
+conversations from it. Those two lists were maintained separately — TypeScript i18n
+keys and Python scenario data — and nothing detects a divergence, because neither
+copy is wrong on its own. The symptom is realising mid-demo that no traffic ever
+reached the security agent. `shared/tests/test_prompt_examples.py` closes it by
+asserting against the *source*: every skill published by every AgentCard must be
+named by some example, and no example may name a skill that no longer exists. **If
+two places must agree about what exists, derive both from the thing that
+defines it and assert the derivation.**
 
 ---
 

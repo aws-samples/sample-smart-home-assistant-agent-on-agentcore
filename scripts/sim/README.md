@@ -16,9 +16,10 @@ indistinguishable from real usage.
 ```bash
 export SIM_USER_PASSWORD='SomeStrong#Pass1'   # must satisfy the Cognito policy
 
-python3 scripts/simulate-users.py setup       # create + configure 5 users
-python3 scripts/simulate-users.py run         # light tier (~2 min warm)
+python3 scripts/simulate-users.py setup       # create + configure 9 users
+python3 scripts/simulate-users.py run         # light tier, 52 turns (~3.5-5 min)
 python3 scripts/simulate-users.py run --heavy # + browser-use, code-interpreter
+python3 scripts/simulate-users.py run --days-back 45   # spread votes for 60d/90d views
 python3 scripts/simulate-users.py status      # who exists, with what config
 python3 scripts/simulate-users.py teardown --yes
 ```
@@ -39,9 +40,26 @@ charts show several real rows instead of one bucket.
 | `carol` | Haiku 4.5 | ab-bundles | multi-turn memory recall, user feedback |
 | `dave` | Kimi K2.5 | ab-targets | code-interpreter (heavy) |
 | `erin` | Sonnet 4.5 | default | browser-use (heavy), refusal, ambiguity |
+| `frank` | Sonnet 4.6 | default | light-effect + scene-sync specialists |
+| `grace` | Haiku 4.5 | ab-bundles | task-management (solar triggers), orchestration |
+| `henry` | Opus 4.6 | ab-targets | energy-optimization + home-security specialists |
+| `iris` | Sonnet 4.5 | default | appliance-maintenance, docs Q&A, concurrent delegation |
 
-Scenario tiers: **light** turns run 3–25s (23 turns across 5 personas takes
-~97s warm, ~212s if the runtime is cold); **heavy** (`--heavy`) covers
+**Scenario prompts come from `shared/prompt-examples.json`** — the same file the
+chatbot renders as its example drawer. Bound by group id via `from_group()`, so a
+new capability becomes demo traffic as soon as someone writes its example. Before
+`frank`–`iris` existed, not one of the eight A2A specialists ever saw traffic.
+
+**Votes.** After the conversations each persona files real 👍/👎 on its own turns
+through the same feedback API a human uses, tagged `source="sim"`. Rates are per
+persona (0.7–0.8) so the satisfaction card shows a distribution. Keep them
+*reachable* at the persona's own turn count: 6 turns at 0.85 rounds to 0.9
+negatives, i.e. none, and that persona then contributes nothing to the negative
+rate — `tests/test_vote_distribution.py` asserts this per persona.
+
+Scenario tiers: **light** turns run 3–25s (52 turns across 9 personas measured
+~215s warm; a three-specialist concurrent turn is the slow one at 52–69s);
+**heavy** (`--heavy`) covers
 code-interpreter and browser-use, measured 19–141s per turn, and browser-use
 occupies a real DCV browser session.
 
@@ -66,3 +84,12 @@ Setup is idempotent: existing users are reused, not recreated.
 - **The runtime ARN isn't a CDK output.** It's read from the admin Lambda's env,
   which `setup-agentcore.py` patches. A bare `cdk deploy` resets it to a
   placeholder — the loader raises a clear error if so.
+- **`setup` grants MCP tools, not A2A skills.** A persona bound to a specialist
+  group still needs an A2A grant from Admin Console → Integration Registry, or
+  those turns come back "outside my current tool / skill / agent capabilities" —
+  a legitimate refusal that looks like a broken specialist. See admin manual
+  §11.11 for why the grantable catalog is currently short.
+- **`--days-back` only moves rows this script writes** (the votes). Span and
+  evaluation timestamps are stamped by AgentCore and cannot be backdated, so the
+  90d view stays sparse before today. That is real, not a bug — filling it would
+  mean writing fabricated telemetry.
