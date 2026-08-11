@@ -138,7 +138,7 @@ def test_the_tool_using_agents_are_the_expected_ones():
         if os.path.exists(os.path.join(REGISTRY_DIR, name, "tools.py"))
     }
     assert with_tools == {"device-control", "light-effect", "knowledge-qa",
-                          "task-management"}, with_tools
+                          "task-management", "scene-sync"}, with_tools
     # The three original advisors stay prompt-only — they touch no user data, and
     # requiring an identity they never had would break them.
     prompt_only = set(agents.AGENT_NAMES) - with_tools

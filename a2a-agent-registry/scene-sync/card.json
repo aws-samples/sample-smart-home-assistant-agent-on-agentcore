@@ -1,0 +1,34 @@
+{
+  "name": "scene-sync-agent",
+  "description": "A specialist agent that turns a room into a synchronised experience right now: the TV backlight following the picture for a film, or the lights moving with the beat for music, with the rest of the room's fixtures joining in. It drives devices live rather than saving a routine, and it reports the speaker link honestly instead of assuming a pairing succeeded.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "smarthome-agent-harness",
+    "url": "https://example.com/a2a/scene-sync-agent"
+  },
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "skills": [
+    {
+      "id": "music_feast",
+      "name": "Music feast",
+      "description": "Make the room move with the music: put the sync-capable light into music mode, wait for the speaker link to come up, and drive the other fixtures to match the energy. Reports plainly when nothing is paired rather than claiming success.",
+      "tags": ["scene", "music", "live", "write"],
+      "examples": [
+        "Make the living room lights dance to the music",
+        "Party mode — I want the lights on the beat",
+        "让客厅的灯跟着音乐跳起来"
+      ]
+    },
+    {
+      "id": "video_feast",
+      "name": "Video feast",
+      "description": "Set the room up for watching something: the TV backlight follows the picture edge by edge, the other lights drop to a low ambient level, and the room stops competing with the screen.",
+      "tags": ["scene", "video", "live", "write"],
+      "examples": [
+        "I'm watching a film, make the lights follow the TV",
+        "Cinema mode in the living room",
+        "看电影，灯光跟着电视走"
+      ]
+    }
+  ]
+}

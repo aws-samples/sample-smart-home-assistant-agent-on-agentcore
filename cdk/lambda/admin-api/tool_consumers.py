@@ -17,10 +17,10 @@ Enforced by:      cdk/lambda/admin-api/tests/test_tool_consumers.py
 
 # fmt: off
 TOOL_CONSUMERS: dict[str, list[str]] = {
-    'control_device': ['smarthome', 'sha2adevice', 'sha2alight'],
-    'discover_devices': ['smarthome', 'sha2adevice', 'sha2alight'],
+    'control_device': ['smarthome', 'sha2adevice', 'sha2alight', 'sha2async'],
+    'discover_devices': ['smarthome', 'sha2adevice', 'sha2alight', 'sha2async'],
     'navigate_to_page': ['smarthome'],
-    'query_device_state': ['smarthome', 'sha2adevice', 'sha2alight'],
+    'query_device_state': ['smarthome', 'sha2adevice', 'sha2alight', 'sha2async'],
     'query_knowledge_base': ['smarthome', 'sha2aqa'],
     'query_sensor_history': ['smarthome', 'sha2adevice'],
 }

@@ -49,6 +49,13 @@ AGENTS: dict[str, tuple[str, str]] = {
     # so a half-rename leaves the routing table pointing at tools that no longer
     # exist.
     "task-management": ("task-management-agent", "sha2atask"),
+    # The live counterpart to task-management, and deliberately a separate runtime.
+    # It drives devices in real time (sync_mode, then the rest of the room), so it
+    # holds Gateway device tools and NO table; task-management holds a table and no
+    # device tools. Merging them would have given the agent that writes scenes a
+    # device path of its own, which is the one thing shared/scenarios.py exists to
+    # prevent.
+    "scene-sync": ("scene-sync-agent", "sha2async"),
 }
 
 # The one agent that owns a DynamoDB table of its own. deploy.py gives only this
