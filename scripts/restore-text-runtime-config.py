@@ -20,6 +20,19 @@ None of those fail loudly. This script exists so the fix is one command rather
 than a hand-assembled boto3 call each time, and so the list cannot be
 half-remembered.
 
+> **Run `scripts/sync-agent-code.py` BEFORE the deploy, not just this after it.**
+> `.agentcore-project/smarthome/app/smarthome/` is a COPY of `agent/` that only
+> `setup-agentcore.py` refreshes, and `agentcore deploy` packages whatever is
+> there. A deploy on its own therefore ships the code from the last full
+> provision and reports success. Two features were "deployed" this way on
+> 2026-08-11 and were simply absent from the running container.
+
+So the whole sequence for an orchestrator change is:
+
+    ./venv/bin/python scripts/sync-agent-code.py
+    cd .agentcore-project/smarthome && agentcore deploy -y && cd -
+    ./venv/bin/python scripts/restore-text-runtime-config.py
+
 Values come from the live deployment (cdk-outputs.json, agentcore-state.json, the
 A2A deployed-state.json) rather than being hardcoded, and are MERGED onto whatever
 env survived — the CLI does legitimately set the gateway URL and memory id itself.

@@ -211,6 +211,24 @@ def _build_strands_agent(system_prompt: str, model_id: str, name: str,
     from strands import Agent
     from strands.models.bedrock import BedrockModel
 
+    # No prompt caching here, deliberately — see agent/agent.py, where the
+    # orchestrator DOES enable it. Two measurements decided it:
+    #
+    #   - A specialist's prefix is small. Measured across four deployed agents:
+    #     362 to 4,211 mean input tokens per call, with minima as low as 71. Cache
+    #     checkpoints have model-specific minimums (1,024 tokens for Claude 3.7
+    #     Sonnet, per the AWS docs), and a prefix under the minimum caches
+    #     nothing: a 2,817-token Haiku call with a cache point returned
+    #     cacheRead=0, cacheWrite=0 — the checkpoint was silently ignored.
+    #   - The prefix is not stable anyway. `execute` appends the admin's governed
+    #     override and then the user's retrieved memory to this prompt, and the
+    #     memory section differs per request. Cache hits need an EXACT prefix
+    #     match, so each request would write a new entry and read none.
+    #
+    # Together that is the bad case: cache writes are billed at 1.25x the uncached
+    # rate, so enabling it here would cost 25% MORE per delegation for zero hits.
+    # The orchestrator is the opposite case — a ~10.5k byte-identical prefix — and
+    # gets a 98% token reduction from the same feature.
     model = BedrockModel(
         model_id=model_id,
         region_name=os.environ.get("AWS_REGION", "us-east-1"),
