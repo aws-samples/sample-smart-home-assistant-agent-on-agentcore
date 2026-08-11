@@ -7,6 +7,8 @@ Mock boundaries:
   * ``strands.tool`` — we use the real decorator so the Strands tool object
     shape (name, signature) matches production.
 """
+import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -416,28 +418,102 @@ def test_a_card_that_cannot_be_built_falls_back_rather_than_sending_garbage():
 def test_the_event_loop_is_reused_across_delegations():
     """`asyncio.run` closes the loop it creates, so every delegation built a fresh
     one and none could share a connection pool. Three delegations stacked to
-    15-45s."""
+    15-45s.
+
+    The loop now runs on its own thread (spec 5 S4), so it is running rather than
+    idle between uses — but it is still the SAME loop, which is what the connection
+    pool depends on.
+    """
     from tools import a2a as a2a_mod
 
-    a2a_mod._loop = None
     first = a2a_mod._get_loop()
     assert a2a_mod._get_loop() is first
     assert not first.is_closed()
-    first.close()
-    a2a_mod._loop = None
+    assert first.is_running(), "the shared loop should be running on its own thread"
 
 
-def test_a_closed_loop_is_replaced_rather_than_reused():
+def test_a_dead_loop_is_replaced_rather_than_reused():
+    """A loop that has stopped must not be handed out again.
+
+    It cannot be closed while running, so the realistic failure is a loop whose
+    thread has gone: `run_coroutine_threadsafe` against it would never complete and
+    every delegation would hang until its timeout.
+    """
     from tools import a2a as a2a_mod
 
-    a2a_mod._loop = None
-    loop = a2a_mod._get_loop()
-    loop.close()
+    original = a2a_mod._get_loop()
+    original.call_soon_threadsafe(original.stop)
+    for _ in range(50):
+        if not original.is_running():
+            break
+        time.sleep(0.02)
     replacement = a2a_mod._get_loop()
-    assert replacement is not loop
-    assert not replacement.is_closed()
-    replacement.close()
-    a2a_mod._loop = None
+    assert replacement is not original
+    assert replacement.is_running()
+
+
+def test_many_delegations_can_overlap():
+    """The bug S4 fixed, and the reason the loop moved to its own thread.
+
+    `run_until_complete` may only be called from the thread that owns the loop.
+    Strands calls tools from a POOL of threads and issues independent tool calls
+    concurrently (measured: two tools starting within 0.00s of each other), so the
+    third concurrent delegation raised "This event loop is already running". That
+    error was caught, counted as an endpoint failure, and shown to the user as
+    "A2A agent call failed" — blaming a healthy specialist, and tripping its
+    circuit breaker after three.
+    """
+    import threading
+
+    from tools import a2a as a2a_mod
+
+    results: dict[str, str] = {}
+
+    def delegate(name: str) -> None:
+        async def work() -> str:
+            await asyncio.sleep(0.4)
+            return "ok"
+        try:
+            results[name] = a2a_mod._run_on_loop(work(), timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            results[name] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=delegate, args=(f"c{i}",)) for i in range(6)]
+    started = time.time()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    elapsed = time.time() - started
+
+    assert all(v == "ok" for v in results.values()), results
+    # Six 0.4s tasks: concurrent finishes in well under the 2.4s serial total.
+    assert elapsed < 1.5, f"delegations ran serially ({elapsed:.1f}s)"
+
+
+def test_a_hung_delegation_times_out_instead_of_pinning_a_tool_thread():
+    """The backstop above httpx's own timeouts.
+
+    httpx applies connect/read timeouts inside the coroutine, so this should never
+    fire in practice — but without it a coroutine that never completes would hold a
+    Strands tool thread for the life of the container.
+    """
+    from tools import a2a as a2a_mod
+
+    async def hang() -> str:
+        await asyncio.sleep(30)
+        return "never"
+
+    started = time.time()
+    with pytest.raises(TimeoutError):
+        a2a_mod._run_on_loop(hang(), timeout=1)
+    assert time.time() - started < 5
+
+    # And the shared loop must still be usable — a cancelled coroutine must not
+    # leave it wedged for every later delegation.
+    async def still_fine() -> str:
+        return "ok"
+    assert a2a_mod._run_on_loop(still_fine(), timeout=10) == "ok"
 
 
 def test_the_breaker_opens_after_repeated_failures_and_then_cools_down(monkeypatch):

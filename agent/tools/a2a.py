@@ -38,8 +38,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
+from concurrent.futures import TimeoutError as FuturesTimeout
 from functools import lru_cache
 from typing import Any, Callable
 
@@ -351,20 +353,76 @@ def _record_success(endpoint: str) -> None:
     _breaker.pop(endpoint, None)
 
 
+# ----------------------------------------------------------------------------
+# Parallel delegation (spec 5 S4)
+#
+# Strands ALREADY issues independent tool calls concurrently — measured: two tools
+# in one turn both started within 0.00s of each other, in separate threads. So a
+# multi-domain request ("my security gap and my energy usage") is already two
+# overlapping delegations and needs no prompt change to become parallel.
+#
+# What did not work was this module's transport. It kept one module-level loop and
+# drove it with `run_until_complete`, which a loop can only do from one thread at a
+# time. Measured with three concurrent delegations: two ran, and the third raised
+#
+#     RuntimeError: This event loop is already running
+#
+# which `_send_a2a_message` catches, counts as an endpoint FAILURE, and returns to
+# the model as "A2A agent call failed: ...". So a three-domain request showed the
+# user an internal asyncio error attributed to a perfectly healthy specialist, and
+# three of those in a turn would trip the circuit breaker against it.
+#
+# The loop now runs on its own daemon thread and work is submitted with
+# `run_coroutine_threadsafe`, which is the thread-safe entry point. Any number of
+# delegations can overlap, they share one connection pool as before, and no caller
+# ever drives the loop itself.
+# ----------------------------------------------------------------------------
+
 _loop: Any = None
+_loop_thread: Any = None
+# Guards loop creation. Without it, two tool threads arriving together could each
+# see `_loop is None` and start a second loop and thread — which would work, and
+# would quietly halve the connection reuse this design exists for.
+_loop_lock = threading.Lock()
 
 
 def _get_loop():
-    """One event loop for the process, reused across delegations.
+    """The shared event loop, running on its own thread.
 
-    A per-call loop is why two delegations in a turn could not share a
-    connection pool. Created on demand rather than at import so a fork-based
-    worker does not inherit a loop bound to the parent.
+    Started on demand rather than at import so a fork-based worker does not
+    inherit a thread bound to the parent. The thread is a daemon: the loop holds
+    no state worth draining at shutdown, and a non-daemon thread would keep the
+    container alive after the runtime asked it to stop.
     """
-    global _loop
-    if _loop is None or _loop.is_closed():
+    global _loop, _loop_thread
+    with _loop_lock:
+        if _loop is not None and not _loop.is_closed() and _loop.is_running():
+            return _loop
         _loop = asyncio.new_event_loop()
-    return _loop
+        _loop_thread = threading.Thread(
+            target=_loop.run_forever, name="a2a-loop", daemon=True)
+        _loop_thread.start()
+        return _loop
+
+
+def _run_on_loop(coro, timeout: float):
+    """Run `coro` on the shared loop from any thread and return its result.
+
+    `run_coroutine_threadsafe` rather than `run_until_complete`: the latter can
+    only be called from the thread that owns the loop, and Strands calls tools
+    from a pool of threads. The timeout is a backstop only — httpx already applies
+    its own connect/read timeouts inside the coroutine — so it is set above them,
+    and exists so a hung coroutine cannot pin a tool thread forever.
+    """
+    future = asyncio.run_coroutine_threadsafe(coro, _get_loop())
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeout:
+        # Stop the coroutine rather than leaving it running on the shared loop,
+        # where it would keep a connection open for a request nobody is waiting on.
+        future.cancel()
+        raise TimeoutError(
+            f"the specialist did not respond within {timeout:.0f}s") from None
 
 
 def _local_agent_card(card_dict: dict, endpoint_url: str):
@@ -489,10 +547,12 @@ def _send_a2a_message(
                             reply_text = r.text
             return reply_text or "(no response from A2A agent)"
 
-    # The shared loop, driven with run_until_complete. `asyncio.run` would close
-    # the loop it creates, which is what made every call build a fresh one.
+    # Submitted to the shared loop from whichever thread Strands called this tool
+    # on. `run_until_complete` used to be called here directly, which failed on the
+    # THIRD concurrent delegation with "This event loop is already running" — see
+    # the note above _get_loop.
     try:
-        result = _get_loop().run_until_complete(_run())
+        result = _run_on_loop(_run(), timeout=_READ_TIMEOUT + _CONNECT_TIMEOUT + 5)
     except Exception:
         _record_failure(endpoint_url)
         raise
