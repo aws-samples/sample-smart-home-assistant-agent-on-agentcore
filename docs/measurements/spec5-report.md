@@ -232,6 +232,45 @@ than the docs, diff the deployed copy against the repo.
 
 ---
 
+## S6 — developer experience
+
+| Item | Status |
+|---|---|
+| `docs/agent-design-principles.md` | 3 chapters, every entry with `file:line` + a number |
+| README design chapter (both languages) | leads with the five counter-intuitive findings |
+| This report | phase-by-phase before/after |
+| Scenes as code | export/import JSON, validated by the agent's own validator |
+| Structured JSON output | `responseFormat: "json"`, plus a fence-stripper the prompt could not replace |
+| Delegation trace panel | built from the S5 progress stream — free and instant |
+| End-user skill publishing | **already shipped**; Skill ERP + approval flow verified live |
+
+Two of these were narrowed by what already existed or by measurement:
+
+- The **trace panel** was specified to read `aws/spans` per turn for route, tools,
+  ms and tokens. That is a 10-20s Logs Insights query to learn what the SSE stream
+  said seconds earlier, so it would arrive long after the answer it describes. Built
+  from the stream instead; ms and tokens stay on the Overview dashboard, where
+  aggregates belong.
+- **Self-service skill publishing** needed no work. Skill ERP already gives any
+  confirmed Cognito user a publish surface with a curator approval flow; verified
+  live, with an end-user-published skill sitting in Approved state.
+
+Three bugs the live tests found in the new code:
+
+| Bug | Symptom |
+|---|---|
+| Scenes are keyed by Cognito **sub**, not email | first export returned 0 scenes for a user with six |
+| Admin Lambda had read-only on the scenarios table | all six scenes validated, then every PutItem failed AccessDenied |
+| A delegated JSON reply came back in a ```json fence | `JSON.parse` fails on a reply that is otherwise perfect |
+
+The fence is the interesting one. The prompt forbids fences and that works on a
+plain device query — but after summarising a specialist's prose the model is in
+chat-formatting mode and a fence is what that produces. `unfence_json` strips it,
+which is the same conclusion the `⟦A2A:…⟧` marker reached: if a property must hold
+for every reply, the harness enforces it rather than the prompt asking.
+
+---
+
 ## Reproducing
 
 ```bash
