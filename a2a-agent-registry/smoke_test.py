@@ -63,6 +63,19 @@ PROMPTS = {
         "What automations do I have saved?",
         "⟦A2A:task-management⟧",
     ),
+    # Video rather than music, deliberately: the music path waits on the Bluetooth
+    # link, which nothing is driving during a smoke test, so it would spend several
+    # seconds polling and then correctly report that no speaker is paired. Video
+    # sync has no such dependency — the backlight reads the picture itself — so this
+    # exercises discover -> setSyncMode without a timing-dependent outcome.
+    #
+    # It DOES change device state, unlike the reads above. That is the point for
+    # this agent (it has no read-only skill to test), and it is recoverable: the
+    # user's own panel or a later command sets sync_mode back to off.
+    "scene-sync-agent": (
+        "I'm watching a film in the living room — make the lights follow the TV.",
+        "⟦A2A:scene-sync⟧",
+    ),
 }
 
 # Roster: see common/agents.py. A stale copy here makes the smoke test skip an
