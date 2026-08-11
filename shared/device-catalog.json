@@ -266,7 +266,7 @@
       "displayName": { "en": "TV Backlight", "zh": "电视背光灯" },
       "room": "living",
       "connectivity": "wifi",
-      "$comment": "The screen-sync master for the video-sync scene. Zones map to the four screen edges, so a 4-segment addressable light; sync_mode is inert until the scene agent drives it (spec 3).",
+      "$comment": "The screen-sync master for the video-sync scene. Zones map to the four screen edges, so a 4-segment addressable light; sync_mode is driven by the scene-sync agent, which waits on `bluetooth` before claiming music sync is running.",
       "capabilities": {
         "power": { "type": "boolean" },
         "brightness": { "type": "integer", "min": 0, "max": 100 },
@@ -277,7 +277,12 @@
           "values": ["solid", "gradient", "wave", "chase", "breathe", "sparkle", "twinkle"]
         },
         "effect_speed": { "type": "integer", "min": 1, "max": 10 },
-        "sync_mode": { "type": "enum", "values": ["off", "video", "music"] }
+        "sync_mode": { "type": "enum", "values": ["off", "video", "music"] },
+        "bluetooth": {
+          "type": "readonly",
+          "values": ["idle", "pairing", "connected"],
+          "$comment": "Reported by the simulator, never settable. Music sync goes over the speaker link, so the scene-sync agent polls this instead of assuming the pairing succeeded — 'paired in a moment' and 'never paired' look identical for the first two seconds."
+        }
       },
       "actions": {
         "setPower": { "writes": "power", "required": ["power"] },

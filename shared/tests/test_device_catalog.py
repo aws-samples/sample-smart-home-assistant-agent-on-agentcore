@@ -283,6 +283,47 @@ def test_explicit_parameter_beats_the_implication():
     assert ok and cmd["power"] is False, "an explicit value must win over `implies`"
 
 
+def test_a_parameter_no_action_declares_is_dropped_not_forwarded():
+    """The normalised command carries only what the action actually takes.
+
+    This used to be `out.update(command)`, which forwarded every key the caller
+    sent — so a key no action declares reached the device having been validated by
+    nothing at all. `bluetooth` on the TV backlight is the case that matters: it is
+    a READONLY capability, the pairing state the device alone may report, and the
+    scene-sync agent decides whether music sync is really running by reading it.
+    Letting a command assert it would let anything that can phrase a command (a
+    model, or a prompt injection reaching one) fake the answer.
+
+    Dropped rather than refused: an extra key is usually a caller being sloppy, not
+    an attack, and failing the whole command would be a worse trade. What matters
+    is that it goes no further.
+    """
+    tv = dc.device_by_id("living-tvlight-1")
+    ok, cmd, _ = dc.validate_command(
+        tv, {"action": "setSyncMode", "sync_mode": "music",
+             "bluetooth": "connected", "somethingInvented": 1})
+    assert ok, "a stray key should not fail an otherwise valid command"
+    assert "bluetooth" not in cmd, "a readonly capability must not be settable"
+    assert "somethingInvented" not in cmd
+    assert cmd["sync_mode"] == "music"
+
+
+def test_bluetooth_has_no_action_that_writes_it():
+    """Belt and braces on the above: nothing in the catalog should offer to set it.
+
+    Asserted against the catalog rather than the validator, so adding a
+    `setBluetooth` action fails here rather than quietly making the state
+    forgeable.
+    """
+    tv = dc.device_by_id("living-tvlight-1")
+    assert "bluetooth" in tv["capabilities"], "the capability should exist to read"
+    writers = [name for name, spec in tv["actions"].items()
+               if spec.get("writes") == "bluetooth"
+               or "bluetooth" in (spec.get("required") or [])
+               or "bluetooth" in (spec.get("optional") or [])]
+    assert writers == [], f"bluetooth is reported, never set; found {writers}"
+
+
 def test_set_power_off_does_not_self_imply():
     fan = dc.device_by_id("living-fan-1")
     ok, cmd, _ = dc.validate_command(fan, {"action": "setPower", "power": False})

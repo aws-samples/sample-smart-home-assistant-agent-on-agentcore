@@ -115,20 +115,38 @@ def validate_command(device, command):
         ]
 
     spec = actions[action]
-    # Side effects the device performs itself: setting a fan speed runs the fan,
-    # picking a light effect turns the light on. Seeded before the caller's own
-    # parameters so an explicit value still wins, and applied here rather than in
-    # each caller so the simulator and the control path agree on what a command
-    # means.
-    out = dict(spec.get("implies") or {})
-    out.update(command)
-
     for param in spec.get("required", []):
         if param not in command:
             return False, None, [f"Missing required parameter '{param}' for action '{action}'"]
 
     caps = device.get("capabilities", {})
     allowed = set(spec.get("required", [])) | set(spec.get("optional", []))
+
+    # Side effects the device performs itself: setting a fan speed runs the fan,
+    # picking a light effect turns the light on. Seeded before the caller's own
+    # parameters so an explicit value still wins, and applied here rather than in
+    # each caller so the simulator and the control path agree on what a command
+    # means.
+    #
+    # Only `action` and the action's OWN parameters are copied across. This used to
+    # be `out.update(command)`, which forwarded every key the caller sent —
+    # including ones no action declares, which therefore reached the device having
+    # been validated by nothing. That is how a readonly capability stops being
+    # readonly: `{"action": "setSyncMode", "bluetooth": "connected"}` was accepted
+    # and published, so anything that can phrase a command (a model, or a prompt
+    # injection reaching one) could assert a state the device alone is allowed to
+    # report. Unknown keys are now dropped rather than refused — a caller adding a
+    # harmless extra should not fail — but they go no further than here.
+    implied = dict(spec.get("implies") or {})
+    out = dict(implied)
+    out["action"] = action
+    # An IMPLIED key may be overridden: "set the fan to speed 3 but leave it off"
+    # is a real request, and `implies` is a default rather than a constraint. Those
+    # overrides are validated below like any other parameter, because the implied
+    # key names a capability by construction.
+    for param in set(allowed) | set(implied):
+        if param in command:
+            out[param] = command[param]
     # Wire parameter names usually match the capability they set, but not always
     # — setOscillation carries `enabled`, setEffect carries `colors` for the
     # `segments` capability. `params` states those mappings explicitly; guessing

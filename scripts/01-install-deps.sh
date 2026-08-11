@@ -84,8 +84,13 @@ done
 # truth, because the drift between per-copy device tables is exactly what it
 # replaces. Source of truth is shared/; these are build outputs (gitignored).
 # ------------------------------------------------------------------------------
+# admin-api is in this list because it imports scenarios.py, which imports
+# device_catalog — so it validates a scene's actions against the catalog too. Its
+# copy was placed by hand once and never refreshed by this script, which meant it
+# drifted: a capability added here was enforced by the runner and the control path
+# but not by the console's own validation.
 echo "==> Copying shared device catalog into IoT Lambda directories..."
-for lambda_dir in iot-control iot-discovery iot-query scenario-runner; do
+for lambda_dir in iot-control iot-discovery iot-query scenario-runner admin-api; do
     target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
     [ -d "$target" ] || continue
     cp "$SCRIPT_DIR/shared/device-catalog.json" "$target/device-catalog.json"

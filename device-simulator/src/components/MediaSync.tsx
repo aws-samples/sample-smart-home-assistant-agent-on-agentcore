@@ -94,6 +94,16 @@ export const MediaSync: React.FC<Props> = ({ device, userSub }) => {
       // `effect: solid` because the segments ARE the frame — an effect motion on
       // top would fight the picture it is supposed to be following.
       effect: 'solid',
+      // The speaker link, read from the ref so `publish` does not have to be
+      // rebuilt (and the render loop restarted) every time pairing advances.
+      //
+      // Reported because music sync depends on it and nothing else can see it.
+      // It lived only in this component's state, so an agent asked to make the
+      // lights follow the music had no way to tell "paired in a moment" from
+      // "never paired" — and the honest answer to the second is to tell the user
+      // to reconnect, not to claim success. It is a readonly capability: the
+      // catalog offers no action that writes it, so a command cannot forge it.
+      bluetooth: live.current.bluetooth,
     });
   }, [device.deviceId, userSub]);
 
@@ -130,6 +140,35 @@ export const MediaSync: React.FC<Props> = ({ device, userSub }) => {
     const timer = setTimeout(() => setBluetooth('connected'), PAIRING_MS);
     return () => clearTimeout(timer);
   }, [bluetooth]);
+
+  // Report every pairing transition, not just the settled state.
+  //
+  // The render loop only publishes while music sync is actually driving colours,
+  // which is to say only once bluetooth is `connected`. So an agent that set music
+  // mode and then polled would never observe `pairing` — it would read whatever was
+  // reported before, decide the link was idle, and tell the user to reconnect a
+  // speaker that was two seconds from being ready. Publishing the transition is
+  // what makes "wait for it" a thing the agent can actually do.
+  //
+  // The WHOLE state goes in the message, not just the changed field. The IoT topic
+  // rule writes `state` as one attribute, so a partial report replaces the item
+  // rather than merging into it — publishing `{bluetooth}` alone would erase
+  // power, sync_mode and segments, and `query_device_state` would then report the
+  // backlight as off in the middle of driving it.
+  useEffect(() => {
+    if (!userSub) return;
+    reportState(userSub, device.deviceId, {
+      power: mode !== 'off',
+      sync_mode: mode,
+      segments: edges,
+      effect: 'solid',
+      bluetooth,
+    });
+    // Deliberately keyed on `bluetooth` alone: this effect exists to report the
+    // pairing transition, and the render loop already publishes colour changes at
+    // its own throttled rate. Adding `edges` here would fire it 60 times a second.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bluetooth, userSub, device.deviceId]);
 
   // The render loop: paint a frame, read its edges, drive the light.
   useEffect(() => {
