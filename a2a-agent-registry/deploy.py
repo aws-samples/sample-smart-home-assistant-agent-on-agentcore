@@ -283,6 +283,90 @@ def _text_agent_gateway_env(state: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _text_agent_memory_env(state: dict[str, Any]) -> dict[str, str]:
+    """Read the shared Memory id off the main text runtime.
+
+    Copied from the orchestrator rather than configured here, for the same reason
+    the Gateway env is: it must be the SAME memory, and a second source of the id
+    is a second chance for the two to disagree. A specialist pointed at its own
+    memory would work — it would just retrieve nothing, forever, which reads as a
+    retrieval bug rather than a configuration one.
+
+    Note the var name embeds the memory's logical name
+    (`MEMORY_SMARTHOMEMEMORY_ID`) because that is what the agentcore CLI sets on
+    the orchestrator; `common/memory.py` reads the same key so the two match by
+    construction.
+    """
+    runtime_id = state.get("text_agent_runtime_id", "")
+    if not runtime_id:
+        return {}
+    try:
+        ac = boto3.client("bedrock-agentcore-control", region_name=state["region"])
+        env = ac.get_agent_runtime(
+            agentRuntimeId=runtime_id).get("environmentVariables") or {}
+    except Exception as exc:  # noqa: BLE001
+        log(f"  warn: could not read the main runtime's memory env: {exc}")
+        return {}
+    return {k: v for k, v in env.items()
+            if k.startswith("MEMORY_") and k.endswith("_ID") and v}
+
+
+def _memory_arn_from_id(memory_id: str, account_id: str, region: str) -> str:
+    return (f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/{memory_id}"
+            if memory_id and account_id else "")
+
+
+def _grant_memory_read(agent: str, role_arn: str, memory_env: dict[str, str],
+                       state: dict[str, Any]) -> None:
+    """Let this sub-agent RETRIEVE from the shared Memory, and nothing else.
+
+    `RetrieveMemoryRecords` alone. Not CreateEvent, not ListEvents: writing is the
+    orchestrator's job because only it holds the whole conversation (see
+    common/memory.py), and the cheapest way to keep that true as the code changes
+    is for the permission not to exist. A future edit that tried to write would
+    fail loudly here rather than quietly poison the user's long-term memory with
+    half-sentences.
+
+    Its own inline policy name, like every other grant in this file:
+    `put_role_policy` REPLACES a document, so sharing a name with
+    `A2APromptTableRead` would silently delete whichever grant was applied first.
+    """
+    # Account id off the role ARN rather than an STS call, matching the other
+    # grants in this file — the role is in the account we are deploying into by
+    # definition.
+    account_id = role_arn.split(":")[4]
+    resources = [
+        arn for arn in (
+            _memory_arn_from_id(m, account_id, state["region"])
+            for m in memory_env.values() if m
+        ) if arn
+    ]
+    if not resources:
+        log(f"  [{agent}] no shared memory id — skipping the Memory read grant")
+        return
+    doc = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": ["bedrock-agentcore:RetrieveMemoryRecords"],
+            "Resource": resources,
+        }],
+    }
+    role_name = role_arn.split("/")[-1]
+    try:
+        boto3.client("iam").put_role_policy(
+            RoleName=role_name,
+            PolicyName="A2ASharedMemoryRead",
+            PolicyDocument=json.dumps(doc),
+        )
+        log(f"  [{agent}] granted RetrieveMemoryRecords on {len(resources)} memory(ies)")
+    except Exception as exc:  # noqa: BLE001
+        # Soft: the agent still answers, just without the user's remembered
+        # context. Loud in the log because the symptom otherwise is "the
+        # specialist never remembers anything", which looks like a code bug.
+        log(f"  [{agent}] WARNING: could not grant Memory read: {exc}")
+
+
 def _module_name(agent: str) -> str:
     """Importable package name for an agent directory.
 
@@ -552,6 +636,18 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         else:
             log(f"  [{agent}] WARNING: could not find AGENTCORE_GATEWAY_*_URL on "
                 f"the main runtime — this agent will have no device tools")
+
+    # The shared Memory, for EVERY agent including the prompt-only advisors: a
+    # security or energy recommendation is better for knowing the user prefers
+    # warm light at night, and none of them needs a tool to use that. Read-only,
+    # enforced by the grant below.
+    memory_env = _text_agent_memory_env(state)
+    if memory_env:
+        env.update(memory_env)
+        log(f"  [{agent}] shared memory env: {sorted(memory_env)}")
+    else:
+        log(f"  [{agent}] note: no MEMORY_*_ID on the main runtime — this agent "
+            f"will answer without the user's remembered context")
     if default_model:
         env["MODEL_ID"] = default_model
     update_kwargs = dict(
@@ -584,6 +680,7 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
     log(f"  [{agent}] header allowlist: {ALLOWED_SKILLS_HEADER}, {USER_TOKEN_HEADER}")
 
     _grant_prompt_table_read(agent, rt_info["roleArn"], state)
+    _grant_memory_read(agent, rt_info["roleArn"], memory_env, state)
     if agent == SCENARIO_AGENT:
         _grant_scenarios_table_access(agent, rt_info["roleArn"], state)
 
@@ -714,6 +811,44 @@ def ensure_workload_identity(agent: str, state: dict[str, Any]) -> str | None:
 # Step 6: Registry create / update
 # ------------------------------------------------------------------
 
+def _as_update_descriptors(descriptors: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a Create-shaped descriptor tree into Update's shape.
+
+    `CreateRegistryRecord` takes descriptors bare. `UpdateRegistryRecord` wraps
+    EVERY level in `optionalValue` — the union, each descriptor, and each field:
+
+        create  {"a2aAgentCard": {"data": "<json>"}}
+        update  {"optionalValue": {"a2aAgentCard": {"optionalValue":
+                    {"data": {"optionalValue": "<json>"}}}}}
+
+    Measured from the botocore service model rather than guessed:
+
+        c = boto3.client("agent-registry-control")
+        c.meta.service_model.operation_model("UpdateRegistryRecord") \\
+         .input_shape.members["descriptors"]                     # -> optionalValue
+         ...members["optionalValue"].members["a2aAgentCard"]     # -> optionalValue
+         ...members["optionalValue"].members["data"]             # -> optionalValue
+
+    Why this is done by a function and not by hand: wrapping only the outer level
+    is a fix that LOOKS right and is not, and the failure is silent. Any update
+    error is treated as "delete the record and recreate it" by the caller; that
+    path succeeds, so a redeploy reports success while minting a NEW recordId —
+    and `a2aGrants` in every `__a2a_permissions__` row is keyed by recordId. The
+    user-visible symptom is a specialist whose skills were granted yesterday
+    having no `a2a_*` tools today, with nothing in any log. That happened twice:
+    once before the outer wrap was added, and again on the next deploy because the
+    inner two levels were still bare.
+    """
+    def wrap(value: Any, depth: int) -> Any:
+        if isinstance(value, dict):
+            return {"optionalValue": {k: wrap(v, depth + 1) for k, v in value.items()}}
+        return {"optionalValue": value}
+
+    return {"optionalValue": {
+        name: wrap(fields, 0) for name, fields in descriptors.items()
+    }}
+
+
 def ensure_registry_record(
     agent: str,
     state: dict[str, Any],
@@ -744,15 +879,7 @@ def ensure_registry_record(
     descriptor_payload = {
         "a2aAgentCard": {"data": json.dumps(card_for_registry)},
     }
-    # UpdateRegistryRecord takes the SAME descriptor union wrapped in
-    # `optionalValue`; Create takes it bare. Measured from the service model, not
-    # guessed — passing Create's shape to Update fails validation with "Unknown
-    # parameter in descriptors: a2aAgentCard", and the code below treats any update
-    # failure as "recreate the record". That path works, so a redeploy looked
-    # successful while silently minting a NEW recordId, and a recordId is what
-    # every user's `a2aGrants` map is keyed by. The visible symptom is a user whose
-    # skills were granted yesterday having no `a2a_*` tools today.
-    update_descriptor_payload = {"optionalValue": descriptor_payload}
+    update_descriptor_payload = _as_update_descriptors(descriptor_payload)
 
     # AWS Agent Registry (GA namespace) — Registry calls only.
     registry_control = boto3.client(REGISTRY_CLIENT, region_name=state["region"])

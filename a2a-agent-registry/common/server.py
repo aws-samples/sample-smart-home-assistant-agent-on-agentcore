@@ -125,6 +125,21 @@ def _parse_allowed_skills(headers: dict[str, str]) -> frozenset[str]:
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
 
 
+def _request_text(a2a_context) -> str:
+    """The delegated request as plain text, or "".
+
+    Used as the search query for memory retrieval, so relevance ranking has
+    something to rank against. `get_user_input` is the a2a-sdk's own accessor and
+    already joins multiple text parts; returns "" rather than raising if the
+    request carries no text at all, which the caller treats as "no memory lookup".
+    """
+    try:
+        return a2a_context.get_user_input() or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.info("could not read the request text: %s", exc)
+        return ""
+
+
 def enforce_allowed_skills(allowed: frozenset[str], skill_ids: frozenset[str]) -> None:
     """Refuse a request that was not granted any of this agent's skills.
 
@@ -320,6 +335,28 @@ def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
                 agent_kwargs["name"], agent_kwargs["system_prompt"],
                 user_id=caller.sub,
             )
+
+            # The user's long-term memory, shared with the orchestrator and read
+            # only (common/memory.py explains why writing stays upstream).
+            # Appended AFTER the governed prompt rather than folded into it: an
+            # admin's global override replaces the shipped prompt entirely, and
+            # the user's own remembered preferences should survive an operator
+            # retuning this specialist's instructions.
+            #
+            # Retrieved with the request text as the query, so relevance ranking
+            # has something to rank against; "" when there is nothing to add, in
+            # which case the prompt is byte-for-byte what it was before.
+            try:
+                from common.memory import memory_prompt_section
+
+                section = memory_prompt_section(caller, _request_text(context))
+            except Exception as exc:  # noqa: BLE001
+                # Memory is an enhancement. A specialist that refused to answer
+                # because a retrieval failed would trade a good answer for none.
+                logger.info("memory section unavailable: %s", exc)
+                section = ""
+            if section:
+                kwargs["system_prompt"] += section
 
             # Swap in a request-scoped Agent for the duration of this call. The
             # executor instance is shared, so this must not outlive the request.
