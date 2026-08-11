@@ -1520,10 +1520,16 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     scenariosTable.grantReadWriteData(scenarioRunner);
-    // The admin API reads scenes for the operator view and reconciles Scheduler
-    // against them. Read-only on the table: the console displays automations, the
-    // agent creates them.
-    scenariosTable.grantReadData(adminLambda);
+    // The admin API reads scenes for the operator view, reconciles Scheduler
+    // against them, and — since scenes-as-code (spec 5 S6) — writes them on import.
+    //
+    // Write was added deliberately and narrowly. Read-only was right while the
+    // agent was the only author; JSON import makes the console an author too, and
+    // an import that validated all six scenes and then failed every PutItem with
+    // AccessDenied is exactly what read-only produced. `grantWriteData` rather
+    // than a hand-written policy so the index ARNs come along, which is what the
+    // reconcile Query needs.
+    scenariosTable.grantReadWriteData(adminLambda);
     adminLambda.addEnvironment("SCENARIOS_TABLE_NAME", scenariosTable.tableName);
     adminLambda.addEnvironment("SCENARIO_SCHEDULE_GROUP", "smarthome-scenarios");
     adminLambda.addEnvironment("SCENARIO_RUNNER_ARN", scenarioRunner.functionArn);

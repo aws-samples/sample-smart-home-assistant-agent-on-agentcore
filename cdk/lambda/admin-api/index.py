@@ -2780,6 +2780,239 @@ def sync_scenario_schedules(event):
 
 
 # ---------------------------------------------------------------------------
+# Scenes as code (spec 5 S6)
+#
+# Export and import a user's scenes as JSON. For the developer-shaped end users
+# this product has: paste a definition instead of describing it in a dozen turns,
+# keep it in version control, move it between accounts.
+#
+# Import goes through `scenarios.build_scenario`, the same validator the A2A agent
+# uses. That is the point — an imported scene is validated exactly like a spoken
+# one, so it cannot store a device action the execution path would then refuse. A
+# separate import validator would be a second definition of "valid", and it would
+# drift.
+# ---------------------------------------------------------------------------
+
+# Fields that describe the scene ITSELF. Everything else on the row is either
+# derived (scenarioKey, scenarioId), owner-specific (userId), or runtime state
+# (lastRunAt, lastRunOk, lastRunDetail, createdAt) — exporting those would invite a
+# round trip that claims to restore a run history it cannot.
+_EXPORTABLE_FIELDS = ("name", "description", "trigger", "deviceActions",
+                      "isActive", "isTemplate")
+
+
+def _scenario_owner_keys(user_id: str) -> list[str]:
+    """Every key a user's scene rows might be stored under, most likely first.
+
+    Scenes are keyed by Cognito **sub**, not email — the A2A agent stores them from
+    the verified token's `sub`, and the runner reads them back the same way. But
+    every other admin surface (settings, prompts, A2A grants) is keyed by EMAIL,
+    and the Scenarios page passes whatever it has.
+
+    So both are tried. This is the same two-key-space trap that once wrote a
+    settings row under `admin%40smarthome.local`: the failure mode is an empty
+    result for a user who plainly has data, which reads as "the feature does not
+    work" rather than "you asked about a different key".
+    """
+    keys = [user_id]
+    if "@" in user_id:
+        sub = _resolve_sub_for_email(user_id)
+        if sub and sub not in keys:
+            keys.append(sub)
+    return keys
+
+
+def _resolve_sub_for_email(email: str) -> str:
+    """The Cognito sub for an email, or "" if it cannot be resolved.
+
+    The inverse of `_resolve_ddb_user_key`, which goes sub -> email for the rows
+    keyed that way. Scenes are the one table keyed by sub, hence both directions
+    existing in the same file.
+    """
+    if not COGNITO_USER_POOL_ID:
+        return ""
+    try:
+        resp = boto3.client("cognito-idp", region_name=REGION).list_users(
+            UserPoolId=COGNITO_USER_POOL_ID, Filter=f'email = "{email}"', Limit=1)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not resolve sub for %s: %s", email, e)
+        return ""
+    for user in resp.get("Users", []):
+        for attr in user.get("Attributes", []):
+            if attr.get("Name") == "sub":
+                return attr.get("Value", "")
+    return ""
+
+
+def export_scenarios(event):
+    """One user's scenes as a portable JSON document.
+
+    `?userId=` is required rather than defaulting to every user: a scene carries
+    device ids and daily routines, and an export endpoint that silently dumped the
+    whole fleet's automations would be a data-disclosure bug wearing a convenience
+    feature's clothes.
+    """
+    import scenarios as sc
+
+    params = event.get("queryStringParameters") or {}
+    user_id = unquote(params.get("userId", "") or "")
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+
+    items = []
+    try:
+        scenarios_table = _scenarios_table()
+        for key in _scenario_owner_keys(user_id):
+            resp = scenarios_table.query(
+                KeyConditionExpression=Key("userId").eq(key))
+            items = resp.get("Items", [])
+            if items:
+                break
+    except Exception as e:  # noqa: BLE001
+        logger.warning("scene export query failed for %s: %s", user_id, e)
+        return response(500, {"error": f"could not read scenes: {str(e)[:200]}"})
+
+    scenes = []
+    for item in items:
+        if sc.is_template_key(item.get("scenarioKey", "")):
+            continue  # templates are library content, not this user's automations
+        scenes.append({k: _plain(item[k]) for k in _EXPORTABLE_FIELDS if k in item})
+
+    return response(200, {
+        "version": 1,
+        "exportedFor": user_id,
+        "count": len(scenes),
+        "scenes": scenes,
+    })
+
+
+def _plain(value):
+    """DynamoDB Decimals to JSON numbers, recursively.
+
+    `json.dumps` cannot serialise Decimal, and the response helper's `default=str`
+    would quietly turn brightness 20 into the string "20" — which then fails
+    validation on the way back in, on an export the user never edited.
+    """
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+def import_scenarios(event):
+    """Create scenes from an exported (or hand-written) JSON document.
+
+    Per-scene outcomes rather than all-or-nothing: a document with one bad trigger
+    should not cost the user the other five scenes, and a partial import that says
+    exactly which entries failed and why is more useful than a single 400.
+
+    Does NOT create schedules. `sync-schedules` does that, and keeping them
+    separate means an import cannot start firing automations as a side effect of
+    being parsed — the operator reconciles when they are ready.
+    """
+    import scenarios as sc
+
+    body = json.loads(event.get("body") or "{}")
+    user_id = unquote(body.get("userId", "") or "")
+    scenes = body.get("scenes")
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    # Scenes are keyed by Cognito **sub**: that is what the A2A agent writes and
+    # what the scenario runner reads. Importing under an email would store rows the
+    # runner never looks at — a scene that appears on the page and never fires,
+    # which is the worst of both outcomes. So resolve to a sub before writing, and
+    # refuse rather than guess if it cannot be resolved.
+    owner = user_id
+    if "@" in owner:
+        resolved = _resolve_sub_for_email(owner)
+        if not resolved:
+            return response(400, {
+                "error": f"could not resolve a Cognito sub for {owner}; scenes are "
+                         f"stored by sub, so importing under an email would create "
+                         f"rows the scenario runner never reads"})
+        owner = resolved
+    if not isinstance(scenes, list) or not scenes:
+        return response(400, {"error": "scenes must be a non-empty array"})
+    if len(scenes) > 50:
+        return response(400, {"error": "at most 50 scenes per import"})
+
+    now = datetime.now(timezone.utc).isoformat()
+    scenarios_table = _scenarios_table()
+    created, failed = [], []
+    for index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            failed.append({"index": index, "error": "each scene must be an object"})
+            continue
+        try:
+            built = sc.build_scenario(
+                user_id=owner,
+                name=scene.get("name", ""),
+                trigger=scene.get("trigger") or {},
+                actions=scene.get("deviceActions") or [],
+                description=scene.get("description", ""),
+                # Templates are library content owned by the catalog, not something
+                # a user import should be able to mint.
+                is_template=False,
+                is_active=scene.get("isActive", True),
+                now=now,
+                source="import",
+            )
+        except sc.ScenarioError as exc:
+            failed.append({"index": index, "name": scene.get("name", ""),
+                           "error": str(exc)})
+            continue
+        item = built["item"]
+        try:
+            scenarios_table.put_item(Item=_decimalise(item))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("scene import put failed: %s", exc)
+            failed.append({"index": index, "name": item["name"],
+                           "error": str(exc)[:200]})
+            continue
+        created.append({
+            "scenarioId": item["scenarioId"],
+            "name": item["name"],
+            "trigger": sc.describe_trigger(item["trigger"]),
+            "warnings": built.get("warnings") or [],
+            "autoInferredFields": built.get("autoInferredFields") or {},
+        })
+
+    return response(200, {
+        "created": created,
+        "failed": failed,
+        "createdCount": len(created),
+        "failedCount": len(failed),
+        # Said explicitly so nobody waits for an automation that has no schedule.
+        "note": ("Imported scenes are stored but not scheduled. Run Reconcile "
+                 "(sync-schedules) to create their EventBridge schedules."),
+    })
+
+
+def _decimalise(value):
+    """Floats to Decimal, recursively — DynamoDB rejects Python floats.
+
+    A latitude or a brightness that arrived as JSON is a float, and `put_item`
+    fails with "Float types are not supported" on the way in. Converting via `str`
+    rather than `Decimal(float)` avoids inheriting the float's binary noise
+    (`Decimal(0.1)` is 0.1000000000000000055511151231257827).
+    """
+    from decimal import Decimal
+
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _decimalise(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_decimalise(v) for v in value]
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Browser sessions / workspace files (user-facing; chatbot polls these)
 # ---------------------------------------------------------------------------
 
@@ -3018,6 +3251,8 @@ def _dispatch(event, context):
             return list_scenarios(event)
         if action == "sync-schedules":
             return sync_scenario_schedules(event)
+        if action == "export-scenes":
+            return export_scenarios(event)
         return list_registry_records(event)
     if resource == "/registry/records" and method == "POST":
         # Rides on the existing resource: the admin Lambda's auto-generated API
@@ -3031,6 +3266,8 @@ def _dispatch(event, context):
         action = (event.get("queryStringParameters") or {}).get("action", "")
         if action == "sync-schedules":
             return sync_scenario_schedules(event)
+        if action == "import-scenes":
+            return import_scenarios(event)
         return review_registry_record(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

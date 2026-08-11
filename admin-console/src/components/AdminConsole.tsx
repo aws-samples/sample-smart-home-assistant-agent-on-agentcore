@@ -52,6 +52,8 @@ import {
   listAgentFleet,
   listScenarios,
   syncScenarioSchedules,
+  exportScenes,
+  importScenes,
   ScenarioRow,
   listBundles,
   listABTests,
@@ -567,6 +569,15 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
   const [rows, setRows] = useState<ScenarioRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // Scenes as code (spec 5 S6). The one authoring path on this otherwise
+  // read-only page, and it is deliberately a paste box rather than a form: the
+  // audience is a developer who already has the JSON, and a form would be a
+  // second, worse scene editor competing with the agent that owns authoring.
+  const [selected, setSelected] = useState<ScenarioRow[]>([]);
+  const [codeOpen, setCodeOpen] = useState(false);
+  const [codeUser, setCodeUser] = useState('');
+  const [codeText, setCodeText] = useState('');
+  const [codeBusy, setCodeBusy] = useState(false);
   const { t } = useI18n();
 
   const load = useCallback(async () => {
@@ -611,6 +622,78 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
     }
   };
 
+  // The owner of the selected row, or the first row's owner. Prefilled rather than
+  // demanded: scenes are per-user, and typing a Cognito sub by hand is exactly the
+  // step where an operator exports the wrong person's automations.
+  const defaultCodeUser = () => selected[0]?.userId || rows[0]?.userId || '';
+
+  const openCode = () => {
+    clearMessages();
+    setCodeUser(defaultCodeUser());
+    setCodeText('');
+    setCodeOpen(true);
+  };
+
+  const handleExport = async () => {
+    clearMessages();
+    setCodeBusy(true);
+    try {
+      const out = await exportScenes(codeUser.trim());
+      setCodeText(JSON.stringify(out.scenes, null, 2));
+      if (out.count === 0) {
+        setError(t('scenarios.codeEmpty'));
+      } else {
+        setSuccess(`${t('scenarios.codeExported')} ${out.count}`);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setCodeBusy(false);
+    }
+  };
+
+  const handleImport = async () => {
+    clearMessages();
+    let scenes: any;
+    try {
+      scenes = JSON.parse(codeText);
+    } catch (err: any) {
+      // Reported here rather than sent to the API: a JSON syntax error is the
+      // paste's problem, and a round trip would only rename it.
+      setError(`${t('scenarios.codeBadJson')} ${err.message}`);
+      return;
+    }
+    // Accept either the bare array or the whole export envelope, because the
+    // obvious thing to paste back is exactly what Export handed over.
+    if (!Array.isArray(scenes) && Array.isArray(scenes?.scenes)) scenes = scenes.scenes;
+    if (!Array.isArray(scenes)) {
+      setError(t('scenarios.codeNotArray'));
+      return;
+    }
+    setCodeBusy(true);
+    try {
+      const out = await importScenes(codeUser.trim(), scenes);
+      if (out.failedCount > 0) {
+        // Both counts, because a partial import is the normal outcome of editing
+        // by hand and the operator needs to know which entries to fix.
+        setError(
+          `${out.createdCount} imported, ${out.failedCount} failed — ` +
+          out.failed.map((f) => `#${f.index + 1} ${f.name || ''}: ${f.error}`).join('; ')
+        );
+      } else {
+        setSuccess(`${t('scenarios.codeImported')} ${out.createdCount}. ${out.note || ''}`);
+      }
+      if (out.createdCount > 0) {
+        setCodeOpen(false);
+        await load();
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setCodeBusy(false);
+    }
+  };
+
   const runIndicator = (row: ScenarioRow) => {
     if (!row.lastRunAt) {
       return <StatusIndicator type="pending">{t('scenarios.neverRun')}</StatusIndicator>;
@@ -637,6 +720,7 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
             actions={
               <SpaceBetween direction="horizontal" size="xs">
                 <Button iconName="refresh" onClick={load}>{t('overview.refresh')}</Button>
+                <Button onClick={openCode}>{t('scenarios.asCode')}</Button>
                 <Button variant="primary" loading={syncing} onClick={handleSync}>
                   {t('scenarios.reconcile')}
                 </Button>
@@ -713,6 +797,9 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
           },
           { id: 'source', header: t('scenarios.colSource'), cell: (row) => row.source || '-' },
         ]}
+        selectionType="single"
+        selectedItems={selected}
+        onSelectionChange={({ detail }) => setSelected(detail.selectedItems)}
         empty={
           <CloudscapeBox textAlign="center" padding="m">
             <b>{t('scenarios.empty')}</b>
@@ -722,6 +809,44 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
           </CloudscapeBox>
         }
       />
+
+      <Modal
+        visible={codeOpen}
+        onDismiss={() => setCodeOpen(false)}
+        header={t('scenarios.asCode')}
+        size="large"
+        footer={
+          <CloudscapeBox float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button onClick={() => setCodeOpen(false)}>{t('skills.cancel')}</Button>
+              <Button loading={codeBusy} disabled={!codeUser.trim()}
+                      onClick={handleExport}>
+                {t('scenarios.codeExport')}
+              </Button>
+              <Button variant="primary" loading={codeBusy}
+                      disabled={!codeUser.trim() || !codeText.trim()}
+                      onClick={handleImport}>
+                {t('scenarios.codeImport')}
+              </Button>
+            </SpaceBetween>
+          </CloudscapeBox>
+        }
+      >
+        <SpaceBetween size="m">
+          <Alert type="info">{t('scenarios.codeHelp')}</Alert>
+          <FormField label={t('scenarios.codeUser')}
+                     description={t('scenarios.codeUserHint')}>
+            <Input value={codeUser} onChange={({ detail }) => setCodeUser(detail.value)}
+                   placeholder="user@example.com" />
+          </FormField>
+          <FormField label={t('scenarios.codeJson')}
+                     description={t('scenarios.codeJsonHint')}>
+            <Textarea value={codeText} rows={16}
+                      onChange={({ detail }) => setCodeText(detail.value)}
+                      placeholder='[{"name": "Movie mode", "trigger": {"sceneType": "manual"}, "deviceActions": [...]}]' />
+          </FormField>
+        </SpaceBetween>
+      </Modal>
     </SpaceBetween>
   );
 };

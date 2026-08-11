@@ -993,6 +993,71 @@ export async function syncScenarioSchedules(): Promise<SyncSchedulesResult> {
   return body;
 }
 
+/** A scene in its portable form — what export emits and import accepts. */
+export interface PortableScene {
+  name: string;
+  description?: string;
+  trigger: Record<string, unknown>;
+  deviceActions: Array<Record<string, unknown>>;
+  isActive?: boolean;
+  isTemplate?: boolean;
+}
+
+export interface SceneExport {
+  version: number;
+  exportedFor: string;
+  count: number;
+  scenes: PortableScene[];
+}
+
+export interface SceneImportResult {
+  created: Array<{ scenarioId: string; name: string; trigger: string;
+                   warnings?: string[] }>;
+  failed: Array<{ index: number; name?: string; error: string }>;
+  createdCount: number;
+  failedCount: number;
+  note?: string;
+}
+
+/**
+ * One user's scenes as portable JSON (spec 5 S6, "scenes as code").
+ *
+ * `userId` is required by the API rather than defaulting to everyone: a scene
+ * carries device ids and daily routines, so a fleet-wide dump would be a
+ * disclosure bug dressed as convenience.
+ */
+export async function exportScenes(userId: string): Promise<SceneExport> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?action=export-scenes&userId=${encodeURIComponent(userId)}`,
+    { headers }
+  );
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) throw new Error(body.error || `Export failed (${res.status})`);
+  return body;
+}
+
+/**
+ * Create scenes from a JSON document.
+ *
+ * Per-scene outcomes, not all-or-nothing: one bad trigger must not cost the user
+ * their other five scenes, so the result names which entries failed and why.
+ * Imported scenes are stored but NOT scheduled — Reconcile does that, so parsing a
+ * document can never start firing automations as a side effect.
+ */
+export async function importScenes(
+  userId: string, scenes: PortableScene[]
+): Promise<SceneImportResult> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?action=import-scenes`,
+    { method: 'POST', headers, body: JSON.stringify({ userId, scenes }) }
+  );
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) throw new Error(body.error || `Import failed (${res.status})`);
+  return body;
+}
+
 export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
   const headers = await authHeaders();
   // Reuses /registry/records?action=a2a-list — consolidated on a single API

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 
 # OpenTelemetry instrumentation is handled entirely by the AgentCore Runtime
 # container: `agentcore deploy` auto-instruments the process, emits spans
@@ -228,6 +229,49 @@ KNOWLEDGE BASE: Use query_knowledge_base for questions that may relate to compan
 IMAGES IN THIS CONVERSATION: When the user references an image they uploaded ("the image I just sent", "the photo", "上一张图片", "这张图"), rely on the image description that appears earlier in the conversation as a prior assistant message — that is the vision model's caption. Do NOT say "I cannot see images" or "I don't have image access"; the description is already in your context. If no image description is present, say so honestly and ask the user to re-upload. Never fabricate image contents; never invent colors, modes, or details that are not stated in a prior image description."""
 
 
+# Structured output (spec 5 S6). Appended only when the caller asks for it.
+#
+# This product's end users are largely developers, and the natural-language reply
+# they get is not scriptable: a device state arrives as prose about brightness
+# rather than as a number they can assert on. Asking for JSON turns the agent into
+# something a shell script can call.
+#
+# Prompt-level rather than a constrained-decoding feature, deliberately. The reply
+# still comes from the same turn with the same tools, so a JSON request routes and
+# delegates exactly as its prose equivalent would — one behaviour to reason about,
+# not two. The cost is that compliance is not guaranteed, which is why the rules
+# below are about what NOT to wrap it in: a fenced block or a "Here is the JSON:"
+# preamble is the common failure and it breaks `JSON.parse` just as thoroughly as
+# malformed JSON would.
+JSON_OUTPUT_RULES = """OUTPUT FORMAT — JSON ONLY. This request came from a program,
+not a person reading prose.
+
+Reply with a single JSON value and NOTHING else:
+
+  - No ``` fences. No "Here is the JSON:". No trailing commentary.
+  - The first character of your reply must be `{` or `[`, and the last must be the
+    matching close.
+  - No comments, no trailing commas.
+
+Shape it around the answer, and keep keys stable and machine-friendly
+(lowerCamelCase, no spaces). Some useful conventions:
+
+  - one device       -> {"deviceId": ..., "power": ..., "brightness": ...}
+  - several devices  -> {"devices": [ ... ]}
+  - an action taken  -> {"applied": [{"deviceId": ..., "action": ..., "ok": true}]}
+  - a scene          -> the same shape the scenes export uses: name, description,
+                        trigger, deviceActions
+  - a failure        -> {"error": "<what went wrong>"} — an error is a JSON reply
+                        too, never prose
+
+Use real JSON types: numbers unquoted, booleans as true/false, absent values as
+null rather than the string "null" or "unknown".
+
+This changes only how you FORMAT the answer. Route, delegate and call tools exactly
+as you otherwise would — including consulting a specialist when one covers the
+request. If you must refuse, refuse in JSON: {"error": "..."}."""
+
+
 # Appended to the system prompt only on turns where `a2a_*` tools are actually
 # registered, so a user without grants is never told about specialists they
 # cannot reach.
@@ -365,6 +409,37 @@ it is saved and do not apply anything — but that is the user declining executi
 not you skipping it."""
 
 
+_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*\n(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+def unfence_json(text: str) -> str:
+    """Strip a Markdown code fence from a JSON reply, if there is one.
+
+    The prompt asks for bare JSON and forbids fences. It mostly works — a plain
+    device-state question comes back unfenced — but measured on the live runtime, a
+    DELEGATED turn came back as:
+
+        ```json
+        {"source": "a2a_home_security_agent_risk_assessment", ...}
+        ```
+
+    which is unsurprising: after summarising a specialist's prose the model is deep
+    in chat-formatting mode, and the fence is what chat formatting does with JSON.
+    Instructing harder is not the fix — the same lesson as the `⟦A2A:…⟧` marker
+    (a2a-agent-registry/common/server.py): if a property must hold for every reply,
+    the harness enforces it rather than the model.
+
+    Conservative on purpose. Only an entire reply that is one fenced block is
+    unwrapped, and only in JSON mode; the content is not parsed or re-serialised, so
+    a reply this cannot fix passes through unchanged for the caller to reject rather
+    than being silently mangled.
+    """
+    if not text:
+        return text
+    match = _FENCE_RE.match(text)
+    return match.group(1).strip() if match else text
+
+
 def _strands_version() -> str:
     """The installed strands-agents version, or "?".
 
@@ -496,7 +571,7 @@ def _extract_sub_from_auth(auth_header: str | None) -> str | None:
 
 
 def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None,
-                 headers=None, on_event=None):
+                 headers=None, on_event=None, json_output=False):
     session_manager = get_memory_session_manager(session_id, actor_id)
 
     skills = None
@@ -840,16 +915,36 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                     effective_system_prompt
                     + "\n\n" + A2A_DELEGATION_RULES
                 )
+            # LAST, so it wins on formatting. Everything before it — including an
+            # admin's governed prompt — may ask for prose; the caller asking for
+            # JSON is asking about the wire format, and the instruction nearest the
+            # end is the one the model follows on a direct conflict. It also lands
+            # after the cache point's stable prefix, so a JSON request does not
+            # evict the cached prose prefix (S3).
+            if json_output:
+                effective_system_prompt += "\n\n" + JSON_OUTPUT_RULES
 
             agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt, headers=headers)
+            # `unfence_json` only when the caller asked for JSON: the model
+            # sometimes wraps a delegated reply in a ```json fence despite the
+            # prompt forbidding it, and a fence breaks JSON.parse exactly as
+            # thoroughly as malformed JSON would.
+            _post = unfence_json if json_output else (lambda t: t)
             if on_event is not None:
-                return _run_streamed(agent, prompt, on_event)
-            return str(agent(prompt))
+                return _post(_run_streamed(agent, prompt, on_event))
+            return _post(str(agent(prompt)))
     else:
-        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt, headers=headers)
+        # No Gateway configured, so no tools — but a caller can still ask for JSON,
+        # and honouring it here keeps the flag's behaviour the same on both paths.
+        no_gateway_prompt = user_system_prompt
+        if json_output:
+            no_gateway_prompt = (no_gateway_prompt or SYSTEM_PROMPT) + \
+                "\n\n" + JSON_OUTPUT_RULES
+        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=no_gateway_prompt, headers=headers)
+        _post = unfence_json if json_output else (lambda t: t)
         if on_event is not None:
-            return _run_streamed(agent, prompt, on_event)
-        return str(agent(prompt))
+            return _post(_run_streamed(agent, prompt, on_event))
+        return _post(str(agent(prompt)))
 
 
 # ---------------------------------------------------------------------------
@@ -1255,16 +1350,27 @@ def handle_invocation(payload, context):
     # generator makes BedrockAgentCoreApp emit text/event-stream, and a caller
     # doing `response.json()` on that gets a parse error rather than a reply. The
     # chatbot is updated in the same change; nothing else has to be.
+    # Structured output (spec 5 S6): `responseFormat: "json"` appends the JSON
+    # rules to the prompt. Accepted alongside `stream`, since a script may well
+    # want both — progress on stderr, JSON on stdout.
+    json_output = str(payload.get("responseFormat", "")).lower() == "json"
+
     if payload.get("stream"):
         return _stream_invocation(prompt, session_id, actor_id, auth_header,
-                                  request_headers)
+                                  request_headers, json_output=json_output)
 
     response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id,
-                            auth_header=auth_header, headers=request_headers)
-    return {"response": response, "status": "success"}
+                            auth_header=auth_header, headers=request_headers,
+                            json_output=json_output)
+    return {"response": response, "status": "success",
+            # Echoed so a caller can tell a JSON-mode reply from a prose one
+            # without re-reading its own request — a script that fed a prose reply
+            # to `JSON.parse` would fail on the parse, not on the mode.
+            **({"responseFormat": "json"} if json_output else {})}
 
 
-def _stream_invocation(prompt, session_id, actor_id, auth_header, request_headers):
+def _stream_invocation(prompt, session_id, actor_id, auth_header, request_headers,
+                       json_output=False):
     """Yield SSE frames: `progress` per tool call, then one `answer`.
 
     A generator, so BedrockAgentCoreApp wraps it in a StreamingResponse. The agent
@@ -1289,6 +1395,7 @@ def _stream_invocation(prompt, session_id, actor_id, auth_header, request_header
                 prompt, session_id=session_id, actor_id=actor_id,
                 auth_header=auth_header, headers=request_headers,
                 on_event=lambda kind, detail: events.put((kind, detail)),
+                json_output=json_output,
             )
             events.put(("answer", answer))
         except Exception as exc:  # noqa: BLE001

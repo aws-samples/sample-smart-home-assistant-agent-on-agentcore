@@ -237,6 +237,10 @@ def test_no_images_still_routes_to_kimi(agent_mod):
         # Request headers ride along for the A/B configuration-bundle hook; the
         # stub context carries none, so this is the empty dict agent.py passes.
         headers={},
+        # Structured output is off unless the caller asks (spec 5 S6). Asserted
+        # rather than ignored: a default of True would put JSON in front of every
+        # chatbot user, and this is the call site that decides.
+        json_output=False,
     )
     assert out == {"response": "OK", "status": "success"}
 

@@ -105,7 +105,7 @@ def test_with_the_flag_the_reply_is_a_generator(agent_mod, monkeypatch):
 def test_each_tool_is_reported_then_the_answer(agent_mod, monkeypatch):
 
     def _fake_invoke(prompt, session_id=None, actor_id=None, auth_header=None,
-                     headers=None, on_event=None):
+                     headers=None, on_event=None, json_output=False):
         on_event("tool", "a2a_home_security_agent_risk_assessment")
         on_event("tool", "query_device_state")
         return "here is your answer"

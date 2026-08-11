@@ -6,6 +6,45 @@
 
 > **实现原理、架构图、协议细节** 请参见 [`docs/architecture-and-design.md`](docs/architecture-and-design.md)。本 README 专注于**部署和使用**。
 
+## 设计理念（先读这一节）
+
+九个 Agent(一个编排器 + 八个 A2A 专家)跑在各自的 AgentCore Runtime 上。真正值得看的
+不是拓扑,而是**哪些设计是被实测和线上故障逼出来的**。完整版见
+[`docs/agent-design-principles.md`](docs/agent-design-principles.md),每条都配
+file:line 与数字;这里只列最反直觉的五条。
+
+**1. 会碰用户数据的 tool 必须是工厂,不能是列表。** 启动时建一次 tool 列表会把第一个
+到达的用户钉死在后续每个请求上 —— 不报错、不打日志,Agent 照样流畅回答。这是一个长得
+像"系统正常"的跨用户数据泄漏。`common/server.py:316` 按请求重建;`user_id` 从闭包里
+来,**不出现在任何模型可见的签名里** —— 模型能填的参数,prompt injection 就能填。
+
+**2. 一半的"性能优化"实测方向是错的。** Spec 5 四条延迟优化,两条被自己的测量推翻:
+
+| 预期 | 实测 |
+|---|---|
+| Prompt caching 降延迟(AWS 文档:最高 85%) | 延迟 **2%**(噪声内),但 token **降 98%** |
+| 并行委派需要新建 | Strands **本来就并发**,坏的是 transport(第三个委派直接崩) |
+| 预热能省冷启动 | 闲置 100 分钟后首调只慢 **0.3s** —— 没东西可省,方案作废 |
+| 流式透传把 TTFT 从 30s 降到个位数 | **做不到**:模型必须等 tool 返回才能写正文 |
+
+所以先建测量工具(`scripts/measure-baseline.py`)再动手,不是流程洁癖 —— 三条优化互相
+影响,不固定测量方法就只能"声称"改善。
+
+**3. 延迟要分清哪部分不是你的。** 24.3s 平均耗时里 **7.1s 花在 AgentCore 里、还没进
+容器**:全新 session id 约 7s,复用约 0.4s。所以"16s 快路径"其实是 8s Agent 工作 + 8s
+平台建会话。只报 wall 会把平台冷启动记在 harness 账上 —— 两个方向都会错。
+
+**4. tool 的 description 压得住 system prompt。** S2 把设备清单塞进委派消息、prompt
+改成"别再调 discover_devices",部署两次都没效果 —— 因为 `discover_devices` 自己的
+docstring 还写着 "Call this FIRST, every time"。它贴在模型正要决策的那个 tool 上,所以
+它赢。**回复里完全看不出来**:答案一直是对的,优化从来没发生。
+
+**5. 要防的不是崩溃,是"静默成功"。** 这个系统历史上几乎每个 bug 都报告成功:redeploy
+"成功"却把所有 A2A 授权作废;大屏"没有数据"整整六天像是系统闲置;`agentcore deploy`
+成功但打包的是旧代码。对策每次都一样 —— **在声称做了这件事的代码之外去断言它**:读
+span 不读回复文本、按 botocore service model 校验而不是按文档、把部署副本和仓库
+diff 一遍。
+
 ![architecture](screenshots/architecture.drawio.png)
 ![chatbot](screenshots/smarthomeassistant-chat.png)
 ![device simulator](screenshots/smarthomeassistant-devices-v2.png)
@@ -486,6 +525,8 @@ cd cdk && npx cdk destroy --all --force
 | 本 README | 部署、使用、本地开发、成本估算、故障排除 |
 | [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | 架构图、组件设计、认证模型、语音模式实现细节、**A2A 专家 Agent 的身份透传与 skill 强制**、**场景编排与定时执行**、**Agents 机队页**、AgentCore CLI 坑、运维大屏与测试数据设计、API 参考、MQTT 命令、技术选型 |
 | [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | 管理员运维手册:部署闭环、身份接入、权限管控(含授权复核与工具影响面)、质量评估、提示词优化、Skill 审批流水线、**Agents 机队与逐个 Agent prompt**、**场景联动与定时自动化**、Session 调试、运维大屏、`cdk deploy` 环境变量陷阱 |
+| [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | **Agent 设计理念**:Harness 设计、Context 工程、Prompt 设计三章。每条都配本仓 file:line 与实测数字;与预期相反的结论会写明预期本身 |
+| [`docs/measurements/`](docs/measurements/) | 延迟与成本实测:测量方法(`README.md`)、Spec 5 逐阶段 before/after 报告(`spec5-report.md`)、可对比的基线归档(JSON) |
 | [`scripts/sim/README.md`](scripts/sim/README.md) | 模拟用户脚本:persona 配置、覆盖范围、安全边界与已知坑位 |
 
 ---
@@ -508,6 +549,59 @@ cd cdk && npx cdk destroy --all --force
 AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console organises 15 pages across four lifecycle stages — **Discover / Build / Deploy / Assess** — including an **agent operations dashboard** on Overview (live health, token cost attribution, evaluation drift, release state) and a **Remote Shell** per-session debug console. The **Skill ERP** site lets end users publish their own skills and A2A agents to **AWS Agent Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
 
 > **Implementation details, architecture diagrams, protocol specs** live in [`docs/architecture-and-design.md`](docs/architecture-and-design.md). This README focuses on **deployment and usage**.
+
+## Design principles (read this first)
+
+Nine agents — one orchestrator plus eight A2A specialists — each on its own
+AgentCore Runtime. The topology is the least interesting part. What is worth reading
+is **which decisions were forced by a measurement or a production failure**. The
+full set is in [`docs/agent-design-principles.md`](docs/agent-design-principles.md),
+each entry citing `file:line` and a number; here are the five most
+counter-intuitive.
+
+**1. A tool that touches user data must be a factory, never a list.** Building the
+tool list once at startup pins whichever user arrived first onto every later
+request — no error, no log line, and the agent keeps answering fluently. It is a
+cross-user data leak that looks exactly like a working system.
+`common/server.py:316` rebuilds per request, and `user_id` comes from a closure so
+it appears in **no** model-facing signature: a parameter the model can fill is a
+parameter a prompt injection can fill.
+
+**2. Half of our "performance work" pointed the wrong way.** Of Spec 5's four
+latency phases, two were overturned by their own measurements:
+
+| Expected | Measured |
+|---|---|
+| Prompt caching cuts latency (AWS docs: up to 85%) | latency **2%** (noise); tokens **-98%** |
+| Parallel delegation needs building | Strands was **already** concurrent; the transport was broken (the 3rd delegation crashed) |
+| Prewarming removes a cold start | **0.3s** after 100 minutes idle — nothing to win, proposal dropped |
+| Streaming drops TTFT from 30s to single digits | **impossible**: the model can't write prose before its tool returns |
+
+Building the instrument first (`scripts/measure-baseline.py`) was not process
+hygiene — three of those optimisations move the same number, and without a fixed
+method none of them could have been attributed afterwards, only claimed.
+
+**3. Separate the latency you own from the latency you rent.** Of a 24.3s mean
+turn, **7.1s is spent inside AgentCore before our container is entered** — ~7s for
+a session id the runtime has never seen, ~0.4s for a reused one. So a "16s fast
+path" is about 8s of agent work behind 8s of platform session creation, and quoting
+wall alone credits the platform's cold start to the harness in both directions.
+
+**4. A tool's description outranks the system prompt about that tool.** We added a
+device list to each delegation and rewrote the prompts to say "stop calling
+`discover_devices`". Two deploys later, nothing had changed — because
+`discover_devices`' own docstring still opened with "Call this FIRST, every time",
+and that text is attached to the very tool the model is deciding about. **Nothing
+was visible in any reply**: the answers stayed correct and the optimisation simply
+never happened.
+
+**5. Design against silent success, not against crashes.** Nearly every bug in this
+system's history reported success: a redeploy that "worked" while voiding every
+user's A2A grants; a dashboard that read "no data" for six days as though the system
+were idle; an `agentcore deploy` that succeeded while packaging stale code. The
+response is always the same — **assert the thing you want from outside the code that
+claims to do it**: read spans rather than reply text, validate against the botocore
+service model rather than the docs, diff the deployed copy against the repo.
 
 ## Prerequisites
 
@@ -605,7 +699,7 @@ The side navigation groups 16 pages by agent lifecycle stage:
 | Stage | Page | What you can do |
 |-------|------|-----------------|
 | **Discover** | **Overview** | Product intro + architecture diagram (collapsed by default) and the **agent operations dashboard** (see below). The three demo launchers moved to the side nav's **Demos** group |
-| Discover | **Agents** | **Fleet view**: 1 orchestrator + 7 specialists + voice + an A/B variant + 1 tool, with runtime name, status, skill count and live metrics. The detail page **edits that agent's system prompt** — saved, and in effect on its next request, with no container redeploy. The list is derived from runtime ARNs + Registry records, so a newly deployed sub-agent appears with no frontend change |
+| Discover | **Agents** | **Fleet view**: 1 orchestrator + 8 specialists + voice + an A/B variant + 1 tool, with runtime name, status, skill count and live metrics. The detail page **edits that agent's system prompt** — saved, and in effect on its next request, with no container redeploy. The list is derived from runtime ARNs + Registry records, so a newly deployed sub-agent appears with no frontend change |
 | Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AWS Agent Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card |
 | **Build** | **Models** | Set the global default LLM; override text and vision models per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
 | Build | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides; **import approved records from AWS Agent Registry** |
@@ -654,7 +748,7 @@ Skill ERP is a self-service skills site for **regular end users** (no `admin` gr
 
 ### A2A Specialist Agents (optional, for demo)
 
-`a2a-agent-registry/` contains **7** independently deployable A2A (Agent-to-Agent) specialists the orchestrator delegates to over the standard A2A protocol:
+`a2a-agent-registry/` contains **8** independently deployable A2A (Agent-to-Agent) specialists the orchestrator delegates to over the standard A2A protocol:
 
 | Agent | Skills | Model | Touches devices? |
 |-------|--------|-------|------------------|
@@ -966,6 +1060,8 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 | This README | Deployment, usage, local dev, cost estimation, troubleshooting |
 | [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | Architecture diagrams, component design, authentication model, voice-mode implementation details, **A2A identity forwarding and server-side skill enforcement**, **scene orchestration and scheduled execution**, **the Agents fleet page**, AgentCore CLI quirks, ops-dashboard and test-data design, API reference, MQTT schemas, technology choices |
 | [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | Administrator runbook (Chinese): deploy loop, identity, permission management incl. grant verification and tool blast radius, quality evaluation, prompt optimization, skill approval pipeline, **the Agents fleet and per-agent prompts**, **scenes and scheduled automations**, session debugging, ops dashboard, the `cdk deploy` env-var trap |
+| [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | **Agent design principles** — Harness design, context engineering, prompt design. Every entry cites the code (`file:line`) and the number or bug that produced it; where a measurement contradicted the expectation, the expectation is named |
+| [`docs/measurements/`](docs/measurements/) | Latency and cost measurements: method (`README.md`), the phase-by-phase before/after report (`spec5-report.md`), and comparable archived baselines (JSON) |
 | [`scripts/sim/README.md`](scripts/sim/README.md) | Simulated-users script: persona configuration, coverage, safety boundary, known gotchas |
 
 ---
