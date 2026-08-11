@@ -364,6 +364,7 @@ const zh: Record<string, string> = {
   // Manage Permissions 弹层中的 A2A 区块
   'users.a2a.sectionTitle': 'A2A 智能体',
   'users.a2a.none': 'Registry 中暂无已审批的 A2A 智能体。',
+  'users.a2a.loadFailed': '无法加载 A2A 智能体目录：{error}',
   'users.a2a.grantedCount': '（已授权 {n} / {total} 个 skill）',
 
   // Integrations tab

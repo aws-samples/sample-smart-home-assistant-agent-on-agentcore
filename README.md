@@ -306,6 +306,7 @@ Chatbot 输入框左侧的图标打开右侧抽屉：**56 条示例、17 个能�
 ./venv/bin/python scripts/ab-delegation-brief.py       # 单项 A/B：委派设备清单
 ./venv/bin/python scripts/ab-parallel-delegation.py    # 单项 A/B：并行委派
 ./venv/bin/python scripts/probe-routing.py             # 实际路由到哪（读 span）
+./venv/bin/python scripts/check-registry-wiring.py     # 四处 REGISTRY_ID 是否一致、registry 是否可用
 ```
 
 已完成的优化：
@@ -557,7 +558,8 @@ cd cdk && npx cdk destroy --all --force
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → 账号已经达到 AWS Agent Registry 的默认配额（5）。如果该账号已经有名为 `SmartHomeSkillsRegistry` 的 Registry，部署脚本会自动复用；否则需在 AWS Service Quotas 控制台申请提额，或删除不用的 Registry。
 - **`boto3 ... is below the required 1.43.67`** → venv 中的 boto3 过旧。1.43.67 是首个包含 `agent-registry` / `agent-registry-control` 两个 service 的版本（AWS Agent Registry 于 2026-08-06 GA 时迁到该命名空间）。重跑 `scripts/01-install-deps.sh`（会自动升级），或 `pip install --upgrade boto3`。
 - **Skill ERP 新建技能后卡在 DRAFT 状态** → 表示 `SubmitRegistryRecordForApproval` 在记录仍处于 `CREATING` 时被调用。最新 Lambda 会轮询 `GetRegistryRecord` 直到状态脱离 `CREATING` 再提交，更新 Lambda 代码即可（重跑 `scripts/04-cdk-deploy.sh` 或 `aws lambda update-function-code`）。
-- **⚠️ 跑过 `cdk deploy` 之后：Tool Policy 里一个 Gateway 工具都不显示 / Optimization 认不出子 Agent / `/optimization/*` 报 ConfigurationError** → admin Lambda 的环境变量被重置了。CDK 只声明其中 7 个，另外 10 个（`GATEWAY_ID`、`REGISTRY_ID`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、7 个 `OPTIMIZATION_*`）由 `setup-agentcore.py` 在部署后补写，而 CloudFormation 里 `environment` 是整张表，所以任何一次 `cdk deploy` 都会把它们抹掉，**且全程没有任何报错**。修复：重跑 `python scripts/setup-agentcore.py`，再 `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。核对：`aws lambda get-function-configuration --function-name smarthome-admin-api --query "length(Environment.Variables)"` 应为 28 而非 14。
+- **Tool Policy → Manage Permissions 里没有可授权的 A2A Agent（或只有 3 个）** → 跑 `./venv/bin/python scripts/check-registry-wiring.py`。它比对 admin Lambda、Skill ERP Lambda、orchestrator runtime 和 `agentcore-state.json` 四处的 `REGISTRY_ID`，再确认该 registry 为 READY 且有已批准记录。最常见的原因是用了**旧 `bedrock-agentcore` namespace** 的 id —— 两个 namespace 各持有一套互不可见的 registry，同一个 id 在另一边必然 404，所以单看 `GetRegistry` 报错**不能**断定 id 失效。修法是重跑 `scripts/setup-agentcore.py`；`REGISTRY_ID` 在模块导入时读取，需强制冷启动。现在读取失败会返回 `catalogError`，控制台直接显示原因而不是一个空列表。
+- **⚠️ 跑过 `cdk deploy` 之后：Tool Policy 里一个 Gateway 工具都不显示 / Optimization 认不出子 Agent / `/optimization/*` 报 ConfigurationError** → admin Lambda 的环境变量被重置了。CDK 只声明其中 7 个，另外 10 个（`GATEWAY_ID`、`REGISTRY_ID`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、7 个 `OPTIMIZATION_*`）由 `setup-agentcore.py` 在部署后补写，而 CloudFormation 里 `environment` 是整张表，所以任何一次 `cdk deploy` 都会把它们抹掉，**且全程没有任何报错**。修复：重跑 `python scripts/setup-agentcore.py`，再 `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。核对要**按名字**而不是按个数（新增一个变量总数就变了）：`aws lambda get-function-configuration --function-name smarthome-admin-api --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"` 不能有 null，且 `scripts/check-registry-wiring.py` 要 exit 0。
 
 ### 前端相关
 
@@ -920,6 +922,7 @@ Every performance claim in this repo has an instrument and an archive under [`do
 ./venv/bin/python scripts/ab-delegation-brief.py       # A/B: the delegation device brief
 ./venv/bin/python scripts/ab-parallel-delegation.py    # A/B: parallel delegation
 ./venv/bin/python scripts/probe-routing.py             # where requests actually routed (spans)
+./venv/bin/python scripts/check-registry-wiring.py     # all four REGISTRY_ID consumers agree, registry usable
 ```
 
 What has been done:
@@ -1149,8 +1152,9 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 - **Teardown fails `Gateway has targets associated`** → the teardown script handles order; manually: `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → the account is at the AWS Agent Registry default quota (5). If a registry named `SmartHomeSkillsRegistry` already exists the deploy script reuses it automatically; otherwise request a quota increase in AWS Service Quotas or delete an unused registry.
 - **`boto3 ... is below the required 1.43.67`** → venv boto3 is too old. 1.43.67 is the first release carrying the `agent-registry` and `agent-registry-control` services that AWS Agent Registry moved to when it went GA on 2026-08-06. Re-run `scripts/01-install-deps.sh` (which upgrades boto3) or `pip install --upgrade boto3`.
+- **No A2A agents to grant in Tool Policy → Manage Permissions (or only 3)** → run `./venv/bin/python scripts/check-registry-wiring.py`. It compares the `REGISTRY_ID` held by the admin Lambda, the Skill ERP Lambda, the orchestrator runtime and `agentcore-state.json`, then confirms that registry is READY and has approved records. The usual cause is an id from the **legacy `bedrock-agentcore` namespace**, which holds a different set of registries than GA `agent-registry` — the same id 404s in the other namespace, so a `GetRegistry` failure alone does not tell you the id is dead. Fix by re-running `scripts/setup-agentcore.py`; `REGISTRY_ID` is read at module import, so force a cold start. The console now names the reason (`catalogError`) instead of showing an empty list.
 - **Skill ERP records stuck in `DRAFT`** → `SubmitRegistryRecordForApproval` was called while the record was still `CREATING`. The current Lambda polls `GetRegistryRecord` until the record leaves `CREATING` before submitting — just push the latest code (re-run `scripts/04-cdk-deploy.sh` or `aws lambda update-function-code`).
-- **⚠️ After any `cdk deploy`: no gateway tools in Tool Policy / Optimization rejects a sub-agent / `/optimization/*` returns ConfigurationError** → the admin Lambda's env vars were reset. CDK declares 7 of them; the other 10 (`GATEWAY_ID`, `REGISTRY_ID`, `DASHBOARD_EXTRA_RUNTIME_ARNS`, seven `OPTIMIZATION_*`) are patched in afterwards by `setup-agentcore.py`, and `environment` in CloudFormation is the whole map — so any `cdk deploy` drops them, **with no error anywhere**. Fix: re-run `python scripts/setup-agentcore.py`, then `cd a2a-agent-registry && python deploy.py --only patch-text-agent`. Verify: `aws lambda get-function-configuration --function-name smarthome-admin-api --query "length(Environment.Variables)"` should be 28, not 14.
+- **⚠️ After any `cdk deploy`: no gateway tools in Tool Policy / Optimization rejects a sub-agent / `/optimization/*` returns ConfigurationError** → the admin Lambda's env vars were reset. CDK declares 7 of them; the other 10 (`GATEWAY_ID`, `REGISTRY_ID`, `DASHBOARD_EXTRA_RUNTIME_ARNS`, seven `OPTIMIZATION_*`) are patched in afterwards by `setup-agentcore.py`, and `environment` in CloudFormation is the whole map — so any `cdk deploy` drops them, **with no error anywhere**. Fix: re-run `python scripts/setup-agentcore.py`, then `cd a2a-agent-registry && python deploy.py --only patch-text-agent`. Verify by NAME, not by count (the total moves whenever a variable is added): `aws lambda get-function-configuration --function-name smarthome-admin-api --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"` must have no nulls, and `scripts/check-registry-wiring.py` must exit 0.
 
 ### Frontend
 

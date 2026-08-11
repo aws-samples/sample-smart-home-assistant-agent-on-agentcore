@@ -97,6 +97,25 @@ SETTLED_STATUSES = frozenset({
     STATUS_DEPRECATED, STATUS_CREATE_FAILED, STATUS_UPDATE_FAILED,
 })
 
+# Status values a REGISTRY can hold. Deliberately separate from the record
+# statuses above: they share no values, and conflating them is not a type error.
+#
+# A healthy registry is READY. There is no ACTIVE — `setup-agentcore.py` waited
+# on "ACTIVE" for a while, which meant its wait loop could only ever time out,
+# and a wait that always times out looks exactly like no wait at all. Names read
+# out of the botocore model and confirmed against a live registry.
+REGISTRY_STATUS_CREATING = "CREATING"
+REGISTRY_STATUS_READY = "READY"
+REGISTRY_STATUS_UPDATING = "UPDATING"
+REGISTRY_STATUS_CREATE_FAILED = "CREATE_FAILED"
+REGISTRY_STATUS_UPDATE_FAILED = "UPDATE_FAILED"
+REGISTRY_STATUS_DELETING = "DELETING"
+REGISTRY_STATUS_DELETE_FAILED = "DELETE_FAILED"
+# The states a registry can still move out of on its own; anything else is final.
+REGISTRY_PENDING_STATUSES = frozenset({
+    REGISTRY_STATUS_CREATING, REGISTRY_STATUS_UPDATING,
+})
+
 
 def registry_client(region: str | None = None):
     """A boto3 client for AWS Agent Registry's control plane.

@@ -1096,6 +1096,12 @@ export interface UserA2APermissions {
    *  entry would make every save fail with a 400. Reported so an admin asking
    *  "why did this user lose access" can see the record was replaced. */
   staleGrants?: string[];
+  /** Set when `availableAgents` is empty because the Registry lookup FAILED
+   *  rather than because there is nothing to grant. Without it the two cases are
+   *  the same empty list, and the console showed "no agents available" for a
+   *  wrong registryId, a missing IAM action and a genuinely empty registry
+   *  alike. */
+  catalogError?: string;
   updatedAt?: string;
 }
 
@@ -1125,6 +1131,7 @@ export async function getUserA2APermissions(
     a2aGrants: data.a2aGrants || {},
     availableAgents: data.availableAgents || [],
     staleGrants: data.staleGrants || [],
+    catalogError: data.catalogError || '',
     updatedAt: data.updatedAt,
   };
 }

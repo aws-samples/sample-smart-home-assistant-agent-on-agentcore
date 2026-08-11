@@ -333,3 +333,65 @@ def test_put_passthroughs_email_unchanged():
     _mock_ac.list_users.assert_not_called()
     args = _mock_table.put_item.call_args.kwargs["Item"]
     assert args["userId"] == "bob@example.com"
+
+
+# ---------------------------------------------------------------------------
+# An empty catalog and an unreadable catalog must not look the same
+#
+# Both used to produce `availableAgents: []` inside a 200. The console rendered
+# "No approved A2A agents in the registry" either way, so a wrong REGISTRY_ID and
+# a missing agent-registry:ListRegistryRecords grant both presented as "nothing to
+# approve yet" — and the only evidence was a warning in a Lambda log. That
+# ambiguity cost a real misdiagnosis: the empty list was attributed to a stale
+# botocore and a missing IAM action, when the registry id was simply pointing at a
+# different registry.
+# ---------------------------------------------------------------------------
+
+def test_a_genuinely_empty_registry_reports_no_error():
+    """The ordinary empty case must stay quiet, or the warning means nothing."""
+    import index
+    _mock_table.get_item.return_value = {}
+    _mock_ac.list_registry_records.side_effect = None
+    _mock_ac.list_registry_records.return_value = {"registryRecords": []}
+
+    resp = index.get_user_a2a_permissions(_get_event("alice-sub"))
+    body = json.loads(resp["body"])
+    assert resp["statusCode"] == 200
+    assert body["availableAgents"] == []
+    assert body["catalogError"] == ""
+
+
+def test_an_unreadable_registry_reports_why():
+    import index
+    _mock_table.get_item.return_value = {}
+    _mock_ac.list_registry_records.side_effect = Exception(
+        "ResourceNotFoundException: Registry with ID gqrzwR9mtoL1Y0UK not found.")
+
+    resp = index.get_user_a2a_permissions(_get_event("alice-sub"))
+    body = json.loads(resp["body"])
+    # Still a 200: the page needs the user's existing grants regardless, and
+    # failing the whole request would hide them too.
+    assert resp["statusCode"] == 200
+    assert body["availableAgents"] == []
+    assert body["catalogError"], "a Registry failure must be reported, not swallowed"
+    assert "gqrzwR9mtoL1Y0UK" in body["catalogError"], (
+        "the message must carry enough detail to tell the causes apart")
+    _mock_ac.list_registry_records.side_effect = None
+
+
+def test_existing_grants_survive_a_catalog_failure():
+    """The stale-grant filter must not fire when the catalog simply failed to
+    load — otherwise one Registry error looks like a mass revocation."""
+    import index
+    _mock_table.get_item.return_value = {"Item": {
+        "userId": "alice@example.com",
+        "a2aGrants": {"rec-energy": ["estimate_savings"]},
+    }}
+    _mock_ac.list_registry_records.side_effect = Exception("AccessDeniedException")
+
+    resp = index.get_user_a2a_permissions(_get_event("alice-sub"))
+    body = json.loads(resp["body"])
+    assert body["a2aGrants"] == {"rec-energy": ["estimate_savings"]}
+    assert body["staleGrants"] == []
+    assert body["catalogError"]
+    _mock_ac.list_registry_records.side_effect = None

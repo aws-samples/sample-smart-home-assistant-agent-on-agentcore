@@ -2440,6 +2440,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [userA2aGrants, setUserA2aGrants] = useState<Record<string, string[]>>({});
   const [userA2aGrantsOriginal, setUserA2aGrantsOriginal] = useState<Record<string, string[]>>({});
   const [availableA2aAgents, setAvailableA2aAgents] = useState<A2AAvailableAgent[]>([]);
+  // Why the catalog is empty, when it is empty for a reason worth showing.
+  const [a2aCatalogError, setA2aCatalogError] = useState<string>('');
   const [expandedA2aAgents, setExpandedA2aAgents] = useState<Record<string, boolean>>({});
 
   // File manager (shown when editing a skill)
@@ -2680,11 +2682,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         setUserA2aGrants(normGrants);
         setUserA2aGrantsOriginal(normGrants);
         setExpandedA2aAgents({});
+        // Empty for the ordinary case. Set when the API could not read the
+        // Registry at all, which is otherwise identical to an empty registry.
+        setA2aCatalogError(a2a.catalogError || '');
       } catch (err: any) {
         console.warn('Failed to load A2A permissions', err);
         setAvailableA2aAgents([]);
         setUserA2aGrants({});
         setUserA2aGrantsOriginal({});
+        setA2aCatalogError(err?.message || String(err));
       }
     } catch (err: any) {
       setError(err.message);
@@ -4159,9 +4165,19 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   <b>{t('users.a2a.sectionTitle')}</b>
                 </div>
                 {availableA2aAgents.length === 0 ? (
-                  <CloudscapeBox color="text-body-secondary" padding="s">
-                    {t('users.a2a.none')}
-                  </CloudscapeBox>
+                  a2aCatalogError ? (
+                    // A failed lookup is not an empty registry. Rendered as a
+                    // warning rather than the neutral empty state so an admin
+                    // stops looking for records to approve and looks at the
+                    // configuration instead.
+                    <StatusIndicator type="warning">
+                      {t('users.a2a.loadFailed').replace('{error}', a2aCatalogError)}
+                    </StatusIndicator>
+                  ) : (
+                    <CloudscapeBox color="text-body-secondary" padding="s">
+                      {t('users.a2a.none')}
+                    </CloudscapeBox>
+                  )
                 ) : (
                   <div className="perm-a2a-list">
                     {availableA2aAgents.map((agent) => {

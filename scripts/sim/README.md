@@ -85,10 +85,11 @@ Setup is idempotent: existing users are reused, not recreated.
   which `setup-agentcore.py` patches. A bare `cdk deploy` resets it to a
   placeholder — the loader raises a clear error if so.
 - **`setup` grants MCP tools, not A2A skills.** A persona bound to a specialist
-  group still needs an A2A grant from Admin Console → Integration Registry, or
-  those turns come back "outside my current tool / skill / agent capabilities" —
-  a legitimate refusal that looks like a broken specialist. See admin manual
-  §11.11 for why the grantable catalog is currently short.
+  group still needs an A2A grant from Admin Console → Tool Policy → Manage
+  Permissions, or those turns come back "outside my current tool / skill / agent
+  capabilities" — a legitimate refusal that looks like a broken specialist. All
+  8 specialists (18 skills) are grantable; if the list renders empty, run
+  `scripts/check-registry-wiring.py` and see admin manual §11.11.
 - **`--days-back` only moves rows this script writes** (the votes). Span and
   evaluation timestamps are stamped by AgentCore and cannot be backdated, so the
   90d view stays sparse before today. That is real, not a bug — filling it would

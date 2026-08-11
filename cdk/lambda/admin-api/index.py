@@ -1379,11 +1379,20 @@ def get_user_a2a_permissions(event):
         if isinstance(skills, (set, list, tuple)):
             grants[rid] = sorted(str(s) for s in skills)
 
+    # A Registry failure here used to be indistinguishable from an empty registry:
+    # both produced `availableAgents: []` inside a 200, so the console showed "no
+    # agents available to grant" whether the catalog was genuinely empty, the
+    # registryId was wrong, or the role lacked ListRegistryRecords. That cost a
+    # real misdiagnosis — a wrong REGISTRY_ID was read as two other causes, and the
+    # only evidence either way was a warning in a Lambda log. The reason travels
+    # with the response now.
+    catalog_error = ""
     try:
         available = _fetch_approved_a2a_cards()
     except Exception as e:
         logger.warning("Failed to fetch A2A agent catalog: %s", e)
         available = []
+        catalog_error = str(e)
 
     # Drop grants whose record is gone. A recordId is minted per Registry record,
     # so redeploying an agent in a way that recreates its record leaves the old id
@@ -1413,6 +1422,10 @@ def get_user_a2a_permissions(event):
         # looking at why a user lost access deserves to see that the cause was a
         # record being replaced.
         "staleGrants": stale,
+        # Empty when the catalog loaded. Non-empty means `availableAgents` is empty
+        # because the lookup FAILED, not because there is nothing to grant — the
+        # console renders it instead of the "no agents" empty state.
+        "catalogError": catalog_error,
         "updatedAt": (item or {}).get("updatedAt", ""),
     })
 

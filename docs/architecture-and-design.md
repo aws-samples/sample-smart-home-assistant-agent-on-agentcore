@@ -2992,6 +2992,18 @@ winning on the same recordId. The Admin API reuses
 `/registry/records?action=a2a-grants&recordId=X` to stay under the admin
 Lambda's 20 KB resource-policy cap.
 
+The GET response carries `catalogError` alongside `availableAgents`. It is empty
+in the ordinary case; when set, the agent list is empty because the Registry read
+**failed** rather than because there is nothing to grant, and the console renders
+the reason as a warning (and disables Save) instead of the neutral "no approved
+A2A agents" state. The two were previously indistinguishable — both an empty
+registry and a wrong `REGISTRY_ID` produced `[]` inside a 200, with the reason
+visible only in a Lambda log — which is what let a wrong registry id be diagnosed
+as two unrelated causes. The request still returns 200: the user's existing grants
+are in the same payload, and failing the whole call would hide those too. A
+catalog failure also suppresses the stale-grant filter, so one Registry error
+cannot look like a mass revocation.
+
 ### 9.13 A2A Specialist Agents & Text Agent A2A Client
 
 The text agent calls downstream A2A agents as a standard **A2A client**:
@@ -3415,6 +3427,27 @@ appends every A2A runtime ARN to the admin Lambda's
   predicted silent failure happened exactly as written: after migration the agent
   said "I have no device-control specialist" and answered from its own tools —
   only the log showed `not authorized to perform: agent-registry:GetRegistryRecord`.
+- **The two namespaces hold DISJOINT sets of registries**, and this is the trap
+  that outlives the migration. A GA registry id is invisible to
+  `bedrock-agentcore-control` and vice versa, so `GetRegistry` →
+  `ResourceNotFoundException` does **not** establish that an id is dead — it says
+  the same thing for a live id read through the wrong namespace. Measured:
+  `Zuy3YNKrPQ5uwE9t` is READY with 8 agent records under `agent-registry-control`
+  and a 404 under `bedrock-agentcore-control`. One id was "corrected" to a legacy
+  registry holding only 3 records on the strength of that 404, and the resulting
+  short catalog was then attributed to two unrelated causes (§1.13.1 of the design
+  principles). `scripts/check-registry-wiring.py` compares all four `REGISTRY_ID`
+  consumers and names the namespace explicitly.
+- **A registry's status is `READY`, never `ACTIVE`.** The enum is
+  CREATING/READY/UPDATING/CREATE_FAILED/UPDATE_FAILED/DELETING/DELETE_FAILED —
+  disjoint from the RECORD statuses (DRAFT/PENDING_APPROVAL/APPROVED/...) in the
+  same service, so conflating them raises nothing. `setup-agentcore.py` polled for
+  `ACTIVE`, so its wait could only ever exhaust all 15 attempts and fall through:
+  30s per deploy, behaviourally identical to no wait, and a CREATE_FAILED registry
+  passed straight through it. Now it breaks on leaving CREATING/UPDATING and warns
+  when the settled status is not READY. Locked by
+  `shared/tests/test_registry_status.py`, which reads the enum out of the botocore
+  model rather than restating it.
 
 **Observability.** The A2A runtimes are ADOT-instrumented and tag spans with
 `service.name = {runtimeName}.DEFAULT`, so their tokens flow into the span groups

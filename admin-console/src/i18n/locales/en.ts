@@ -364,6 +364,11 @@ const en: Record<string, string> = {
   // A2A permissions block inside the Manage Permissions modal
   'users.a2a.sectionTitle': 'A2A Agents',
   'users.a2a.none': 'No approved A2A agents in the registry.',
+  // Distinct from `none`: the list is empty because the lookup failed, not
+  // because the registry is empty. Shown with the underlying error, since the
+  // causes (wrong REGISTRY_ID, missing agent-registry:ListRegistryRecords) are
+  // only distinguishable from the message.
+  'users.a2a.loadFailed': 'Could not load the A2A agent catalog: {error}',
   'users.a2a.grantedCount': '({n} / {total} skills granted)',
 
   // Integrations tab

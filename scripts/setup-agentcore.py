@@ -2629,16 +2629,33 @@ def main():
             else:
                 print(f"  Warning: create_registry failed: {e}")
 
-        # Wait for ACTIVE
+        # Wait for the registry to settle. A GA registry reports READY, never
+        # ACTIVE — the status enum is
+        # CREATING/READY/UPDATING/CREATE_FAILED/UPDATE_FAILED/DELETING/DELETE_FAILED
+        # (read out of the botocore model, confirmed against the live registry).
+        # This loop used to compare against "ACTIVE", which no registry ever
+        # returns, so it burned the full 30s on every deploy and then carried on
+        # regardless of the real state — a wait that always times out is
+        # indistinguishable from no wait at all, and it silently masked a
+        # CREATE_FAILED registry as though it were usable.
+        #
+        # So: break on the terminal states rather than on one hoped-for string,
+        # and say so when the registry is unusable instead of patching every
+        # Lambda to point at it.
         if registry_id:
+            reg_status = ""
             for _ in range(15):
                 try:
                     reg_info = registry_control.get_registry(registryId=registry_id)
-                    if reg_info.get("status") == "ACTIVE":
+                    reg_status = reg_info.get("status", "")
+                    if reg_status not in ("CREATING", "UPDATING"):
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  Warning: get_registry({registry_id}) failed: {e}")
                 time.sleep(2)
+            if reg_status and reg_status != "READY":
+                print(f"  Warning: registry {registry_id} is {reg_status}, not READY — "
+                      "the Integration Registry tab will be empty until this is resolved")
 
         # Patch admin + skill-erp Lambdas with REGISTRY_ID env
         if registry_id:

@@ -201,6 +201,8 @@ Nearly every bug in this system's history reported success:
 | IoT topic rule | published messages went nowhere, no error |
 | simulated vote distribution | "29 filed, 0 failed" and a CSAT of exactly 5.0/5 — every vote positive |
 | feedback sort key led with `ts` | one 👎 plus its reason wrote two rows and counted as two negatives |
+| A2A catalog read failure | 200 with `availableAgents: []` — identical to a registry with nothing in it |
+| registry wait polled for `ACTIVE` | a status no registry returns, so the wait could only time out and fall through |
 
 The two new rows are the same shape as the rest. The vote split used `i % 100`
 against a threshold of `rate * 100` while a persona has 6-8 turns, so `i` never
@@ -215,6 +217,31 @@ The response is the same each time: **assert the thing you actually want, from
 outside the code that claims to do it.** Read spans, not reply text. Validate
 against the botocore service model, not the docs. Diff the deployed copy against
 the repo.
+
+#### 1.13.1 An ambiguous symptom will be diagnosed wrongly, confidently
+
+The empty-catalog row above cost two wrong diagnoses before the right one. An empty
+list inside a 200 is consistent with too many causes — nothing published, wrong
+registry id, missing IAM action, stale SDK — so the investigation picks whichever
+is most interesting rather than whichever is true. Both chosen causes were written
+up as fact in the admin manual, with a remediation plan (a Lambda Layer) for a
+problem that did not exist. The real cause was the most boring candidate.
+
+Two habits fall out of this:
+
+**Name the namespace, the version, the account — whatever makes the observation
+reproducible.** `GetRegistry` returning `ResourceNotFoundException` looks like
+proof that an id is dead. It is equally consistent with a live id queried through
+the wrong namespace, which is exactly what happened: GA `agent-registry` and legacy
+`bedrock-agentcore` hold disjoint sets of registries, and the same id 404s in the
+other one. A observation that cannot distinguish two causes is not evidence for
+either.
+
+**Make the failure say which failure it is, at the point a human reads it.** The
+fix was not more logging — there was already a warning. It was returning
+`catalogError` alongside the empty list so the console can render the reason
+instead of the neutral empty state. When two causes produce the same output, the
+cheapest permanent fix is usually to make the outputs differ.
 
 ---
 

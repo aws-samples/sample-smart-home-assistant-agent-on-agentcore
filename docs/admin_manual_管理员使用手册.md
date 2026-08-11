@@ -18,7 +18,7 @@
    - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)（含[场景即代码](#965-场景即代码导出--导入-json)、[JSON 模式](#966-结构化输出json-模式)、[委派进度与追踪](#968-委派时的进度提示)、[共享记忆](#969-跨-agent-共享记忆)、[示例提示词库](#9610-示例提示词库chatbot)）
 10. [Agent 运维统计大屏与演示前数据准备](#10-agent-运维统计大屏与演示前数据准备)
 11. [其他重要事项](#11-其他重要事项)
-    - [11.11 A2A 目录为空:Registry ID 与 botocore 版本](#1111--a2a-目录为空registry-id-与-botocore-版本)
+    - [11.11 A2A 目录为空:两个 namespace 各有一套 registry](#1111--a2a-目录为空两个-namespace-各有一套-registry)
 
 ---
 
@@ -888,7 +888,7 @@ python3 scripts/simulate-users.py run --days-back 45
 | 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
 | 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
 | `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
-| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Integration Registry** 里给。注意目前 registry 里只有 3 个专家有已批准记录,其余 5 个无法授权(见 [§11.11](#1111--a2a-目录为空registry-id-与-botocore-版本)) |
+| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Integration Registry** 里给。8 个专家全部有已批准记录、共 18 个 skill 可授权;目录为空时的排查见 [§11.11](#1111--a2a-目录为空两个-namespace-各有一套-registry)) |
 | 满意度卡片显示「尚无反馈」 | 该时间范围内没有投票。跑 `run`(会自动投票)或在 Chatbot 里点几下赞/踩。**空表不会显示成 CSAT 0** —— 那会把「没数据」画成「评分极低」 |
 | 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 这三个环境变量推导出的 Runtime。修复:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),A2A 则重跑 `python a2a-agent-registry/deploy.py --only patch-text-agent`。**注意**:2026-08-05 之前部署的环境没有 `DASHBOARD_EXTRA_RUNTIME_ARNS`,升级后必须重跑一次才会生效 |
 
@@ -1045,53 +1045,62 @@ runtime 没见过的 session id 约 7s,复用的约 0.4s。所以"16s 快路径"
 
 ---
 
-### 11.11 ⚠️ A2A 目录为空:Registry ID 与 botocore 版本
+### 11.11 ⚠️ A2A 目录为空:两个 namespace 各有一套 registry
 
-**症状**:Admin Console → Integration Registry 里可授权的 A2A Agent 列表是**空的**,或者
-只有 3 个;给用户授权后,问安全/能耗类问题仍然回「超出我当前的工具、技能与代理能力范围」。
-接口返回 200,日志里只有一条 warning。
+**症状**:Admin Console → Integration Registry(或 Tool Policy 的权限弹窗)里可授权的
+A2A Agent 列表是**空的**,或者只有 3 个;给用户授权后,问安全/能耗类问题仍然回
+「超出我当前的工具、技能与代理能力范围」。
 
-这里有**三个相互独立**的原因,排查时逐个确认:
-
-**① `agentcore-state.json` 里的 `registryId` 可能已失效。** 实测该文件里记录的 registry
-调用 `GetRegistry` 直接 `ResourceNotFoundException` —— registry 在某次操作中被重建过,而
-这个文件没跟着更新。真正持有 A2A 记录的是另一个 registry。确认方法:
+**一条命令先定位**:
 
 ```bash
-# 列出账号下所有 registry,逐个数记录条数
-for rid in $(aws bedrock-agentcore-control list-registries \
-               --query 'registries[].registryId' --output text); do
-  echo "=== $rid"
-  aws bedrock-agentcore-control list-registry-records --registry-id "$rid" \
-    --max-results 50 --query 'registryRecords[].{id:recordId,n:name,s:status}' \
-    --output table 2>/dev/null | head -12
-done
+./venv/bin/python scripts/check-registry-wiring.py
 ```
 
-找到真正有 `*-agent` 记录的那个,写进 admin Lambda 的 `REGISTRY_ID`。**注意 `REGISTRY_ID`
-是在模块导入时读取的**,改完环境变量后暖容器仍然用旧值 —— 要强制冷启动(改一次
-`--description` 即可)才会生效。
+它比对 4 个 `REGISTRY_ID` 消费方(admin Lambda、Skill ERP Lambda、orchestrator runtime、
+`agentcore-state.json`),再确认该 registry 存在、`READY`、且有已批准记录。任何一项不符
+就非 0 退出并打印具体差异。
 
-**② admin Lambda 内置的 botocore 版本可能早于 Registry GA 的 API 形状。** 实测容器里是
-**botocore 1.42.97**,它的 `ListRegistryRecords` 只接受 `status` / `descriptorType`
-(GA 前的参数),而 `agent_registry.py` 发的是 GA 的 `filters` 列表,于是抛
-`ParamValidationError`。这个异常被 catch 成一条 warning,**目录静默返回空列表**。
+**根因(2026-08-10 实测)**:GA 的 `agent-registry` 与旧的 `bedrock-agentcore` 是**两个
+互不可见的 namespace,各自持有一套 registry**。同一个 id 在另一个 namespace 里查不到:
 
-仓库里 vendored 了 1.43.68,但 AWS 内置的那份在 `sys.path` 上优先,所以只放文件不够 ——
-需要打成 Lambda Layer,或在 handler 里把 vendored 路径插到 `sys.path` 最前。
+```bash
+aws agent-registry-control     get-registry --registry-id Zuy3YNKrPQ5uwE9t   # READY,8 条 agent 记录
+aws bedrock-agentcore-control  get-registry --registry-id Zuy3YNKrPQ5uwE9t   # ResourceNotFoundException
+```
 
-**③ Lambda 角色可能缺 `bedrock-agentcore:ListRegistryRecords`** 在该 registry 上的权限。
-参数修对之后仍会 `AccessDeniedException`。
+所以 **`GetRegistry` 报 404 并不能证明 id 失效** —— id 正确而 namespace 用错时,报的是
+同一个错。**排查时必须同时说清用的是哪个 namespace**,否则会得出错误结论(见下方复盘)。
 
-诊断这三者最快的办法是在 Lambda 里跑一次探针(而不是在本地跑 —— 本地 botocore 是新的,
-问题复现不出来):打印 `botocore.__version__`、`ListRegistryRecords` 接受的参数列表,以及
-分别用两种参数形状调用的结果。
+列记录时也要认准 namespace:
 
-> **当前状态(2026-08-11)**:①已修(admin Lambda 的 `REGISTRY_ID` 已指向
-> `gqrzwR9mtoL1Y0UK`);②③**未修**。后果是 8 个专家里只有 3 个
-> (energy-optimization、appliance-maintenance、home-security)有已批准的 registry 记录
-> 可授权,另外 5 个暂时无法通过控制台授权给用户。委派本身是好的 —— `probe-routing.py`
-> 读 span 确认 5 个专家 skill 都被真实调用过,只是要求调用者已持有对应授权。
+```bash
+# GA:这才是 A2A 记录真正所在的地方
+aws agent-registry-control list-registry-records --registry-id "$(
+  python3 -c "import json;print(json.load(open('agentcore-state.json'))['registryId'])")" \
+  --max-results 60 --query 'registryRecords[].{id:recordId,n:name,t:recordType,s:status}' --output table
+```
+
+**修法**:重跑 `scripts/setup-agentcore.py`,它会把两个 Lambda 都按 `agentcore-state.json`
+patch 回去。**注意 `REGISTRY_ID` 是在模块导入时读取的**,改完环境变量后暖容器仍然用旧值
+—— 要强制冷启动(改一次 `--description` 即可)才会生效。
+
+> **复盘:一次被误诊的排查。** 2026-08-10 这个空目录被归因为两个**都不成立**的原因:
+> ①「admin Lambda 内置 botocore 早于 GA 的 `filters` 形状」——实测部署包里是 **1.43.68**
+> 且带 GA service model,`/var/task` 在 `sys.path` 上优先于 `/var/runtime`;若真被旧版覆盖,
+> 导入期的 `boto3.client("agent-registry-control")` 会直接 `UnknownServiceError`,Lambda
+> 根本返回不了 200。②「角色缺 `ListRegistryRecords`」——该权限一直在 CDK 里授着,且以
+> `agent-registry:` 前缀。真实原因只有一个:admin Lambda 的 `REGISTRY_ID` 被手工改成了一个
+> **旧 namespace** 的 id,那个 registry 里只有 3 条记录。
+>
+> 教训是这个仓库反复出现的那一类:**空列表 + 200 + 一条 warning,无法区分「本来就没有」和
+> 「读失败了」**。现在读失败会随响应返回 `catalogError`,控制台渲染成告警而不是中性的
+> 「暂无已审批的 A2A 智能体」,并禁用保存按钮。
+
+> **当前状态(2026-08-11,已修)**:8 个专家全部可授权(共 18 个 skill)。
+> `check-registry-wiring.py` 通过;`probe-routing.py` 读 span 确认 4 个专家 skill 被真实
+> 调用,其中 `knowledge-qa` 与 `light-effect` 在旧 registry 里根本没有记录 —— 也就是说这
+> 两个此前无法授权。
 
 ---
 
