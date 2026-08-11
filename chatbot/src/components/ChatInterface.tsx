@@ -67,10 +67,101 @@ function generateId(): string {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
 
+/**
+ * A tool name as something worth showing a waiting user.
+ *
+ * `a2a_home_security_agent_risk_assessment` -> `Home Security specialist`.
+ * `query_sensor_history` -> `Sensor History`.
+ * Gateway tools arrive prefixed (`SmartHomeDeviceQuery___query_device_state`),
+ * so the target prefix is dropped first.
+ *
+ * The A2A case is the one that matters: a delegated turn is the slow one, and
+ * naming the specialist is the whole point — "asking the Home Security
+ * specialist…" is the honest version of a 30-second wait.
+ */
+export function toolLabel(rawName: string): string {
+  if (!rawName) return '';
+  const name = rawName.includes('___') ? rawName.split('___').pop()! : rawName;
+  const a2a = name.match(/^a2a_(.+?)_agent_/);
+  if (a2a) {
+    const domain = a2a[1].replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    return `${domain} specialist`;
+  }
+  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Read the runtime's SSE reply, reporting each tool as it starts, and return the
+ * final answer text.
+ *
+ * Frames are `data: {json}\n\n`. Two kinds: `progress` (a tool the model just
+ * called) and `answer` (the reply, or an `error`). The answer always arrives, so
+ * a stream that ends without one means the connection dropped mid-turn and that
+ * is reported rather than shown as an empty reply.
+ *
+ * Buffers by blank line rather than by chunk: a frame can be split across TCP
+ * reads, and parsing per chunk would drop the tail of a split frame — which for
+ * the `answer` frame means losing the whole reply.
+ */
+async function readAgentStream(
+  response: Response,
+  onTool: (label: string) => void,
+): Promise<string> {
+  const body = response.body;
+  if (!body) throw new Error('no response stream');
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let answer: string | null = null;
+
+  const handleFrame = (frame: string) => {
+    const line = frame.split('\n').find((l) => l.startsWith('data:'));
+    if (!line) return;
+    let evt: any;
+    try {
+      evt = JSON.parse(line.slice(5).trim());
+      // AgentCore JSON-encodes each value the handler yields, so a frame decodes
+      // to the STRING '{"type":"progress",...}' rather than to the object.
+      // Measured against the live runtime — parsing once leaves a string, and
+      // `evt.type` on a string is undefined, so every frame including the answer
+      // would have been silently dropped.
+      if (typeof evt === 'string') evt = JSON.parse(evt);
+    } catch {
+      return; // a keep-alive or a shape we do not know; ignore rather than fail
+    }
+    if (!evt || typeof evt !== 'object') return;
+    if (evt.type === 'progress' && evt.tool) onTool(toolLabel(evt.tool));
+    else if (evt.type === 'answer') {
+      if (evt.error) throw new Error(evt.error);
+      answer = evt.response ?? '';
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let split: number;
+    while ((split = buffered.indexOf('\n\n')) !== -1) {
+      const frame = buffered.slice(0, split);
+      buffered = buffered.slice(split + 2);
+      handleFrame(frame);
+    }
+  }
+  if (buffered.trim()) handleFrame(buffered);
+
+  if (answer === null) throw new Error('the reply ended before the agent answered');
+  return answer;
+}
+
 const ChatInterface: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  // The tool the agent is currently waiting on, as a label. Replaces the static
+  // "thinking…" during a delegated turn, where the wait is ~30s and the
+  // orchestrator names its specialist ~6s before any prose exists (spec 5 S5).
+  const [progressTool, setProgressTool] = useState('');
   const [error, setError] = useState('');
   const [voiceActive, setVoiceActive] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState('');
@@ -414,16 +505,30 @@ const ChatInterface: React.FC = () => {
         images = encoded;
       }
 
-      const body: Record<string, unknown> = { prompt: text, userId };
-      if (images) body.images = images;
-
       // Per-tenant entry environment (§8.13). Each tenant is in one of:
       //   default      → direct SigV4 to primary runtime, DDB additive prompts
       //   ab-bundles   → direct SigV4 to bundles runtime (BeforeModelCallEvent
       //                  hook overrides system_prompt from baggage)
       //   ab-targets   → optimization gateway (target-based runtime-version A/B)
       // Cache miss / fetch failure falls back to 'default' (see api/tenantEnv).
+      // Resolved before the body is built because whether we ask for a streaming
+      // reply depends on it.
       const mode = await getTenantMode(userId);
+
+      const body: Record<string, unknown> = { prompt: text, userId };
+      if (images) body.images = images;
+      // Ask for progress events (spec 5 S5). The runtime replies with SSE instead
+      // of a JSON body when this is set, so the reader below has to parse it.
+      // Only for text turns: the image paths compose their reply from a vision
+      // caption and have no tool calls to report.
+      //
+      // Not requested for the two A/B modes. `ab-bundles` runs a different
+      // runtime and `ab-targets` goes through the optimization gateway, and
+      // neither is guaranteed to pass a streaming body through unbuffered — an
+      // experiment arm that silently degraded to a 30s blank wait would be worse
+      // than no progress at all. They keep the JSON path.
+      const wantStream = !images && mode === 'default';
+      if (wantStream) body.stream = true;
 
       let response: Response;
       if (mode === 'ab-targets' && config.optimizationGatewayUrl) {
@@ -463,8 +568,13 @@ const ChatInterface: React.FC = () => {
         throw new Error(`Request failed (${response.status}): ${errBody}`);
       }
 
-      const data = await response.json();
-      const agentText = data.response || data.text || data.content || JSON.stringify(data);
+      let agentText: string;
+      if (wantStream) {
+        agentText = await readAgentStream(response, setProgressTool);
+      } else {
+        const data = await response.json();
+        agentText = data.response || data.text || data.content || JSON.stringify(data);
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -479,6 +589,7 @@ const ChatInterface: React.FC = () => {
       setError(err.message || t('chat.sendFailed'));
     } finally {
       setIsTyping(false);
+      setProgressTool('');
     }
   }, [inputValue, attachedImages, t]);
 
@@ -795,7 +906,11 @@ const ChatInterface: React.FC = () => {
         {isTyping && (
           <div className="message-row message-row-agent">
             <div className="message-bubble bubble-agent">
-              <StatusIndicator type="loading">{t('chat.typing') || 'thinking…'}</StatusIndicator>
+              <StatusIndicator type="loading">
+                {progressTool
+                  ? `${t('chat.consulting') || 'asking the'} ${progressTool}…`
+                  : t('chat.typing') || 'thinking…'}
+              </StatusIndicator>
             </div>
           </div>
         )}

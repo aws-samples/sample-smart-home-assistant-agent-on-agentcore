@@ -95,6 +95,8 @@ const zh: Record<string, string> = {
   // 图片分析
   'chat.chip.vision.describe': '识别图片（先点回形针）',
   'chat.chip.vision.describe.prompt': '先用回形针按钮上传图片，然后问："描述一下这张图片里是什么。"',
+  'chat.typing': '思考中…',
+  'chat.consulting': '正在询问',
   'chat.sendFailed': '消息发送失败',
   'chat.voiceMode.enter': '切换到语音模式',
   'chat.voiceMode.exit': '切换到文本模式',

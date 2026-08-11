@@ -495,7 +495,8 @@ def _extract_sub_from_auth(auth_header: str | None) -> str | None:
         return None
 
 
-def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None, headers=None):
+def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=None,
+                 headers=None, on_event=None):
     session_manager = get_memory_session_manager(session_id, actor_id)
 
     skills = None
@@ -841,10 +842,91 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                 )
 
             agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt, headers=headers)
+            if on_event is not None:
+                return _run_streamed(agent, prompt, on_event)
             return str(agent(prompt))
     else:
         agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=user_system_prompt, headers=headers)
+        if on_event is not None:
+            return _run_streamed(agent, prompt, on_event)
         return str(agent(prompt))
+
+
+# ---------------------------------------------------------------------------
+# Progress streaming (spec 5 S5)
+# ---------------------------------------------------------------------------
+#
+# The spec proposed streaming the A2A hop through to the user, expecting TTFT to
+# drop from ~30s to single digits. Measured against `Agent.stream_async`, that is
+# not achievable and would not have helped:
+#
+#     +0.00s  init_event_loop
+#     +1.88s  messageStart          <- first token of the turn
+#     +1.88s  tool_use_stream       <- and it is a TOOL CALL, naming the specialist
+#     +2.16s  message (toolUse complete)
+#     +8.13s  first text delta      <- the first PROSE, after the tool returned
+#
+# The model cannot write its answer until the tool it just called comes back. So
+# TTFT-to-prose is bounded below by the specialist's own latency no matter how the
+# A2A hop is transported; streaming the sub-agent's tokens would deliver text the
+# orchestrator has not finished reasoning about, into a UI with nowhere to put it.
+#
+# What IS available at 1.88s is the NAME of the specialist being consulted. That
+# turns 31 seconds of a motionless "thinking…" into "asking the home security
+# specialist…", which is the honest version of the same wait and arrives ~6s
+# earlier than any text could. So this streams TOOL LIFECYCLE, not tokens.
+#
+# The final answer still arrives as one `answer` event rather than as deltas. Two
+# reasons: the chatbot renders replies as markdown and a partially-streamed table
+# or code fence renders as broken markup mid-flight; and the vision and
+# image-to-effect paths return composed strings, so a token stream would be a
+# second shape to handle for no gain.
+
+
+def _run_streamed(agent, prompt: str, on_event) -> str:
+    """Drive `agent` with stream_async, reporting progress, and return the text.
+
+    `on_event(kind, detail)` is called for each notable step. It must never raise —
+    a progress callback that breaks the turn would be worse than no progress at
+    all — so every call is guarded.
+
+    Falls back to a blocking call if streaming raises before producing a result.
+    The reply is the product; progress is a nicety, and losing the turn to improve
+    the waiting experience is the wrong trade.
+    """
+    import asyncio
+
+    async def _drive() -> str:
+        final = ""
+        announced: set[str] = set()
+        async for event in agent.stream_async(prompt):
+            if not isinstance(event, dict):
+                continue
+            # A tool call, as soon as the model names it. `current_tool_use`
+            # arrives repeatedly while the arguments stream in, so announce each
+            # tool once.
+            tool_use = event.get("current_tool_use") or {}
+            name = tool_use.get("name") or ""
+            if name and name not in announced:
+                announced.add(name)
+                _safe_emit(on_event, "tool", name)
+            result = event.get("result")
+            if result is not None:
+                final = str(result)
+        return final
+
+    try:
+        return asyncio.run(_drive())
+    except Exception:
+        logger.exception("streamed run failed; falling back to a blocking call")
+        return str(agent(prompt))
+
+
+def _safe_emit(on_event, kind: str, detail: str) -> None:
+    try:
+        on_event(kind, detail)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("progress callback raised (ignored): %s", exc)
 
 
 def _extract_user_auth(context) -> str | None:
@@ -1163,9 +1245,80 @@ def handle_invocation(payload, context):
     _record_session(actor_id, session_id)
 
     request_headers = getattr(context, "request_headers", None) or {}
+
+    # Progress streaming, opt-in per request (spec 5 S5). A caller that asks for
+    # it gets SSE — one `progress` event per tool the model calls, then one
+    # `answer`. Everything else, including the voice path, the eval harness and
+    # any existing client, keeps the plain JSON body it has always had.
+    #
+    # Opt-in rather than always-on because the response TYPE changes: returning a
+    # generator makes BedrockAgentCoreApp emit text/event-stream, and a caller
+    # doing `response.json()` on that gets a parse error rather than a reply. The
+    # chatbot is updated in the same change; nothing else has to be.
+    if payload.get("stream"):
+        return _stream_invocation(prompt, session_id, actor_id, auth_header,
+                                  request_headers)
+
     response = invoke_agent(prompt, session_id=session_id, actor_id=actor_id,
                             auth_header=auth_header, headers=request_headers)
     return {"response": response, "status": "success"}
+
+
+def _stream_invocation(prompt, session_id, actor_id, auth_header, request_headers):
+    """Yield SSE frames: `progress` per tool call, then one `answer`.
+
+    A generator, so BedrockAgentCoreApp wraps it in a StreamingResponse. The agent
+    runs on a worker thread and pushes events into a queue this generator drains —
+    `invoke_agent` is synchronous and Strands calls tools from its own threads, so
+    a callback cannot yield directly from here.
+
+    The `answer` frame always goes out, including on failure, where it carries the
+    error text. A stream that just stops leaves the UI showing progress for a turn
+    that will never finish, which is worse than an error the user can read.
+    """
+    import json as _json
+    import queue
+    import threading
+
+    events: queue.Queue = queue.Queue()
+    _DONE = object()
+
+    def _run() -> None:
+        try:
+            answer = invoke_agent(
+                prompt, session_id=session_id, actor_id=actor_id,
+                auth_header=auth_header, headers=request_headers,
+                on_event=lambda kind, detail: events.put((kind, detail)),
+            )
+            events.put(("answer", answer))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("streamed invocation failed")
+            events.put(("error", str(exc)))
+        finally:
+            events.put(_DONE)
+
+    threading.Thread(target=_run, name="stream-invoke", daemon=True).start()
+
+    # Yield BARE JSON, not `data: ...\n\n`. BedrockAgentCoreApp adds the SSE
+    # framing itself when a handler returns a generator, so a hand-framed string
+    # arrives double-wrapped:
+    #
+    #     data: data: {"type": "progress", ...}\n\n\n\n
+    #
+    # which parses as the STRING 'data: {...}' rather than an object. Measured
+    # against the live runtime; the client saw a str where it expected a dict and
+    # would have silently dropped every frame including the answer.
+    while True:
+        item = events.get()
+        if item is _DONE:
+            break
+        kind, detail = item
+        if kind == "tool":
+            yield _json.dumps({"type": "progress", "tool": detail})
+        elif kind == "answer":
+            yield _json.dumps({"type": "answer", "response": detail})
+        elif kind == "error":
+            yield _json.dumps({"type": "answer", "error": detail})
 
 
 if __name__ == "__main__":
