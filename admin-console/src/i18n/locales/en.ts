@@ -727,7 +727,7 @@ const en: Record<string, string> = {
   'dashboard.kpi.activeSessionsHint': 'CloudWatch exposes ActiveSessionCount only at account level (Service=AgentCore.Runtime) with no per-runtime dimension, so this figure covers every AgentCore runtime in the account.',
   'dashboard.kpi.sessionsInWindow': '{n} sessions in window',
   'dashboard.kpi.ttft': 'Time to first token P95',
-  'dashboard.kpi.ttftHint': 'TTFT is not a CloudWatch metric. It comes from the gen_ai.server.time_to_first_token attribute on Strands chat spans in the aws/spans log group. The value shown is the upper envelope of per-day P95 (Logs Insights cannot merge percentiles across time bins). A turn that delegates to a specialist agent raises TTFT substantially: the A2A hop is non-streaming, so the orchestrator emits nothing until the specialist has finished its own LLM turn. Measured at roughly 15s for a direct answer against 30s for a delegated one. That is the cost of the delegation, not a regression in the model.',
+  'dashboard.kpi.ttftHint': "TTFT is not a CloudWatch metric. It comes from the gen_ai.server.time_to_first_token attribute on Strands chat spans, read from each runtime's own log group (/aws/bedrock-agentcore/runtimes/{id}-DEFAULT) plus the legacy aws/spans group for history before 2026-08-05, when AgentCore moved trace export per-runtime. The value shown is the upper envelope of per-day P95 (Logs Insights cannot merge percentiles across time bins). A turn that delegates raises TTFT substantially — the A2A hop is non-streaming, so the orchestrator's own answer cannot begin until the specialist finishes its LLM turn: roughly 15s direct against 30s delegated. That is the cost of the delegation, not a model regression. The user is not left staring at nothing, though: the chatbot streams the specialist's NAME at about 2s, so the wait reads \"asking the Home Security specialist…\" rather than a motionless spinner.",
   'dashboard.kpi.errorRate': 'Error rate',
   'dashboard.kpi.errorRateHint': '(UserErrors + SystemErrors) / Invocations from AWS/Bedrock-AgentCore metrics. Shows -- rather than 0% when there was no traffic in the window.',
   'dashboard.kpi.noTraffic': 'No traffic in window',
@@ -810,7 +810,7 @@ const en: Record<string, string> = {
   'dashboard.satisfaction.footnote': 'This entire card is simulated. The chatbot has no thumbs up/down control today, and there is no CSAT inference or escalation instrumentation. The closest real proxies are Helpfulness and GoalSuccessRate in the evaluation card above, which are not the same thing as CSAT.',
 
   'dashboard.strip.tokens': 'Total tokens',
-  'dashboard.strip.tokensHint': 'Input plus output tokens in the window, from the gen_ai.usage.* attributes on Strands chat spans in aws/spans.',
+  'dashboard.strip.tokensHint': "Input plus output tokens in the window, from the gen_ai.usage.* attributes on Strands chat spans. Read from each runtime's own log group plus the legacy aws/spans for history before the 2026-08-05 cutover.",
   'dashboard.strip.quality': 'Evaluation quality',
   'dashboard.strip.qualityHint': 'Window mean across all ratio-scaled (0-1) online evaluators. Numerical-scale evaluators such as smarthome_SmartHomeQuality are excluded so different scales are never averaged into one percentage.',
   'dashboard.strip.driftAlerts': '{n} evaluators declining',

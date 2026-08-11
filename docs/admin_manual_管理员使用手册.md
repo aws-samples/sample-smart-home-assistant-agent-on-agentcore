@@ -15,7 +15,7 @@
 8. [Skill 发布/审批/下发](#8-skill-发布审批下发)
 9. [Session 调试与 Remote Shell](#9-session-调试与-remote-shell)
    - [9.5 Agents 页 —— 机队总览与逐个 Agent 治理](#95-agents-页--机队总览与逐个-agent-治理)
-   - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)
+   - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)（含[场景即代码](#965-场景即代码导出--导入-json)、[JSON 模式](#966-结构化输出json-模式)、[委派进度与追踪](#968-委派时的进度提示)、[共享记忆](#969-跨-agent-共享记忆)）
 10. [Agent 运维统计大屏与演示前数据准备](#10-agent-运维统计大屏与演示前数据准备)
 11. [其他重要事项](#11-其他重要事项)
 
@@ -25,8 +25,8 @@
 
 | 组件 | 本方案中的作用 | Admin Console 对应入口 |
 |------|---------------|----------------------|
-| **Runtime** | 承载 Agent 代码。共 **10 个 Runtime**:`smarthome`(文本主 Agent)、`smarthomevoice`(语音)、`smarthome_bundles`(A/B 变体)、以及 7 个 A2A 专家子 Agent | **Agents** / Sessions / Remote Shell / Prompt |
-| **Runtime (A2A)** | 7 个独立子 Agent:设备控制、灯效、问答、场景编排、安防、能耗、家电保养。走标准 A2A 协议(9000 端口、挂载 `/`),**携带调用者身份**访问同一个 Gateway | **Agents**(详情页可改各自 prompt) |
+| **Runtime** | 承载 Agent 代码。共 **11 个 Runtime**:`smarthome`(文本主 Agent)、`smarthomevoice`(语音)、`smarthome_bundles`(A/B 变体)、以及 8 个 A2A 专家子 Agent | **Agents** / Sessions / Remote Shell / Prompt |
+| **Runtime (A2A)** | 8 个独立子 Agent:设备控制、灯效、问答、任务管理(task-management)、实时场景联动(scene-sync)、安防、能耗、家电保养。走标准 A2A 协议(9000 端口、挂载 `/`),**携带调用者身份**访问同一个 Gateway;并**只读**共享同一份用户记忆(§9.6.9)| **Agents**(详情页可改各自 prompt) |
 | **Gateway** | MCP Server,聚合设备控制、发现、KB 检索等 Lambda 工具;执行 Cedar 策略 | Tool Policy / Integration Registry |
 | **Memory** | 短期会话 + 长期事实/偏好/摘要 (三种策略) | Memories |
 | **Registry** | Skill/A2A 描述符托管 + 审批工作流。**审批已搬进 Admin Console**(§8.6) | Skills → "Add approved skill from AWS Agent Registry" |
@@ -34,7 +34,7 @@
 | **Identity** (Cognito) | 用户认证、`principal.id` 来源 | Identity / Models / Tool Policy 的用户列表 |
 | **Evaluator** | 对话质量打分、数据集评测 | Quality Evaluation 入口 |
 | **Knowledge Base** (Bedrock KB + S3 Vectors) | RAG 检索,按 scope 元数据隔离 | Knowledge Base |
-| **EventBridge Scheduler** | 定时场景的触发器:每个时间型场景一条 cron,加一条 5 分钟的条件巡检 | Agents(场景由 chatbot 创建) |
+| **EventBridge Scheduler** | 定时场景的触发器:每个时间型/日照型场景一条 cron(按 owner 时区),加一条 5 分钟的条件巡检,以及一条每天 00:10 UTC 的日照时刻重算 | Agents(场景由 chatbot 创建)、Scenarios |
 
 ---
 
@@ -84,6 +84,48 @@ bash scripts/06-deploy-agentcore.sh
 ```
 
 它只重新走 `agentcore deploy` + env patch + session invalidate,不会动 Cognito/IoT/CDK。
+
+### 2.5 ⚠️ 手动跑 `agentcore deploy` 时,三条命令缺一不可
+
+如果你绕过 `06-deploy-agentcore.sh`、自己进 `.agentcore-project/smarthome` 跑
+`agentcore deploy`(改一行代码时很自然的做法),**必须**是这三步:
+
+```bash
+# 1. 必须先做 —— 否则部署的是旧代码,而且会报告成功
+./venv/bin/python scripts/sync-agent-code.py          # 加 --check 只检测不修改
+
+# 2. 部署
+cd .agentcore-project/smarthome && agentcore deploy -y && cd -
+
+# 3. 把 CLI 抹掉的配置补回去
+./venv/bin/python scripts/restore-text-runtime-config.py
+```
+
+**第 1 步为什么必须:** `.agentcore-project/smarthome/app/smarthome/` 是 `agent/` 的一份
+**拷贝**,不是链接;只有 `setup-agentcore.py` 会刷新它,而 `agentcore deploy` 打包的就是
+那个目录里现有的内容。所以「改 `agent/` → `agentcore deploy`」部署的是**上一次完整
+provision 时的代码**,并且报告成功。
+
+2026-08-11 就这么中过一次:两个功能都已提交、都「部署」了,runtime 也 READY 到了新版本,
+但**两个功能都不在容器里** —— 那份拷贝已经五个小时没更新,连新文件都没有。当时所有症状
+都指向别处,两个看起来都合理的判断全是错的(「专家 Agent 在无视 prompt」、「prompt
+caching 在 AgentCore 上不生效」)。
+
+`sync-agent-code.py --check` 在拷贝过期时 exit 1,可以挂进 CI 或部署脚本。手动排查:
+
+```bash
+diff -rq --exclude=tests --exclude=__pycache__ agent .agentcore-project/smarthome/app/smarthome
+```
+
+**第 3 步为什么必须:** `agentcore deploy` 会抹掉 12 个环境变量(A2A_* 、REGISTRY_ID、
+各表名、MODEL_ID 等)、`protocolConfiguration`、header allowlist 和 `/mnt/workspace`
+挂载。**没有 A2A 变量时,编排器不会注册任何 `a2a_*` tool,而是自己回答所有专家问题 ——
+静默地。** 本轮每次真实部署都确认恢复了 12 个变量。
+
+> ⚠️ **还有一个独立的坑:热容器会继续跑旧代码。** runtime 在 06:36 更新完,06:38 的一轮
+> 请求仍然执行的是上一个版本。所以部署后测试前,先换一个**全新的**
+> `runtimeSessionId` 拿到冷容器,再据此下结论。`setup-agentcore.py` 会停掉 DynamoDB 里
+> 记录的会话,单独跑 `agentcore deploy` 不会。
 
 ---
 
@@ -555,13 +597,15 @@ Gateway、以用户身份、受同一套策略约束。
 > 只给 Secrets Manager 权限是不够的:用客户托管密钥时 `GetSecretValue` 会被 **KMS**
 > 拒绝,而表象是"没有可用的调度凭证",看起来像 secret 不存在而不是缺权限。
 
-### 9.6.3 触发器支持哪三种
+### 9.6.3 触发器支持哪五种
 
 | 类型 | 例子 | 说明 |
 |------|------|------|
-| `time` | 每天 23:00 | 24 小时制 `HH:MM`,**按 UTC 调度** —— schema 里还没有时区字段,猜一个偏移会让场景在用户没说过的时间触发,而且比统一用 UTC 难发现得多 |
+| `time` | 每天 23:00 | 24 小时制 `HH:MM`,**按 owner 自己的时区调度**。时区来自 Identity 页的「Timezone / Location」;没设过的用户回退到 UTC。EventBridge Scheduler 的 `ScheduleExpressionTimezone` 直接接受 IANA 名称(如 `Asia/Shanghai`),所以不需要我们自己换算 —— 也因此 DST 是平台负责的 |
+| `solar` | 每天日落时 | 日出/日落,由 owner 的经纬度算出(`shared/solar.py`,NOAA 公式),支持 ±240 分钟偏移。**需要先在 Identity 页填经纬度**,否则这个场景无法排期(Reconcile 会把它列进 `failed` 并说明原因)。cron 是绝对 UTC 时刻,所以这类 schedule 的 `ScheduleExpressionTimezone` 固定为 `UTC` —— 再叠一层本地时区会把偏移算两次。每天 00:10 UTC 有一个 `ScenarioSolarRecompute` 定时任务重算次日时刻 |
 | `device_state` | 风扇打开时 | subject 必须是真实 device id |
 | `sensor` | 温度高于 27 | 真传感器阈值(`temperature` / `humidity` / `pm25` / `co2`)。**必须显式写 above 还是 below** —— "高于 26"和"低于 26"是两个相反的场景,猜错会让它在完全错误的时机触发 |
+| `manual` | 「观影模式」 | 一键指令:**不建任何 schedule**,只有用户点名叫它时才执行。所以 Reconcile 的孤儿清理必须把 `manual` 排除在外,否则会把它当成"多余的 schedule"处理 |
 
 条件型触发器按**边沿**触发而非电平:场景行上的 `lastReading` 保证"温度高于 27"
 只在跨过阈值时执行一次,而不是整个下午每 5 分钟执行一次。
@@ -580,6 +624,103 @@ Gateway、以用户身份、受同一套策略约束。
   payload 调一次执行 Lambda(它是幂等的,接受的就是 Scheduler 发的同一个入参)。
   设备模拟器里的**虚拟时钟**只加速模拟器自身的时间(传感器曲线 + 屏幕上的钟),
   **不会**改变 AWS 侧的真实触发时间。
+
+### 9.6.5 场景即代码(导出 / 导入 JSON)
+
+**Admin Console → Assess → Scenarios → 「场景即代码」**。面向那些宁愿贴一段 JSON
+也不想来回描述十几轮的用户。
+
+| 操作 | 说明 |
+|------|------|
+| **导出** | 把该用户的场景写进文本框。只导出场景**定义**(name / description / trigger / deviceActions / isActive),不导出 `lastRunAt`、`createdAt`、`userId` 这些运行时或派生字段 —— 一次假装能恢复运行历史的往返比不导出更糟 |
+| **导入** | 按框里的内容创建场景。可以直接贴导出的那个数组,也可以贴整份导出文档 |
+
+三个运维要点:
+
+1. **导入只存,不排期。** 导入完请自己点一次「同步定时任务」。这是刻意的:解析一份
+   文档不应该顺带开始触发自动化。返回里也写明了这句话。
+2. **校验走 Agent 用的同一份代码**(`scenarios.build_scenario`)。所以导入的场景不可能
+   存下一个执行端随后会拒绝的动作 —— 另写一份导入校验就是第二套「什么算合法」的定义,
+   而它一定会和第一套发散,发散的表现是「场景存得干干净净、到点什么也不做」。
+3. **逐条报结果,不是全或全无。** 一份文档里有一条 trigger 写错,不该让用户丢掉另外
+   五条;返回里会指明是第几条、错在哪。
+
+> ⚠️ **场景行按 Cognito `sub` 存,不是按邮箱。** 这是 A2A Agent 写入时用的 key,也是
+> runner 读取时用的 key —— 而 admin API 其他所有地方(设置、prompt、A2A 授权)都按
+> **邮箱**存。填邮箱时导出会自动解析成 sub;导入则**必须**解析成功,解析不出来会直接
+> 报错拒绝。原因是:按邮箱存会「成功」,然后产出一个在页面上看得见、但 runner 永远不读
+> 的场景 —— 那比一个说清原因的报错难查得多。
+
+### 9.6.6 结构化输出(JSON 模式)
+
+调用时带 `{"responseFormat": "json"}`,Agent 就返回 JSON 而不是自然语言 —— 设备状态会
+变成 `{"deviceId": "bedroom-light-1", "power": false, "brightness": 80}`,可以直接进
+脚本。
+
+- **不影响路由。** 规则里明确写了「格式变、路由不变」,所以一个 JSON 请求该问专家 Agent
+  还是会问(线上验证过:安全类问题仍然走了 home-security)。
+- **规则追加在最后**,这一点是有意义的两次:格式冲突时靠后的指令赢(admin 的治理
+  prompt 可能要求自然语言);而 per-request 内容必须排在缓存前缀之后,否则会打掉
+  prompt cache 命中。
+- **靠 prompt 不够。** 一个**委派**过的 turn 会把 JSON 包在 ```` ```json ```` 代码块里
+  —— 总结完专家 Agent 的自然语言之后,模型正处在 chat 排版模式。代码里的
+  `unfence_json` 会剥掉它,且只在 JSON 模式下剥。和 `⟦A2A:…⟧` 标记是同一个结论:
+  **必须对每条回复都成立的性质,由 Harness 保证,而不是靠 prompt 请求。**
+
+### 9.6.7 聊天里的「这个回答是怎么来的」
+
+Chatbot 每个回答下面有一个默认折叠的小节,列出这一轮实际调用了哪些 tool(按顺序)。
+
+它存在的理由:**一个委派来的答案和一个编造的答案读起来一模一样。**「你最大的风险是
+IoT 网络没做隔离」这句话,无论是受治理的专家 Agent 产出的还是编排器自己现编的,都同样
+流畅 —— 这正是 `scripts/probe-routing.py` 必须读 span 而不是读回复文本的原因。这个面板
+把同一份证据摆在读答案的人面前。
+
+数据来自这一轮已经推送的进度事件(见下条),所以**零额外成本、即时出现**;如果改成查
+`aws/spans`,就要为「几秒前流里已经说过的事」付一次 10-20s 的 Logs Insights 查询。
+
+### 9.6.8 委派时的进度提示
+
+委派一轮要约 31s,以前这段时间聊天窗口只有一个不动的「思考中…」。现在请求带
+`{"stream": true}` 时,runtime 返回 **SSE**:模型每调一个 tool 推一帧 `progress`,最后
+一帧 `answer`。线上实测一个三域请求:
+
+```
++12.0s  progress  a2a_home_security_agent_risk_assessment
++13.1s  progress  a2a_energy_optimization_agent_estimate_savings
++13.8s  progress  a2a_knowledge_qa_agent_answer_from_docs
++44.8s  answer
+```
+
+所以用户在 12s 就看到「正在询问 Home Security specialist…」,而不是等到 45s 才看到
+任何东西。
+
+**为什么不是流式输出正文:** 模型必须等它刚调的那个 tool 返回,才能开始写答案。实测
+第一个正文 token 在 +8.13s,而第一个 token(是个 **tool 调用**)在 +1.88s —— 所以
+「首个正文 token」的下限就是专家 Agent 自己的耗时,换 transport 改变不了它。能提前拿到
+的是专家 Agent 的**名字**,所以推的是 tool 生命周期,不是 token。
+
+这是**按请求 opt-in** 的,因为返回**类型**变了:返回 generator 会让
+`BedrockAgentCoreApp` 输出 `text/event-stream`,任何还在做 `response.json()` 的调用方
+会拿到解析错误而不是回复。语音、评估用的 harness、以及两个 A/B 分支都保持原来的 JSON
+返回 —— A/B 分支是刻意排除的:bundles runtime 和 optimization gateway 都不保证不缓冲地
+透传流式响应,而一个「静默退化成 30s 空白等待」的实验分支比没有进度提示更糟。
+
+### 9.6.9 跨 Agent 共享记忆
+
+八个专家 Agent 现在都能读到编排器写入的那一份用户记忆(facts + preferences),命名空间
+按用户分区、**不带 Agent 维度**。效果是:用户对主 Agent 说过「我喜欢暖光」,之后让灯效
+Agent 做场景时它就会用暖色调。
+
+对运维来说要知道三件事:
+
+- **只读。** 写入仍然只有编排器做,而且这条约束由 IAM 保证 ——
+  `A2ASharedMemoryRead` 只授予 `RetrieveMemoryRecords`。理由:专家 Agent 收到的是一条
+  自包含的委派指令,它写进去的东西之后每次检索都会以「没有上下文的半句话」返回。
+- **actor id 是邮箱(sanitize 后)**,主 Agent 和子 Agent 共用
+  `shared/memory_actor.py` 这一个函数。两边如果算得不一样,不会报错 —— 各自得到一份
+  能用、私有、只有一半内容的记忆,症状是「子 Agent 从来不记得我说过的话」。
+- **Memory 不可用时子 Agent 照常回答**(软失败),只是答得没那么贴合。
 
 ---
 
@@ -743,14 +884,18 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 
 1. **Sessions tab 确认用户 session 还活着** → 必要时 Stop 让其重建。
 2. **Remote Shell 查环境变量 + skill 加载** → 80% 配置类问题在此暴露。
-3. **CloudWatch Logs `aws/spans` 看 `chat` span** → token 用量、工具路径、报错 stacktrace。
+3. **看 `chat` span** → token 用量、工具路径、报错 stacktrace。
+   **注意 log group 换过位置**:2026-08-05 起 span 写在每个 runtime 自己的
+   `/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`(`spans` 流)里,不再是
+   账号级的 `aws/spans` —— 见 [§11.9](#119--span-的-log-group-换过位置查错地方会看到空数据)。
 4. **Tool Policy 切 LOG_ONLY 重放** → 鉴别是 Cedar 拒绝还是模型没调工具。
 5. **Quality Evaluation 跑一次 offline eval** → 判断回归是提示词还是模型引起。
 
 ### 11.7 变更安全清单
 
 - 改 Prompt / Skill → DynamoDB 即时生效,不需 `agentcore deploy`。
-- 改 Agent Python 代码 → 必须 `bash scripts/06-deploy-agentcore.sh`。
+- 改 Agent Python 代码 → 必须 `bash scripts/06-deploy-agentcore.sh`;若手动跑
+  `agentcore deploy`,**必须**按 [§2.5](#25--手动跑-agentcore-deploy-时三条命令缺一不可) 的三条命令来。
 - 改 CDK (Lambda / IAM / API GW) → `bash scripts/04-cdk-deploy.sh`,**然后必须再跑
   `python scripts/setup-agentcore.py`** —— 见下条。
 - 改 Cognito 用户组 / 添加 admin → Cognito 控制台直接操作,不走 CDK。
@@ -785,6 +930,68 @@ aws lambda get-function-configuration --function-name smarthome-admin-api \
 `cdk/lambda/admin-api/tests/test_env_contract.py` 记录了哪一侧拥有哪个变量,
 新增变量时按它选边。
 
+### 11.9 ⚠️ span 的 log group 换过位置,查错地方会看到空数据
+
+AgentCore Runtime 以前把 Strands/ADOT 的 span 写进账号级的 `aws/spans`。**2026-08-05
+起(主 Agent)/ 2026-08-09 起(八个 A2A 子 Agent)** 改成写进每个 runtime 自己的
+`/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`(`spans` 流)。
+
+切换非常干净,也因此完全没有人发现:`aws/spans` 停在 02:12,runtime 自己那条流从同一天
+02:28 开始。**没有报错、没有权限拒绝,`StartQuery` 一直成功** —— 它只是匹配到 0 条记录。
+结果是 Overview 的 TTFT / Token 卡片和 Sessions 页的 token 合计**整整六天显示"没有
+数据",和系统闲置时的表现一模一样。**
+
+代码侧已修:`dashboard._spans_log_groups()` 同时查**两个**来源并合并。为什么不直接换掉
+旧的:30 天的时间范围仍然会跨过这个切换点,丢掉旧 group 等于把趋势线抹掉五周 —— 而趋势
+线正是这个页面存在的意义。
+
+自己排查时要注意两点(都是实测出来的):
+
+- **`StartQuery` 只要有一个 group 不存在,就整条请求失败**(`ResourceNotFoundException`)。
+  所以一个已经拆掉、但还留在 `DASHBOARD_EXTRA_RUNTIME_ARNS` 里的子 Agent runtime,会把
+  **所有** span 卡片一起弄挂。代码里先用 `DescribeLogGroups` 过滤一遍。
+- **`POST /invocations` 这个 span 在 `opentelemetry.instrumentation.starlette` scope 下**,
+  不在 Strands 的 scope 里。只按 Strands scope 过滤会静默丢掉它 —— 而它是唯一能测出
+  "一次请求里有多少时间花在我们容器内"的数据。
+
+手工查最近的 span:
+
+```bash
+aws logs start-query --region us-west-2 \
+  --log-group-names "/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT" \
+  --start-time $(( $(date +%s) - 3600 )) --end-time $(date +%s) \
+  --query-string 'fields @timestamp, name, attributes.gen_ai.tool.name as tool,
+    attributes.gen_ai.usage.input_tokens as inTok, durationNano
+    | filter scope.name = "strands.telemetry.tracer" | sort @timestamp desc | limit 30'
+```
+
+### 11.10 延迟与成本:先测量,再优化
+
+`scripts/measure-baseline.py` 是这个仓库里所有性能结论的量具:10 条固定只读 prompt
+(5 条快路径、5 条走不同专家 Agent)× N 轮,按 session id 关联 runtime 自己的 span,
+归档成 JSON 便于跨周对比。`--compare <file>` 打印 before/after 表。
+
+**最反直觉的一条:24.3s 平均耗时里约 7.1s 花在 AgentCore 里、还没进入我们的容器。**
+runtime 没见过的 session id 约 7s,复用的约 0.4s。所以"16s 快路径"其实是约 8s Agent
+工作 + 约 8s 平台建会话。只报 wall 会把平台冷启动记到 harness 账上,`--compare` 因此
+**拒绝**拿 warm run 对比 cold run。
+
+判断一个改动是否真的有效,先看波动:委派组 wall 波动 13%,快路径 30%。
+**三轮取样下,快路径上小于约 15% 的改善和噪声无法区分。**
+
+```bash
+./venv/bin/python scripts/measure-baseline.py --repeats 3 --label baseline        # 冷
+./venv/bin/python scripts/measure-baseline.py --repeats 3 --label baseline --warm # 热
+./venv/bin/python scripts/ab-delegation-brief.py     # 单项 A/B:委派设备清单
+./venv/bin/python scripts/ab-parallel-delegation.py  # 单项 A/B:并行委派
+./venv/bin/python scripts/probe-routing.py           # 实际路由到哪(读 span)
+```
+
+已完成的优化与实测结果见
+[`measurements/spec5-report.md`](measurements/spec5-report.md);每一列可以支撑什么结论见
+[`measurements/README.md`](measurements/README.md);背后的设计取舍见
+[`agent-design-principles-zh.md`](agent-design-principles-zh.md)。
+
 ---
 
-*最后更新: 2026-08-10*
+*最后更新: 2026-08-11*

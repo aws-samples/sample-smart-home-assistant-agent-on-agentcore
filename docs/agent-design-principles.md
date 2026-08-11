@@ -9,6 +9,8 @@ Three chapters: **Harness design** (how the pieces are wired), **Context
 engineering** (what reaches the model), **Prompt design** (how the model is
 instructed).
 
+> 中文版见 [`agent-design-principles-zh.md`](agent-design-principles-zh.md)。
+
 ---
 
 ## 1. Harness design

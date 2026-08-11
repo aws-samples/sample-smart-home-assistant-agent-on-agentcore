@@ -11,6 +11,7 @@
 - [7. Chatbot Design](#7-chatbot-design)
 - [8. AI Agent Design](#8-ai-agent-design) (includes [8.6 Agent Internal Data Flow](#86-agent-internal-data-flow))
 - [8.7. Skill Management](#87-skill-management)
+- [8.7.1. Prompt Caching](#871-prompt-caching)
 - [8.8. Per-User Model Selection](#88-per-user-model-selection)
 - [8.9. Per-Login Session ID and Session Tracking](#89-per-login-session-id-and-session-tracking)
 - [8.10. Agent System Prompts (Text & Voice)](#810-agent-system-prompts-text--voice)
@@ -35,6 +36,7 @@
 - [9.17. Task Management & Scheduled Automations](#917-task-management--scheduled-automations)
 - [9.18. The Agents Page (Fleet & Per-Agent Governance)](#918-the-agents-page-fleet--per-agent-governance)
 - [9.19. Simulator Props: Virtual Clock, Screen and Speaker](#919-simulator-props-virtual-clock-screen-and-speaker)
+- [9.20. Developer-Facing Surfaces](#920-developer-facing-surfaces)
 - [10. API Reference](#10-api-reference)
 - [11. MQTT Topic & Command Reference](#11-mqtt-topic--command-reference)
 - [12. Error Handling Strategy](#12-error-handling-strategy)
@@ -1084,7 +1086,7 @@ S3: smarthome-skill-files-{accountId}
 | `GET` | `/memories` | List all memory actors |
 | `GET` | `/memories/{actorId}` | Get long-term memory records (facts + preferences) for an actor |
 | `GET` | `/dashboard?range=24h\|7d\|30d` | Ops-dashboard fast half — health metrics, evaluation scores, release/version state (see [§9.15](#915-agent-operations-dashboard)) |
-| `GET` | `/dashboard?range=…&part=spans&dim=user\|tenant\|agent` | Ops-dashboard slow half — TTFT percentiles and token trend/attribution from a Logs Insights query over `aws/spans` (~5-20s) |
+| `GET` | `/dashboard?range=…&part=spans&dim=user\|tenant\|agent` | Ops-dashboard slow half — TTFT percentiles and token trend/attribution from a Logs Insights query over the runtime span groups (~5-20s; see the note in §9.4) |
 
 **Authorization:** All admin API endpoints require a valid Cognito JWT. The Lambda additionally checks that the caller belongs to the `admin` Cognito group (returns 403 if not).
 
@@ -1093,6 +1095,47 @@ S3: smarthome-skill-files-{accountId}
 > auto-permissions, because the admin Lambda's auto-generated resource policy is
 > already at the API Gateway 20 KB cap — the same reason `/optimization/*` and
 > the `?action=` dispatches exist.
+
+### 8.7.1 Prompt Caching
+
+Every orchestrator turn re-sends an identical ~10.5k-token prefix: the system
+prompt (~1.6k), the A2A routing table (~1.7k), eleven governed skills (~4.3k) and
+~20 tool schemas. `create_agent` passes `cache_config=CacheConfig(strategy="auto")`
+so Bedrock reads it from cache instead of reprocessing it. Measured on the live
+runtime:
+
+| | `InputTokenCount` | `CacheReadInputTokenCount` | `CacheWriteInputTokenCount` |
+|---|---|---|---|
+| before | 29,644 | 0 | 0 |
+| after | **9** | 20,988 | 10,512 |
+
+**This is a cost optimisation, not a latency one, and the AWS documentation reads
+otherwise.** The docs advertise "up to 85% latency reduction"; measured
+side-by-side at ~15.6k prefix tokens over two controlled runs (12 and 8
+alternating calls), latency moved 2% — 2.11s uncached against 2.06s cached, and
+2.70s against 2.68s. At this prefix size the prefill was never the bottleneck. The
+98% token cut is real and every turn of every user pays that prefix, so it is worth
+having; calling it a latency win would be a claim the numbers do not support.
+
+`strategy="auto"` rather than a hardcoded cache point because the model is
+per-user configurable (§8.8): auto asks Strands to check model support and degrade
+to uncached with a warning, where `cache_prompt="default"` would fail every turn
+for a user on an unsupported model. Cache hits need an **exact** prefix match,
+which is why the static prompt/skills/tools come first and per-request content
+(the governed override, the user's memory, the JSON-output rules) is appended
+last.
+
+The A2A specialists deliberately do **not** cache — see §9.13 for the measurement.
+
+`create_agent` also logs `prompt caching: strands=<version> model=<id>
+strategy=<...>` once per agent build. That line exists because the failure is
+silent in both directions: caching that quietly stops working looks identical to
+caching that works, and diagnosing it from outside cost an hour — the spans carry
+no cache attributes, so a high `InputTokenCount` with an absent
+`CacheReadInputTokenCount` was the only signal, and it is indistinguishable from
+"the code was never deployed". The live line reads `strands=1.51.0
+strategy=anthropic`; note 1.51.0, where `requirements.txt` pins only `>=1.25.0`,
+so the container's resolved version was itself unknown until it said so.
 
 ### 8.8 Per-User Model Selection
 
@@ -1140,7 +1183,44 @@ Each page load gets a **fresh runtime session ID** generated once in the chatbot
 
 **Session tracking:** On each invocation, the agent records `{userId, sessionId, kind, lastActiveAt}` to a dedicated DynamoDB table (`smarthome-runtime-sessions`, PK `userId`, SK `sessionKey = "{kind}#{sessionId}"`). Each per-login session gets its own row — no overwrites — so the Admin Console's Sessions tab can render the full per-user history. The `kind` attribute is `text` for text-runtime rows (written by `agent._record_session`) and `voice` for the voice runtime (written by `voice_session._record_voice_session`); the UI's `Kind` column maps to the correct runtime ARN when stopping (`POST /sessions/{id}/stop?kind=text|voice`). This table is independent of the `smarthome-skills` table — runtime sessions and skill storage are unrelated concerns.
 
-**Per-session 7-day token usage:** The Sessions tab also shows each session's total token consumption over the last 7 days. AgentCore Runtime exports Strands/ADOT spans to the CloudWatch Logs `aws/spans` log group; each `chat` span (emitted by `strands.telemetry.tracer`) carries both `attributes.session.id` and `attributes.gen_ai.usage.total_tokens`. The admin Lambda runs a CloudWatch Logs Insights query on `GET /sessions` that sums `total_tokens` grouped by `session.id` for the last 7 days and joins the result onto the DynamoDB session rows as `totalTokens7d`. The query is the backing dataset for the CloudWatch "GenAI Observability → Bedrock AgentCore → All sessions" dashboard, so the numbers match what an admin sees in that console view. Permissions: the admin Lambda gets `logs:StartQuery`/`logs:StopQuery` scoped to `log-group:aws/spans:*` plus `logs:GetQueryResults` (required at `*` since GetQueryResults doesn't support resource-level scoping).
+**Per-session 7-day token usage:** The Sessions tab also shows each session's total token consumption over the last 7 days. Each `chat` span (emitted by `strands.telemetry.tracer`) carries both `attributes.session.id` and `attributes.gen_ai.usage.total_tokens`. The admin Lambda runs a CloudWatch Logs Insights query on `GET /sessions` that sums `total_tokens` grouped by `session.id` for the last 7 days and joins the result onto the DynamoDB session rows as `totalTokens7d`. The query is the backing dataset for the CloudWatch "GenAI Observability → Bedrock AgentCore → All sessions" dashboard, so the numbers match what an admin sees in that console view.
+
+> ⚠️ **Where the spans live changed, silently.** AgentCore Runtime used to export
+> Strands/ADOT spans to the account-wide `aws/spans` log group. Since **2026-08-05**
+> (orchestrator) and **2026-08-09** (the eight A2A specialists) each runtime writes
+> them to its own group instead — a `spans` stream inside
+> `/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`.
+>
+> The cutover was clean and completely invisible: `aws/spans` stops at 02:12 and
+> the runtime-local stream starts at 02:28 the same day. Nothing errored, no
+> permission was denied, and `StartQuery` kept succeeding — it simply matched zero
+> records, so the Overview page's TTFT and token cards and this tab's token totals
+> read "no data" **for six days**, exactly as they would on an idle system.
+>
+> `dashboard._spans_log_groups()` now queries **both** sources and merges them: a
+> 30d dashboard range still reaches back past the cutover, so dropping the legacy
+> group would erase five weeks from a trend line the page exists to draw.
+>
+> Two things had to be measured rather than assumed:
+> - **`StartQuery` rejects the WHOLE request** with `ResourceNotFoundException` if
+>   any one named group is missing, so one torn-down specialist runtime still
+>   listed in `DASHBOARD_EXTRA_RUNTIME_ARNS` would take down every spans card. The
+>   group list is filtered through `DescribeLogGroups` first
+>   (`_existing_log_groups`), and a describe failure leaves the list intact —
+>   losing the ability to check is not evidence that nothing exists.
+> - **The `POST /invocations` span is under the `opentelemetry.instrumentation.starlette`
+>   scope**, not the Strands one. Filtering on the Strands scope alone silently
+>   drops it, and it is the only measurement of how much of a request's wall clock
+>   was spent inside this container.
+
+Permissions: the admin Lambda gets `logs:StartQuery`/`logs:StopQuery` on **both**
+`log-group:aws/spans:*` and `log-group:/aws/bedrock-agentcore/runtimes/*`, plus
+`logs:DescribeLogGroups` and `logs:GetQueryResults` (both required at `*` — neither
+supports resource-level scoping). The runtime groups are wildcarded rather than
+enumerated because the specialists' runtime ids belong to
+`a2a-agent-registry/deploy.py`, not to the CDK stack: naming them would mean a
+stack deploy per specialist redeploy, with a silently failing read until it
+happened.
 
 **Stop session:** The Admin Console calls the AgentCore `StopRuntimeSession` API from the browser using the admin's AWS credentials (obtained by exchanging the Cognito idToken for Identity Pool temporary credentials — the same SigV4 flow the chatbot uses for `/invocations` and `/ws`). `scripts/setup-agentcore.py` also invokes this API as a post-deploy step to invalidate any warm sessions so users pick up fresh code immediately instead of waiting for the idle timeout.
 
@@ -1188,7 +1268,7 @@ The text agent calls this inside `invoke_agent()` on every request; the voice ag
 
 **Every agent's prompt, not just these two.** `PROMPT_AGENT_TYPES = ("text", "voice")` is now `BUILTIN_AGENT_TYPES`, and any **AgentCard name** is also a valid `agentType` — so `__prompt_light-effect-agent__` governs that specialist exactly as `__prompt_text__` governs the orchestrator. The valid set is derived from the Registry's approved AGENT records rather than hardcoded, and re-read on a miss before rejecting: a stale cache is precisely how the Cedar action map once silently authorised nothing, and an agent deployed after the container warmed up would otherwise be permanently unaddressable with a 400 that points at the caller. Sub-agent prompts are edited from the agent detail page (§9.18) and resolved by the runtime per request (§9.13).
 
-**Defaults mirror.** The Lambda ships `agent_prompt_defaults.py` (text + voice, hand-maintained) and `a2a_prompt_defaults.py` (the seven specialists, **generated** by `scripts/gen-prompt-defaults.py` from each `system_prompt.md`). The duplication is intentional: the admin Lambda is packaged from its own directory and cannot read the agent tree, and making the editor render "what the agent will use when no override exists" without a round-trip is worth the copy.
+**Defaults mirror.** The Lambda ships `agent_prompt_defaults.py` (text + voice, hand-maintained) and `a2a_prompt_defaults.py` (the eight specialists, **generated** by `scripts/gen-prompt-defaults.py` from each `system_prompt.md`). The duplication is intentional: the admin Lambda is packaged from its own directory and cannot read the agent tree, and making the editor render "what the agent will use when no override exists" without a round-trip is worth the copy.
 
 A stale mirror is *worse* than a missing one — "Revert to Default" would install a prompt no agent has ever run, and the editor would misreport what an override changes. Nothing else catches it: the mirror is a valid Python string whatever it says, and the agent never reads it. `test_prompt_defaults_mirror.py` compares all nine against their sources byte for byte. The text/voice mirror was previously kept in sync by a comment asking future editors to remember; that comment is now enforced.
 
@@ -1627,6 +1707,42 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
 - **`requestHeaderConfiguration` round-trip pitfall.** `get_agent_runtime` returns the allowlist as the top-level field `requestHeaderAllowlist`, but `update_agent_runtime` expects it nested under `requestHeaderConfiguration={"requestHeaderAllowlist": [...]}`. A naïve round-trip that re-passes the top-level value **silently drops the allowlist**, which strips the custom auth header at the edge proxy → the agent sees `context.request_headers = None` → MCP gateway returns 401. Any helper that calls `UpdateAgentRuntime` (latency-probe nonce bumper, `enable-welcome.py`, session redeploy helpers) must read from either location and always wrap back into the nested form. See `voice-latency-test/force-cold.py` + `enable-welcome.py` for the correct pattern.
 - `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
+- ⚠️ **`.agentcore-project/smarthome/app/smarthome/` is a COPY of `agent/`, not a
+  link, and `agentcore deploy` packages whatever is sitting in it.** Only
+  `setup-agentcore.py` refreshes that copy (`shutil.copytree`, as one step of a
+  full provision), so the normal way to ship an agent change — edit `agent/`, run
+  `agentcore deploy` — deploys the code from the *last full provision* and reports
+  success.
+
+  Hit on 2026-08-11 with two features at once: both were committed, both
+  "deployed", the runtime went READY on a new version, and neither was in the
+  container — the copy was five hours old and did not even contain the new files.
+  Every symptom pointed elsewhere, and both plausible diagnoses were wrong: the
+  specialists ignoring a prompt (which had genuinely happened an hour earlier for a
+  different reason), and prompt caching not working through AgentCore.
+
+  **So the full sequence for an orchestrator change is three commands, not one:**
+
+  ```bash
+  ./venv/bin/python scripts/sync-agent-code.py          # or --check to just detect
+  cd .agentcore-project/smarthome && agentcore deploy -y && cd -
+  ./venv/bin/python scripts/restore-text-runtime-config.py
+  ```
+
+  `sync-agent-code.py --check` exits 1 on a stale copy, so a deploy wrapper or CI
+  can fail rather than ship one. Diagnosis by hand:
+  `diff -rq --exclude=tests --exclude=__pycache__ agent .agentcore-project/smarthome/app/smarthome`.
+- ⚠️ **A warm container keeps running the old code.** Independent of the above: the
+  runtime updated at 06:36 and a 06:38 turn still executed the previous version,
+  showing zero cache activity on correctly deployed code. Force a **new**
+  `runtimeSessionId` to get a cold container before concluding anything from a
+  post-deploy test. `setup-agentcore.py` stops DynamoDB-tracked sessions for this
+  reason; an ad-hoc `agentcore deploy` does not.
+- **`restore-text-runtime-config.py` is not optional.** `agentcore deploy` strips
+  the 12 A2A/table env vars, `protocolConfiguration`, the header allowlist and the
+  `/mnt/workspace` mount. Without the A2A vars the orchestrator registers **no**
+  `a2a_*` tools and answers every specialist question itself — silently. Measured
+  on real deploys during this work: 12 vars restored each time.
 
 ### 9.2 Deployment Architecture
 
@@ -1895,7 +2011,7 @@ Two sources of tools are listed side-by-side, each tagged with a Cloudscape `Bad
 `GET /tools` returns both sets in one response, each item tagged with `source: "builtin" | "gateway"`. The UI renders a Badge per tool so admins can distinguish runtime-local surface from gateway-routed surface.
 
 **Each Gateway tool also names its consumers.** A flat checkbox list was right
-when one agent existed; with an orchestrator and seven specialists it hid the thing
+when one agent existed; with an orchestrator and eight specialists it hid the thing
 an administrator needs *before* revoking a tool — who breaks. Revoking
 `control_device` stops the user's chat commands, their scheduled scenes (§9.17),
 the light-effect specialist and the device-control specialist, and nothing on the
@@ -2831,6 +2947,25 @@ resource as a query-param dispatch: `GET /registry/records?action=a2a-list`
 returns approved A2A records enriched with `publishedBy` from the
 ownership-row scan.
 
+That same cap is why several unrelated features ride on `/registry/records`
+rather than getting paths of their own. The full dispatch table:
+
+| Method | `?action=` | Does |
+|--------|-----------|------|
+| GET | *(none)* | list registry records (optionally `?status=APPROVED`) |
+| GET | `a2a-list` | approved A2A records + `publishedBy` |
+| GET | `a2a-grants` | which users hold grants on one record |
+| GET | `fleet` | the Agents page's derived fleet (§9.18) |
+| GET | `scenarios` | every saved scene with its schedule + last-run state (§9.17) |
+| GET | `export-scenes` | one user's scenes as portable JSON (§9.20) |
+| POST | *(none)* | review/approve a skill record |
+| POST | `sync-schedules` | reconcile EventBridge Scheduler against the scenes |
+| POST | `import-scenes` | create scenes from JSON (§9.20) |
+
+The `action` check comes **first** on POST. Without it, `sync-schedules` fell
+through to the skill reviewer and was rejected with "recordId is required" — a
+confusing error for a button that has nothing to do with records.
+
 **Deploy-time seed.** `setup-agentcore.py` idempotently seeds three demo
 records after the registry is ensured to exist — `energy-optimization-agent`,
 `home-security-agent`, `appliance-maintenance-agent`, i.e. the three
@@ -2862,7 +2997,7 @@ JSON-RPC `message/send` against AgentCore Runtime's native A2A protocol mode
 (port 9000, `/` mount). The upstream orchestrator and each downstream
 specialist are independent AgentCore Runtimes.
 
-**Seven specialist agents** live under
+**Eight specialist agents** live under
 [`a2a-agent-registry/`](../a2a-agent-registry/README.md). The roster is a
 single table in `common/agents.py`; deploy, teardown, demo-reset and the smoke
 test all import it, because four copies were survivable at three agents and a
@@ -3000,10 +3135,106 @@ reset, so a still-broken endpoint re-opens on its next failure. A breaker skip
 returns `"A2A agent unavailable"` rather than `"call failed"`, so the model says
 the specialist was never asked instead of implying it answered badly.
 
-`streaming=False` stays, deliberately: the change is wide and the marker is
-applied to the result rather than the stream. The consequence — a delegated turn
-is silent until the specialist finishes, roughly 15s direct against 30s
-delegated — is stated in the Overview dashboard's TTFT hint rather than hidden.
+`streaming=False` on the A2A hop stays, and the reason is now measured rather
+than assumed. Streaming the sub-agent's tokens cannot improve
+time-to-first-prose, because the orchestrator cannot write its answer until the
+tool it just called returns. Timed against `Agent.stream_async`:
+
+```
++0.00s  init_event_loop
++1.88s  messageStart          <- first token of the turn
++1.88s  tool_use_stream       <- and it is a TOOL CALL, naming the specialist
++2.16s  message (toolUse complete)
++8.13s  first text delta      <- the first PROSE, after the tool returned
+```
+
+So the floor is the specialist's own latency however the hop is transported, and
+pushing its tokens upstream would deliver text the orchestrator has not finished
+reasoning about into a UI with nowhere to put it.
+
+What *is* available early is the specialist's **name**, at 1.88s. The
+orchestrator therefore streams **tool lifecycle** instead of tokens — see
+§9.20 — which replaces ~31s of motionless "thinking…" with "asking the Home
+Security specialist…". The marker stays applied to the result rather than the
+stream, unchanged.
+
+### Delegation latency, measured
+
+`scripts/measure-baseline.py` archives a comparable baseline; `docs/measurements/`
+holds the runs and `docs/measurements/spec5-report.md` the phase-by-phase report.
+Cold-session means over 10 fixed prompts × 3 repeats:
+
+| Group | wall | platform | server | llm | tool (the A2A hop) | harness |
+|-------|------|----------|--------|-----|--------------------|---------|
+| fast (15) | 17.3s | 7.3s | 10.0s | 5.9s | 1.3s | 2.9s |
+| delegated (15) | 31.3s | 7.0s | 24.3s | 10.0s | 11.5s | 2.9s |
+
+**`platform` is the surprise: ~7s of every turn is spent inside AgentCore before
+this container is entered.** A session id the runtime has never seen costs ~7s; a
+reused one ~0.4s. A "16s fast path" is therefore roughly 8s of agent work behind
+8s of platform session creation, and any report quoting `wall` alone credits the
+platform's cold start to the harness — in both directions. `--compare` refuses to
+diff a warm run against a cold one for exactly that reason.
+
+Three optimisations act on the numbers above:
+
+| Change | Effect | Harness |
+|--------|--------|---------|
+| **Device brief on delegation** — the orchestrator names the relevant devices, so the specialist skips its opening `discover_devices` cycle (`shared/device_brief.py`) | **-1.64s (-10%)** on the specialist's turn, winning 4/4 A/B pairs | `scripts/ab-delegation-brief.py` |
+| **Parallel delegation** — the shared event loop moved onto its own thread, so independent delegations genuinely overlap | **51.1s → 17.2s (-66%)** on a three-domain request | `scripts/ab-parallel-delegation.py` |
+| **Prompt caching** on the orchestrator's ~10.5k-token prefix | billed input tokens **29,644 → 9**; latency **2%** (noise) | CloudWatch `CacheReadInputTokenCount` |
+
+Two proposals were dropped on measurement. **Prewarming** buys nothing: after
+100+ minutes idle — far past the 900s session timeout — a specialist's first call
+was ~0.3s slower than its warm calls (energy 8.52s vs 8.39s, security 9.65s vs
+9.28s), because AgentCore keeps these runtimes hot. And **caching the
+sub-agents' prefixes** would cost more than it saves: they measure 362-4,211 mean
+input tokens with minima as low as 71, below the model-specific checkpoint
+minimum (a 2,817-token Haiku call with a cache point returned `cacheRead=0,
+cacheWrite=0`), and the prefix varies per request anyway because the governed
+override and the user's memory are appended. Cache **writes** bill at 1.25×, so
+enabling it there is 25% more per delegation for zero hits.
+
+> **The bug worth knowing about.** The device brief took three deploys. The first
+> two rewrote the specialists' system prompts to say "use the supplied list, do
+> not call `discover_devices`" — and the specialists kept calling it. The brief
+> was demonstrably arriving (sub-agent input tokens rose 2,521 → 3,428) and the
+> new prompt was live. The cause was `discover_devices`' own docstring, which
+> still opened with *"Call this FIRST, every time."* **A tool's description
+> outranks the system prompt about that tool**, and nothing was visible in any
+> reply: the answers stayed correct and the optimisation simply never happened.
+> `common/tests/test_discover_guidance.py` now asserts the two halves agree.
+
+### Read-only shared Memory
+
+All eight specialists retrieve from the Memory the orchestrator writes
+(`common/memory.py`), under the same actor-partitioned namespaces
+(`/users/{actor}/facts`, `/users/{actor}/preferences`) with **no agent
+dimension** — "prefers warm light" is a fact about the user, not about whichever
+agent heard it. The actor id comes from `shared/memory_actor.py`, one function
+copied into every container: two containers that sanitized the same user
+differently would each get a working, private, half-empty memory, and the symptom
+("the sub-agent never remembers what I told the main agent") reads as a retrieval
+bug rather than a naming one.
+
+**Writing stays the orchestrator's alone**, because only it holds the
+conversation. A specialist receives one self-contained delegated instruction, so
+anything it wrote would return as a context-free half-sentence on every future
+retrieval, and eight concurrent writers would hand the SUMMARIZATION strategy an
+interleaved transcript of a conversation none of them had. Enforced by IAM rather
+than by intent: `A2ASharedMemoryRead` grants `bedrock-agentcore:RetrieveMemoryRecords`
+and nothing else, so an edit that tried to write fails instead of quietly
+poisoning the memory.
+
+`/summaries/{actor}/{sessionId}` is deliberately **not** read: AgentCore assigns
+runtimeSessionId per runtime and the A2A hop does not propagate the
+orchestrator's, so a specialist cannot name the session whose summary it wants and
+would be reading its own empty namespace.
+
+The retrieved lines are framed as context about the user, explicitly not part of
+the current request, with the current request winning on conflict. Unlabelled they
+read as instructions — a specialist asked to dim the bedroom would apply a
+remembered ocean effect because the prompt appeared to ask for it.
 
 > `AgentCard` validates types, not emptiness: `AgentCard(name="", url="")`
 > constructs happily and would be sent only to be rejected at the far end. The
@@ -3032,6 +3263,32 @@ two deployed skills the table never mentioned (`inspect_devices`,
 `tariff_analysis`) on its first run. A renamed skill would otherwise leave the
 prompt pointing at a missing tool, and the model would fall back to its own
 knowledge with no error anywhere.
+
+The rules also state the **cost model**, not just the routing: independent
+specialists run concurrently, so asking two in one turn costs about as long as one,
+and serialising them doubles the wait for nothing. Given only "you may call several
+tools", the model tends to wait for each reply before asking the next — which is
+the 51.1s arm of the parallel-delegation A/B in §9.13. Only a genuinely dependent
+step (one specialist needs another's *answer*) is serialised, and the prompt names
+the two cases: a feast the user then wants saved, and an automation containing a
+lighting effect.
+
+**What each delegated message carries.** `agent/tools/a2a.py` appends a device
+brief mechanically, from `shared/device_brief.py` — the relevant devices for this
+request with their ids and the capability bounds a specialist cannot guess
+(ranges, enum values, segment counts). Appended by the *tool* rather than
+requested in the prompt, because a latency fix that depends on the model
+remembering to include device details every time is a fix that works unevenly.
+
+Trimmed twice, and the second cut is the point: filtering by relevance alone would
+still hand over the full 12-device capability table (~1,800 tokens), removing a
+round trip and adding a large prompt — moving the cost rather than removing it.
+One line per device brings it to 99-210 tokens, 5-11% of the payload it replaces.
+The brief is a **hint**: `discover_devices` stays available, the prompt says when
+to use it anyway (no list, the device missing, the list contradicting the request),
+and it states plainly that the brief carries **no live state**, since it is built
+from the static catalog and a specialist that assumed otherwise would report a
+brightness nobody told it.
 
 **Measuring routing.** `scripts/probe-routing.py` reads the runtime's own
 `gen_ai.tool.name` spans, which is the only direct record of which tool ran.
@@ -3067,11 +3324,38 @@ IAM is granted per agent and narrowly:
 |---------------|--------|--------------|
 | `A2AM2MSecretRead` | `secretsmanager:GetSecretValue` on the m2m secret | all |
 | `A2APromptTableRead` | `dynamodb:GetItem` on `smarthome-skills` | all |
+| `A2ASharedMemoryRead` | `bedrock-agentcore:RetrieveMemoryRecords` on the shared Memory — **and nothing else**, so a future edit that tried to write fails rather than quietly poisoning it (§9.13) | all |
 | `A2AScenariosTableAccess` | read/write on `smarthome-scenarios` + its indexes | task-management only |
 
 Separate policy **names** on purpose: `put_role_policy` replaces a document, so
 sharing one name means whichever step runs last wins and the other grant
 vanishes silently.
+
+> ⚠️ **`UpdateRegistryRecord` wraps every level in `optionalValue`; `Create` takes
+> it bare.** Measured from the botocore service model, not guessed: the union, each
+> descriptor **and** each field.
+>
+> ```
+> create  {"a2aAgentCard": {"data": "<json>"}}
+> update  {"optionalValue": {"a2aAgentCard": {"optionalValue":
+>             {"data": {"optionalValue": "<json>"}}}}}
+> ```
+>
+> This matters because `deploy.py` treats **any** update failure as "delete the
+> record and recreate it", and that path succeeds — so a redeploy reported success
+> while minting a **new recordId**, and `a2aGrants` in every `__a2a_permissions__`
+> row is keyed by recordId. The visible symptom is a user whose skills were granted
+> yesterday having no `a2a_*` tools today, with nothing in any log.
+>
+> It shipped twice. The first fix wrapped only the outer level — which looks right —
+> so the very next deploy recreated the record and voided the grants again.
+> `_as_update_descriptors()` now converts the whole tree, and
+> `common/tests/test_registry_update_shape.py` validates the result against the live
+> service model *and* asserts the plausible wrong shape is genuinely rejected.
+>
+> If grants ever look mysteriously empty after a redeploy, compare the recordIds in
+> `__a2a_permissions__` against
+> `aws agent-registry-control list-registry-records --registry-id <id>`.
 
 Supports `--agent <name>` for partial deploys and `--only` / `--skip` step
 filtering. `./deploy.sh` does **not** deploy the specialists — the base system
@@ -3131,7 +3415,7 @@ appends every A2A runtime ARN to the admin Lambda's
   only the log showed `not authorized to perform: agent-registry:GetRegistryRecord`.
 
 **Observability.** The A2A runtimes are ADOT-instrumented and tag spans with
-`service.name = {runtimeName}.DEFAULT`, so their tokens flow into `aws/spans`
+`service.name = {runtimeName}.DEFAULT`, so their tokens flow into the span groups
 and into the dashboard's service-name allowlist (§9.15). Two caveats:
 
 - **A sub-agent stamps its own session id** — a bare UUID, not the
@@ -3496,7 +3780,7 @@ and the AWS-official Strands eval sample
 We deliberately do **not** call `StrandsTelemetry`, set
 `OTEL_SEMCONV_STABILITY_OPT_IN`, or attach OTel baggage in `agent/agent.py`
 — any of those overrides the runtime's TracerProvider and stops Strands
-spans from reaching the `aws/spans` CloudWatch Logs group.
+spans from reaching the CloudWatch Logs span group.
 
 The voice runtime opts out entirely (`DISABLE_ADOT=1` via both
 `voice_agent.py` and `setup-agentcore.py`) because bi-directional streams
@@ -3532,7 +3816,7 @@ Memory's long-term summaries — keyed on `actor_id = sub`, not
 `session_id` — still carry context across logins.
 
 Warmup requests additionally send `X-Amzn-Trace-Id: Root=...;Sampled=0`
-so the short-circuit `__warmup__` turn is not sampled into `aws/spans`
+so the short-circuit `__warmup__` turn is not sampled into the span group
 alongside the real agent turns.
 
 ### 9.14 Code Interpreter — Live Agent Code Execution
@@ -3694,15 +3978,23 @@ does this table:
 
 | # | Card | Source | Real? |
 |---|------|--------|-------|
-| 1 | Health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans`, summed across every configured runtime and also returned per-runtime as `health.runtimes[]` | ✅ |
-| 2 | Token trend + attribution (input/output split, and per-agent on the Sessions tab) | Strands `chat` spans in `aws/spans` | ✅ tokens; ❌ dollar cost |
+| 1 | Health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + the runtime span groups, summed across every configured runtime and also returned per-runtime as `health.runtimes[]` | ✅ |
+| 2 | Token trend + attribution (input/output split, and per-agent on the Sessions tab) | Strands `chat` spans, read from each runtime's own group **and** legacy `aws/spans` (§9.4) | ✅ tokens; ❌ dollar cost |
 | 3 | Budget consumption | — | ❌ simulated |
 | 4 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
 | 5 | Active version & release state | `ListAgentRuntimeEndpoints` / `…Versions`, CloudTrail | ✅ versions; ⚠️ rollout stage derived |
 | 6 | User satisfaction (CSAT, thumbs, escalation) | — | ❌ simulated |
 
-Four constraints drove the design, all measured rather than assumed:
+The constraints below all came from measurement rather than assumption:
 
+- **The span log group moved, and nothing said so.** Since 2026-08-05 each
+  runtime writes spans to its own `/aws/bedrock-agentcore/runtimes/{id}-DEFAULT`
+  group instead of the account-wide `aws/spans`. Every card on this page read
+  "no data" for six days as a result — a query that succeeds and matches zero
+  records is indistinguishable from an idle system. Both sources are now queried
+  and merged, and the group list is filtered through `DescribeLogGroups` first
+  because `StartQuery` fails the *entire* request if one named group is absent.
+  Full account in §9.4.
 - **`aws/spans` is account-wide.** Around forty unrelated runtimes share it in
   this account, so every query over it needs a `service.name` filter. The
   per-session token query had none — it filtered on `scope.name` and on the
@@ -3786,7 +4078,7 @@ Four constraints drove the design, all measured rather than assumed:
 
 **Two-stage loading.** The fast half (CloudWatch `GetMetricData` + control-plane
 reads + CloudTrail) returns in ~2-3s and paints immediately. The slow half
-(`?part=spans`) runs Logs Insights over `aws/spans` and takes ~5-20s, filling in
+(`?part=spans`) runs Logs Insights over the span groups and takes ~5-20s, filling in
 the token cards when it lands. Both spans queries share **one** deadline
 (`SPANS_QUERY_BUDGET_SECONDS = 22`) because API Gateway's integration timeout is
 a hard 29s that cannot be raised — giving each query its own 20s budget risked a
@@ -4109,7 +4401,7 @@ fails closed.
 "Agent" was not a first-class entity in this control plane. The first-class
 entities were the Cognito user and the skill; an agent appeared only as
 `agentType: 'text' | 'voice'`, a two-value enum inside the prompt and
-optimization screens. With an orchestrator, seven specialists, a voice runtime and
+optimization screens. With an orchestrator, eight specialists, a voice runtime and
 a navigation tool, nothing answered *what agents exist, where do they run, and is
 any of them failing*.
 
@@ -4205,6 +4497,113 @@ watching the screen follow, in both modes.
 > looked perfect. And `MessageCallback` is `(topic, payload)`: a one-parameter
 > handler receives the *topic string*, so every field read off it was undefined
 > and an agent's command was ignored while the panel's own buttons worked.
+
+---
+
+### 9.20 Developer-Facing Surfaces
+
+The customer's product has a large developer audience, so four features exist for
+users who would rather script the agent than converse with it. All four are
+opt-in; none changes the default path.
+
+#### Progress streaming and the delegation trace
+
+A delegated turn takes ~31s and the chatbot used to show a motionless
+"thinking…" for all of it. `POST /invocations` with `{"stream": true}` returns
+**SSE** instead of a JSON body: one `progress` frame per tool the model calls,
+then one `answer`.
+
+```
++12.0s  {"type":"progress","tool":"a2a_home_security_agent_risk_assessment"}
++13.1s  {"type":"progress","tool":"a2a_energy_optimization_agent_estimate_savings"}
++13.8s  {"type":"progress","tool":"a2a_knowledge_qa_agent_answer_from_docs"}
++44.8s  {"type":"answer","response":"…"}
+```
+
+So the user reads "asking the Home Security specialist…" at 12s rather than
+nothing until 45s. §9.13 explains why streaming *tokens* cannot beat that.
+
+Opt-in because the response **type** changes: returning a generator makes
+`BedrockAgentCoreApp` emit `text/event-stream`, and an existing caller doing
+`response.json()` on that gets a parse error rather than a reply. Voice, the eval
+harness and both A/B arms keep the JSON body. The A/B arms are excluded
+deliberately — neither the bundles runtime nor the optimization gateway is
+guaranteed to pass a streaming body through unbuffered, and an experiment arm that
+silently degraded to a blank 30s wait would be worse than no progress at all.
+
+The chatbot keeps each turn's tool list and renders it as a collapsed
+`<details>` under the reply. That matters because **a delegated answer and an
+invented one read identically** — "your biggest gap is the flat IoT network" is
+equally fluent either way, which is exactly why `scripts/probe-routing.py` reads
+spans instead of reply text. The panel puts the same evidence in front of the
+person reading the answer, for free: it is built from the events the turn already
+streamed, where querying spans would mean a 10-20s Logs Insights round trip to
+learn what the stream said seconds earlier.
+
+> **The framing bug this nearly shipped with.** `BedrockAgentCoreApp` adds the SSE
+> framing itself **and** JSON-encodes each yielded value. Hand-framing
+> `data: {...}\n\n` in the handler therefore produced `data: data: {...}` on the
+> wire, and a frame that decodes to the *string* `'{"type":"progress",…}'` rather
+> than an object — `evt.type` on a string is `undefined`, so the client would have
+> silently dropped every frame **including the answer**. The handler yields bare
+> JSON; the client decodes twice. Caught by reading the live stream, not by the
+> unit tests, which had encoded the same wrong assumption.
+
+#### Structured output
+
+`{"responseFormat": "json"}` appends JSON formatting rules to the prompt, so a
+device state arrives as `{"deviceId": "bedroom-light-1", "power": false,
+"brightness": 80}` rather than as prose about brightness.
+
+Prompt-level rather than constrained decoding, deliberately: the reply comes from
+the same turn with the same tools, so a JSON request routes and delegates exactly
+as its prose equivalent does — verified live, it still consulted the security
+specialist. The rules are appended **last**, which is load-bearing twice: the
+instruction nearest the end wins a direct conflict with an admin's governed prompt
+that may ask for prose, and anything per-request must sit after the cached prefix
+(§8) to keep cache hits.
+
+Prompting alone was not sufficient. On a *delegated* turn the reply came back
+wrapped in a ```` ```json ```` fence — unsurprising, since after summarising a
+specialist's prose the model is deep in chat-formatting mode. `unfence_json`
+strips it, and only in JSON mode. Same conclusion as the `⟦A2A:…⟧` marker: **if a
+property must hold for every reply, the harness enforces it** rather than the
+prompt asking politely.
+
+#### Scenes as code
+
+`GET /registry/records?action=export-scenes&userId=…` returns a user's scenes as
+portable JSON; `POST …?action=import-scenes` creates them from a document.
+Surfaced in Admin Console → Scenarios → **Scenes as Code**, a paste box rather
+than a form — the audience already has the JSON, and a form would be a second,
+worse scene editor competing with the agent that owns authoring.
+
+Import goes through `scenarios.build_scenario`, **the same validator the A2A agent
+uses**. A separate import validator would be a second definition of "valid" and it
+would drift, which in practice means storing a device action the execution path
+then refuses — an automation that saves cleanly and silently never fires.
+Per-scene outcomes rather than all-or-nothing, since one bad trigger should not
+cost the user their other five. Import stores but does **not** schedule; Reconcile
+does that, so parsing a document can never start firing automations as a side
+effect.
+
+Two findings from the live test:
+
+- **Scene rows are keyed by Cognito `sub`, not email** — that is what the A2A
+  agent writes and what the runner reads, while every other admin surface is keyed
+  by email. The first export returned 0 scenes for a user with six. Export now
+  tries both; import *resolves* to a sub and refuses if it cannot, because storing
+  under an email would "succeed" and produce a scene that shows on the page and
+  never runs.
+- **The admin Lambda had read-only access to the scenarios table.** All six scenes
+  validated and then every `PutItem` failed with `AccessDenied`. Read-only was
+  right while the agent was the only author; JSON import makes the console one too.
+
+#### Self-service publishing
+
+Already covered by §9.8: any confirmed Cognito user can publish a skill or an A2A
+agent record through Skill ERP, and a curator approves it before it reaches the
+catalog.
 
 ---
 

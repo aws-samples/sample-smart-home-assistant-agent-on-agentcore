@@ -727,7 +727,7 @@ const zh: Record<string, string> = {
   'dashboard.kpi.activeSessionsHint': 'CloudWatch 的 ActiveSessionCount 只有账号级维度（Service=AgentCore.Runtime），没有按单个 Runtime 拆分的版本，因此该数值涵盖账号下所有 AgentCore Runtime。',
   'dashboard.kpi.sessionsInWindow': '窗口内会话 {n}',
   'dashboard.kpi.ttft': '首 Token 延迟 P95',
-  'dashboard.kpi.ttftHint': 'TTFT 不存在于 CloudWatch 指标中，来自 aws/spans 日志组里 Strands chat span 的 gen_ai.server.time_to_first_token 属性。展示值为各天 P95 的上包络（Logs Insights 无法跨时间桶合并分位数）。委派给子 Agent 的轮次会显著拉高 TTFT：A2A 这一跳不走流式，主 Agent 在子 Agent 完成自己那次 LLM 调用之前不会输出任何内容。实测直接回答约 15 秒，委派约 30 秒 —— 这是委派的固有代价，不是模型退化。',
+  'dashboard.kpi.ttftHint': "TTFT 不存在于 CloudWatch 指标中，来自 Strands chat span 的 gen_ai.server.time_to_first_token 属性 —— 从各 runtime 自己的日志组读取（/aws/bedrock-agentcore/runtimes/{id}-DEFAULT），再加上 aws/spans 里 2026-08-05 之前的历史（那天 AgentCore 把 trace 导出改成了按 runtime 分组）。展示值是各天 P95 的上包络（Logs Insights 无法跨时间桶合并分位数）。发生委派的回合 TTFT 会明显变高 —— A2A 跳转是非流式的，主 Agent 必须等专家跑完自己那轮 LLM 才能开始写答案：直答约 15s，委派约 30s。这是委派的代价，不是模型退化。但用户并不会干等：聊天界面在约 2s 时就会流式给出专家的名字，等待期间显示的是「正在询问 Home Security specialist…」而不是一个不动的转圈。",
   'dashboard.kpi.errorRate': '错误率',
   'dashboard.kpi.errorRateHint': '(UserErrors + SystemErrors) / Invocations，取自 AWS/Bedrock-AgentCore 指标。窗口内无请求时显示为 --，而不是 0%。',
   'dashboard.kpi.noTraffic': '窗口内无请求',
@@ -810,7 +810,7 @@ const zh: Record<string, string> = {
   'dashboard.satisfaction.footnote': '本卡片全部为模拟数据。Chatbot 目前没有赞/踩交互，也没有 CSAT 推断与升级率埋点。最接近的真实替代指标是上方评估卡中的 Helpfulness 与 GoalSuccessRate，但它们并不等同于 CSAT。',
 
   'dashboard.strip.tokens': 'Token 消耗合计',
-  'dashboard.strip.tokensHint': '窗口内输入与输出 Token 之和，来自 aws/spans 中 Strands chat span 的 gen_ai.usage.* 属性。',
+  'dashboard.strip.tokensHint': '窗口内输入与输出 Token 之和，来自 Strands chat span 的 gen_ai.usage.* 属性。从各 runtime 自己的日志组读取，另加 aws/spans 里 2026-08-05 切换之前的历史。',
   'dashboard.strip.quality': '评估质量均分',
   'dashboard.strip.qualityHint': '所有比例型（0-1）在线评估器的窗口均分。Numerical 量表的评估器（如 smarthome_SmartHomeQuality）不计入，避免把不同量纲混算成一个百分比。',
   'dashboard.strip.driftAlerts': '{n} 个评估器下滑',

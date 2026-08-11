@@ -2,7 +2,7 @@
 
 > **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、**企业知识库**、外部集成、会话监控、长期记忆查看和质量评估。
 
-基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台按 **Discover / Build / Deploy / Assess** 四个阶段组织 15 个页面，覆盖 Agent 全生命周期，其中 Overview 页内置 **Agent 运维统计大屏**（实时健康、Token 成本归因、评估漂移、版本发布状态）。**Skill ERP** 网站让普通用户可以自助发布技能到 **AWS Agent Registry**，审批通过后一键导入到技能目录。
+基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台按 **Discover / Build / Deploy / Assess** 四个阶段组织 17 个页面，覆盖 Agent 全生命周期，其中 Overview 页内置 **Agent 运维统计大屏**（实时健康、Token 成本归因、评估漂移、版本发布状态）。**Skill ERP** 网站让普通用户可以自助发布技能到 **AWS Agent Registry**，审批通过后一键导入到技能目录。
 
 > **实现原理、架构图、协议细节** 请参见 [`docs/architecture-and-design.md`](docs/architecture-and-design.md)。本 README 专注于**部署和使用**。
 
@@ -10,7 +10,7 @@
 
 九个 Agent(一个编排器 + 八个 A2A 专家)跑在各自的 AgentCore Runtime 上。真正值得看的
 不是拓扑,而是**哪些设计是被实测和线上故障逼出来的**。完整版见
-[`docs/agent-design-principles.md`](docs/agent-design-principles.md),每条都配
+[`docs/agent-design-principles-zh.md`](docs/agent-design-principles-zh.md),每条都配
 file:line 与数字;这里只列最反直觉的五条。
 
 **1. 会碰用户数据的 tool 必须是工厂,不能是列表。** 启动时建一次 tool 列表会把第一个
@@ -141,12 +141,12 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 > **注册 ≠ 有管理员权限。** 本控制台只对 `admin` 组成员开放。新注册的账号能登录，但会看到"访问被拒绝"，需要联系管理员把你加入 `admin` 组（Admin Console → Build → Identity 页的 `Make Admin`，或 `aws cognito-idp admin-add-user-to-group`）。在此之前可以直接使用**聊天机器人** —— 所有终端用户功能（智能家居对话、设备控制、知识库问答）都不需要管理员权限。注册页和"访问被拒绝"页都给出了聊天机器人的直达链接。
 
-左侧导航按 Agent 生命周期分成四段，共 16 个页面：
+左侧导航按 Agent 生命周期分成四段，共 17 个页面：
 
 | 分段 | 页面 | 能做什么 |
 |------|------|---------|
 | **Discover** | **Overview** | 产品说明 + 架构图（默认折叠）以及 **Agent 运维统计大屏**（见下节）。三个 Demo 入口已移至侧边栏「演示入口」分组 |
-| Discover | **Agents** | **机队总览**：1 主 + 7 子 + 1 语音 + 1 A/B 变体 + 1 Tool，含运行时名、状态、skill 数与实时指标。点进详情页可**逐个 Agent 编辑 system prompt**（保存后下一次请求即生效，不用重新部署容器）。列表由 Runtime ARN + Registry 记录推导，新部署的子 Agent 自动出现 |
+| Discover | **Agents** | **机队总览**：1 主 + 8 子 + 1 语音 + 1 A/B 变体 + 1 Tool，含运行时名、状态、skill 数与实时指标。点进详情页可**逐个 Agent 编辑 system prompt**（保存后下一次请求即生效，不用重新部署容器）。列表由 Runtime ARN + Registry 记录推导，新部署的子 Agent 自动出现 |
 | Discover | **Integration Registry** | 工具集成概览 + 从 AWS Agent Registry 读取已批准的 **A2A Agent** 记录（显示名称/端点/能力/发布者） |
 | **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
 | Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AWS Agent Registry 导入已批准技能** |
@@ -158,6 +158,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | **Deploy** | **Instance Type** | 计算实例类型（当前 MicroVM，EC2 规划中） |
 | Deploy | **Sessions** | 每次登录的运行时会话列表（用户 / 类型 / 会话 ID / 最近活跃 / 近 7 天 Token，**并标出 token 归属的 agent**）、一键 Stop，以及 **Remote Shell**（在 Runtime 容器里执行 shell 命令，stdout/stderr 流式回传） |
 | **Assess** | **Agent Guardrails** | 跳转 AgentCore Evaluator + Bedrock Guardrails 控制台 |
+| Assess | **Scenarios** | 所有用户的自动化场景：触发条件、真实 cron + 时区、最近一次是否执行成功。「同步定时任务」按钮对账 EventBridge Scheduler；**「场景即代码」**导出/导入 JSON |
 | Assess | **Observability** | 跳转 CloudWatch Gen-AI Observability |
 | Assess | **Evaluations** | 跳转 AgentCore Evaluations 控制台 |
 | Assess | **Optimization** | AgentCore Optimization：推荐、配置包、目标级 A/B 测试、按用户配置入口环境（entryEnvironment）。优化目标可选**任意已部署的 Agent**（下拉选项来自机队，不是硬编码） |
@@ -270,6 +271,44 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 | `idle` | 明确说没有配对的音箱，请用户去连 —— **绝不报成功** |
 
 猜错的代价是不对称的：把 `pairing` 当失败，是让用户去重连一个两秒后就能用的音箱；把 `idle` 当成功，是让用户对着一屋子不动的灯发愣。
+
+### 面向开发者的四件事
+
+客户产品在开发者社区有大量用户，所以有四个功能是给「宁愿写脚本、不想聊天」的人准备的。全部 opt-in，默认路径不变。
+
+**1. 委派进度提示。** 委派一轮约 31s，以前这段时间只有一个不动的「思考中…」。请求带 `{"stream": true}` 时 runtime 返回 SSE，模型每调一个 tool 推一帧。实测一个三域请求在 **12.0s** 就报出第一个专家 Agent，而答案在 44.8s 才到 —— 用户提前 33 秒知道系统在干什么。
+
+  流式**只推 tool 生命周期，不推正文 token**，因为正文做不到更快：模型必须等它刚调的 tool 返回才能开始写答案（实测首个正文 token 在 +8.13s，而首个 token 是个 tool 调用，在 +1.88s）。
+
+**2. 「这个回答是怎么来的」。** 每条回答下面折叠着这一轮实际调用的 tool 列表。它的价值在于：**一个委派来的答案和一个编造的答案读起来一模一样** —— 这正是测路由必须读 span 而不是读回复文本的原因。数据来自上面那条进度流，所以零额外成本。
+
+**3. 结构化输出。** 请求带 `{"responseFormat": "json"}`，设备状态就变成 `{"deviceId": "bedroom-light-1", "power": false, "brightness": 80}` 而不是一段描述亮度的话。**格式变、路由不变** —— JSON 请求该问专家 Agent 还是会问。
+
+**4. 场景即代码。** Admin Console → Scenarios → 「场景即代码」，把用户的场景导出成 JSON、改完再导入。校验走 Agent 用的**同一份**代码（`scenarios.build_scenario`），所以导入的场景不可能存下一个执行端随后会拒绝的动作。导入只存不排期，之后需要手动点一次「同步定时任务」—— 解析一份文档不应该顺带开始触发自动化。
+
+自助发布 skill / A2A Agent 见 **Skill ERP** 站点（任何已确认的 Cognito 用户都能发，审批后进目录）。
+
+### 性能与实测
+
+所有性能结论都有量具和归档，见 [`docs/measurements/`](docs/measurements/)：
+
+```bash
+./venv/bin/python scripts/measure-baseline.py --repeats 3 --label baseline   # 10 条固定 prompt
+./venv/bin/python scripts/ab-delegation-brief.py       # 单项 A/B：委派设备清单
+./venv/bin/python scripts/ab-parallel-delegation.py    # 单项 A/B：并行委派
+./venv/bin/python scripts/probe-routing.py             # 实际路由到哪（读 span）
+```
+
+已完成的优化：
+
+| 改动 | 实测 |
+|---|---|
+| 委派时带上相关设备清单（省掉子 Agent 开场那次 `discover_devices`） | **-1.64s（-10%）**，四对 A/B 全胜 |
+| 并行委派（event loop 移到自己的线程） | 三域请求 **51.1s → 17.2s（-66%）** |
+| Prompt caching（编排器约 10.5k token 的固定前缀） | 计费 input token **29,644 → 9**；延迟 2%（噪声内）|
+| 委派进度流 | 首个可见信号 **31s → 12s** |
+
+> **报数字要分清哪部分不是你的。** 24.3s 平均耗时里约 **7.1s 花在 AgentCore 里、还没进容器**：全新 session id 约 7s，复用约 0.4s。只报总耗时会把平台冷启动记在 harness 账上。
 
 ### 添加管理员用户
 
@@ -525,7 +564,8 @@ cd cdk && npx cdk destroy --all --force
 | 本 README | 部署、使用、本地开发、成本估算、故障排除 |
 | [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | 架构图、组件设计、认证模型、语音模式实现细节、**A2A 专家 Agent 的身份透传与 skill 强制**、**场景编排与定时执行**、**Agents 机队页**、AgentCore CLI 坑、运维大屏与测试数据设计、API 参考、MQTT 命令、技术选型 |
 | [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | 管理员运维手册:部署闭环、身份接入、权限管控(含授权复核与工具影响面)、质量评估、提示词优化、Skill 审批流水线、**Agents 机队与逐个 Agent prompt**、**场景联动与定时自动化**、Session 调试、运维大屏、`cdk deploy` 环境变量陷阱 |
-| [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | **Agent 设计理念**:Harness 设计、Context 工程、Prompt 设计三章。每条都配本仓 file:line 与实测数字;与预期相反的结论会写明预期本身 |
+| [`docs/agent-design-principles-zh.md`](docs/agent-design-principles-zh.md) | **Agent 设计理念(中文)**:Harness 设计、Context 工程、Prompt 设计三章。每条都配本仓 file:line 与实测数字;与预期相反的结论会写明预期本身 |
+| [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | 同上,英文版 |
 | [`docs/measurements/`](docs/measurements/) | 延迟与成本实测:测量方法(`README.md`)、Spec 5 逐阶段 before/after 报告(`spec5-report.md`)、可对比的基线归档(JSON) |
 | [`scripts/sim/README.md`](scripts/sim/README.md) | 模拟用户脚本:persona 配置、覆盖范围、安全边界与已知坑位 |
 
@@ -546,7 +586,7 @@ cd cdk && npx cdk destroy --all --force
 
 > **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base (on S3 Vectors)**, **Integration Registry (A2A agents)**, session monitoring (with **Remote Shell** debug console), long-term memory viewing, and safety guardrails.
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console organises 15 pages across four lifecycle stages — **Discover / Build / Deploy / Assess** — including an **agent operations dashboard** on Overview (live health, token cost attribution, evaluation drift, release state) and a **Remote Shell** per-session debug console. The **Skill ERP** site lets end users publish their own skills and A2A agents to **AWS Agent Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console organises 17 pages across four lifecycle stages — **Discover / Build / Deploy / Assess** — including an **agent operations dashboard** on Overview (live health, token cost attribution, evaluation drift, release state) and a **Remote Shell** per-session debug console. The **Skill ERP** site lets end users publish their own skills and A2A agents to **AWS Agent Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
 
 > **Implementation details, architecture diagrams, protocol specs** live in [`docs/architecture-and-design.md`](docs/architecture-and-design.md). This README focuses on **deployment and usage**.
 
@@ -694,7 +734,7 @@ Log in with the admin credentials from deploy output. The login page also offers
 
 > **Registering does not grant admin permission.** This console is open only to members of the `admin` group. A newly registered account can sign in but lands on "Access Denied" until an administrator adds it to the group (`Make Admin` on Build → Identity, or `aws cognito-idp admin-add-user-to-group`). Until then, use the **chatbot** — every end-user capability (smart home conversation, device control, knowledge base) works without admin rights. Both the sign-up form and the Access Denied page link straight to it.
 
-The side navigation groups 16 pages by agent lifecycle stage:
+The side navigation groups 17 pages by agent lifecycle stage:
 
 | Stage | Page | What you can do |
 |-------|------|-----------------|
@@ -711,6 +751,7 @@ The side navigation groups 16 pages by agent lifecycle stage:
 | **Deploy** | **Instance Type** | Compute class configuration (MicroVM today, EC2 planned) |
 | Deploy | **Sessions** | Per-login runtime sessions (user / kind / session ID / last active / 7-day tokens, **labelled with the owning agent**); Stop with one click; **Remote Shell** streams shell commands inside the runtime container — admin-only SSH-style debug console |
 | **Assess** | **Agent Guardrails** | Links to AgentCore Evaluator + Bedrock Guardrails consoles |
+| Assess | **Scenarios** | Every user's automations: trigger, live cron + timezone, and whether the last run worked. **Reconcile Schedules** reconciles EventBridge Scheduler; **Scenes as Code** exports/imports them as JSON |
 | Assess | **Observability** | Link to CloudWatch Gen-AI Observability |
 | Assess | **Evaluations** | Link to the AgentCore Evaluations console |
 | Assess | **Optimization** | AgentCore Optimization: recommendations, configuration bundles, target-based A/B tests, per-tenant entry environment. The target can be **any deployed agent** — the options come from the fleet, not a hardcoded list |
@@ -826,6 +867,44 @@ Say "make the living room lights dance to the music": the TV backlight goes into
 The cost of guessing is asymmetric: reading `pairing` as failure tells the user to reconnect a speaker that was two seconds from working, and reading `idle` as success leaves them staring at a room of motionless lights.
 
 `bluetooth` is a **readonly** capability: the catalog declares no action that writes it, and `validate_command` drops any parameter an action does not declare, so a command — including one a prompt injection talked a model into phrasing — cannot assert a link state the device alone may report.
+
+### Four things for developers
+
+The customer's product has a large developer audience, so four features exist for users who would rather script the agent than converse with it. All four are opt-in; the default path is unchanged.
+
+**1. Delegation progress.** A delegated turn takes ~31s, and the chatbot used to show a motionless "thinking…" for all of it. With `{"stream": true}` the runtime returns SSE, one frame per tool the model calls. Measured on a three-domain request: the first specialist is named at **12.0s**, the answer lands at 44.8s — the user learns what the system is doing 33 seconds earlier.
+
+  The stream carries **tool lifecycle, not prose tokens**, because prose cannot be faster: the model must wait for the tool it just called to return. Measured, the first text delta is at +8.13s while the first token — a tool call — is at +1.88s.
+
+**2. "How this was answered."** Each reply has a collapsed list of the tools that turn actually used. It matters because **a delegated answer and an invented one read identically** — precisely why measuring routing means reading spans rather than reply text. It is built from the progress stream above, so it costs nothing.
+
+**3. Structured output.** `{"responseFormat": "json"}` turns a device state into `{"deviceId": "bedroom-light-1", "power": false, "brightness": 80}` instead of a sentence about brightness. **Format changes, routing does not** — a JSON request still consults the specialist that covers it.
+
+**4. Scenes as code.** Admin Console → Scenarios → **Scenes as Code** exports a user's scenes as JSON and imports them back. Validation runs through **the same code the agent uses** (`scenarios.build_scenario`), so an imported scene cannot store an action the execution path would then refuse. Import stores but does not schedule — run Reconcile afterwards, since parsing a document should not start firing automations.
+
+Self-service skill / A2A publishing is the **Skill ERP** site: any confirmed Cognito user can publish, and a curator approves before it reaches the catalog.
+
+### Performance, measured
+
+Every performance claim in this repo has an instrument and an archive under [`docs/measurements/`](docs/measurements/):
+
+```bash
+./venv/bin/python scripts/measure-baseline.py --repeats 3 --label baseline   # 10 fixed prompts
+./venv/bin/python scripts/ab-delegation-brief.py       # A/B: the delegation device brief
+./venv/bin/python scripts/ab-parallel-delegation.py    # A/B: parallel delegation
+./venv/bin/python scripts/probe-routing.py             # where requests actually routed (spans)
+```
+
+What has been done:
+
+| Change | Measured |
+|---|---|
+| Name the relevant devices in the delegation (so the specialist skips its opening `discover_devices`) | **-1.64s (-10%)**, winning 4/4 A/B pairs |
+| Parallel delegation (event loop moved to its own thread) | three-domain request **51.1s → 17.2s (-66%)** |
+| Prompt caching on the orchestrator's ~10.5k-token prefix | billed input tokens **29,644 → 9**; latency 2% (noise) |
+| Delegation progress stream | first visible signal **31s → 12s** |
+
+> **Quote numbers that separate what you own from what you rent.** Of a 24.3s mean turn, about **7.1s is spent inside AgentCore before the container is entered** — ~7s for a session id the runtime has never seen, ~0.4s for a reused one. Reporting total wall time alone credits the platform's cold start to the harness.
 
 ### Add Admin Users
 
