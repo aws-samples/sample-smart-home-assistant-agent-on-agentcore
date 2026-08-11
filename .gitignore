@@ -101,3 +101,8 @@ cdk/lambda/*/user_settings.py
 # copy of because it is built from agent/ alone while the A2A sub-agents get all
 # of shared/. Source of truth is shared/memory_actor.py.
 agent/memory_actor.py
+# Same for the device brief the orchestrator attaches to each delegation, and the
+# catalog it is generated from. Source of truth is shared/.
+agent/device_brief.py
+agent/device_catalog.py
+agent/device-catalog.json

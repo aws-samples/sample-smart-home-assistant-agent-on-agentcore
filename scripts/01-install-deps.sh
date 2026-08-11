@@ -137,6 +137,23 @@ cp "$SCRIPT_DIR/shared/memory_actor.py" "$SCRIPT_DIR/agent/memory_actor.py"
 echo "    -> agent"
 
 # ------------------------------------------------------------------------------
+# The device brief, for the orchestrator. It names the relevant devices in each
+# delegated request so the specialist skips its opening `discover_devices` cycle
+# — measured at ~1.2s of an LLM turn whose only output was that one call.
+#
+# Needs the catalog itself alongside it, since the brief is generated from the
+# same `shared/device-catalog.json` the validating Lambda reads. That shared
+# source is the point: a brief built from a second copy could name a capability
+# the control Lambda would then reject, and the user would see a specialist
+# confidently issue a command that fails.
+# ------------------------------------------------------------------------------
+echo "==> Copying the device brief + catalog into the agent..."
+cp "$SCRIPT_DIR/shared/device_brief.py"    "$SCRIPT_DIR/agent/device_brief.py"
+cp "$SCRIPT_DIR/shared/device_catalog.py"  "$SCRIPT_DIR/agent/device_catalog.py"
+cp "$SCRIPT_DIR/shared/device-catalog.json" "$SCRIPT_DIR/agent/device-catalog.json"
+echo "    -> agent"
+
+# ------------------------------------------------------------------------------
 # Copy the AWS Agent Registry helper into the Lambdas that talk to the Registry.
 # Same reason as the catalog above: Code.fromAsset(<dir>) only packages the
 # directory, and the GA record shapes must not be re-derived per caller — the

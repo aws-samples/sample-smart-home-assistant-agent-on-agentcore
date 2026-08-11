@@ -77,6 +77,43 @@ def _slug(raw: str) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Context trimming (spec 5 S2)
+# ----------------------------------------------------------------------------
+#
+# A specialist's FIRST event-loop cycle exists only to call `discover_devices`.
+# The call is cheap (~0.2s); the cycle around it is a whole LLM turn, measured at
+# 1.0-1.3s of the ~7s the specialist takes. Delegation is already two serial agent
+# turns, and the catalog is static — so the devices can be named up front.
+#
+# Attached HERE rather than left to the orchestrator's prompt, deliberately. The
+# alternative was to instruct the model to include device details in the message
+# it composes, which makes a latency optimisation depend on the model complying
+# every time, and it complies unevenly. This is a mechanical append: the tool has
+# the request text, so it can do it on every call without being asked.
+#
+# `shared/device_brief.py` decides what is relevant and keeps it to ~100-200
+# tokens; the full discovery payload is ~1,800, and pasting that in would move the
+# cost from a round trip into the prompt rather than removing it.
+
+
+def _device_context(message: str) -> str:
+    """The relevant-devices brief for `message`, or "".
+
+    Soft-fails to "" on any error, including the module simply not being present:
+    the brief is an optimisation, and a delegation that failed because a hint could
+    not be built would trade seconds for the whole answer. The specialist still
+    has `discover_devices`, which is exactly the path this skips when it works.
+    """
+    try:
+        from device_brief import delegation_context
+
+        return delegation_context(message)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("no device brief for this delegation (%s)", exc)
+        return ""
+
+
+# ----------------------------------------------------------------------------
 # AgentCard resolution (LRU-cached; ~60s TTL via time-bucketed key)
 # ----------------------------------------------------------------------------
 
@@ -226,7 +263,10 @@ def _make_skill_tool(
         try:
             return _send_a2a_message(
                 endpoint_url=_endpoint,
-                message=message,
+                # The model's message plus a mechanical device brief. Appended
+                # rather than prepended so the request stays the first thing the
+                # specialist reads.
+                message=message + _device_context(message),
                 allowed_skill_ids=_allowed,
                 token_provider=_token,
                 user_token=_user_token,

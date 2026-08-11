@@ -65,10 +65,18 @@ def build_tools(caller) -> list:
         @strands_tool
         def discover_devices() -> str:
             """List the user's devices with their ids, rooms, and what each one
-            can actually do. Call this FIRST when a request names a room, a
-            category ("the lights"), or anything you cannot map to an exact
-            device id — the ids and capability ranges come from here, never from
-            memory."""
+            can actually do.
+
+            SKIP THIS CALL when the request already contains a "Devices already
+            identified for this request" list — it carries the same ids and
+            capability ranges, so calling this costs a round trip and returns what
+            you were already given.
+
+            Call it when the request has no such list, when the device you need is
+            missing from it, when what is listed contradicts the request, or when
+            the request names a room or a category ("the lights") you cannot map to
+            an exact device id. Ids and ranges come from here or from the request,
+            never from memory."""
             return session.call(DISCOVER, {})
         tools.append(discover_devices)
 

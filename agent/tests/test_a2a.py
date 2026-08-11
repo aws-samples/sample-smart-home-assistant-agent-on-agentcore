@@ -506,3 +506,102 @@ def test_the_timeouts_are_tiered_rather_than_one_number():
 
     assert a2a_mod._CONNECT_TIMEOUT < 10
     assert a2a_mod._READ_TIMEOUT > 30
+
+
+# ---------------------------------------------------------------------------
+# Context trimming (spec 5 S2)
+#
+# A specialist's first event-loop cycle existed only to call `discover_devices`.
+# The call is cheap; the LLM turn around it measured at 1.0-1.3s of the ~7s the
+# specialist took. The devices are named up front instead.
+#
+# Appended by the TOOL, not by the orchestrator's prompt. The alternative was to
+# instruct the model to include device details in the message it composes, which
+# makes a latency fix depend on the model complying every time — and it complies
+# unevenly. These tests pin the mechanical behaviour.
+# ---------------------------------------------------------------------------
+
+def test_the_device_brief_is_appended_to_the_delegated_message(monkeypatch):
+    from tools import a2a as a2a_mod
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    sent = []
+
+    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+                   user_token=None, card_dict=None):
+        sent.append(message)
+        return "ok"
+
+    monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
+    monkeypatch.setattr(a2a_mod, "_device_context",
+                        lambda msg: "\n\nDevices already identified: living-strip-1")
+
+    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
+                            registry_id="reg", token_provider=lambda: "m2m")
+    _invoke_tool(tools[0], "make the living room cosy")
+
+    # The model's request stays FIRST — the brief is context, not the instruction.
+    assert sent[0].startswith("make the living room cosy")
+    assert "living-strip-1" in sent[0]
+
+
+def test_no_brief_leaves_the_message_byte_for_byte_unchanged(monkeypatch):
+    """Most requests get no brief, and those must be exactly as before.
+
+    Otherwise every non-device delegation (security, energy, docs) would carry a
+    stub sentence for nothing.
+    """
+    from tools import a2a as a2a_mod
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    sent = []
+    monkeypatch.setattr(
+        a2a_mod, "_send_a2a_message",
+        lambda endpoint_url, message, allowed_skill_ids, token_provider,
+        user_token=None, card_dict=None: sent.append(message) or "ok")
+    monkeypatch.setattr(a2a_mod, "_device_context", lambda msg: "")
+
+    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
+                            registry_id="reg", token_provider=lambda: "m2m")
+    _invoke_tool(tools[0], "how much could I save?")
+    assert sent == ["how much could I save?"]
+
+
+def test_a_failing_brief_does_not_fail_the_delegation(monkeypatch):
+    """The brief is an optimisation; the answer is the product.
+
+    Soft-fails to "" on anything, including the module being absent from the
+    container — a delegation that died because a hint could not be built would
+    trade a second for the whole reply.
+    """
+    from tools import a2a as a2a_mod
+
+    def _explode(name):
+        raise ImportError("no device_brief in this container")
+
+    monkeypatch.setattr("builtins.__import__", _explode)
+    try:
+        assert a2a_mod._device_context("dim the bedroom") == ""
+    finally:
+        monkeypatch.undo()
+
+
+def test_the_real_brief_names_devices_and_stays_small():
+    """Against the actual shared module, not a stub.
+
+    Two claims at once: it resolves real device ids, and it is a fraction of the
+    ~1,800-token discovery payload it replaces. A brief that grew to the size of
+    the payload would move the cost from a round trip into the prompt, which is
+    the trap this optimisation is meant to avoid.
+    """
+    from tools import a2a as a2a_mod
+
+    ctx = a2a_mod._device_context("Give the living room light strip a calm ocean feel")
+    if not ctx:
+        import pytest
+        pytest.skip("device_brief not present in this checkout's agent/ build")
+    assert "living-strip-1" in ctx
+    assert "discover_devices" in ctx  # still offered as the fallback
+    assert len(ctx) < 2000

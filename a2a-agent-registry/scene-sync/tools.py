@@ -49,12 +49,18 @@ def build_tools(caller) -> list:
         def discover_devices() -> str:
             """List the user's devices with their ids, rooms and capabilities.
 
-            Call this FIRST, every time. A feast is built from what the room
-            actually has, and that varies: only a device declaring a `sync_mode`
-            capability can follow a screen or the music at all, `segments.count`
-            is how many colours its palette may carry (the TV backlight has 4, the
-            living-room strip 30), and `effect.values` is the complete set of
-            animation names that fixture accepts."""
+            SKIP THIS CALL when the request already contains a "Devices already
+            identified for this request" list — it names the same devices and
+            capabilities, including which fixture declares `sync_mode`, so calling
+            this repeats a question already answered and the user waits for it.
+
+            Call it when the request has no such list, when the fixture you need is
+            missing from it, or when what is listed contradicts what was asked. A
+            feast is built from what the room actually has, and that varies: only a
+            device declaring a `sync_mode` capability can follow a screen or the
+            music at all, `segments.count` is how many colours its palette may
+            carry (the TV backlight has 4, the living-room strip 30), and
+            `effect.values` is the complete set of animation names it accepts."""
             return session.call(DISCOVER, {})
         tools.append(discover_devices)
 

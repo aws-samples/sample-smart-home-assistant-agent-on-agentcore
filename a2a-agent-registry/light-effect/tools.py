@@ -48,9 +48,15 @@ def build_tools(caller) -> list:
         def discover_devices() -> str:
             """List the user's devices with their ids, rooms and capabilities.
 
-            Call this FIRST, every time. You cannot compose an effect without
-            knowing which fixtures exist and what each one supports: the
-            `segments.count` tells you how many colours a palette may contain,
+            SKIP THIS CALL when the request already contains a "Devices already
+            identified for this request" list. That list holds the same ids,
+            `segments.count` and `effect.values` this returns, so calling it adds a
+            round trip the user waits through and tells you nothing new.
+
+            Call it when the request has no such list, when the fixture you need is
+            missing from it, or when what is listed contradicts what was asked. You
+            cannot compose an effect without knowing what each fixture supports:
+            `segments.count` is how many colours a palette may contain,
             `effect.values` is the ONLY set of animation names that fixture
             accepts, and a light with no `effect` capability can take a colour but
             not an animation."""
