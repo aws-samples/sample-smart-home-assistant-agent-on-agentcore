@@ -817,6 +817,46 @@ def _memory_client():
     return _memory_client_singleton or None
 
 
+# Words that turn "here is a photo" into "do something to my lights with it".
+#
+# A keyword list rather than asking the vision model to classify the intent: the
+# classification would be one more thing to get wrong, and it would cost a token
+# budget on every plain "what is this" to serve the minority of turns that want an
+# effect. Cheap, inspectable, and wrong in the safe direction — a miss falls back
+# to the caption, which is still a useful answer and which the user can act on with
+# a second message.
+#
+# Both languages, because the deployment is used in both and a Chinese-only phrasing
+# ("照这个做灯效") is the most likely way to ask.
+LIGHT_EFFECT_KEYWORDS = (
+    # English
+    "light effect", "lighting effect", "light up", "lights up", "lighting",
+    "ambience", "ambiance", "atmosphere", "mood light", "colour scheme",
+    "color scheme", "palette", "match the lights", "match my lights",
+    "set the lights", "make the lights", "light scene", "led", "strip",
+    "backlight", "recreate", "like this photo", "like this image",
+    # Chinese
+    "灯效", "灯光", "氛围", "灯带", "背光", "配色", "色调", "调色",
+    "打光", "照这个", "按这张", "按照这张", "仿照", "还原", "同款灯",
+    "点亮", "灯光效果", "情景灯", "变成这个颜色", "这个颜色",
+)
+
+
+def wants_light_effect(prompt: str) -> bool:
+    """Whether an image turn is asking for lighting rather than a description.
+
+    Matched case-insensitively on substrings. Chinese needs substring matching
+    anyway (no word boundaries), and using it for both keeps one rule instead of
+    two.
+    """
+    text = (prompt or "").strip().lower()
+    if not text:
+        # An image with no words is "tell me what this is". Nobody attaches a photo
+        # in silence and expects the lights to change.
+        return False
+    return any(kw in text for kw in LIGHT_EFFECT_KEYWORDS)
+
+
 def _persist_vision_turn(session_id, actor_id, user_prompt, description, images, storage_entries=None):
     """Write the vision exchange to AgentCore Memory short-term events.
 
@@ -1015,6 +1055,38 @@ def handle_invocation(payload, context):
 
         _persist_vision_turn(session_id, actor_id, prompt, response_text, images,
                              storage_entries=storage_entries)
+
+        # "Make a light effect from this photo" is a request the fast path cannot
+        # answer. Captioning and returning describes the picture and changes
+        # nothing, and the user has to ask a second time — which worked, because
+        # the caption was by then in the conversation, but only if they knew to.
+        #
+        # So when the prompt asks for lighting, the caption becomes CONTEXT and the
+        # turn continues into the agent loop, where it can reach the light-effect
+        # specialist. Everything else keeps the fast path: "what is this" pays for
+        # one model call, not two.
+        if wants_light_effect(prompt):
+            logger.info("image prompt asks for a lighting effect — continuing "
+                        "into the agent loop with the caption as context")
+            request_headers = getattr(context, "request_headers", None) or {}
+            effect_prompt = (
+                f"{prompt}\n\n"
+                f"[A vision model has already described the image the user "
+                f"attached. You cannot see the image itself; work from this "
+                f"description, and say which parts of it you drew on.]\n"
+                f"Image description: {caption_text}"
+            )
+            try:
+                effect_response = invoke_agent(
+                    effect_prompt, session_id=session_id, actor_id=actor_id,
+                    auth_header=auth_header, headers=request_headers)
+            except Exception:
+                # The caption is a real answer on its own, so a failure here
+                # degrades to it rather than losing the turn.
+                logger.exception("image-to-effect continuation raised")
+                return {"response": response_text, "status": "success"}
+            return {"response": effect_response, "status": "success"}
+
         return {"response": response_text, "status": "success"}
 
     logger.info(f"Invocation: actor_id={actor_id}, session_id={session_id}")

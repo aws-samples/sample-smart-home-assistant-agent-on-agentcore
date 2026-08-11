@@ -337,3 +337,118 @@ def test_warmup_unchanged(agent_mod):
     assert out == {"status": "warmup_ok"}
     mcap.assert_not_called()
     minvoke.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Image -> lighting effect: when an image turn continues into the agent loop
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("prompt", [
+    "照这个做灯效",
+    "按这张图片调一下客厅的灯光",
+    "把灯带变成这个颜色",
+    "make a light effect from this",
+    "set the lights to match this photo",
+    "use this palette for the LED strip",
+    "recreate this ambience in the living room",
+    "PHOTO -> LIGHTING PLEASE",
+])
+def test_a_lighting_request_continues_into_the_agent_loop(agent_mod, prompt):
+    """These must NOT stop at the caption.
+
+    Captioning and returning describes the picture and changes nothing, so the
+    user has to ask a second time — which works, because the caption is by then in
+    the conversation, but only if they know to.
+    """
+    assert agent_mod.wants_light_effect(prompt), prompt
+
+
+@pytest.mark.parametrize("prompt", [
+    "这是什么",
+    "what is this",
+    "describe this image",
+    "读一下图里的文字",
+    "这是哪个牌子的路由器",
+    "how many people are in the photo",
+])
+def test_a_plain_question_keeps_the_fast_path(agent_mod, prompt):
+    """The fast path exists for a reason: continuing into the agent loop costs a
+    second model call, and "what is this" does not need one."""
+    assert not agent_mod.wants_light_effect(prompt), prompt
+
+
+def test_an_image_with_no_words_keeps_the_fast_path(agent_mod):
+    """Nobody attaches a photo in silence and expects the lights to change."""
+    for empty in ("", "   ", None):
+        assert not agent_mod.wants_light_effect(empty)
+
+
+def test_a_lighting_request_reaches_the_agent_loop_with_the_caption(agent_mod, tiny_png_b64):
+    """The behaviour, not just the keyword match.
+
+    The caption becomes CONTEXT and the turn continues, which is what lets the
+    request reach the light-effect specialist. The caption must be in the prompt —
+    the agent loop cannot see the image, and a continuation without the description
+    would have it inventing colours.
+    """
+    with patch("vision.caption_images") as mcap, \
+         patch.object(agent_mod, "invoke_agent") as minvoke, \
+         patch.object(agent_mod, "_record_session"), \
+         patch.object(agent_mod, "_persist_vision_turn"):
+        mcap.return_value = ("Image 1: a beach at sunset, deep orange into violet.", "")
+        minvoke.return_value = "Applied a sunset gradient to the living-room strip."
+
+        out = agent_mod.handle_invocation(
+            {"prompt": "照这个做灯效", "userId": "u@x",
+             "images": [{"mediaType": "image/png", "data": tiny_png_b64}]},
+            _ctx(),
+        )
+
+    assert out == {"response": "Applied a sunset gradient to the living-room strip.",
+                   "status": "success"}
+    minvoke.assert_called_once()
+    sent = minvoke.call_args.args[0]
+    assert "照这个做灯效" in sent, "the user's own words must survive"
+    assert "deep orange into violet" in sent, "the caption must be passed as context"
+    assert "cannot see the image" in sent, "the loop must be told it is working from words"
+
+
+def test_a_failed_continuation_degrades_to_the_caption(agent_mod, tiny_png_b64):
+    """The caption is a real answer on its own, so a failure in the second call
+    must not lose the turn — the user gets the description rather than an error."""
+    with patch("vision.caption_images") as mcap, \
+         patch.object(agent_mod, "invoke_agent", side_effect=RuntimeError("boom")), \
+         patch.object(agent_mod, "_record_session"), \
+         patch.object(agent_mod, "_persist_vision_turn"):
+        mcap.return_value = ("Image 1: a beach at sunset.", "")
+
+        out = agent_mod.handle_invocation(
+            {"prompt": "make a light effect from this", "userId": "u@x",
+             "images": [{"mediaType": "image/png", "data": tiny_png_b64}]},
+            _ctx(),
+        )
+
+    assert out == {"response": "Image 1: a beach at sunset.", "status": "success"}
+
+
+def test_the_vision_turn_is_persisted_before_the_continuation(agent_mod, tiny_png_b64):
+    """Memory gets the caption either way.
+
+    Persisting only on the fast path would mean a lighting request left no image
+    context behind, so a follow-up ("make it warmer") would have nothing to refer
+    to — the exact problem the vision-turn persistence exists to solve.
+    """
+    with patch("vision.caption_images") as mcap, \
+         patch.object(agent_mod, "invoke_agent") as minvoke, \
+         patch.object(agent_mod, "_record_session"), \
+         patch.object(agent_mod, "_persist_vision_turn") as mpers:
+        mcap.return_value = ("Image 1: a forest.", "")
+        minvoke.return_value = "Applied a forest palette."
+
+        agent_mod.handle_invocation(
+            {"prompt": "用这个做灯效", "userId": "u@x",
+             "images": [{"mediaType": "image/png", "data": tiny_png_b64}]},
+            _ctx(),
+        )
+
+    mpers.assert_called_once()
