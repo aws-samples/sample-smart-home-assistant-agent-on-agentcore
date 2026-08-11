@@ -95,6 +95,7 @@ const en: Record<string, string> = {
   // Vision chip \u2014 reminds users they can attach an image via the paperclip
   'chat.chip.vision.describe': 'Describe an image (use paperclip first)',
   'chat.chip.vision.describe.prompt': 'Attach an image with the paperclip, then ask: \u201cDescribe what you see in this image.\u201d',
+  'chat.trace': "how this was answered",
   'chat.typing': 'thinking…',
   'chat.consulting': 'asking the',
   'chat.sendFailed': 'Failed to send message',

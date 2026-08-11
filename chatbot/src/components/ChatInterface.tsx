@@ -49,6 +49,15 @@ interface ChatMessage {
   // Blob URLs for the user's attached images, created per-message so they
   // survive clearing the input-area thumbnail strip. Revoked on unmount.
   imageUrls?: string[];
+  // Which tools this turn actually used, in order, as readable labels (spec 5 S6).
+  // Collected from the progress stream rather than queried afterwards: the events
+  // already arrive for the "asking the …" indicator, so the trace is free and
+  // instant. Reading it back from `aws/spans` would mean a 10-20s Logs Insights
+  // query per turn to learn what the stream just said.
+  //
+  // Only present on turns that streamed, which is why the panel is absent rather
+  // than empty on the image and A/B paths.
+  trace?: string[];
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -84,10 +93,22 @@ export function toolLabel(rawName: string): string {
   const name = rawName.includes('___') ? rawName.split('___').pop()! : rawName;
   const a2a = name.match(/^a2a_(.+?)_agent_/);
   if (a2a) {
-    const domain = a2a[1].replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    return `${domain} specialist`;
+    return `${titleCase(a2a[1].replace(/_/g, ' '))} specialist`;
   }
-  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return titleCase(name.replace(/_/g, ' '));
+}
+
+// Initialism fixups. Plain title-casing turns `knowledge_qa` into "Knowledge Qa",
+// which reads as a typo in the one place a developer is looking closely.
+const INITIALISMS: Record<string, string> = { qa: 'QA', led: 'LED', tv: 'TV',
+                                              pm25: 'PM2.5', co2: 'CO2' };
+
+function titleCase(words: string): string {
+  return words
+    .split(' ')
+    .map((w) => INITIALISMS[w.toLowerCase()] ||
+                w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
 }
 
 /**
@@ -569,8 +590,13 @@ const ChatInterface: React.FC = () => {
       }
 
       let agentText: string;
+      // Every tool this turn used, in order — kept for the trace panel below.
+      const trace: string[] = [];
       if (wantStream) {
-        agentText = await readAgentStream(response, setProgressTool);
+        agentText = await readAgentStream(response, (label) => {
+          setProgressTool(label);
+          trace.push(label);
+        });
       } else {
         const data = await response.json();
         agentText = data.response || data.text || data.content || JSON.stringify(data);
@@ -583,6 +609,7 @@ const ChatInterface: React.FC = () => {
           role: 'agent',
           content: agentText,
           timestamp: new Date(),
+          trace: trace.length > 0 ? trace : undefined,
         },
       ]);
     } catch (err: any) {
@@ -897,6 +924,29 @@ const ChatInterface: React.FC = () => {
                 ) : (
                   <div className="message-text">{msg.content}</div>
                 )
+              )}
+              {/*
+                Delegation trace (spec 5 S6). Which tools this turn actually used,
+                in order — so a developer can see that a security question really
+                did reach the specialist rather than being answered from the
+                orchestrator's own knowledge. That distinction is invisible in the
+                reply text: a confident wrong answer reads exactly like a delegated
+                one, which is why `scripts/probe-routing.py` has to read spans.
+
+                Collapsed by default; built from the progress events the turn
+                already streamed, so it costs nothing and appears immediately.
+              */}
+              {msg.trace && msg.trace.length > 0 && (
+                <details className="message-trace">
+                  <summary>
+                    {t('chat.trace') || 'how this was answered'} ({msg.trace.length})
+                  </summary>
+                  <ol>
+                    {msg.trace.map((label, i) => (
+                      <li key={`${msg.id}-trace-${i}`}>{label}</li>
+                    ))}
+                  </ol>
+                </details>
               )}
               <div className="message-time">{formatTime(msg.timestamp)}</div>
             </div>

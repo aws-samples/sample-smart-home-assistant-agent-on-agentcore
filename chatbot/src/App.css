@@ -400,6 +400,31 @@
   text-align: right;
 }
 
+/* --- Delegation trace (spec 5 S6) ---------------------------------------
+   Which tools a turn actually used. Collapsed by default so it never competes
+   with the answer; the audience is a developer checking that a specialist was
+   really consulted, which is invisible in the reply text. Colours are inherited
+   rather than fixed so it works in both themes. */
+.message-trace {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+.message-trace summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.message-trace ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.message-trace li {
+  margin: 2px 0;
+}
+
 /* --- Input Row (Cloudscape-native) --- */
 .input-row {
   display: flex;
