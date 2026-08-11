@@ -163,6 +163,7 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 | `light-effect-agent` | 心情/图片 → 灯效 | Haiku 4.5 | ✅ 经 Gateway |
 | `knowledge-qa-agent` | 文档问答、故障排查 | Nova Lite | ✅ 知识库 |
 | `task-management-agent` | 任务/自动化（触发器+动作） | Haiku 4.5 | ❌ 只规划，见下节 |
+| `scene-sync-agent` | 音乐/观影盛宴（实时驱动） | Haiku 4.5 | ✅ 经 Gateway |
 | `home-security-agent` | 风险评估、事件响应 | Haiku 4.5 | ❌ 纯建议 |
 | `energy-optimization-agent` | 节能测算、电价分析 | Nova Lite | ❌ 纯建议 |
 | `appliance-maintenance-agent` | 保养计划、故障诊断 | Nova Lite | ❌ 纯建议 |
@@ -181,7 +182,7 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
   cd a2a-agent-registry
   python deploy.py                              # 全量
   python deploy.py --agent light-effect          # 只部署一个
-  python smoke_test.py                           # 7 个 agent + 6 个负向鉴权用例
+  python smoke_test.py                           # 8 个 agent + 6 个负向鉴权用例
   ```
 - Admin 在 **Admin Console → Users → Manage Permissions → A2A Agents** 区块按用户按 skill 授权；主 Agent 在下一次调用时加载。**未授权的 skill 根本不会注册**，模型看不见也就无法被 prompt injection 诱导去调用。
 - **每个子 Agent 的 prompt 可以在 Admin Console → Agents → 详情页单独编辑**，保存后下一次请求即生效，不需要重新部署容器。
@@ -192,13 +193,44 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 
 在 chatbot 里说「每天晚上 11 点关灯、风扇调到 1 档」，主 Agent 会委派给场景编排子 Agent，把它存成一个**场景**（触发器 + 设备动作），并由 EventBridge Scheduler 到点执行。
 
-支持三种触发器：**时间**（24 小时制 `HH:MM`，按 UTC 调度）、**设备状态**、**真实传感器阈值**（温度 / 湿度 / PM2.5 / CO₂，必须显式写 above 或 below —— 「高于 26」和「低于 26」是两个相反的场景）。
+支持五种触发器：
+
+| 类型 | 说明 |
+|---|---|
+| **时间** | 24 小时制 `HH:MM`，按**用户自己的时区**调度（Identity 页设置；没设过的按 UTC，行为与以前一致）|
+| **日出/日落** | 按用户经纬度算出当天时刻，可带偏移（「日落前 30 分钟」）。每晚重算次日时间——太阳时刻每天都在动 |
+| **设备状态** | 某个设备变成某个状态 |
+| **传感器阈值** | 温度 / 湿度 / PM2.5 / CO₂，必须显式写 above 或 below —— 「高于 26」和「低于 26」是两个相反的场景 |
+| **一键指令** | 不会自己触发，只在用户点名时执行（「执行观影模式」）|
+
+日出场景需要用户的经纬度，没有就**拒绝创建并说明去哪里设置** —— 猜一个位置会在错误的时间开灯，而且比拒绝更难被发现。
+
+管理员在 **Admin Console → Assess → 自动化任务** 看所有用户的场景：触发条件、真实的 cron 表达式和时区、以及最近一次是否执行成功。定时场景在 07:30 触发时没有人盯着，所以「最近执行」这一列是区分「能用」和「从来没成功过」的唯一依据。
 
 > **定时执行不是一条绕过管控的后门。** 执行 Lambda 完全没有 IoT 权限：它以场景所属用户的身份过 Gateway → Cedar → `iot-control`，和用户手打指令走的是同一条授权链。所以管理员在 Tool Policy 里撤销某用户的 `control_device` 之后，他的 07:30 自动化也会一起停。
 >
 > 代价说清楚：以「不在线的用户」身份执行需要一份凭证。实测 `GetWorkloadAccessTokenForUserId` 换出的 token 会被 Gateway 以 401 拒绝（它是 KMS 加密的不透明 token，不是带正确 audience 的 JWT），所以系统存的是 **Cognito refresh token** —— 一份 30 天有效的用户凭证落在了 Secrets Manager 里（专用 KMS 密钥 + 已开启轮换 + 一个用户一个 secret + 只有执行 Lambda 能读 + 绝不写日志）。没有存 token 的用户，其定时场景直接不执行。
 
 设备模拟器里配了三样"道具"给场景用：**虚拟时钟**（最高 3600 倍速，只加速模拟器自身的时间和传感器曲线，**不会**改变 AWS 侧的真实触发时间）、**屏幕同步**（电视背光四个分区跟随程序化画面的四边取色）、**音乐同步**（合成节拍 + 蓝牙 idle → pairing → connected 三态）。
+
+### 音乐盛宴与观影盛宴（实时驱动）
+
+「保存下来以后再跑」和「现在就跑起来」是两件事，由两个子 Agent 分开做，这个拆分本身就是设计：
+
+- `task-management-agent` 有自己的表、**没有任何设备权限**。
+- `scene-sync-agent` 有 Gateway 设备工具、**没有表**。
+
+合成一个的话，能写场景的 Agent 就同时有了一条自己的设备通路 —— 而这正是 `shared/scenarios.py` 存在的目的（场景是数据，不是能力）。两边都做不了对方那一半，由主 Agent 串起来，并且**存成一键指令之前会先问用户**。
+
+在 chatbot 里说「让客厅的灯跟着音乐跳起来」：电视背光进入 `music` 同步模式，其余灯具按节奏跑 `chase`。这里有一个天然会静默失败的环节 —— 音乐要走蓝牙音箱，链路没连上灯就不会动，而配对需要一两秒。所以 Agent 会**轮询 `bluetooth` 状态直到它稳定**，并且把「还在配对中」当成一个和成功/失败都不同的答案：
+
+| 状态 | Agent 的回应 |
+|---|---|
+| `connected` | 驱动灯具，报告盛宴已启动 |
+| `pairing` | 说链路还没起来，建议稍后再试 —— **不猜它会往哪边走** |
+| `idle` | 明确说没有配对的音箱，请用户去连 —— **绝不报成功** |
+
+猜错的代价是不对称的：把 `pairing` 当失败，是让用户去重连一个两秒后就能用的音箱；把 `idle` 当成功，是让用户对着一屋子不动的灯发愣。
 
 ### 添加管理员用户
 
@@ -630,6 +662,7 @@ Skill ERP is a self-service skills site for **regular end users** (no `admin` gr
 | `light-effect-agent` | mood / image → lighting effect | Haiku 4.5 | ✅ via Gateway |
 | `knowledge-qa-agent` | documentation Q&A, troubleshooting | Nova Lite | ✅ knowledge base |
 | `task-management-agent` | saved tasks and automations | Haiku 4.5 | ❌ plans only — see below |
+| `scene-sync-agent` | music / video feasts, driven live | Haiku 4.5 | ✅ via Gateway |
 | `home-security-agent` | risk assessment, incident response | Haiku 4.5 | ❌ advisory |
 | `energy-optimization-agent` | savings estimates, tariff analysis | Nova Lite | ❌ advisory |
 | `appliance-maintenance-agent` | maintenance schedule, diagnosis | Nova Lite | ❌ advisory |
@@ -659,13 +692,46 @@ Other notes:
 
 Say "every night at 11pm turn the lights off and set the fan to low" in the chatbot: the orchestrator delegates to the task-management specialist, which stores it as a **scene** (a trigger plus device actions), and EventBridge Scheduler runs it on time.
 
-Three trigger kinds: **time** (24-hour `HH:MM`, scheduled in UTC), **device state**, and **real sensor thresholds** (temperature / humidity / PM2.5 / CO₂ — you must say above or below, because "above 26" and "below 26" build opposite scenes).
+Five trigger kinds:
+
+| Kind | Notes |
+|---|---|
+| **time** | 24-hour `HH:MM`, scheduled in **the owner's timezone** (set on Identity; unset means UTC, exactly as before) |
+| **solar** | sunrise or sunset computed from the owner's coordinates, with an offset ("30 minutes before sunset"). Recomputed nightly, because the sun moves every day |
+| **device state** | a device entering a state |
+| **sensor threshold** | temperature / humidity / PM2.5 / CO₂ — you must say above or below, because "above 26" and "below 26" build opposite scenes |
+| **manual** | never fires by itself; runs when the user names it ("run movie mode") |
+
+A solar scene needs the owner's coordinates, and without them it is **refused with a message saying where to set them** — a guessed location turns the lights on at the wrong time, which is harder to notice than a refusal.
+
+**Admin Console → Assess → Scenarios** shows every user's automations: the trigger, the live cron expression and its timezone, and whether the last run worked. A scene that fires at 07:30 has nobody watching, so that last column is the only way to tell "works" from "has never worked".
 
 > **Scheduled execution is not a way around governance.** The runner Lambda holds no IoT permission at all: it authenticates as the scene's owner and goes Gateway → Cedar → `iot-control`, the same authorisation chain a hand-typed command uses. So revoking a user's `control_device` in Tool Policy also stops their 07:30 automation.
 >
 > The cost, stated plainly: acting as an absent user needs a credential. `GetWorkloadAccessTokenForUserId` was measured and its token is rejected by the Gateway with 401 (it is an opaque KMS-encrypted token, not a JWT with the right audience), so what gets stored is a **Cognito refresh token** — a 30-day user credential at rest in Secrets Manager, under a dedicated KMS key with rotation, one secret per user, readable only by the runner, never logged. A user with no stored token simply has no scheduled scenes execute.
 
 The device simulator carries three props for scenes to sync to: a **virtual clock** (up to 3600x — it accelerates the simulator's own time and sensor curve, and deliberately does **not** move the real AWS trigger time), **screen sync** (the TV backlight's four segments follow the four edges of a procedural picture), and **music sync** (a synthesised beat plus a bluetooth `idle → pairing → connected` state machine).
+
+### Music and video feasts, driven live
+
+"Save it for later" and "make it happen now" are different jobs, and two sub-agents do them. The split is the design:
+
+- `task-management-agent` owns a table and holds **no device permissions**.
+- `scene-sync-agent` holds Gateway device tools and **no table**.
+
+Merging them would give the agent that writes scenes a device path of its own — which is the single thing `shared/scenarios.py` exists to prevent (a scene is data, not a capability). Neither can do the other's half; the orchestrator strings them together, and **asks before saving a feast as a one-tap command**.
+
+Say "make the living room lights dance to the music": the TV backlight goes into `music` sync mode and the other fixtures run a `chase` on the beat. There is a step in there that fails silently by nature — music goes through a Bluetooth speaker, the lights do nothing until that link is up, and pairing takes a second or two. So the agent **polls `bluetooth` until it settles**, and treats "still pairing" as an answer distinct from either outcome:
+
+| State | What the agent says |
+|---|---|
+| `connected` | drives the lights and reports the feast is running |
+| `pairing` | says the link has not come up yet, suggest retrying — **does not guess which way it went** |
+| `idle` | says plainly that no speaker is paired and asks the user to connect one — **never reports success** |
+
+The cost of guessing is asymmetric: reading `pairing` as failure tells the user to reconnect a speaker that was two seconds from working, and reading `idle` as success leaves them staring at a room of motionless lights.
+
+`bluetooth` is a **readonly** capability: the catalog declares no action that writes it, and `validate_command` drops any parameter an action does not declare, so a command — including one a prompt injection talked a model into phrasing — cannot assert a link state the device alone may report.
 
 ### Add Admin Users
 

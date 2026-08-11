@@ -59,7 +59,8 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent (code) | `code-interpreter` + AgentCore Code Interpreter (`aws.codeinterpreter.v1`) driven by the text agent's `execute_python` Strands tool | Live Python execution for data analysis, optimization, simulation, and charting over smart-home telemetry. Chatbot's right-side panel auto-opens a "CodeInterpreter" tab rendering each block's code + streamed stdout/stderr + inline matplotlib charts; charts land in `/mnt/workspace/<sid>/code/` (see §9.14). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
 | AI Agents (specialists) | 7 independent AgentCore Runtimes reached over the A2A protocol | Domain specialists the orchestrator delegates to: device control, lighting effects, knowledge QA, scene orchestration, security, energy, appliance maintenance. Each carries the caller's verified identity to the same Gateway, so Cedar evaluates the real end user (see §9.13). |
-| Task management | task-management A2A agent + `smarthome-scenarios` table + EventBridge Scheduler + `smarthome-scenario-runner` Lambda | Turns a described routine into a stored scene (trigger + device actions) and executes it on time **as the owner, through the Gateway**, so a scheduled command is authorised exactly like a hand-typed one (see §9.17). |
+| Task management | task-management A2A agent + `smarthome-scenarios` table + EventBridge Scheduler + `smarthome-scenario-runner` Lambda | Turns a described routine into a stored scene (trigger + device actions) and executes it on time **as the owner, through the Gateway**, so a scheduled command is authorised exactly like a hand-typed one. Five trigger kinds: clock time in the owner's timezone, sunrise/sunset from their coordinates, device state, sensor threshold, and one-tap manual (see §9.17). |
+| Live scene sync | scene-sync A2A agent + the simulator's screen/music props | Drives a room in real time — backlight following the picture, lights on the beat — and waits on the reported Bluetooth link instead of assuming a pairing succeeded. Holds device tools and no table, the mirror of task-management (see §9.17). |
 | Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Control Center with AWS-Console-style left-nav: Discover (Overview, **Agents**, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations, Optimization). Supports light/dark themes. |
 | Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AWS Agent Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + **S3 Vectors** + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering. Vector store is the pay-per-vector S3 Vectors service (no fixed monthly floor). |
@@ -2876,6 +2877,7 @@ roster edit that missed one failed at a different stage each time.
 | `light-effect-agent` | `compose_effect`, `effect_from_description` | Claude Haiku 4.5 | control / discover / state |
 | `knowledge-qa-agent` | `answer_from_docs`, `troubleshoot_from_docs` | Nova Lite | knowledge base |
 | `task-management-agent` | `compose_scenario`, `manage_scenario`, `suggest_automation` | Claude Haiku 4.5 | — (own DynamoDB table) |
+| `scene-sync-agent` | `music_feast`, `video_feast` | Claude Haiku 4.5 | `discover_devices`, `query_device_state`, `control_device` |
 
 The first three are prompt-only advisors. The rest reach real backends, which
 is what forced the identity and enforcement work below.
@@ -3892,6 +3894,32 @@ an EventBridge Scheduler-driven Lambda executes them, and the Admin Console can
 list them. All three share `shared/scenarios.py`, so what gets validated at write
 time is what gets executed.
 
+#### Live scenes are a different agent
+
+`scene-sync-agent` drives a room in real time — the TV backlight following the
+picture, or the lights moving with the beat. It is a separate runtime holding
+Gateway device tools and **no table**, while task-management holds a table and
+**no device tools**. Merging them would give the agent that writes scenes a device
+path of its own, which is the one thing this section's split exists to prevent.
+Neither can do the other's half; the orchestrator carries output across, and asks
+the user before saving a feast as a `manual` scene.
+
+The music case has a failure that is silent by construction: the lights produce
+nothing until the Bluetooth speaker link is up, and pairing takes a second or two,
+so a single read straight after setting music mode returns `pairing`. The agent
+polls until the state settles and treats "still pairing" as an answer distinct
+from either outcome — reading it as failure tells the user to reconnect a speaker
+that was about to work, and reading `idle` as success leaves them watching a room
+of motionless lights.
+
+`bluetooth` is a **readonly** capability, and that is enforced twice: no action in
+the catalog writes it, and `validate_command` forwards only the parameters an
+action declares. The second half was a real hole — the function ended with
+`out.update(command)`, so any key the caller sent reached the device validated by
+nothing, and `{"action": "setSyncMode", "bluetooth": "connected"}` was accepted
+and published. Anything that can phrase a command, including a prompt injection
+reaching a model, could assert a state only the device may report.
+
 #### The agent plans; it never controls
 
 `create_scenario` returns `pendingActions` and the **orchestrator** applies each
@@ -3923,15 +3951,72 @@ named 睡眠模式 with no way to tell which one a trigger referred to.
 
 | field | meaning | values |
 |-------|---------|--------|
-| `sceneType` | what kind of thing happens | `time` / `device_state` / `sensor` |
-| `subject` | which device or metric it observes | device id, or `temperature`/`humidity`/`pm25`/`co2` |
-| `conditionValue` | the value compared against | `"23:00"` / `"on"` / a number |
+| `sceneType` | what kind of thing happens | `time` / `solar` / `device_state` / `sensor` / `manual` |
+| `subject` | which device, metric or event it observes | device id, `temperature`/`humidity`/`pm25`/`co2`, or `sunrise`/`sunset` |
+| `conditionValue` | the value compared against | `"23:00"` / `"on"` / a number / a solar offset in minutes |
 | `calculationType` | how it is compared | `equal` / `above` / `below` / `change` |
 | `executionType` | once, or every time | `once` / `recurring` |
 
 `subject` replaces the predecessor's habit of encoding the device into
 `sceneType`, which made "temperature above 26" and "the fan turned on" two
 unrelated enum values instead of the same shape with different subjects.
+
+**Which types own a schedule, and why it is not the same question as "has a cron".**
+`cron_for` names an expression for `time` and returns `""` for the other four — but
+for four different reasons, and a reconciler that conflates them deletes working
+schedules:
+
+| type | schedule | who computes it |
+|---|---|---|
+| `time` | one per scene | `cron_for`, in the owner's timezone |
+| `solar` | one per scene | the admin API on save AND the runner nightly, from the owner's coordinates |
+| `device_state` / `sensor` | none of its own | the runner's shared 5-minute sweep evaluates the reading |
+| `manual` | none, correctly | nothing; it runs when the user names it |
+
+So the reconciler asks `wants_schedule(trigger)`, not `bool(cron_for(trigger))`.
+With the latter, a solar scene's schedule appears in `existing` and not in
+`wanted` — an orphan to delete — so **saving any scene would have silently wiped
+every solar schedule** until the next midnight, and the user would have found out
+at sunset. Both writers deriving the same name (`shared/scenarios.schedule_name`)
+and the same payload (`shared/scenario_schedules_shared.py`) is what makes them
+idempotent with respect to each other rather than fighting on alternate days.
+
+A settings read that FAILS is also kept distinct from a user who has no
+coordinates. Both produce `{}`, and the right response is opposite: the first means
+"we do not know, leave the schedule alone", the second means "this scene cannot be
+scheduled". Conflating them deletes a working schedule on a transient DynamoDB
+error and reports success.
+
+**A time trigger fires on the owner's clock.** The stored `HH:MM` is what the user
+said, and Scheduler's own `ScheduleExpressionTimezone` carries their IANA zone.
+Converting to a UTC cron ourselves was the alternative and is wrong twice: it
+breaks at every DST transition (a 07:30 scene drifting to 06:30 for half the year),
+and it would put a timezone-dependent value inside `cron_for`, which is a pure
+function with three callers that do not all hold the user's settings. A user who
+has set no timezone gets `UTC`, which is exactly where their schedules already
+were.
+
+**Solar times are computed, not fetched** (`shared/solar.py`, the NOAA equations).
+An external service would be one more thing that can be down at 05:00, and the
+Lambda has no other reason to reach the internet. Approximating it on the 5-minute
+sweep would give ±5 minutes for the trigger users would reasonably expect to be
+the *more* precise of the two. Above roughly 66° the sun may not cross the horizon
+at all, and then there is no answer: the function returns `None` and the caller
+reports that rather than inventing a time.
+
+The coordinates live on the user's `__settings__` row, so the check for them
+happens at the **tool** layer, not in `validate_trigger` — `shared/scenarios.py`
+deliberately never reads DynamoDB, which is what keeps every rule in it testable
+without a table or a mock. Missing coordinates **refuse** the scene and say where
+to set them; a guessed location turns the lights on at the wrong time in a way
+nobody thinks to check.
+
+> Two key spaces meet here. Scene rows and the per-user scheduling secret are keyed
+> by Cognito **sub**; the settings row is keyed by **email**, because that is what
+> the chatbot sends and the orchestrator reads. Nothing needed to cross that line
+> until a schedule started depending on the coordinates, which is why
+> `shared/user_settings.py` exists and why both processes that cross it share one
+> implementation.
 
 **Sensor thresholds are real triggers.** The predecessor design ruled them out
 because its sensors were a random-number generator; `living-sensor-1` now reports
