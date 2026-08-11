@@ -30,8 +30,28 @@ export function TokenTrend({ spans, loading, theme, chartHeight }: Props) {
   const { t } = useI18n();
   const trend = spans?.trend ?? [];
 
+  // Where span history begins, when the selected window reaches back past it.
+  // Noted rather than zero-filled: the pre-horizon days hold no telemetry, and a
+  // bar of height zero would claim they held no traffic. The value is probed per
+  // request because it moves — `aws/spans` keeps 30 rolling days.
+  const horizon = spans?.dataFrom
+    ? new Date(spans.dataFrom)
+    : null;
+  const firstDay = trend.length ? new Date(trend[0].day) : null;
+  const showHorizon = Boolean(
+    horizon && firstDay && horizon.getTime() > firstDay.getTime() - 86400_000,
+  );
+
   return (
     <ChartTableToggle
+      footer={
+        showHorizon ? (
+          <Box variant="small" color="text-body-secondary">
+            {t('dashboard.token.dataFrom').replace(
+              '{date}', spans!.dataFrom!.slice(0, 10))}
+          </Box>
+        ) : undefined
+      }
       chart={
         <BarChart
           stackedBars

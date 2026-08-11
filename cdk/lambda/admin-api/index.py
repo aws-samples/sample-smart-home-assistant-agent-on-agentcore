@@ -3018,6 +3018,17 @@ def _decimalise(value):
 
 BROWSER_SESSIONS_TABLE_NAME = os.environ.get("BROWSER_SESSIONS_TABLE_NAME", "smarthome-browser-sessions")
 CODE_SESSIONS_TABLE_NAME = os.environ.get("CODE_SESSIONS_TABLE_NAME", "smarthome-code-sessions")
+FEEDBACK_TABLE_NAME = os.environ.get("FEEDBACK_TABLE_NAME", "smarthome-feedback")
+
+# A 👎 reason is free text from an end user. Capped because it is rendered in the
+# console and aggregated on the dashboard; DynamoDB's own 400 KB item limit is far
+# too generous to be a useful guard here.
+MAX_FEEDBACK_REASON_CHARS = 1000
+# Enough to identify which turn was voted on, without turning the feedback table
+# into a second copy of the conversation.
+MAX_FEEDBACK_PROMPT_CHARS = 200
+VALID_FEEDBACK_VOTES = ("up", "down")
+VALID_FEEDBACK_SOURCES = ("user", "sim")
 
 
 def _browser_sessions_table():
@@ -3026,6 +3037,98 @@ def _browser_sessions_table():
 
 def _code_sessions_table():
     return dynamodb.Table(CODE_SESSIONS_TABLE_NAME)
+
+
+def _feedback_table():
+    return dynamodb.Table(FEEDBACK_TABLE_NAME)
+
+
+def handle_submit_feedback(event):
+    """POST /sessions?action=feedback — record one thumbs up/down.
+
+    Reached BEFORE the check_admin gate in _dispatch, because the whole point is
+    that ordinary users vote. Behind the gate every non-admin vote would 403 and
+    the UI would show nothing but an unresponsive button.
+
+    The sort key puts `ts` first so the dashboard's per-day trend is a range
+    query, and embeds `turnId` so re-voting the same turn overwrites rather than
+    double-counting. A user who changes their mind must not move the average
+    twice.
+    """
+    body = json.loads(event.get("body") or "{}")
+    user_id = (body.get("userId") or "").strip()
+    if not user_id:
+        return response(400, {"error": "userId required"})
+    guard = _require_self_or_admin(event, user_id)
+    if guard:
+        return guard
+
+    vote = (body.get("vote") or "").strip()
+    if vote not in VALID_FEEDBACK_VOTES:
+        return response(400, {"error": f"vote must be one of {list(VALID_FEEDBACK_VOTES)}"})
+
+    source = (body.get("source") or "user").strip()
+    if source not in VALID_FEEDBACK_SOURCES:
+        return response(400, {"error": f"source must be one of {list(VALID_FEEDBACK_SOURCES)}"})
+    # Only an admin may attribute a vote to the simulator. Otherwise any client
+    # could file its votes as `sim`, and the dashboard's "N% simulated" note —
+    # the one thing that keeps the card honest — becomes unreliable.
+    if source == "sim" and not check_admin(event):
+        return response(403, {"error": "Forbidden: source=sim requires admin"})
+
+    turn_id = (body.get("turnId") or "").strip()
+    if not turn_id:
+        return response(400, {"error": "turnId required"})
+    session_id = (body.get("sessionId") or "").strip()
+
+    reason = (body.get("reason") or "").strip()[:MAX_FEEDBACK_REASON_CHARS]
+    turn_prompt = (body.get("turnPrompt") or "").strip()[:MAX_FEEDBACK_PROMPT_CHARS]
+
+    # `agentDim` arrives from the chatbot's delegation trace: which specialists
+    # this turn actually consulted. Stored so "which agent draws the 👎" is
+    # answerable — a question mock data could never answer.
+    agent_dim = body.get("agentDim") or []
+    if isinstance(agent_dim, str):
+        agent_dim = [agent_dim]
+    agent_dim = [str(a)[:120] for a in agent_dim][:10]
+
+    # A caller-supplied timestamp is accepted only from an admin, and only so
+    # the simulator can lay votes across past days for a long-range demo. An
+    # ordinary user's vote is always stamped server-side.
+    ts = now_iso()
+    supplied_ts = (body.get("ts") or "").strip()
+    if supplied_ts and check_admin(event):
+        ts = supplied_ts
+
+    # Keyed by the TURN, not by the timestamp. Putting `ts` first looked
+    # attractive (a per-day range query instead of a filter) but broke the thing
+    # the key exists for: re-voting the same turn produced a second row, because
+    # the server stamps a new `ts` each time. Verified live — one 👎 followed by
+    # its reason wrote two rows and counted as two negatives.
+    #
+    # Aggregation filters on the `ts` attribute instead, which the dashboard
+    # already does over a table holding one row per vote.
+    item = {
+        "userId": user_id,
+        "feedbackKey": f"{session_id}#{turn_id}",
+        "ts": ts,
+        "vote": vote,
+        "source": source,
+        "turnId": turn_id,
+    }
+    if session_id:
+        item["sessionId"] = session_id
+    if reason:
+        item["reason"] = reason
+    if turn_prompt:
+        item["turnPrompt"] = turn_prompt
+    if agent_dim:
+        item["agentDim"] = agent_dim
+
+    _feedback_table().put_item(Item=item)
+    logger.info("feedback recorded user=%s vote=%s source=%s agents=%s",
+                user_id[:12], vote, source, agent_dim)
+    return response(200, {"ok": True, "feedbackKey": item["feedbackKey"]})
 
 
 def handle_browser_sessions_active(event):
@@ -3125,6 +3228,15 @@ def _dispatch(event, context):
         if action == "code-active":
             return handle_code_sessions_active(event)
         # Fall through to the admin-gated list_sessions below if no action=.
+
+    # User feedback (thumbs up/down). Also before the gate, and for the same
+    # reason: ordinary users are the ones voting. Piggybacks on /sessions rather
+    # than taking a new API Gateway method — see the resource-policy note above.
+    if resource == "/sessions" and method == "POST":
+        action = (event.get("queryStringParameters") or {}).get("action", "")
+        if action == "feedback":
+            return handle_submit_feedback(event)
+        return response(400, {"error": f"Unknown sessions action: {action}"})
 
     if not check_admin(event):
         return response(403, {"error": "Forbidden: admin group required"})

@@ -36,7 +36,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -191,6 +191,78 @@ def _run_persona(p: P.Persona, cfg: dict, password: str, heavy: bool,
     return {"persona": p.key, "turns": turns, "path": path}
 
 
+# Reasons attached to a simulated 👎. Written as things a real user would say,
+# because they are rendered verbatim in the console's "recent comments" list and
+# a placeholder there would look like a bug in the feature.
+SIM_DOWN_REASONS = [
+    "Took too long to answer.",
+    "It described what it would do but nothing actually changed.",
+    "Not the room I meant.",
+    "Answer was vaguer than I wanted.",
+    "It asked me to clarify something I had already said.",
+]
+
+
+def _vote_on_turns(results: list, cfg: dict, days_back: int) -> tuple[int, int]:
+    """File one 👍/👎 per successful turn, through the real feedback API.
+
+    Runs after the conversations rather than during them: a vote references a
+    turn, and the turn has to exist first. Failures are counted and reported but
+    never fatal — a demo with traffic and no votes is still a usable demo,
+    whereas aborting the run would throw away the conversations too.
+
+    `days_back` spreads the votes over the past N days so the 60d/90d dashboard
+    views are not one column on today. It moves only the rows we write.
+    """
+    prov = _provisioner(cfg)
+    filed = failed = 0
+    for r in results:
+        persona = P.PERSONA_BY_KEY.get(r["persona"])
+        if not persona:
+            continue
+        good = [t for t in r.get("turns", []) if t.status == 200 and not t.error]
+        acc = 0.0  # carries the fractional negative across turns
+        for i, t in enumerate(good):
+            # Deterministic rather than random: a fixed sequence keeps two runs
+            # comparable, and random noise in demo data makes a dashboard
+            # screenshot impossible to reproduce.
+            #
+            # Negatives are spread EVENLY through the sequence (a Bresenham-style
+            # accumulator), not grouped at the end of a fixed window. Two earlier
+            # attempts both failed silently:
+            #   - `i % 100 < rate*100`: a persona has 6-8 turns, so `i` never
+            #     reached the threshold and EVERY vote was positive. The run
+            #     reported "29 filed, 0 failed" and the card showed 5.0/5.
+            #   - `i % 10`: puts all the negative slots at positions 7-9, which a
+            #     persona with 6 turns never reaches.
+            # `scripts/sim/tests/test_vote_distribution.py` asserts each persona's
+            # own turn count yields a mixed result, so a third variant of this
+            # mistake fails a test instead of a demo.
+            acc += (1.0 - persona.feedback_up_rate)
+            up = acc < 1.0
+            if not up:
+                acc -= 1.0
+            vote = "up" if up else "down"
+            reason = "" if up else SIM_DOWN_REASONS[i % len(SIM_DOWN_REASONS)]
+            ts = ""
+            if days_back > 0:
+                offset = timedelta(days=(i % days_back),
+                                   hours=(i * 7) % 24, minutes=(i * 13) % 60)
+                ts = (datetime.now(timezone.utc) - offset).isoformat()
+            status = prov.submit_feedback(
+                persona.email, vote, turn_id=f"{r['persona']}-{i}-{t.scenario}",
+                session_id=t.session_id, reason=reason,
+                turn_prompt=t.prompt, ts=ts,
+            )
+            if status == 200:
+                filed += 1
+            else:
+                failed += 1
+                if failed <= 3:
+                    print(f"  feedback failed for {persona.key}: HTTP {status}")
+    return filed, failed
+
+
 def cmd_run(args) -> int:
     cfg = load_config(REPO)
     password = _password()
@@ -232,9 +304,24 @@ def cmd_run(args) -> int:
         total += len(ts); ok_total += ok; err_total += err
     print("-" * 56)
     print(f"{'TOTAL':10s} {total:6d} {ok_total:4d} {err_total:4d}")
+    if args.no_feedback:
+        print("\nSkipping feedback votes (--no-feedback).")
+    else:
+        spread = (f", spread over {args.days_back} day(s)" if args.days_back
+                  else " (all stamped now)")
+        print(f"\nFiling satisfaction votes{spread}...")
+        filed, failed = _vote_on_turns(results, cfg, args.days_back)
+        print(f"  {filed} vote(s) filed, {failed} failed. "
+              "They appear on Overview > User satisfaction, tagged as simulated.")
+
     print(f"\nElapsed {time.time() - t0:.0f}s. Results: {RESULTS_DIR}/*.jsonl")
     print("Telemetry takes a few minutes to surface in CloudWatch; the dashboard "
           "caches for 5 min (use Refresh to force).")
+    if args.days_back:
+        print("NOTE: --days-back backdates only the rows this script writes "
+              "(feedback votes). Spans and evaluation scores are stamped by "
+              "AgentCore and cannot be moved, so the long-range views stay "
+              "sparse before today — that is real, not a bug.")
     return 0 if err_total == 0 else 1
 
 
@@ -327,6 +414,11 @@ def main() -> int:
                    help="include browser-use + code-interpreter (30-60s/turn)")
     r.add_argument("--rounds", type=int, default=1,
                    help="repeat the scenario set N times (default 1)")
+    r.add_argument("--days-back", type=int, default=0, metavar="N",
+                   help="spread the satisfaction votes over the past N days so "
+                        "the 60d/90d dashboard views have data (default 0: today)")
+    r.add_argument("--no-feedback", action="store_true",
+                   help="skip filing satisfaction votes")
     r.set_defaults(func=cmd_run)
 
     st = sub.add_parser("status", help="show simulated users and policy state")

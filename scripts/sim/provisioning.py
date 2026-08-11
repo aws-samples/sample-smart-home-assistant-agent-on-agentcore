@@ -97,6 +97,37 @@ class Provisioner:
                          json={"allowedTools": tools}, timeout=180)
         return r.status_code
 
+    def submit_feedback(self, email: str, vote: str, turn_id: str,
+                        session_id: str = "", reason: str = "",
+                        turn_prompt: str = "", ts: str = "") -> int:
+        """File one 👍/👎 through the same API the chatbot uses.
+
+        Tagged `source="sim"` so the dashboard can state what share of the
+        satisfaction figure is simulated. Only an admin may set that tag or
+        backdate `ts` — otherwise any client could file votes as simulated and
+        the "N% simulated" note, the one thing keeping the card honest, would
+        mean nothing.
+
+        `ts` is what lets a pre-demo run lay votes across past days so the 60d
+        and 90d views have something to show. It only moves rows we write:
+        spans and evaluation scores are stamped by AgentCore and cannot be
+        backdated, so those series stay honestly sparse.
+        """
+        self._guard(email)
+        body = {"userId": email, "vote": vote, "turnId": turn_id,
+                "source": "sim"}
+        if session_id:
+            body["sessionId"] = session_id
+        if reason:
+            body["reason"] = reason
+        if turn_prompt:
+            body["turnPrompt"] = turn_prompt
+        if ts:
+            body["ts"] = ts
+        r = requests.post(f"{self.api}/sessions?action=feedback",
+                          headers=self._admin_headers(), json=body, timeout=60)
+        return r.status_code
+
     def set_model(self, email: str, model_id: str) -> int:
         self._guard(email)
         r = requests.put(f"{self.api}/settings/{email}",

@@ -1447,7 +1447,10 @@ export async function deleteTenantEnv(email: string): Promise<void> {
 // separately and fills those cards in when it lands. See dashboard.py.
 // ---------------------------------------------------------------------------
 
-export type DashboardRange = '24h' | '7d' | '30d';
+// Widened to 90d on 2026-08-11. Measured first: one 90d Logs Insights query runs
+// in 3.2s against a 22s budget, so the longer windows cost nothing. See
+// dashboard.py's RANGES comment for why the query is NOT chunked.
+export type DashboardRange = '24h' | '7d' | '30d' | '60d' | '90d';
 export type DashboardDim = 'user' | 'tenant' | 'agent';
 
 export interface MetricSeries {
@@ -1562,6 +1565,11 @@ export interface DashboardSpans {
   trend: SpanTrendPoint[];
   attribution: AttributionRow[];
   dim: DashboardDim;
+  // Where span history actually begins: the oldest instant any span log group can
+  // still answer for. Probed per request because it MOVES — `aws/spans` keeps 30
+  // rolling days while the per-runtime groups never expire. Null when it could not
+  // be determined, which the UI must report as unknown rather than as "today".
+  dataFrom?: string | null;
   totals: {
     inputTokens: number;
     outputTokens: number;
@@ -1569,6 +1577,22 @@ export interface DashboardSpans {
     ttftP95Ms: number | null;
     ttftP99Ms: number | null;
   };
+}
+
+/** Real thumbs up/down, replacing the hardcoded MOCK_SATISFACTION block. */
+export interface DashboardSatisfaction {
+  available: boolean;
+  reason?: string;
+  thumbsUp?: number;
+  thumbsDown?: number;
+  /** 1-5, derived from the up/down split. Null only when nothing has been voted. */
+  csat?: number | null;
+  csatScale?: number;
+  /** Fraction of votes filed by the simulator, so the card can say so. */
+  simulatedShare?: number;
+  trend?: Array<{ day: string; up: number; down: number; downRate: number }>;
+  byAgent?: Array<{ agent: string; up: number; down: number }>;
+  recentReasons?: Array<{ ts: string; vote: string; reason: string; source: string }>;
 }
 
 export interface DashboardFastResponse {
@@ -1580,6 +1604,7 @@ export interface DashboardFastResponse {
   health: DashboardHealth;
   evaluations: DashboardEvaluations;
   abComparison: DashboardAbComparison;
+  satisfaction: DashboardSatisfaction;
   release: DashboardRelease;
 }
 

@@ -147,6 +147,18 @@ echo "    -> agent"
 # the control Lambda would then reject, and the user would see a specialist
 # confidently issue a command that fails.
 # ------------------------------------------------------------------------------
+echo "==> Copying the prompt-example library into the chatbot..."
+# The chatbot renders this as its example drawer; scripts/sim/personas.py reads
+# the SAME file to generate demo traffic. One list, because the two used to be
+# maintained separately (TypeScript chips vs Python scripts) and that drift does
+# not fail loudly — the symptom is finding out mid-demo that nothing exercises
+# the security agent. shared/tests/test_prompt_examples.py asserts every deployed
+# A2A skill is covered.
+mkdir -p "$SCRIPT_DIR/chatbot/src/generated"
+cp "$SCRIPT_DIR/shared/prompt-examples.json" \
+   "$SCRIPT_DIR/chatbot/src/generated/prompt-examples.json"
+echo "    -> chatbot/src/generated"
+
 echo "==> Copying the device brief + catalog into the agent..."
 cp "$SCRIPT_DIR/shared/device_brief.py"    "$SCRIPT_DIR/agent/device_brief.py"
 cp "$SCRIPT_DIR/shared/device_catalog.py"  "$SCRIPT_DIR/agent/device_catalog.py"

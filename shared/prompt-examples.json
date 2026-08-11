@@ -1,0 +1,505 @@
+{
+  "_comment": [
+    "The single source of truth for 'what can this system do'.",
+    "",
+    "Two consumers read this file, which is the whole point:",
+    "  - chatbot: rendered as the example-library drawer + welcome-screen chips.",
+    "    Copied into chatbot/src/generated/ by scripts/01-install-deps.sh.",
+    "  - scripts/sim/personas.py: drives real traffic, so a demo has data.",
+    "",
+    "Kept as one list because the two used to be maintained separately, in TS and",
+    "in Python. That is the same fact stored twice, and the drift does not fail:",
+    "the symptom is 'nobody demoed the security agent', discovered live, with no",
+    "error anywhere. shared/tests/test_prompt_examples.py asserts every deployed",
+    "A2A skill is covered by some example.",
+    "",
+    "`covers` uses <agentDir>.<skillId> from a2a-agent-registry/*/card.json, NOT",
+    "the a2a_* tool name. Tool names are derived by the orchestrator from the",
+    "AgentCard `name`; asserting against the card is asserting against the source.",
+    "",
+    "`tier`: light = seconds, safe to run in bulk. heavy = browser/code-interpreter",
+    "sessions, 19-141s measured, only under `run --heavy`."
+  ],
+  "groups": [
+    {
+      "id": "devices",
+      "titleZh": "设备控制",
+      "titleEn": "Device control",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "我家里有哪些智能设备？",
+          "en": "What smart home devices do I have?",
+          "tier": "light"
+        },
+        {
+          "zh": "把所有灯都打开。",
+          "en": "Turn on all the lights.",
+          "tier": "light"
+        },
+        {
+          "zh": "把 LED 矩阵调成蓝色。",
+          "en": "Change the LED matrix to blue.",
+          "tier": "light"
+        },
+        {
+          "zh": "用标准模式煮米饭。",
+          "en": "Cook rice on the standard preset.",
+          "tier": "light"
+        },
+        {
+          "zh": "风扇开到 2 档。",
+          "en": "Turn the fan on at speed 2.",
+          "tier": "light"
+        },
+        {
+          "zh": "把烤箱预热到 180 度。",
+          "en": "Preheat the oven to 180 degrees.",
+          "tier": "light"
+        },
+        {
+          "zh": "客厅现在多少度？",
+          "en": "What's the temperature in the living room?",
+          "tier": "light",
+          "noteZh": "单个状态读取 — 编排器自己处理，不委派",
+          "noteEn": "Single state read: the orchestrator handles this itself"
+        }
+      ]
+    },
+    {
+      "id": "knowledge",
+      "titleZh": "知识库",
+      "titleEn": "Knowledge base",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "LED 矩阵不亮了，手册里怎么说？",
+          "en": "How do I troubleshoot my LED matrix if it won't turn on?",
+          "tier": "light"
+        },
+        {
+          "zh": "电饭煲有哪些预设模式？",
+          "en": "What presets does the rice cooker have?",
+          "tier": "light"
+        },
+        {
+          "zh": "风扇的错误代码都代表什么？",
+          "en": "What do the fan's error codes mean?",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "weather",
+      "titleZh": "天气",
+      "titleEn": "Weather",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "今天天气怎么样？",
+          "en": "What's the weather like today?",
+          "tier": "light"
+        },
+        {
+          "zh": "北京现在的天气如何？",
+          "en": "What's the weather in Beijing right now?",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "lighting",
+      "titleZh": "灯光氛围",
+      "titleEn": "Lighting moods",
+      "covers": [
+        "light-effect.compose_effect",
+        "light-effect.effect_from_description"
+      ],
+      "examples": [
+        {
+          "zh": "把客厅弄成夕阳的感觉。",
+          "en": "Make the living room feel like a sunset.",
+          "tier": "light",
+          "noteZh": "委派灯效 Agent：把描述变成具体配色与动画",
+          "noteEn": "Delegates to the light-effect agent: mood becomes a palette"
+        },
+        {
+          "zh": "我想要适合读书的灯光，别太刺眼。",
+          "en": "I want lighting good for reading, nothing harsh.",
+          "tier": "light"
+        },
+        {
+          "zh": "照着这张照片的色调布置灯光。",
+          "en": "Set the lights to match the colours in this photo.",
+          "tier": "light",
+          "noteZh": "先由视觉描述图片，再交给灯效 Agent 复现配色",
+          "noteEn": "Vision describes the image first, then the effect is composed from it"
+        },
+        {
+          "zh": "来点适合派对的灯效。",
+          "en": "Give me some party lighting.",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "scene",
+      "titleZh": "场景联动",
+      "titleEn": "Scenes",
+      "covers": [
+        "scene-sync.music_feast",
+        "scene-sync.video_feast"
+      ],
+      "examples": [
+        {
+          "zh": "把客厅灯光跟音乐同步起来。",
+          "en": "Sync the living room lights to the music.",
+          "tier": "light",
+          "noteZh": "实时执行，不是定时 — 这是区分场景联动与定时自动化的关键轴",
+          "noteEn": "Live, not scheduled: this is the axis that separates the two scene agents"
+        },
+        {
+          "zh": "我要开始看电影了，把气氛调好。",
+          "en": "I'm about to watch a movie, set the mood.",
+          "tier": "light",
+          "noteZh": "TV 背光跟随画面边缘 + 其他灯降亮度",
+          "noteEn": "TV backlight follows the picture; the other lights dim"
+        },
+        {
+          "zh": "开个音乐盛宴模式。",
+          "en": "Start music feast mode.",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "automation",
+      "titleZh": "定时自动化",
+      "titleEn": "Scheduled automation",
+      "covers": [
+        "task-management.compose_scenario",
+        "task-management.manage_scenario",
+        "task-management.suggest_automation"
+      ],
+      "examples": [
+        {
+          "zh": "每天晚上 8 点让灯跟着音乐动。",
+          "en": "Every night at 8, make the lights follow the music.",
+          "tier": "light",
+          "noteZh": "存成场景 — 同一句话去掉时间就是实时执行",
+          "noteEn": "Stored as a scene: the same sentence without a time is live"
+        },
+        {
+          "zh": "日落时自动把客厅灯打开。",
+          "en": "Turn the living room lights on at sunset.",
+          "tier": "light",
+          "noteZh": "日照触发 — 按经纬度每天重算，固定 UTC 调度",
+          "noteEn": "Solar trigger: recomputed nightly from lat/long, pinned to UTC"
+        },
+        {
+          "zh": "日出前半小时把风扇关掉。",
+          "en": "Turn the fan off half an hour before sunrise.",
+          "tier": "light",
+          "noteZh": "带偏移量的日照触发",
+          "noteEn": "Solar trigger with an offset"
+        },
+        {
+          "zh": "我保存了哪些场景？",
+          "en": "What scenes do I have saved?",
+          "tier": "light"
+        },
+        {
+          "zh": "把「晚安模式」停用。",
+          "en": "Disable my \"good night\" scene.",
+          "tier": "light"
+        },
+        {
+          "zh": "我经常忘记关厨房灯，有什么自动化建议？",
+          "en": "I keep forgetting to turn the kitchen light off. What automation would help?",
+          "tier": "light",
+          "noteZh": "只给建议，不直接创建",
+          "noteEn": "Advises on a routine rather than creating one"
+        }
+      ]
+    },
+    {
+      "id": "energy",
+      "titleZh": "能耗优化",
+      "titleEn": "Energy",
+      "covers": [
+        "energy-optimization.estimate_savings",
+        "energy-optimization.tariff_analysis"
+      ],
+      "examples": [
+        {
+          "zh": "如果我把客厅灯常亮改成只在晚上开，能省多少电？",
+          "en": "How much would I save if the living room light only ran in the evenings?",
+          "tier": "light"
+        },
+        {
+          "zh": "我该选分时电价还是固定电价？",
+          "en": "Should I switch to a time-of-use tariff or stay on flat rate?",
+          "tier": "light"
+        },
+        {
+          "zh": "把灯的亮度降到 60% 一个月能省多少钱？",
+          "en": "What would dimming the lights to 60% save me over a month?",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "security",
+      "titleZh": "安全评估",
+      "titleEn": "Security",
+      "covers": [
+        "home-security.risk_assessment",
+        "home-security.incident_response"
+      ],
+      "examples": [
+        {
+          "zh": "帮我看看我的智能家居有哪些安全隐患。",
+          "en": "Review my smart home setup for security gaps.",
+          "tier": "light",
+          "noteZh": "按严重程度排序给出风险清单",
+          "noteEn": "Returns gaps ranked by severity"
+        },
+        {
+          "zh": "我不在家的时候传感器报了异常移动，该怎么办？",
+          "en": "My sensor reported unexpected movement while I was out. What should I do?",
+          "tier": "light"
+        },
+        {
+          "zh": "我的设备都用默认密码，风险大吗？",
+          "en": "All my devices still use default passwords. How bad is that?",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "maintenance",
+      "titleZh": "家电维护",
+      "titleEn": "Appliance maintenance",
+      "covers": [
+        "appliance-maintenance.maintenance_schedule",
+        "appliance-maintenance.troubleshoot"
+      ],
+      "examples": [
+        {
+          "zh": "风扇多久需要清一次滤网？",
+          "en": "How often should I clean the fan's filter?",
+          "tier": "light"
+        },
+        {
+          "zh": "电饭煲底部有水垢，怎么处理？",
+          "en": "There's scale on the bottom of my rice cooker. How do I deal with it?",
+          "tier": "light"
+        },
+        {
+          "zh": "烤箱加热不均匀，帮我排查一下。",
+          "en": "My oven heats unevenly. Help me diagnose it.",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "orchestration",
+      "titleZh": "多设备编排",
+      "titleEn": "Multi-device orchestration",
+      "covers": [
+        "device-control.orchestrate_devices",
+        "device-control.resolve_capability",
+        "device-control.inspect_devices"
+      ],
+      "examples": [
+        {
+          "zh": "我要出门了，把家里该关的都关掉。",
+          "en": "I'm heading out, turn off everything that should be off.",
+          "tier": "light",
+          "noteZh": "跨多设备 — 委派而非逐个开关",
+          "noteEn": "Spans several devices, so it delegates rather than switching one at a time"
+        },
+        {
+          "zh": "客厅有能调色温的灯吗？",
+          "en": "Do I have a light in the living room that can change colour temperature?",
+          "tier": "light",
+          "noteZh": "能力解析 — 判断设备能不能做到，并挑对设备",
+          "noteEn": "Capability resolution: can this device do it, and which one is right"
+        },
+        {
+          "zh": "过去 24 小时卧室温度怎么变化的？",
+          "en": "How has the bedroom temperature moved over the last 24 hours?",
+          "tier": "light"
+        },
+        {
+          "zh": "把厨房和客厅都调成适合做饭的状态。",
+          "en": "Set up the kitchen and living room for cooking.",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "docs",
+      "titleZh": "文档问答",
+      "titleEn": "Docs Q&A",
+      "covers": [
+        "knowledge-qa.answer_from_docs",
+        "knowledge-qa.troubleshoot_from_docs"
+      ],
+      "examples": [
+        {
+          "zh": "LED 矩阵支持哪些动画模式？",
+          "en": "What animation modes does the LED matrix support?",
+          "tier": "light",
+          "noteZh": "点了设备名，但这是文档问题 — 按主题而非措辞路由",
+          "noteEn": "Names a device but is a documentation question: routed by subject, not phrasing"
+        },
+        {
+          "zh": "产品手册里关于保修是怎么写的？",
+          "en": "What does the product guide say about the warranty?",
+          "tier": "light"
+        },
+        {
+          "zh": "文档里蓝牙配对失败的处理步骤是什么？",
+          "en": "What are the documented steps when Bluetooth pairing fails?",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "multidomain",
+      "titleZh": "多域并发",
+      "titleEn": "Concurrent specialists",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "帮我同时做三件事：评估家里的安全隐患、算一下降低亮度能省多少电、再给客厅配一套放松的灯光。",
+          "en": "Three things at once: assess my security gaps, work out what dimming would save, and set up relaxing lighting for the living room.",
+          "tier": "light",
+          "noteZh": "三个互不依赖的专家并发执行 — 实测 51.1s → 17.2s（-66%）",
+          "noteEn": "Three independent specialists run concurrently: measured 51.1s to 17.2s (-66%)"
+        },
+        {
+          "zh": "风扇该保养了吗？顺便看看换成定时开关能省多少。",
+          "en": "Does the fan need maintenance? And what would scheduling it instead save me?",
+          "tier": "light",
+          "noteZh": "两个专家一轮问完，耗时约等于问一个",
+          "noteEn": "Two specialists in one turn costs about as long as one"
+        }
+      ]
+    },
+    {
+      "id": "memory",
+      "titleZh": "记忆与偏好",
+      "titleEn": "Memory",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "我叫小李，晚上喜欢风扇开小档。",
+          "en": "My name is Li, and I like the fan on low at night.",
+          "tier": "light",
+          "noteZh": "第 1 步：建立偏好",
+          "noteEn": "Step 1: state a preference"
+        },
+        {
+          "zh": "我读书的时候喜欢 LED 矩阵开海洋模式。",
+          "en": "I also like the LED matrix in ocean mode when I'm reading.",
+          "tier": "light",
+          "noteZh": "第 2 步：再加一条",
+          "noteEn": "Step 2: add another"
+        },
+        {
+          "zh": "帮我布置成平时读书的环境。",
+          "en": "Set up my usual reading environment.",
+          "tier": "light",
+          "noteZh": "第 3 步：兑现 — 需要同时召回上面两条，且子 Agent 也能读到",
+          "noteEn": "Step 3: the payoff, recalling both, readable by the specialists too"
+        }
+      ]
+    },
+    {
+      "id": "browser",
+      "titleZh": "浏览器实时网页",
+      "titleEn": "Live web",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "打开 example.com 看看首页写了什么。",
+          "en": "Open example.com and tell me what the homepage says.",
+          "tier": "heavy"
+        },
+        {
+          "zh": "去 amazon.com 搜一下智能灯泡，看看价格区间。",
+          "en": "Search amazon.com for smart bulbs and tell me the price range.",
+          "tier": "heavy"
+        },
+        {
+          "zh": "查一下维基百科上的 Zigbee 条目，总结协议要点。",
+          "en": "Look up Zigbee on Wikipedia and summarise the protocol.",
+          "tier": "heavy"
+        },
+        {
+          "zh": "访问 httpbin.org/get 把返回内容告诉我。",
+          "en": "Visit httpbin.org/get and show me what comes back.",
+          "tier": "heavy"
+        }
+      ]
+    },
+    {
+      "id": "code",
+      "titleZh": "代码解释器",
+      "titleEn": "Code interpreter",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "这周风扇每天运行 3、5、2、8、6、4、7 小时，算平均值和标准差，并画成柱状图。",
+          "en": "The fan ran 3, 5, 2, 8, 6, 4, 7 hours each day this week. Calculate the mean and standard deviation, and plot it as a bar chart.",
+          "tier": "heavy"
+        },
+        {
+          "zh": "帮我模拟一下恒温器在不同设定值下一个月的能耗差异。",
+          "en": "Simulate how a thermostat's monthly energy use differs across setpoints.",
+          "tier": "heavy"
+        },
+        {
+          "zh": "这组传感器读数里有没有异常值？25, 24, 26, 25, 71, 24, 25",
+          "en": "Are there outliers in these sensor readings? 25, 24, 26, 25, 71, 24, 25",
+          "tier": "heavy"
+        },
+        {
+          "zh": "用蒙特卡洛方法估算一下电费在用量波动下的分布。",
+          "en": "Use Monte Carlo to estimate the distribution of my bill under usage variance.",
+          "tier": "heavy"
+        }
+      ]
+    },
+    {
+      "id": "vision",
+      "titleZh": "图像理解",
+      "titleEn": "Vision",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "这张图片里有什么？（请先附加一张图）",
+          "en": "What's in this image? (attach one first)",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "structured",
+      "titleZh": "结构化输出",
+      "titleEn": "Structured output",
+      "covers": [],
+      "examples": [
+        {
+          "zh": "用 JSON 列出我所有设备的当前状态。",
+          "en": "List every device and its current state as JSON.",
+          "tier": "light",
+          "noteZh": "需要在请求里开启 JSON 模式（responseFormat: json）",
+          "noteEn": "Requires JSON mode on the request (responseFormat: json)"
+        }
+      ]
+    }
+  ]
+}

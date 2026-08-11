@@ -19,6 +19,8 @@ import BrowserPanel, { PanelTab } from './BrowserPanel';
 import { fetchActiveBrowserSession, BrowserSessionInfo } from '../api/browserSessions';
 import { fetchActiveCodeSession, CodeSessionInfo } from '../api/codeSessions';
 import { getTenantMode } from '../api/tenantEnv';
+import { submitFeedback } from '../api/feedback';
+import PromptExamples, { welcomeChips } from './PromptExamples';
 
 const CUSTOM_AUTH_HEADER = 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken';
 
@@ -202,6 +204,19 @@ const ChatInterface: React.FC = () => {
   // back to the rail, so the user always has one-click re-entry.
   const [browserPanelExpanded, setBrowserPanelExpanded] = useState(false);
   const [browserPanelTab, setBrowserPanelTab] = useState<PanelTab>('live');
+  // The example library. Openable at any point in a conversation, unlike the
+  // welcome-screen chips it supplements: those live behind
+  // `messages.length === 0` and so disappeared for good after the first message,
+  // taking the only visible list of the agent's capabilities with them.
+  const [examplesOpen, setExamplesOpen] = useState(false);
+  // Which turns have been voted on, and how. Kept in component state rather than
+  // re-read from the API: the vote is idempotent per turn (the sort key embeds
+  // the turn id) so the only thing the UI needs is which arrow to light up.
+  const [votes, setVotes] = useState<Record<string, 'up' | 'down'>>({});
+  // The turn whose 👎 reason box is open. One at a time: a reason belongs to a
+  // specific turn, and several open boxes invite typing into the wrong one.
+  const [reasonFor, setReasonFor] = useState('');
+  const [reasonText, setReasonText] = useState('');
   // Code Interpreter run for the current turn, polled the same way as the
   // browser session. Unlike the browser panel, a fresh code run auto-expands
   // the panel on the CodeInterpreter tab (requested behavior).
@@ -212,7 +227,7 @@ const ChatInterface: React.FC = () => {
   // panel doesn't render a dead session while waiting for the new
   // tool call to write its `running` row.
   const sendStartAtRef = useRef<number>(0);
-  const { t } = useI18n();
+  const { t, language } = useI18n();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -790,67 +805,89 @@ const ChatInterface: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The user turn that prompted a given agent reply, so a vote records WHAT was
+  // asked. Without it the dashboard can show a 👎 rate but nothing about what
+  // draws one, which is the only actionable half.
+  const promptFor = useCallback((agentMsgId: string): string => {
+    const idx = messages.findIndex((m) => m.id === agentMsgId);
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return messages[i].content;
+    }
+    return '';
+  }, [messages]);
+
+  const postVote = useCallback(async (
+    msg: ChatMessage,
+    vote: 'up' | 'down',
+    reason?: string,
+  ) => {
+    if (!browserUserId) return;
+    await submitFeedback({
+      userId: browserUserId,
+      vote,
+      turnId: msg.id,
+      sessionId: browserAgentSessionId || undefined,
+      reason,
+      turnPrompt: promptFor(msg.id),
+      // The delegation trace this turn already collected. Absent on turns that
+      // did not stream (images, A/B), which the backend buckets explicitly
+      // rather than dropping.
+      agentDim: msg.trace,
+    });
+  }, [browserUserId, browserAgentSessionId, promptFor]);
+
+  const sendVote = useCallback(async (msg: ChatMessage, vote: 'up' | 'down') => {
+    // Optimistic: the arrow lights immediately. Reverted below if the call
+    // fails, because a highlighted arrow whose vote never landed is a lie the
+    // user has no way to detect.
+    const previous = votes[msg.id];
+    setVotes((v) => ({ ...v, [msg.id]: vote }));
+    if (vote === 'down') {
+      setReasonFor(msg.id);
+      setReasonText('');
+    } else if (reasonFor === msg.id) {
+      setReasonFor('');
+    }
+    try {
+      await postVote(msg, vote);
+    } catch (e) {
+      console.warn('feedback failed', e);
+      setVotes((v) => {
+        const next = { ...v };
+        if (previous) next[msg.id] = previous;
+        else delete next[msg.id];
+        return next;
+      });
+      setReasonFor('');
+      setError(t('chat.feedback.failed'));
+    }
+  }, [votes, reasonFor, postVote, t]);
+
+  const sendReason = useCallback(async (msg: ChatMessage) => {
+    const reason = reasonText.trim();
+    setReasonFor('');
+    setReasonText('');
+    if (!reason) return;
+    try {
+      // Re-posts the same turn with the reason attached. The sort key embeds the
+      // turn id, so this overwrites rather than counting a second 👎.
+      await postVote(msg, 'down', reason);
+    } catch (e) {
+      console.warn('feedback reason failed', e);
+      setError(t('chat.feedback.failed'));
+    }
+  }, [reasonText, postVote, t]);
+
   const toggleVoice = () => {
     if (voiceActive) stopVoice();
     else startVoice();
   };
 
-  // Suggestion chips grouped by capability so the welcome screen
-  // surfaces the agent's full surface area (device control, knowledge
-  // base, weather, vision, live-web). Clicking a chip stages the prompt
-  // in the input box; the user still has to hit Send.
-  const suggestionGroups: Array<{ title: string; chips: Array<{ label: string; prompt: string }> }> = [
-    {
-      title: t('chat.group.devices'),
-      chips: [
-        { label: t('chat.chip.checkDevices'), prompt: t('chat.chip.checkDevices.prompt') },
-        { label: t('chat.chip.turnOnAll'), prompt: t('chat.chip.turnOnAll.prompt') },
-        { label: t('chat.chip.changeLed'), prompt: t('chat.chip.changeLed.prompt') },
-        { label: t('chat.chip.cookRice'), prompt: t('chat.chip.cookRice.prompt') },
-        { label: t('chat.chip.turnOnFan'), prompt: t('chat.chip.turnOnFan.prompt') },
-        { label: t('chat.chip.preheatOven'), prompt: t('chat.chip.preheatOven.prompt') },
-      ],
-    },
-    {
-      title: t('chat.group.knowledge'),
-      chips: [
-        { label: t('chat.chip.kb.ledManual'), prompt: t('chat.chip.kb.ledManual.prompt') },
-        { label: t('chat.chip.kb.ricePresets'), prompt: t('chat.chip.kb.ricePresets.prompt') },
-        { label: t('chat.chip.kb.fanErrors'), prompt: t('chat.chip.kb.fanErrors.prompt') },
-      ],
-    },
-    {
-      title: t('chat.group.weather'),
-      chips: [
-        { label: t('chat.chip.weather.today'), prompt: t('chat.chip.weather.today.prompt') },
-        { label: t('chat.chip.weather.beijing'), prompt: t('chat.chip.weather.beijing.prompt') },
-      ],
-    },
-    {
-      title: t('chat.group.browser'),
-      chips: [
-        { label: t('chat.chip.browser.example'), prompt: t('chat.chip.browser.example.prompt') },
-        { label: t('chat.chip.browser.amazon'), prompt: t('chat.chip.browser.amazon.prompt') },
-        { label: t('chat.chip.browser.wiki'), prompt: t('chat.chip.browser.wiki.prompt') },
-        { label: t('chat.chip.browser.httpbin'), prompt: t('chat.chip.browser.httpbin.prompt') },
-      ],
-    },
-    {
-      title: t('chat.group.code'),
-      chips: [
-        { label: t('chat.chip.code.energy'), prompt: t('chat.chip.code.energy.prompt') },
-        { label: t('chat.chip.code.thermostat'), prompt: t('chat.chip.code.thermostat.prompt') },
-        { label: t('chat.chip.code.anomaly'), prompt: t('chat.chip.code.anomaly.prompt') },
-        { label: t('chat.chip.code.montecarlo'), prompt: t('chat.chip.code.montecarlo.prompt') },
-      ],
-    },
-    {
-      title: t('chat.group.vision'),
-      chips: [
-        { label: t('chat.chip.vision.describe'), prompt: t('chat.chip.vision.describe.prompt') },
-      ],
-    },
-  ];
+  // Welcome-screen chips, from the SAME shared library as the drawer and the
+  // simulated users' scripts. They used to be 40 hardcoded i18n keys that covered
+  // only the orchestrator's own tools — nothing exercised any of the eight
+  // specialists, so the welcome screen advertised a fraction of the system.
+  const chips = welcomeChips(language === 'zh');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'row', height: '100%' }}>
@@ -876,19 +913,21 @@ const ChatInterface: React.FC = () => {
                   {t('chat.subtitle')}
                 </Box>
               </div>
-              <SpaceBetween size="m" direction="vertical">
-                {suggestionGroups.map((g) => (
-                  <SpaceBetween key={g.title} size="xs" direction="vertical">
-                    <Box color="text-body-secondary" fontSize="body-s">{g.title}</Box>
-                    <SpaceBetween direction="horizontal" size="xs">
-                      {g.chips.map((c) => (
-                        <Button key={c.label} onClick={() => setInputValue(c.prompt)}>
-                          {c.label}
-                        </Button>
-                      ))}
-                    </SpaceBetween>
-                  </SpaceBetween>
-                ))}
+              <SpaceBetween size="s" direction="vertical">
+                <div className="welcome-chips">
+                  {chips.map((c) => (
+                    <Button key={c.label} onClick={() => setInputValue(c.label)}>
+                      {c.label}
+                    </Button>
+                  ))}
+                </div>
+                {/* One chip per capability group, then a pointer at the full
+                    library. The chips alone cannot show 60+ examples, and the
+                    drawer is the part that stays reachable after the first
+                    message. */}
+                <Button iconName="suggestions" onClick={() => setExamplesOpen(true)}>
+                  {t('examples.openAll')}
+                </Button>
               </SpaceBetween>
             </SpaceBetween>
           </Box>
@@ -947,6 +986,59 @@ const ChatInterface: React.FC = () => {
                     ))}
                   </ol>
                 </details>
+              )}
+              {/*
+                Thumbs up/down. Only on agent turns, and only on settled ones —
+                voting on a half-streamed reply would record an opinion about
+                something the user has not finished reading.
+
+                Before this control the Overview dashboard's satisfaction card was
+                hardcoded mock data, because the only feedback path wrote JSON
+                files into the runtime's workspace, inspectable one at a time and
+                never aggregatable.
+              */}
+              {msg.role === 'agent' && !msg.pending && (
+                <div className="message-feedback">
+                  <Button
+                    variant="inline-icon"
+                    iconName={votes[msg.id] === 'up' ? 'thumbs-up-filled' : 'thumbs-up'}
+                    ariaLabel={t('chat.feedback.up')}
+                    onClick={() => void sendVote(msg, 'up')}
+                  />
+                  <Button
+                    variant="inline-icon"
+                    iconName={votes[msg.id] === 'down' ? 'thumbs-down-filled' : 'thumbs-down'}
+                    ariaLabel={t('chat.feedback.down')}
+                    onClick={() => void sendVote(msg, 'down')}
+                  />
+                  {votes[msg.id] && (
+                    <Box variant="small" color="text-body-secondary" display="inline">
+                      {t('chat.feedback.thanks')}
+                    </Box>
+                  )}
+                </div>
+              )}
+              {/* The reason box appears only after a 👎, because an optional
+                  "why" asked up front is a form; asked after a complaint it is a
+                  follow-up question. The vote is already recorded either way, so
+                  skipping this costs nothing. */}
+              {reasonFor === msg.id && (
+                <div className="message-reason">
+                  <Textarea
+                    value={reasonText}
+                    onChange={({ detail }) => setReasonText(detail.value)}
+                    placeholder={t('chat.feedback.reasonPlaceholder')}
+                    rows={2}
+                  />
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button variant="primary" onClick={() => void sendReason(msg)}>
+                      {t('chat.feedback.reasonSubmit')}
+                    </Button>
+                    <Button variant="link" onClick={() => { setReasonFor(''); setReasonText(''); }}>
+                      {t('chat.feedback.reasonSkip')}
+                    </Button>
+                  </SpaceBetween>
+                </div>
               )}
               <div className="message-time">{formatTime(msg.timestamp)}</div>
             </div>
@@ -1007,6 +1099,15 @@ const ChatInterface: React.FC = () => {
                 disabled={voiceActive || attachedImages.length >= MAX_IMAGES_PER_MESSAGE}
                 ariaLabel={t('chat.attachImage')}
               />
+              {/* The example library, reachable mid-conversation. This is the
+                  control the old welcome-only chips lacked: once the user had
+                  said anything, there was no way back to the list of what the
+                  agent can do. */}
+              <Button
+                iconName="suggestions"
+                onClick={() => setExamplesOpen((v) => !v)}
+                ariaLabel={t('examples.title')}
+              />
             </div>
             <input
               ref={fileInputRef}
@@ -1049,6 +1150,17 @@ const ChatInterface: React.FC = () => {
           textarea element; Cloudscape's onKeyDown doesn't let us preventDefault. */}
       <InputKeyBindings textareaContainerSelector=".input-row-textarea textarea" onSubmit={sendMessage} disabled={voiceActive} />
     </div>
+      {examplesOpen && (
+        <PromptExamples
+          onPick={(prompt) => {
+            // Staged, not sent. A presenter wants a beat to narrate what the
+            // example demonstrates; an explorer wants to edit it first.
+            setInputValue(prompt);
+            setExamplesOpen(false);
+          }}
+          onClose={() => setExamplesOpen(false)}
+        />
+      )}
       <BrowserPanel
         session={browserSession}
         codeSession={codeSession}

@@ -33,7 +33,7 @@ interface Props {
   theme: ChartTheme;
 }
 
-const RANGES: DashboardRange[] = ['24h', '7d', '30d'];
+const RANGES: DashboardRange[] = ['24h', '7d', '30d', '60d', '90d'];
 const DIMS: DashboardDim[] = ['user', 'tenant', 'agent'];
 
 /**
@@ -242,12 +242,18 @@ export function DashboardSection({ theme }: Props) {
                   chartHeight={PLOT_HEIGHT}
                 />
               </Panel>
+              {/* No demoProvenanceKey any more: these numbers are real votes from
+                  the chatbot. The badge was the honest thing to do while the card
+                  was invented, and leaving it on would now understate the data. */}
               <Panel
                 title={t('dashboard.satisfaction.title')}
                 info={t('dashboard.satisfaction.desc')}
-                demoProvenanceKey={MOCK_PROVENANCE.satisfaction}
               >
-                <SatisfactionCards theme={theme} chartHeight={PLOT_HEIGHT} />
+                <SatisfactionCards
+                  data={fast?.satisfaction}
+                  theme={theme}
+                  chartHeight={PLOT_HEIGHT}
+                />
               </Panel>
             </Grid>
           </SpaceBetween>

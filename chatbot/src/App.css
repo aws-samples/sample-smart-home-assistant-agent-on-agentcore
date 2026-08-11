@@ -567,3 +567,55 @@
     display: none;
   }
 }
+
+/* Example library drawer. Same right-hand slot and width as the browser panel,
+   so the two read as one family of side panels rather than two conventions. */
+.examples-panel {
+  width: 380px;
+  flex: 0 0 380px;
+  border-left: 1px solid var(--color-border-divider-default, #e9ebed);
+  overflow-y: auto;
+  height: 100%;
+}
+
+.example-row {
+  padding: 2px 0;
+}
+
+/* The note sits under its example rather than beside it: several notes explain
+   a routing subtlety and do not fit on one line at this width. */
+.example-meta {
+  padding-left: 4px;
+  display: block;
+}
+
+.welcome-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+/* Per-turn feedback. Low contrast until hovered: the control should be findable
+   without competing with the reply it is asking about. */
+.message-feedback {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  opacity: 0.55;
+  transition: opacity 0.15s ease-in-out;
+}
+
+.message-row:hover .message-feedback,
+.message-feedback:focus-within {
+  opacity: 1;
+}
+
+.message-reason {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 420px;
+}

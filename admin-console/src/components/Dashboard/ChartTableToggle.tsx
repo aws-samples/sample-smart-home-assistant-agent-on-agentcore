@@ -17,6 +17,8 @@ interface Props<T> {
   /** Row data backing the table view. */
   items: T[];
   columns: TableColumn<T>[];
+  /** Caveat shown under BOTH views — e.g. where span history actually starts. */
+  footer?: React.ReactNode;
 }
 
 /**
@@ -26,7 +28,7 @@ interface Props<T> {
  * a value (three of the light-mode chart hues sit below 3:1 against the white
  * surface, so the table is also the documented contrast relief channel).
  */
-export function ChartTableToggle<T>({ chart, items, columns }: Props<T>) {
+export function ChartTableToggle<T>({ chart, items, columns, footer }: Props<T>) {
   const { t } = useI18n();
   const [view, setView] = useState<'chart' | 'table'>('chart');
 
@@ -57,6 +59,7 @@ export function ChartTableToggle<T>({ chart, items, columns }: Props<T>) {
           }
         />
       )}
+      {footer}
     </SpaceBetween>
   );
 }

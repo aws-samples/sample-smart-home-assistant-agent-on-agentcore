@@ -37,64 +37,37 @@ const en: Record<string, string> = {
   'chat.placeholder': 'Type a message...',
   'chat.welcome': 'Welcome to Smart Home Assistant',
   'chat.subtitle': 'Control your smart home devices with natural language.',
-  'chat.chip.checkDevices': 'Check what devices I have',
-  'chat.chip.checkDevices.prompt': 'Check what smart home devices I have',
-  'chat.chip.turnOnAll': 'Turn on all my devices',
-  'chat.chip.turnOnAll.prompt': 'Turn on all my devices',
-  'chat.chip.changeLed': 'Change the LED mode',
-  'chat.chip.changeLed.prompt': 'Change the LED mode to rainbow',
-  'chat.chip.cookRice': 'Start cooking white rice',
-  'chat.chip.cookRice.prompt': 'Start cooking white rice',
-  'chat.chip.turnOnFan': 'Turn on fan at speed 2',
-  'chat.chip.turnOnFan.prompt': 'Turn on the fan at speed 2',
-  'chat.chip.preheatOven': 'Preheat oven to 350\u00b0F',
-  'chat.chip.preheatOven.prompt': 'Preheat oven to 350 degrees',
+  // Example library. The example TEXT lives in shared/prompt-examples.json, not
+  // here: scripts/sim/personas.py reads the same file to generate demo traffic,
+  // and Python cannot read a .ts module. Only the shell is translated.
+  'examples.title': 'Example prompts',
+  'examples.subtitle': '{count} examples covering every capability',
+  'examples.search': 'Search examples',
+  'examples.noMatch': 'No example matches that search',
+  'examples.close': 'Close examples',
+  'examples.heavy': 'slow',
+  'examples.openAll': 'Browse all examples',
+
+  // Per-turn feedback
+  'chat.feedback.up': 'This was helpful',
+  'chat.feedback.down': 'This was not helpful',
+  'chat.feedback.thanks': 'Thanks for the feedback',
+  'chat.feedback.reasonPlaceholder': 'What went wrong? (optional)',
+  'chat.feedback.reasonSubmit': 'Send',
+  'chat.feedback.reasonSkip': 'Skip',
+  'chat.feedback.failed': 'Could not record your feedback. Please try again.',
 
   // Suggestion group headings
-  'chat.group.devices': 'Smart devices',
-  'chat.group.knowledge': 'Knowledge base',
-  'chat.group.weather': 'Weather',
-  'chat.group.browser': 'Live web browser',
-  'chat.group.code': 'Code interpreter',
-  'chat.group.vision': 'Image analysis',
 
   // Knowledge base chips (answered from enterprise KB documents)
-  'chat.chip.kb.ledManual': 'LED matrix modes',
-  'chat.chip.kb.ledManual.prompt': 'What LED matrix modes are supported and how do I switch between them?',
-  'chat.chip.kb.ricePresets': 'Rice cooker presets',
-  'chat.chip.kb.ricePresets.prompt': 'What cooking presets does the rice cooker support?',
-  'chat.chip.kb.fanErrors': 'Fan troubleshooting',
-  'chat.chip.kb.fanErrors.prompt': 'The fan shows error code E3 \u2014 what does it mean and how do I fix it?',
 
   // Weather chips (weather-lookup skill via http_request)
-  'chat.chip.weather.today': 'Today\u2019s weather in San Francisco',
-  'chat.chip.weather.today.prompt': 'What\u2019s the weather like today in San Francisco?',
-  'chat.chip.weather.beijing': 'Beijing forecast',
-  'chat.chip.weather.beijing.prompt': '\u5317\u4eac\u672a\u6765\u4e09\u5929\u5929\u6c14\u5982\u4f55\uff1f',
 
   // Live browser chips (browser-use skill \u2192 browse_web tool)
-  'chat.chip.browser.example': 'What does example.com show?',
-  'chat.chip.browser.example.prompt': 'What does https://example.com say right now?',
-  'chat.chip.browser.amazon': 'Find wireless earbuds on Amazon',
-  'chat.chip.browser.amazon.prompt': 'Find the top 3 wireless earbuds under $100 on amazon.com \u2014 brand, price, rating.',
-  'chat.chip.browser.wiki': 'Summarize Python on Wikipedia',
-  'chat.chip.browser.wiki.prompt': 'Open the Python (programming language) Wikipedia page and summarize the first three sections.',
-  'chat.chip.browser.httpbin': 'Show the browser\u2019s public IP',
-  'chat.chip.browser.httpbin.prompt': 'Open https://httpbin.org/ip and tell me the IP address shown.',
 
   // Code interpreter chips (code-interpreter skill \u2192 execute_python tool)
-  'chat.chip.code.energy': 'Analyze home energy & chart it',
-  'chat.chip.code.energy.prompt': 'Synthesize a realistic week of hourly energy readings for my LED matrix, rice cooker, fan, and oven, then with pandas compute daily kWh per device, and with matplotlib plot the daily total kWh trend and each device\u2019s share of total consumption. Run the code and show the charts.',
-  'chat.chip.code.thermostat': 'Optimize AC schedule for cheapest bill',
-  'chat.chip.code.thermostat.prompt': 'Given a time-of-use price curve (off-peak 0.12, mid 0.20, peak 0.38 $/kWh) and a comfort band of 22\u201326\u00b0C, compute an optimal 24-hour AC schedule that minimizes cost while staying in the comfort band. Run the code, report the % saved versus a flat always-on baseline, and plot the price curve with the chosen schedule.',
-  'chat.chip.code.anomaly': 'Detect anomalies in fan telemetry',
-  'chat.chip.code.anomaly.prompt': 'Synthesize 7 days of per-minute fan power readings with a few injected spikes, run rolling-window Z-score anomaly detection to flag abnormal points, and plot the series with the anomalies highlighted. Run the code and summarize when the anomalies occurred.',
-  'chat.chip.code.montecarlo': 'Simulate next month\u2019s electricity bill',
-  'chat.chip.code.montecarlo.prompt': 'Run a Monte-Carlo simulation (10,000 trials) of my next monthly electricity bill given uncertain daily usage across my devices, then plot the bill distribution histogram and report the mean and 90% confidence interval. Run the code and show the chart.',
 
   // Vision chip \u2014 reminds users they can attach an image via the paperclip
-  'chat.chip.vision.describe': 'Describe an image (use paperclip first)',
-  'chat.chip.vision.describe.prompt': 'Attach an image with the paperclip, then ask: \u201cDescribe what you see in this image.\u201d',
   'chat.trace': "how this was answered",
   'chat.typing': 'thinking…',
   'chat.consulting': 'asking the',

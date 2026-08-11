@@ -40,6 +40,7 @@ SKILLS_TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "smarthome-skills")
 RUNTIME_SESSIONS_TABLE_NAME = os.environ.get(
     "RUNTIME_SESSIONS_TABLE_NAME", "smarthome-runtime-sessions"
 )
+FEEDBACK_TABLE_NAME = os.environ.get("FEEDBACK_TABLE_NAME", "smarthome-feedback")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 VOICE_RUNTIME_ARN = os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
 # Comma-separated extra runtime ARNs to fold into the health block (A2A
@@ -79,7 +80,23 @@ CACHE_TTL_SECONDS = 300  # 5 minutes
 # room to serialise the response.
 SPANS_QUERY_BUDGET_SECONDS = 22
 
-RANGES = {"24h": 1, "7d": 7, "30d": 30}
+# Widened to 90d on 2026-08-11. Measured before doing it: a single 90d Logs
+# Insights query takes 3.2s against the 22s budget below, and scanning grows only
+# 8% from 30d to 90d (798k -> 865k records) because the older weeks hold little
+# data. So no chunking, no query rewrite, nothing to optimise.
+#
+# Chunking the window (e.g. 18 x 5d in parallel) was measured too: it saves 0.6s
+# and introduces two failure modes, both reproduced against this account.
+#   1. A chunk lying ENTIRELY outside a group's retention is a hard 400
+#      (MalformedQueryException), not an empty result. `aws/spans` keeps 30 days,
+#      so every chunk older than that fails outright. One wide window is fine,
+#      because it overlaps retention and CloudWatch clips it itself.
+#   2. Guarding against (1) by dropping `aws/spans` from the older chunks
+#      SILENTLY loses data held only there — measured: a d-30..d-25 chunk
+#      returned 1 real day with the group and 0 without it, no error either way.
+# `tests/test_dashboard_ranges.py` asserts one start_query per query regardless of
+# window length, so this cannot be "optimised" back into a data-loss bug.
+RANGES = {"24h": 1, "7d": 7, "30d": 30, "60d": 60, "90d": 90}
 DIMS = ("user", "tenant", "agent")
 
 # The 11 online evaluators actually emitting for this project. Each is its
@@ -299,6 +316,37 @@ def _spans_log_groups():
     return _existing_log_groups(
         [*_runtime_span_log_groups(), LEGACY_SPANS_LOG_GROUP]
     )
+
+
+def _spans_data_from(trend, days):
+    """Where this window's span data actually starts, or None if it spans it all.
+
+    Reported so a 90d view can say "span data begins <date>" rather than leaving
+    the reader to assume the empty first half was a quiet period. Derived from the
+    FIRST DAY THAT RETURNED DATA, not from log-group creation time: an earlier
+    attempt used the oldest group's creation date and got 2026-04-12 — true (the
+    group existed) but useless, because the group held no spans until July. That
+    reading also suppressed the note in exactly the case it exists for, since any
+    old group makes the horizon look older than the window.
+
+    None when the data reaches the start of the window, because then there is
+    nothing to caveat.
+    """
+    if not trend:
+        return None
+    first = str(trend[0].get("day", ""))[:10]
+    if not first:
+        return None
+    try:
+        first_dt = datetime.fromisoformat(first).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    window_start = datetime.now(timezone.utc) - timedelta(days=days)
+    # One day of slack: a window starting mid-day would otherwise flag a note on
+    # every range whose first bin happens to sit just inside it.
+    if first_dt <= window_start + timedelta(days=1):
+        return None
+    return first_dt.isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -925,6 +973,10 @@ def _fetch_spans(days, dim):
         "trend": trend,
         "attribution": attribution,
         "dim": dim,
+        # Where span history actually begins. The UI notes it rather than
+        # rendering the pre-horizon days as zeros: "no telemetry yet" and
+        # "measured zero" look identical on a chart and mean opposite things.
+        "dataFrom": _spans_data_from(trend, days),
         "totals": {
             "inputTokens": tot_in,
             "outputTokens": tot_out,
@@ -934,6 +986,99 @@ def _fetch_spans(days, dim):
             "ttftP95Ms": max(ttfts_p95) if ttfts_p95 else None,
             "ttftP99Ms": max(ttfts_p99) if ttfts_p99 else None,
         },
+    }
+
+
+def _fetch_satisfaction(days):
+    """Real thumbs up/down, aggregated from the feedback table.
+
+    Replaced a hardcoded `MOCK_SATISFACTION` block in the console. The card was
+    invented because until now the only feedback path was the `user-feedback`
+    skill writing JSON files into a runtime's workspace — inspectable one file at
+    a time, never aggregatable.
+
+    `available: False` when nobody has voted, and the UI renders "no feedback
+    yet". It must NOT fall back to a zero CSAT: an empty table and universal
+    dissatisfaction look the same on a gauge and mean opposite things.
+    """
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    items = []
+    try:
+        t = _table(FEEDBACK_TABLE_NAME)
+        kwargs = {}
+        while True:
+            # A scan, not a query: the aggregate spans all users, so there is no
+            # single partition to query. Bounded by the table's own size, which
+            # is one row per vote — orders of magnitude smaller than the spans it
+            # sits beside on this page.
+            resp = t.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            key = resp.get("LastEvaluatedKey")
+            if not key:
+                break
+            kwargs["ExclusiveStartKey"] = key
+    except ClientError as e:
+        logger.warning("feedback scan failed: %s", e)
+        return {"available": False, "reason": "feedback table unreadable"}
+
+    rows = [i for i in items if str(i.get("ts", "")) >= start]
+    if not rows:
+        return {"available": False, "reason": "no feedback in window"}
+
+    up = sum(1 for r in rows if r.get("vote") == "up")
+    down = sum(1 for r in rows if r.get("vote") == "down")
+    total = up + down
+    sim = sum(1 for r in rows if r.get("source") == "sim")
+
+    per_day = {}
+    for r in rows:
+        day = str(r.get("ts", ""))[:10]
+        if not day:
+            continue
+        bucket = per_day.setdefault(day, {"up": 0, "down": 0})
+        bucket["up" if r.get("vote") == "up" else "down"] += 1
+
+    # Which specialist drew the vote. A turn that consulted several agents counts
+    # once for each, because the question being answered is "does this agent
+    # correlate with dissatisfaction", not "who is to blame".
+    per_agent = {}
+    for r in rows:
+        for agent in (r.get("agentDim") or ["(no delegation)"]):
+            bucket = per_agent.setdefault(str(agent), {"up": 0, "down": 0})
+            bucket["up" if r.get("vote") == "up" else "down"] += 1
+
+    recent = sorted(
+        (r for r in rows if r.get("reason")),
+        key=lambda r: str(r.get("ts", "")),
+        reverse=True,
+    )[:10]
+
+    return {
+        "available": True,
+        "thumbsUp": up,
+        "thumbsDown": down,
+        # A 1-5 CSAT derived from a two-way vote, stated as such. Reporting the
+        # share directly would be honest too, but the card this replaces was a
+        # 5-point scale and admins read it against past screenshots.
+        "csat": round(1 + 4 * (up / total), 1) if total else None,
+        "csatScale": 5,
+        "simulatedShare": round(sim / len(rows), 3) if rows else 0,
+        "trend": [
+            {"day": d, "up": v["up"], "down": v["down"],
+             "downRate": round(v["down"] / (v["up"] + v["down"]), 4)
+             if (v["up"] + v["down"]) else 0}
+            for d, v in sorted(per_day.items())
+        ],
+        "byAgent": [
+            {"agent": a, "up": v["up"], "down": v["down"]}
+            for a, v in sorted(per_agent.items(), key=lambda kv: -(kv[1]["up"] + kv[1]["down"]))
+        ],
+        "recentReasons": [
+            {"ts": str(r.get("ts", "")), "vote": r.get("vote", ""),
+             "reason": str(r.get("reason", ""))[:400],
+             "source": r.get("source", "user")}
+            for r in recent
+        ],
     }
 
 
@@ -1032,7 +1177,7 @@ def _attribute(rows, dim):
 # ---------------------------------------------------------------------------
 
 def get_dashboard(event):
-    """GET /dashboard?range=24h|7d|30d[&part=spans][&dim=user|tenant|agent]"""
+    """GET /dashboard?range=24h|7d|30d|60d|90d[&part=spans][&dim=user|tenant|agent]"""
     qs = event.get("queryStringParameters") or {}
     rng = qs.get("range", "7d")
     if rng not in RANGES:
@@ -1072,6 +1217,7 @@ def get_dashboard(event):
             "health": _fetch_health(days),
             "evaluations": _fetch_evaluations(days),
             "abComparison": _fetch_ab_comparison(days),
+            "satisfaction": _fetch_satisfaction(days),
             "release": _fetch_release(),
         }
 

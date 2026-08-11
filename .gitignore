@@ -106,3 +106,9 @@ agent/memory_actor.py
 agent/device_brief.py
 agent/device_catalog.py
 agent/device-catalog.json
+# The prompt-example library, copied into the chatbot's bundle. The chatbot and
+# scripts/sim/personas.py read the SAME file so "what this system can do" is
+# stated once; a second copy would drift, and the symptom is discovering
+# mid-demo that nothing exercises some agent. Source of truth is
+# shared/prompt-examples.json.
+chatbot/src/generated/

@@ -1,36 +1,55 @@
 import React from 'react';
 import Box from '@cloudscape-design/components/box';
-import SpaceBetween from '@cloudscape-design/components/space-between';
 import LineChart from '@cloudscape-design/components/line-chart';
-import { MOCK_SATISFACTION } from './mockData';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import { DashboardSatisfaction } from '../../api/adminApi';
 import { ChartTheme, seriesColor } from './palette';
 import { ChartTableToggle } from './ChartTableToggle';
 import { useI18n } from '../../i18n';
 
 interface Props {
+  data?: DashboardSatisfaction;
   theme: ChartTheme;
   chartHeight: number;
 }
 
 /**
- * #6 User satisfaction — SIMULATED. Panel body.
+ * #6 User satisfaction — REAL as of 2026-08-11.
  *
- * Three figures plus a SINGLE-series line for escalation rate — one series
- * needs no legend box, since the panel title already names what is plotted.
- * Two-part shares (thumbs up/down) are a ratio figure, never a pie.
+ * Reads the `smarthome-feedback` table, written by the chatbot's per-turn 👍/👎.
+ * It was mock data until the chatbot had a feedback control at all: the only
+ * feedback path was the `user-feedback` skill writing JSON into a runtime's
+ * /mnt/workspace/feedback/, readable one file at a time through Remote Shell and
+ * never aggregatable into a figure.
  *
- * No real source: the chatbot ships no thumbs up/down control, and the
- * user-feedback skill only writes JSON into the runtime's
- * /mnt/workspace/feedback/ — readable via Remote Shell, not aggregatable. The
- * nearest real proxies are Helpfulness / GoalSuccessRate in the evaluation
- * panel, which are NOT CSAT.
+ * The empty state is the part worth being careful about. With no votes this
+ * renders "no feedback yet" and NOTHING else — no zero CSAT, no flat line at the
+ * bottom of the chart. An empty table and universal dissatisfaction produce the
+ * same pixels on a gauge and mean opposite things, and inventing the pessimistic
+ * reading of missing data is the same mistake as inventing the optimistic one.
+ *
+ * `byAgent` counts a multi-specialist turn once per specialist. The question is
+ * "does this agent correlate with dissatisfaction", not "who is at fault".
  */
-export function SatisfactionCards({ theme, chartHeight }: Props) {
+export function SatisfactionCards({ data, theme, chartHeight }: Props) {
   const { t } = useI18n();
-  const s = MOCK_SATISFACTION;
-  const totalVotes = s.thumbsUp + s.thumbsDown;
-  const upPct = totalVotes ? (s.thumbsUp / totalVotes) * 100 : 0;
-  const latest = s.escalationTrend[s.escalationTrend.length - 1].rate;
+
+  if (!data?.available) {
+    return (
+      <Box color="text-body-secondary" textAlign="center" padding={{ vertical: 'l' }}>
+        {t('dashboard.satisfaction.empty')}
+      </Box>
+    );
+  }
+
+  const up = data.thumbsUp ?? 0;
+  const down = data.thumbsDown ?? 0;
+  const total = up + down;
+  const upPct = total ? (up / total) * 100 : 0;
+  const trend = data.trend ?? [];
+  const byAgent = data.byAgent ?? [];
+  const reasons = data.recentReasons ?? [];
+  const simShare = data.simulatedShare ?? 0;
 
   return (
     <SpaceBetween size="s">
@@ -38,22 +57,32 @@ export function SatisfactionCards({ theme, chartHeight }: Props) {
         <div>
           <Box variant="awsui-key-label">{t('dashboard.satisfaction.csat')}</Box>
           <Box fontSize="heading-xl" fontWeight="bold">
-            {s.csat.toFixed(1)}
+            {data.csat != null ? data.csat.toFixed(1) : '-'}
             <Box variant="span" color="text-body-secondary" fontSize="body-m" fontWeight="normal">
-              {` / ${s.csatScale}`}
+              {` / ${data.csatScale ?? 5}`}
             </Box>
           </Box>
         </div>
         <div>
           <Box variant="awsui-key-label">{t('dashboard.satisfaction.thumbs')}</Box>
           <Box fontSize="heading-xl" fontWeight="bold">{`${upPct.toFixed(0)}%`}</Box>
-          <Box variant="small" color="text-body-secondary">{`${s.thumbsUp} / ${s.thumbsDown}`}</Box>
+          <Box variant="small" color="text-body-secondary">{`${up} / ${down}`}</Box>
         </div>
         <div>
-          <Box variant="awsui-key-label">{t('dashboard.satisfaction.latestEscalation')}</Box>
-          <Box fontSize="heading-xl" fontWeight="bold">{`${(latest * 100).toFixed(1)}%`}</Box>
+          <Box variant="awsui-key-label">{t('dashboard.satisfaction.votes')}</Box>
+          <Box fontSize="heading-xl" fontWeight="bold">{total}</Box>
         </div>
       </SpaceBetween>
+
+      {/* Stated whenever any simulated vote is included. The simulator files
+          votes through the same API as a real user, which is what makes the demo
+          usable — and exactly why the share has to be visible. */}
+      {simShare > 0 && (
+        <Box variant="small" color="text-status-info">
+          {t('dashboard.satisfaction.simulated').replace(
+            '{pct}', (simShare * 100).toFixed(0))}
+        </Box>
+      )}
 
       <ChartTableToggle
         chart={
@@ -63,33 +92,59 @@ export function SatisfactionCards({ theme, chartHeight }: Props) {
             hideLegend
             series={[
               {
-                title: t('dashboard.satisfaction.escalationRate'),
+                title: t('dashboard.satisfaction.downRate'),
                 type: 'line',
                 color: seriesColor(theme, 0),
-                data: s.escalationTrend.map((p) => ({ x: p.day.slice(5), y: p.rate * 100 })),
+                data: trend.map((p) => ({ x: p.day.slice(5), y: p.downRate * 100 })),
                 valueFormatter: (v: number) => `${v.toFixed(1)}%`,
               },
             ]}
             xScaleType="categorical"
             yTitle="%"
-            ariaLabel={t('dashboard.satisfaction.escalationRate')}
+            ariaLabel={t('dashboard.satisfaction.downRate')}
             yTickFormatter={(v: number) => `${v.toFixed(0)}%`}
           />
         }
-        items={s.escalationTrend}
+        items={trend}
         columns={[
           { id: 'day', header: t('dashboard.token.xDay'), cell: (p) => p.day },
+          { id: 'up', header: '👍', cell: (p) => p.up },
+          { id: 'down', header: '👎', cell: (p) => p.down },
           {
             id: 'rate',
-            header: t('dashboard.satisfaction.escalationRate'),
-            cell: (p) => `${(p.rate * 100).toFixed(1)}%`,
+            header: t('dashboard.satisfaction.downRate'),
+            cell: (p) => `${(p.downRate * 100).toFixed(1)}%`,
           },
         ]}
       />
 
-      <Box variant="small" color="text-body-secondary">
-        {t('dashboard.satisfaction.footnote')}
-      </Box>
+      {/* Which specialist drew the vote — the question mock data could not
+          answer, and the reason the vote carries the turn's delegation trace. */}
+      {byAgent.length > 0 && (
+        <div>
+          <Box variant="awsui-key-label">{t('dashboard.satisfaction.byAgent')}</Box>
+          <SpaceBetween size="xxs">
+            {byAgent.slice(0, 6).map((r) => (
+              <Box key={r.agent} variant="small">
+                {`${r.agent}: 👍 ${r.up} / 👎 ${r.down}`}
+              </Box>
+            ))}
+          </SpaceBetween>
+        </div>
+      )}
+
+      {reasons.length > 0 && (
+        <div>
+          <Box variant="awsui-key-label">{t('dashboard.satisfaction.reasons')}</Box>
+          <SpaceBetween size="xxs">
+            {reasons.slice(0, 5).map((r) => (
+              <Box key={`${r.ts}-${r.reason}`} variant="small" color="text-body-secondary">
+                {`${r.ts.slice(0, 16).replace('T', ' ')} — ${r.reason}`}
+              </Box>
+            ))}
+          </SpaceBetween>
+        </div>
+      )}
     </SpaceBetween>
   );
 }

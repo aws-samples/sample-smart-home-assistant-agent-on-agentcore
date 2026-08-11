@@ -538,6 +538,27 @@ export class SmartHomeStack extends cdk.Stack {
     });
 
     // ========================
+    // DynamoDB - User Feedback Table
+    // Real thumbs up/down from the chatbot. Before this table the Overview
+    // dashboard's satisfaction card was hardcoded mock data, because the only
+    // feedback path was the `user-feedback` skill writing JSON files into a
+    // runtime's /mnt/workspace/feedback/ — readable one at a time through
+    // Remote Shell, never aggregatable into a number.
+    //
+    // The sort key embeds the turn id so a user can change their vote on a turn
+    // (overwrite) while each turn keeps its own row. Sorting by `ts` first is
+    // what makes the dashboard's per-day trend a range query instead of a scan
+    // with a client-side filter.
+    // ========================
+    const feedbackTable = new dynamodb.Table(this, "FeedbackTable", {
+      tableName: "smarthome-feedback",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "feedbackKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ========================
     // S3 - Skill Files (scripts, references, assets)
     // ========================
     const skillFilesBucket = new s3.Bucket(this, "SkillFilesBucket", {
@@ -576,6 +597,7 @@ export class SmartHomeStack extends cdk.Stack {
         BROWSER_SESSIONS_TABLE_NAME: browserSessionsTable.tableName,
         CODE_SESSIONS_TABLE_NAME: codeSessionsTable.tableName,
         RUNTIME_SESSIONS_TABLE_NAME: runtimeSessionsTable.tableName,
+        FEEDBACK_TABLE_NAME: feedbackTable.tableName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
@@ -584,6 +606,7 @@ export class SmartHomeStack extends cdk.Stack {
     browserSessionsTable.grantReadData(adminLambda);
     codeSessionsTable.grantReadData(adminLambda);
     runtimeSessionsTable.grantReadWriteData(adminLambda);
+    feedbackTable.grantReadWriteData(adminLambda);
 
     // ========================
     // Lambda - User Init (Cognito Post-Confirmation trigger)
@@ -755,6 +778,10 @@ export class SmartHomeStack extends cdk.Stack {
     // /sessions
     const sessionsResource = adminApi.root.addResource("sessions");
     sessionsResource.addMethod("GET", adminIntegration, authMethodOptions);
+    // POST /sessions?action=feedback — end-user thumbs up/down. Dispatched by
+    // action inside the Lambda, ahead of the admin gate, because the users doing
+    // the voting are not admins.
+    sessionsResource.addMethod("POST", adminIntegration, authMethodOptions);
 
     // /sessions/{sessionId}/stop
     const sessionIdResource = sessionsResource.addResource("{sessionId}");

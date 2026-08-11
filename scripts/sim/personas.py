@@ -15,7 +15,42 @@ Scenarios are tiered:
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+
+# The example library the chatbot renders as its example drawer. Read here so
+# "what this system can do" is stated ONCE. The two lists used to be maintained
+# separately — TypeScript chips and Python scripts — and that drift does not
+# fail: the symptom is discovering mid-demo that no traffic ever reached the
+# security agent. shared/tests/test_prompt_examples.py asserts every deployed
+# A2A skill is covered by some example.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(os.path.dirname(_HERE))
+EXAMPLES_PATH = os.path.join(_REPO, "shared", "prompt-examples.json")
+
+
+def _load_examples() -> dict[str, list[str]]:
+    """group id -> English prompts, in file order."""
+    with open(EXAMPLES_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    return {g["id"]: [ex["en"] for ex in g["examples"]] for g in data["groups"]}
+
+
+EXAMPLES = _load_examples()
+
+
+def from_group(group_id: str, name: str | None = None, tier: str = "light",
+               limit: int | None = None) -> "Scenario":
+    """A scenario built from a group of the shared example library.
+
+    Using the shared prompts rather than a private copy means a new capability
+    becomes demo traffic as soon as someone writes its example, with no second
+    edit here to forget.
+    """
+    prompts = EXAMPLES[group_id]
+    return Scenario(name or group_id, prompts[:limit] if limit else list(prompts),
+                    tier=tier)
 
 # Tool grants every persona needs to exercise device + KB paths. These are the
 # gateway tool names the agent registers (NOT the skill-doc names).
@@ -42,6 +77,18 @@ class Persona:
     scenarios: list[Scenario] = field(default_factory=list)
     #  Deliberately ungranted, to produce genuine "tool unavailable" data.
     grant_tools: bool = True
+    #  Share of this persona's turns that get a 👍 (the rest get a 👎 with a
+    #  reason). Spread across personas so the satisfaction card shows a real
+    #  distribution rather than one flat value — a card where every persona
+    #  votes the same way looks synthetic even though the votes are real rows.
+    #  Votes go through the SAME API a human uses, tagged source="sim".
+    #
+    #  Keep these reachable at the persona's OWN turn count. A persona with 6
+    #  turns at 0.85 rounds to 0.9 negatives, i.e. none at all, so it silently
+    #  contributes nothing to the negative rate the dashboard plots. With 3-8
+    #  turns per persona that means staying at or below ~0.8.
+    #  test_vote_distribution.py asserts this per persona.
+    feedback_up_rate: float = 0.75
 
     @property
     def email(self) -> str:
@@ -154,6 +201,62 @@ PERSONAS: list[Persona] = [
                 "Make it better in here.",
             ]),
         ],
+    ),
+]
+
+
+# --- specialist-agent personas ---------------------------------------------
+# Added 2026-08-11. Before these, every scenario exercised only the
+# orchestrator's own MCP tools: not one of the eight A2A specialists ever saw
+# traffic, so the dashboard's per-agent attribution had nothing to attribute and
+# a demo could not show delegation at all. Each of these binds to a group of the
+# shared example library, so the traffic and the chatbot's examples cannot drift.
+PERSONAS += [
+    Persona(
+        key="frank",
+        display="Frank (lighting moods + scenes)",
+        model_id="us.anthropic.claude-sonnet-4-6",
+        tenant_env="default",
+        scenarios=[
+            from_group("lighting"),
+            from_group("scene"),
+        ],
+        feedback_up_rate=0.8,
+    ),
+    Persona(
+        key="grace",
+        display="Grace (automation, incl. sunrise/sunset triggers)",
+        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        tenant_env="ab-bundles",
+        scenarios=[
+            from_group("automation"),
+            from_group("orchestration", limit=2),
+        ],
+        feedback_up_rate=0.75,
+    ),
+    Persona(
+        key="henry",
+        display="Henry (energy + security advice)",
+        model_id="us.anthropic.claude-opus-4-6-v1",
+        tenant_env="ab-targets",
+        scenarios=[
+            from_group("energy"),
+            from_group("security"),
+        ],
+        feedback_up_rate=0.7,
+    ),
+    Persona(
+        key="iris",
+        display="Iris (maintenance, docs, concurrent specialists)",
+        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        tenant_env="default",
+        scenarios=[
+            from_group("maintenance"),
+            from_group("docs"),
+            # The measured -66% case: three independent specialists in one turn.
+            from_group("multidomain"),
+        ],
+        feedback_up_rate=0.7,
     ),
 ]
 
