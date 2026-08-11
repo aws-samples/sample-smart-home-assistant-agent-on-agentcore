@@ -46,7 +46,26 @@ VOICE_RUNTIME_ARN = os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
 # specialist runtimes, the bundles runtime, …). Set by setup-agentcore.py /
 # a2a-agent-registry/deploy.py as those runtimes come and go.
 EXTRA_RUNTIME_ARNS = os.environ.get("DASHBOARD_EXTRA_RUNTIME_ARNS", "")
-SPANS_LOG_GROUP = "aws/spans"
+
+# Where AgentCore Runtime writes its OTel spans.
+#
+# It used to be the account-wide `aws/spans` group, and this page read that. It
+# is not any more: AgentCore moved trace export into each runtime's OWN log
+# group (a `spans` stream inside
+# `/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`). The cutover was clean
+# and completely silent — for the orchestrator, `aws/spans` stops at
+# 2026-08-05 02:12 and the runtime-local stream starts at 02:28; the sub-agents
+# followed on 2026-08-09. Nothing errored, no permission was denied, and the
+# Logs Insights query kept succeeding: it simply matched zero records, so the
+# TTFT and token-split cards read "no data" for six days as if the system were
+# idle.
+#
+# `aws/spans` is kept in the list rather than replaced. Both are queried and the
+# results merged, because a `range=30d` window still straddles the cutover, and
+# dropping the old group would erase five of those weeks' history from a page
+# whose entire purpose is a trend line.
+LEGACY_SPANS_LOG_GROUP = "aws/spans"
+SPANS_LOG_GROUP = LEGACY_SPANS_LOG_GROUP  # retained for callers that import it
 
 # Cache rows live on the global partition of the skills table.
 CACHE_PK = "__global__"
@@ -215,9 +234,71 @@ def _spans_service_filter():
 
     `in [...]` is an exact match — verified against aws/spans, where it
     returned only our runtimes and excluded every unrelated project.
+
+    Still applied when querying the per-runtime groups, where it is redundant by
+    construction. Cheap, and it keeps one query string correct for both sources
+    rather than forking it.
     """
     names = ", ".join(f'"{n}"' for n in _service_names())
     return f"| filter resource.attributes.service.name in [{names}]\n"
+
+
+def _runtime_span_log_groups():
+    """The per-runtime span log groups for every runtime this project owns.
+
+    One group per runtime, which is where AgentCore writes spans now. Empty if no
+    runtime ARN is configured, in which case the caller falls back to the legacy
+    account-wide group alone.
+    """
+    out = []
+    for arn in _all_runtime_arns():
+        runtime_id = _runtime_id_from_arn(arn)
+        if runtime_id:
+            group = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
+            if group not in out:
+                out.append(group)
+    return out
+
+
+def _existing_log_groups(names):
+    """Filter `names` down to the groups that exist, preserving order.
+
+    Necessary, not defensive: `StartQuery` rejects the WHOLE request with
+    ResourceNotFoundException if any single named group is missing, so one
+    torn-down sub-agent runtime still listed in DASHBOARD_EXTRA_RUNTIME_ARNS
+    would take the entire dashboard down with it. Verified against the live
+    account by naming one real group and one fake one.
+
+    A describe failure returns the list unfiltered rather than empty: losing the
+    ability to check is not evidence that nothing exists, and the query's own
+    error handling is the backstop.
+    """
+    logs = _client("logs")
+    found = []
+    for name in names:
+        try:
+            resp = logs.describe_log_groups(logGroupNamePrefix=name, limit=50)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("describe_log_groups failed for %s: %s", name, e)
+            return list(names)
+        if any(g.get("logGroupName") == name for g in resp.get("logGroups", [])):
+            found.append(name)
+        else:
+            logger.info("span log group %s does not exist; skipping", name)
+    return found
+
+
+def _spans_log_groups():
+    """Every log group that could hold this project's spans, newest source first.
+
+    Both sources are queried together because a 30d window straddles the
+    2026-08-05 cutover described at LEGACY_SPANS_LOG_GROUP. Logs Insights unions
+    the groups itself, and the `service.name` filter keeps other projects out of
+    the legacy one.
+    """
+    return _existing_log_groups(
+        [*_runtime_span_log_groups(), LEGACY_SPANS_LOG_GROUP]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -724,16 +805,24 @@ def _run_logs_insights(query, days, deadline=None):
         return None
     end_time = int(time.time())
     start_time = end_time - days * 86400
+    groups = _spans_log_groups()
+    if not groups:
+        logger.info("no span log group exists; spans block unavailable")
+        return None
     try:
         start = logs.start_query(
-            logGroupName=SPANS_LOG_GROUP,
+            # logGroupNames (plural): spans live in one group per runtime now,
+            # plus the legacy account-wide group for history before the cutover.
+            logGroupNames=groups,
             startTime=start_time,
             endTime=end_time,
             queryString=query,
         )
         query_id = start["queryId"]
     except logs.exceptions.ResourceNotFoundException:
-        logger.info("%s log group not found", SPANS_LOG_GROUP)
+        # Should not happen — `_spans_log_groups` already filtered to existing
+        # groups — but a group deleted between the check and the call lands here.
+        logger.info("span log group vanished between check and query: %s", groups)
         return None
     except Exception as e:  # noqa: BLE001
         logger.warning("start_query failed: %s", e)

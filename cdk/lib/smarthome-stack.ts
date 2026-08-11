@@ -869,9 +869,23 @@ export class SmartHomeStack extends cdk.Stack {
       resources: ["*"],
     }));
 
-    // Grant admin Lambda CloudWatch Logs Insights access on the aws/spans log
-    // group (AgentCore GenAI spans). Used to aggregate per-session token usage
-    // for the Sessions tab.
+    // Grant admin Lambda CloudWatch Logs Insights access on the AgentCore GenAI
+    // span groups. Used for the Sessions tab's per-session token totals and the
+    // Overview page's TTFT / token-split cards.
+    //
+    // TWO resources, because AgentCore moved where spans are written. They used
+    // to land in the account-wide `aws/spans` group; since 2026-08-05 each
+    // runtime writes its own (`/aws/bedrock-agentcore/runtimes/{id}-DEFAULT`,
+    // `spans` stream). Both are granted: the old group still holds history a 30d
+    // dashboard range reaches back into, and the new ones hold everything since.
+    //
+    // The runtime groups are wildcarded rather than enumerated. The A2A
+    // specialists' runtime ids are not known to this stack — they are deployed
+    // separately by a2a-agent-registry/deploy.py and arrive via
+    // DASHBOARD_EXTRA_RUNTIME_ARNS — so naming them here would mean a stack
+    // deploy every time a specialist is redeployed, and the read would fail
+    // silently until it happened. Scoped to the AgentCore runtime path, so this
+    // is not a grant over all log groups in the account.
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         "logs:StartQuery",
@@ -879,7 +893,17 @@ export class SmartHomeStack extends cdk.Stack {
       ],
       resources: [
         `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:aws/spans:*`,
+        `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/*`,
       ],
+    }));
+    // DescribeLogGroups so the dashboard can skip a group that no longer exists.
+    // Necessary, not tidiness: StartQuery rejects the whole request if ANY named
+    // group is missing, so one torn-down specialist runtime still listed in
+    // DASHBOARD_EXTRA_RUNTIME_ARNS would otherwise take down every spans card.
+    // The API does not support resource-level scoping.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["logs:DescribeLogGroups"],
+      resources: ["*"],
     }));
     // GetQueryResults doesn't support resource-level scoping.
     adminLambda.addToRolePolicy(new iam.PolicyStatement({

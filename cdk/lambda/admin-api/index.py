@@ -714,16 +714,24 @@ def _fetch_token_totals_7d():
         'resource.attributes.service.name as serviceName\n'
         '| limit 10000'
     )
+    groups = dashboard._spans_log_groups()
+    if not groups:
+        logger.info("no span log group exists; returning empty token totals")
+        return {}
     try:
         start = logs_client.start_query(
-            logGroupName=SPANS_LOG_GROUP,
+            # Both the per-runtime groups (where spans go since 2026-08-05) and
+            # the legacy account-wide one, so a 7d window spanning the cutover is
+            # whole. See dashboard.LEGACY_SPANS_LOG_GROUP.
+            logGroupNames=groups,
             startTime=start_time,
             endTime=end_time,
             queryString=query,
         )
         query_id = start["queryId"]
     except logs_client.exceptions.ResourceNotFoundException:
-        logger.info("aws/spans log group not found; returning empty token totals")
+        logger.info("span log group vanished between check and query; "
+                    "returning empty token totals")
         return {}
     except Exception as e:
         logger.warning("Logs Insights start_query failed: %s", e)
