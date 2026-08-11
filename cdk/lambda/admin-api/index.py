@@ -307,49 +307,151 @@ def list_users(_event):
 
 
 def get_settings(event):
-    """GET /settings/{userId} — return user settings (modelId + visionModelId)."""
+    """GET /settings/{userId} — return user settings.
+
+    Two models plus the user's place in the world: `timezone` decides when "every
+    night at 23:00" actually fires, and the coordinates are what make "at sunset"
+    computable at all (see shared/solar.py).
+    """
     path_params = event.get("pathParameters") or {}
-    user_id = path_params.get("userId", "")
+    # unquote, like every other handler that takes a userId. An email in a path
+    # arrives as `admin%40smarthome.local`, and writing that literal string as the
+    # partition key produces a row the AGENT can never find — it reads by plain
+    # email. That went unnoticed while these settings were only `modelId`, because
+    # the console wrote and read the same escaped key; the coordinates broke the
+    # symmetry, since the agent is the one that reads them.
+    user_id = unquote(path_params.get("userId", ""))
 
     resp = table.get_item(Key={"userId": user_id, "skillName": "__settings__"})
     item = resp.get("Item")
     if not item:
-        return response(200, {"userId": user_id, "modelId": "", "visionModelId": ""})
+        return response(200, {"userId": user_id, "modelId": "",
+                              "visionModelId": "", "timezone": "",
+                              "latitude": None, "longitude": None})
     return response(200, {
         "userId": item["userId"],
         "modelId": item.get("modelId", ""),
         "visionModelId": item.get("visionModelId", ""),
+        "timezone": item.get("timezone", ""),
+        # Decimal is not JSON-serialisable, and the coordinates are stored as
+        # Decimal because DynamoDB rejects a Python float outright.
+        "latitude": _coord_out(item.get("latitude")),
+        "longitude": _coord_out(item.get("longitude")),
     })
+
+
+def _coord_out(value):
+    """A stored coordinate as a JSON number, or None when unset."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_location(body: dict, existing: dict) -> tuple[dict, str]:
+    """The location fields to store, or an error message.
+
+    Validated here rather than in shared/scenarios.py: that module is pure and
+    deliberately never reads DynamoDB, while these values live in a `__settings__`
+    row. Latitude and longitude are stored as Decimal (DynamoDB rejects float) and
+    only ever together — one without the other computes a sunrise for a place that
+    is half real, which is worse than having none.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    out: dict = {}
+
+    if "timezone" in body:
+        tz = (body.get("timezone") or "").strip()
+        if tz:
+            # Checked against the runtime's own tz database, which is what
+            # Scheduler is effectively validating against too. Accepting an
+            # unknown name here would surface much later as a schedule that
+            # refuses to save.
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+            try:
+                ZoneInfo(tz)
+            except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
+                return {}, (f"unknown timezone {tz!r} — use an IANA name such as "
+                            f"'Asia/Shanghai' or 'America/Los_Angeles'")
+            if len(tz) > 50:
+                # Scheduler's ScheduleExpressionTimezone caps at 50 characters.
+                return {}, f"timezone {tz!r} is longer than the 50-character limit"
+        out["timezone"] = tz
+    else:
+        out["timezone"] = existing.get("timezone", "")
+
+    for field, limit in (("latitude", 90), ("longitude", 180)):
+        if field not in body:
+            if existing.get(field) is not None:
+                out[field] = existing[field]
+            continue
+        raw = body.get(field)
+        if raw is None or raw == "":
+            out[field] = None  # explicit clear
+            continue
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return {}, f"{field} must be a number"
+        if not -limit <= value <= limit:
+            return {}, f"{field} must be between -{limit} and {limit}"
+        out[field] = value
+
+    lat, lon = out.get("latitude"), out.get("longitude")
+    if (lat is None) != (lon is None):
+        return {}, ("latitude and longitude must be set together — one without "
+                    "the other cannot locate anything")
+    return out, ""
 
 
 def update_settings(event):
     """PUT /settings/{userId} — update user settings.
 
-    Accepts `modelId` (text agent) and/or `visionModelId` (image captioning).
-    Only fields present in the request body are updated; absent fields retain
-    their existing value so callers can patch one model without clobbering the
-    other.
+    Accepts `modelId` (text agent), `visionModelId` (image captioning),
+    `timezone` (IANA name) and `latitude`/`longitude`. Only fields present in the
+    request body are updated; absent fields retain their existing value so callers
+    can patch one without clobbering the others. Passing null or "" for a
+    coordinate clears it.
     """
     path_params = event.get("pathParameters") or {}
-    user_id = path_params.get("userId", "")
+    user_id = unquote(path_params.get("userId", ""))  # see get_settings
     body = json.loads(event.get("body") or "{}")
 
     existing = table.get_item(Key={"userId": user_id, "skillName": "__settings__"}).get("Item") or {}
     model_id = body.get("modelId", existing.get("modelId", ""))
     vision_model_id = body.get("visionModelId", existing.get("visionModelId", ""))
+    location, err = _validate_location(body, existing)
+    if err:
+        return response(400, {"error": err})
     ts = now_iso()
 
-    table.put_item(Item={
+    item = {
         "userId": user_id,
         "skillName": "__settings__",
         "modelId": model_id,
         "visionModelId": vision_model_id,
+        "timezone": location["timezone"],
         "updatedAt": ts,
-    })
+    }
+    # Omit a cleared coordinate rather than writing null: `attribute_exists` is how
+    # the agent tools ask "does this user have a location", and a null would answer
+    # yes.
+    for field in ("latitude", "longitude"):
+        if location.get(field) is not None:
+            item[field] = location[field]
+
+    table.put_item(Item=item)
     return response(200, {
         "message": f"Settings updated for '{user_id}'",
         "modelId": model_id,
         "visionModelId": vision_model_id,
+        "timezone": location["timezone"],
+        "latitude": _coord_out(location.get("latitude")),
+        "longitude": _coord_out(location.get("longitude")),
     })
 
 
@@ -1275,10 +1377,34 @@ def get_user_a2a_permissions(event):
         logger.warning("Failed to fetch A2A agent catalog: %s", e)
         available = []
 
+    # Drop grants whose record is gone. A recordId is minted per Registry record,
+    # so redeploying an agent in a way that recreates its record leaves the old id
+    # behind — pointing at nothing, granting nothing.
+    #
+    # They cannot merely be ignored. The UI round-trips whatever this returns, and
+    # PUT validates every recordId against the approved catalog, so ONE dead entry
+    # makes every future save fail with a 400 that names a record the admin has
+    # never heard of and cannot remove from the page. Filtered only when the
+    # catalog actually loaded: with `available` empty from a Registry error, every
+    # grant would look dead and one bad fetch would appear to revoke everything.
+    stale: list[str] = []
+    if available:
+        known = {c["recordId"] for c in available}
+        stale = sorted(set(grants) - known)
+        for rid in stale:
+            grants.pop(rid, None)
+        if stale:
+            logger.info("ignoring %d grant(s) for records that no longer exist: %s",
+                        len(stale), stale)
+
     return response(200, {
         "userId": user_id,
         "a2aGrants": grants,
         "availableAgents": available,
+        # Surfaced rather than hidden: the row still holds them, and an admin
+        # looking at why a user lost access deserves to see that the cause was a
+        # record being replaced.
+        "staleGrants": stale,
         "updatedAt": (item or {}).get("updatedAt", ""),
     })
 
@@ -2545,10 +2671,14 @@ def list_scenarios(event):
 
     items = []
     try:
-        table = _scenarios_table()
+        # Deliberately NOT named `table`: the module-level `table` is the skills
+        # table, and shadowing it here would send the settings reads below to the
+        # scenarios table, where they would find nothing and report UTC for
+        # everyone.
+        scenarios_table = _scenarios_table()
         kwargs = {}
         while True:
-            resp = table.scan(**kwargs)
+            resp = scenarios_table.scan(**kwargs)
             items.extend(resp.get("Items", []))
             if "LastEvaluatedKey" not in resp:
                 break
@@ -2557,18 +2687,74 @@ def list_scenarios(event):
         logger.warning("could not list scenarios: %s", e)
         return response(200, {"scenarios": [], "count": 0, "error": str(e)[:200]})
 
+    # The owner's timezone, memoised across rows: several scenes usually belong to
+    # the same user, and a cron reads wrong without the zone it runs in — "0 15"
+    # is 23:00 in Shanghai and 07:00 in Los Angeles.
+    tz_cache: dict[str, str] = {}
+
+    def _timezone(user_id: str) -> str:
+        if user_id not in tz_cache:
+            try:
+                settings = table.get_item(
+                    Key={"userId": user_id, "skillName": "__settings__"}
+                ).get("Item") or {}
+                tz_cache[user_id] = str(settings.get("timezone") or "UTC")
+            except Exception:  # noqa: BLE001
+                tz_cache[user_id] = "UTC"
+        return tz_cache[user_id]
+
     out = []
     for item in items:
         row = sc.summarise(item)
-        row["userId"] = item.get("userId", "")
-        row["scheduled"] = bool(sc.cron_for(item.get("trigger") or {}))
-        row["cron"] = sc.cron_for(item.get("trigger") or {})
+        trigger = item.get("trigger") or {}
+        user_id = item.get("userId", "")
+        row["userId"] = user_id
+        # `wants_schedule`, not `bool(cron_for(...))`. A solar scene HAS a schedule
+        # but `cron_for` cannot name it — the expression depends on the owner's
+        # coordinates and today's date, and is computed by scenario_schedules /
+        # the runner. Asking the wrong question here made the page report "no
+        # schedule" for a sunrise scene that was in fact scheduled.
+        row["scheduled"] = sc.wants_schedule(trigger)
+        if trigger.get("sceneType") == sc.SCENE_SOLAR:
+            # Read the live expression rather than recomputing it: what matters to
+            # an operator is what Scheduler actually holds, which is also how a
+            # drifted or missing schedule becomes visible.
+            row["cron"], row["timezone"] = _live_schedule(user_id, row["scenarioId"])
+        else:
+            row["cron"] = sc.cron_for(trigger)
+            row["timezone"] = _timezone(user_id) if row["cron"] else ""
         row["lastRunAt"] = item.get("lastRunAt", "")
         row["lastRunOk"] = item.get("lastRunOk")
-        row["lastRunDetail"] = item.get("lastRunDetail", "")
+        # Truncated. The runner stores the whole per-device MCP reply, which is a
+        # few hundred characters of nested JSON per action — useful in the table
+        # only as "something went wrong here", and the full text is in the row and
+        # the runner's log for anyone who needs it.
+        detail = str(item.get("lastRunDetail", "") or "")
+        row["lastRunDetail"] = detail[:200] + ("…" if len(detail) > 200 else "")
         out.append(row)
     out.sort(key=lambda r: r.get("updatedAt", ""), reverse=True)
     return response(200, {"scenarios": out, "count": len(out)})
+
+
+def _live_schedule(user_id: str, scenario_id: str) -> tuple[str, str]:
+    """(expression, timezone) as EventBridge Scheduler currently holds it.
+
+    ("", "") when there is no schedule — which for a solar scene means it is not
+    firing, and is exactly the state the page exists to make visible.
+    """
+    import scenarios as sc
+    import scenario_schedules
+
+    try:
+        sched = scenario_schedules._client().get_schedule(
+            Name=sc.schedule_name(user_id, scenario_id),
+            GroupName=os.environ.get("SCENARIO_SCHEDULE_GROUP", "smarthome-scenarios"),
+        )
+    except Exception:  # noqa: BLE001
+        # ResourceNotFound is the expected case, not an error worth logging per row.
+        return "", ""
+    return (sched.get("ScheduleExpression", ""),
+            sched.get("ScheduleExpressionTimezone", ""))
 
 
 def sync_scenario_schedules(event):
@@ -2580,7 +2766,9 @@ def sync_scenario_schedules(event):
     """
     import scenario_schedules
 
-    return response(200, scenario_schedules.sync_schedules(_scenarios_table()))
+    # The skills table comes along because that is where each owner's timezone
+    # lives, and a schedule created without it runs in UTC.
+    return response(200, scenario_schedules.sync_schedules(_scenarios_table(), table))
 
 
 # ---------------------------------------------------------------------------
@@ -2826,6 +3014,15 @@ def _dispatch(event, context):
     if resource == "/registry/records" and method == "POST":
         # Rides on the existing resource: the admin Lambda's auto-generated API
         # Gateway resource policy is near the 20 KB cap, so a new path is not free.
+        #
+        # The action check comes FIRST. Reconciling creates and deletes schedules,
+        # so it belongs on POST rather than GET — and without this branch it fell
+        # through to the skill reviewer, which rejected it with "recordId is
+        # required": a confusing error for a button that has nothing to do with
+        # records.
+        action = (event.get("queryStringParameters") or {}).get("action", "")
+        if action == "sync-schedules":
+            return sync_scenario_schedules(event)
         return review_registry_record(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

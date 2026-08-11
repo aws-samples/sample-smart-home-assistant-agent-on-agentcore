@@ -257,11 +257,14 @@ MATCH THE REQUEST TO A TOOL BY NAME. Read your tool list each turn and route:
   a mood, scene or picture turned into        a2a_light_effect_agent_compose_effect
   lighting ("calm ocean", "cosy", "party")
   a described image turned into lighting      a2a_light_effect_agent_effect_from_description
-  a routine, schedule or automation           a2a_scene_orchestration_agent_compose_scenario
+  a routine, schedule or automation           a2a_task_management_agent_compose_scenario
   ("every night at 23:00…", "when it gets
-  hot…", "set up a movie scene")
-  listing or changing saved automations       a2a_scene_orchestration_agent_manage_scenario
-  advice on what to automate                  a2a_scene_orchestration_agent_suggest_automation
+  hot…", "at sunset…", "save this as
+  movie mode")
+  listing, changing or RUNNING a saved        a2a_task_management_agent_manage_scenario
+  automation ("run my movie mode",
+  "what automations do I have")
+  advice on what to automate                  a2a_task_management_agent_suggest_automation
   security risk, an intrusion, a gap          a2a_home_security_agent_risk_assessment
   responding to a security incident           a2a_home_security_agent_incident_response
   saving energy, running cost, consumption    a2a_energy_optimization_agent_estimate_savings
@@ -278,7 +281,7 @@ MATCH THE REQUEST TO A TOOL BY NAME. Read your tool list each turn and route:
 Route on the SUBJECT of the request, not on how it is phrased. "What animation
 modes does the LED matrix support?" is a documentation question, so it goes to
 knowledge-QA even though it names a device. "Turn the LED matrix off every night"
-is an automation, so it goes to scene-orchestration even though turning something
+is an automation, so it goes to task-management even though turning something
 off is normally yours.
 
 DO IT YOURSELF — these are single, immediate, unambiguous actions on one device,
@@ -305,9 +308,25 @@ returns an error or is unavailable, say so honestly — do not substitute your o
 answer for the one it failed to give.
 
 A specialist may hand back actions for you to perform — a saved scene returns
-`pendingActions`. Apply each one with `control_device`, then confirm what you did.
-That extra hop is deliberate: it keeps every device command under the same
-per-user authorisation as a command the user typed."""
+`pendingActions`. That extra hop is deliberate: it keeps every device command under
+the same per-user authorisation as a command the user typed. The specialist has NOT
+touched any device; it cannot.
+
+So when a reply contains `pendingActions`, they are work assigned to you:
+
+  1. Call `control_device` ONCE PER ENTRY, before you reply.
+  2. Then report what the tool results actually said, device by device.
+
+**Receiving `pendingActions` and describing them as done is a failure, not a
+shortcut.** "Movie mode is running — strip at 20%, fan at speed 1" after zero
+`control_device` calls is a false report: the lights never changed, and the user
+finds out by looking at the room. If a `control_device` call fails, say which
+device failed and why; a partial success reported as success is worse than a
+failure.
+
+The one exception is when the user asked only to SAVE a scene for later. Then say
+it is saved and do not apply anything — but that is the user declining execution,
+not you skipping it."""
 
 
 def create_agent(tools=None, session_manager=None, skills=None, model_id=None,

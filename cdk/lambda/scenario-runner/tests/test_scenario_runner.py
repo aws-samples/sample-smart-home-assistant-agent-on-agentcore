@@ -412,14 +412,36 @@ def test_a_gateway_session_is_reused_across_one_users_scenes():
 
 def test_the_sweep_only_considers_active_non_template_condition_scenes():
     """A template is a library entry, not an automation, and an inactive scene is
-    switched off — firing either would be acting on something nobody armed."""
-    import inspect
+    switched off — firing either would be acting on something nobody armed.
 
-    src = inspect.getsource(index._all_condition_scenarios)
-    assert 'item.get("isActive")' in src
-    assert 'item.get("isTemplate")' in src
-    assert "SCENE_SENSOR" in src and "SCENE_DEVICE_STATE" in src
-    assert "SCENE_TIME" not in src  # those have their own schedules
+    `manual` matters most here. A one-tap command must never fire by itself, and
+    the sweep is the one path that could make it. Asserted against the real filter
+    rather than by reading the source: the previous version of this test inspected
+    the function body and broke the moment the scan moved into a helper, without
+    the behaviour having changed at all.
+    """
+    rows = [
+        {"userId": "u", "scenarioKey": "strategy#hot", "isActive": True,
+         "trigger": {"sceneType": "sensor"}},
+        {"userId": "u", "scenarioKey": "strategy#door", "isActive": True,
+         "trigger": {"sceneType": "device_state"}},
+        # Each of these must be left out, for a different reason.
+        {"userId": "u", "scenarioKey": "strategy#night", "isActive": True,
+         "trigger": {"sceneType": "time"}},          # has its own schedule
+        {"userId": "u", "scenarioKey": "strategy#dusk", "isActive": True,
+         "trigger": {"sceneType": "solar"}},         # ditto, recomputed nightly
+        {"userId": "u", "scenarioKey": "strategy#movie", "isActive": True,
+         "trigger": {"sceneType": "manual"}},        # only runs on request
+        {"userId": "u", "scenarioKey": "strategy#off", "isActive": False,
+         "trigger": {"sceneType": "sensor"}},        # switched off
+        {"userId": "u", "scenarioKey": "template#x", "isActive": True,
+         "isTemplate": True, "trigger": {"sceneType": "sensor"}},  # library entry
+    ]
+    table = MagicMock()
+    table.scan.return_value = {"Items": rows}
+    with patch.object(index, "_table", return_value=table):
+        picked = {i["scenarioKey"] for i in index._all_condition_scenarios()}
+    assert picked == {"strategy#hot", "strategy#door"}
 
 
 def test_the_runner_holds_no_iot_client():

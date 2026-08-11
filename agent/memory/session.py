@@ -17,17 +17,23 @@ MEMORY_ID = os.getenv("MEMORY_SMARTHOMEMEMORY_ID", "")
 REGION = os.getenv("AWS_REGION", "us-west-2")
 
 
-def _sanitize_actor_id(actor_id: str) -> str:
-    """Sanitize actor ID to match AgentCore Memory constraints.
+# The actor id rule lives in shared/memory_actor.py because the A2A sub-agents
+# read the same Memory namespaces and have to compute the identical id — see that
+# module for why a divergence is silent rather than loud. scripts/01-install-deps.sh
+# copies it to agent/memory_actor.py for this container (gitignored build output).
+#
+# The fallback is a real one, not defensive noise: this module is imported by unit
+# tests that run from the repo without the build step having happened.
+try:
+    from memory_actor import sanitize_actor_id as _sanitize_actor_id  # noqa: F401
+except ImportError:  # pragma: no cover - pre-build / test path
+    import sys
+    from pathlib import Path
 
-    Memory API requires: [a-zA-Z0-9][a-zA-Z0-9-_/]*
-    Email addresses contain '@' and '.' which are not allowed.
-    """
-    import re
-    sanitized = re.sub(r"[^a-zA-Z0-9_/-]", "_", actor_id)
-    if not sanitized or not sanitized[0].isalnum():
-        sanitized = "u" + sanitized
-    return sanitized
+    _shared = Path(__file__).resolve().parent.parent.parent / "shared"
+    if _shared.is_dir() and str(_shared) not in sys.path:
+        sys.path.insert(0, str(_shared))
+    from memory_actor import sanitize_actor_id as _sanitize_actor_id  # noqa: F401
 
 
 def get_memory_session_manager(

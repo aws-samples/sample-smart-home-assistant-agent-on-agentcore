@@ -94,17 +94,42 @@ for lambda_dir in iot-control iot-discovery iot-query scenario-runner; do
 done
 
 # ------------------------------------------------------------------------------
-# The scenario model, for the Lambda that executes a due scene. Same reason as
-# the catalog: it decides whether a trigger has fired and which actions to
-# apply, and a second copy of that logic would let the stored scene and the
-# executed one disagree — which is unobservable, because nobody is watching at
-# 07:30. The scene-orchestration A2A agent gets its copy from deploy.py.
+# The scenario model and its two companions, for the Lambdas that schedule and
+# execute a scene. Same reason as the catalog: these decide whether a trigger has
+# fired, which actions to apply, what time sunrise is, and what a schedule is
+# called. A second copy of any of them would let the stored scene and the executed
+# one disagree — unobservable, because nobody is watching at 07:30.
+#
+# Both Lambdas get all three, and that matters for the two that are new:
+#   - solar.py, because the admin API computes a solar cron when a scene is saved
+#     and the runner recomputes it nightly.
+#   - scenario_schedules_shared.py, because those two writes must be identical. If
+#     they differed, each pass would "correct" the other and the scene would fire
+#     correctly on alternate days only.
+#
+# The task-management A2A agent gets its copy of shared/ from deploy.py.
 # ------------------------------------------------------------------------------
-echo "==> Copying the scenario model into the scenario runner..."
-if [ -d "$SCRIPT_DIR/cdk/lambda/scenario-runner" ]; then
-    cp "$SCRIPT_DIR/shared/scenarios.py" "$SCRIPT_DIR/cdk/lambda/scenario-runner/scenarios.py"
-    echo "    -> scenario-runner"
-fi
+echo "==> Copying the scenario model into the scenario Lambdas..."
+for lambda_dir in scenario-runner admin-api; do
+    target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
+    [ -d "$target" ] || continue
+    for module in scenarios.py solar.py scenario_schedules_shared.py user_settings.py; do
+        cp "$SCRIPT_DIR/shared/$module" "$target/$module"
+    done
+    echo "    -> $lambda_dir"
+done
+
+# ------------------------------------------------------------------------------
+# The Memory actor-id rule, for the orchestrator. Its container is built from
+# agent/ alone, while the A2A sub-agents get all of shared/ from deploy.py — and
+# both read the same Memory namespaces. Two containers that sanitize the same user
+# differently each get a working, private, half-empty memory: no error, just an
+# agent that never remembers what the other one was told. See
+# shared/memory_actor.py.
+# ------------------------------------------------------------------------------
+echo "==> Copying the Memory actor rule into the agent..."
+cp "$SCRIPT_DIR/shared/memory_actor.py" "$SCRIPT_DIR/agent/memory_actor.py"
+echo "    -> agent"
 
 # ------------------------------------------------------------------------------
 # Copy the AWS Agent Registry helper into the Lambdas that talk to the Registry.

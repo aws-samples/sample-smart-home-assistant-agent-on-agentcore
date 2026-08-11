@@ -40,13 +40,21 @@ AGENTS: dict[str, tuple[str, str]] = {
     # actions for the ORCHESTRATOR to execute — it never controls a device itself.
     # See shared/scenarios.py: that split is what keeps every scene-driven command
     # inside Cedar's reach.
-    "scene-orchestration": ("scene-orchestration-agent", "sha2ascene"),
+    #
+    # Named for what it does — triggers, actions and storage, i.e. task management
+    # — and not "scene-orchestration", which it was called until the feast agent
+    # (scene-sync) arrived and made the two indistinguishable by name. The rename
+    # went all the way through the slug, so the runtime was rebuilt: an
+    # `a2a_*` tool name is derived from the AgentCard name (agent/tools/a2a.py),
+    # so a half-rename leaves the routing table pointing at tools that no longer
+    # exist.
+    "task-management": ("task-management-agent", "sha2atask"),
 }
 
 # The one agent that owns a DynamoDB table of its own. deploy.py gives only this
 # agent the table name and the IAM grant, so a new sub-agent does not silently
 # inherit write access to someone else's data.
-SCENARIO_AGENT = "scene-orchestration"
+SCENARIO_AGENT = "task-management"
 
 AGENT_NAMES: tuple[str, ...] = tuple(AGENTS)
 AGENT_LONG_NAMES: dict[str, str] = {k: v[0] for k, v in AGENTS.items()}

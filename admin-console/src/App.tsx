@@ -272,6 +272,10 @@ const App: React.FC = () => {
       defaultExpanded: true,
       items: [
         { type: 'link' as const, text: t('nav.agentGuardrails'), href: '#/guardrails' },
+        // Under Assess rather than Build: a scene is created by an agent at
+        // runtime, so this page is where an operator checks what exists and
+        // whether it ran — not where automations are authored.
+        { type: 'link' as const, text: t('tab.scenarios'), href: '#/scenarios' },
         { type: 'link' as const, text: t('tab.observability'), href: '#/observability' },
         { type: 'link' as const, text: t('tab.evaluations'), href: '#/evaluations' },
         { type: 'link' as const, text: t('tab.optimization'), href: '#/optimization' },

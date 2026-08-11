@@ -138,7 +138,7 @@ def test_the_tool_using_agents_are_the_expected_ones():
         if os.path.exists(os.path.join(REGISTRY_DIR, name, "tools.py"))
     }
     assert with_tools == {"device-control", "light-effect", "knowledge-qa",
-                          "scene-orchestration"}, with_tools
+                          "task-management"}, with_tools
     # The three original advisors stay prompt-only — they touch no user data, and
     # requiring an identity they never had would break them.
     prompt_only = set(agents.AGENT_NAMES) - with_tools
@@ -160,7 +160,7 @@ def test_every_tools_module_exports_build_tools():
 
 # Parameter names that would let the model choose whose data a tool acts on.
 # Identity is closed over from the verified caller (see common/gateway_tools.py and
-# scene-orchestration/tools.py) and must never appear in a model-facing signature.
+# task-management/tools.py) and must never appear in a model-facing signature.
 FORBIDDEN_PARAMS = frozenset({
     "user_id", "userid", "user", "sub", "email", "actor_id", "actorid",
     "authorization", "token", "id_token", "access_token", "principal", "scope",

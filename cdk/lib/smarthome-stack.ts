@@ -459,7 +459,7 @@ export class SmartHomeStack extends cdk.Stack {
 
     // ========================
     // DynamoDB - Scenarios Table
-    // Scene definitions and reusable templates for the scene-orchestration
+    // Scene definitions and reusable templates for the task-management
     // agent: a trigger, a list of device actions, and whether it is active.
     //
     // A separate table rather than more prefixes on skillsTable. That table
@@ -1576,6 +1576,74 @@ export class SmartHomeStack extends cdk.Stack {
         input: JSON.stringify({ mode: "sweep" }),
       },
     });
+
+    // The solar recompute. A sunrise trigger's clock time moves a minute or two a
+    // day and depends on the owner's coordinates, so its schedule has to be
+    // rewritten rather than declared once.
+    //
+    // 00:10 UTC, not midnight: a schedule at exactly 00:00 competes with every
+    // other cron in the account for Scheduler's attention, and ten minutes of
+    // slack costs nothing here because the earliest sunrise it could affect is
+    // hours away. Declared in CDK rather than created by the admin API because
+    // unlike a per-scene schedule this one is infrastructure — it exists whether
+    // or not any solar scene does.
+    new scheduler.CfnSchedule(this, "ScenarioSolarRecompute", {
+      name: "smarthome-scenario-solar",
+      groupName: scheduleGroup.name,
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "cron(10 0 * * ? *)",
+      scheduleExpressionTimezone: "UTC",
+      target: {
+        arn: scenarioRunner.functionArn,
+        roleArn: schedulerRole.roleArn,
+        input: JSON.stringify({ mode: "solar" }),
+      },
+    });
+
+    // The runner needs to WRITE schedules for the solar recompute above — the one
+    // thing it does that is not "apply a scene's actions". Scoped to the same group
+    // and, unlike the admin API's grant, without DeleteSchedule: this pass moves
+    // existing schedules and creates missing ones, and reconciliation (which is
+    // what deleting is for) stays the admin API's job. A runner that could delete
+    // schedules could disable a user's automation from inside the execution path.
+    scenarioRunner.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["scheduler:CreateSchedule", "scheduler:UpdateSchedule",
+                "scheduler:GetSchedule"],
+      resources: [
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule/smarthome-scenarios/*`,
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule-group/smarthome-scenarios`,
+      ],
+    }));
+    scenarioRunner.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["iam:PassRole"],
+      resources: [schedulerRole.roleArn],
+      conditions: { StringEquals: { "iam:PassedToService": "scheduler.amazonaws.com" } },
+    }));
+    scenarioRunner.addEnvironment("SCENARIO_SCHEDULE_GROUP", scheduleGroup.name!);
+    // Composed from the literal function name rather than `scenarioRunner.functionArn`.
+    // Passing the token makes the function's own definition depend on its own ARN,
+    // which CloudFormation rejects as a circular dependency — and it does so by
+    // naming every resource in the cycle (about eighty of them here), which points
+    // at the API Gateway methods rather than at the one line that caused it.
+    scenarioRunner.addEnvironment(
+      "SCENARIO_RUNNER_ARN",
+      `arn:aws:lambda:${this.region}:${this.account}:function:smarthome-scenario-runner`,
+    );
+    scenarioRunner.addEnvironment("SCENARIO_SCHEDULER_ROLE_ARN", schedulerRole.roleArn);
+    // The owner's coordinates live on their `__settings__` row. Read-only, and the
+    // runner has no reason to write anything in the skills table — that table also
+    // holds the permission and prompt rows that govern the agents.
+    skillsTable.grantReadData(scenarioRunner);
+    scenarioRunner.addEnvironment("SKILLS_TABLE_NAME", skillsTable.tableName);
+    // Reading that row needs the owner's EMAIL, and a scene row carries their
+    // Cognito SUB — the two key spaces this deployment has always had (see
+    // shared/user_settings.py). ListUsers with a `sub = "..."` filter bridges them.
+    // Read-only on the one pool: this cannot create, disable or modify a user.
+    scenarioRunner.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["cognito-idp:ListUsers"],
+      resources: [userPool.userPoolArn],
+    }));
+    scenarioRunner.addEnvironment("COGNITO_USER_POOL_ID", userPool.userPoolId);
 
     // Scheduler management, scoped to the one group. The admin API creates a
     // schedule per time-triggered scene; it has no reason to touch schedules

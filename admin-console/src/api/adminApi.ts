@@ -133,6 +133,15 @@ export interface UserSettings {
   /** Optional per-user Bedrock multimodal model used by the vision captioning
    *  pipeline. Empty string = use the global default. */
   visionModelId?: string;
+  /** IANA name, e.g. `Asia/Shanghai`. Empty means UTC, which is what every
+   *  time-triggered scene used before this field existed. Handed to EventBridge
+   *  Scheduler as `ScheduleExpressionTimezone`, so DST is the service's problem
+   *  rather than ours. */
+  timezone?: string;
+  /** Decimal degrees, or null when unset. Required together — the sunrise /
+   *  sunset trigger cannot be computed from one of them. */
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 export async function getSettings(userId: string): Promise<UserSettings> {
@@ -150,7 +159,15 @@ export async function getSettings(userId: string): Promise<UserSettings> {
 
 export async function updateSettings(
   userId: string,
-  settings: { modelId?: string; visionModelId?: string }
+  // Only the fields present are written; the rest keep their stored value. Pass
+  // null for a coordinate to clear it.
+  settings: {
+    modelId?: string;
+    visionModelId?: string;
+    timezone?: string;
+    latitude?: number | null;
+    longitude?: number | null;
+  }
 ): Promise<void> {
   const headers = await authHeaders();
   const res = await fetch(
@@ -896,6 +913,86 @@ export async function listAgentFleet(): Promise<FleetAgent[]> {
   return data.agents || [];
 }
 
+// ---------------------------------------------------------------------------
+// Scenarios (saved automations, across users)
+// ---------------------------------------------------------------------------
+
+/** One saved automation, as the operator view needs it. */
+export interface ScenarioRow {
+  userId: string;
+  scenarioId: string;
+  name: string;
+  description: string;
+  /** Plain-language rendering of the trigger, built by shared/scenarios.py so the
+   *  console and the agent describe a trigger identically. */
+  triggerDescription: string;
+  trigger: { sceneType?: string; subject?: string; conditionValue?: unknown };
+  actionCount: number;
+  isActive: boolean;
+  isTemplate: boolean;
+  /** True when this scene owns a schedule of its own (time and solar do). */
+  scheduled: boolean;
+  cron: string;
+  /** The zone the cron is evaluated in. "UTC" for solar, since a sunrise time is
+   *  already absolute. Empty for a scene with no schedule. */
+  timezone: string;
+  /** From the runner. The only way to answer "did it fire?" for something that
+   *  runs at 07:30 when nobody is watching. */
+  lastRunAt: string;
+  lastRunOk?: boolean | null;
+  lastRunDetail: string;
+  updatedAt: string;
+  /** Which agent wrote it. Rows created before the agent was renamed carry the
+   *  old name, and that is left as it is rather than rewritten. */
+  source: string;
+}
+
+export async function listScenarios(): Promise<ScenarioRow[]> {
+  const headers = await authHeaders();
+  // Same consolidated resource as the fleet and A2A actions — a new API Gateway
+  // path would push the admin Lambda's resource policy past its 20KB cap.
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=scenarios`, {
+    headers,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list scenarios (${res.status})`);
+  }
+  const data = await res.json();
+  return data.scenarios || [];
+}
+
+export interface SyncSchedulesResult {
+  synced: boolean;
+  created?: string[];
+  updated?: string[];
+  deleted?: string[];
+  failed?: Array<{ name: string; error: string }>;
+  reason?: string;
+}
+
+/**
+ * Reconcile EventBridge Scheduler against the saved scenes.
+ *
+ * Runs on every scene save too; exposed here because reconciliation is
+ * self-healing and an operator who suspects a schedule has drifted should be able
+ * to say so. `failed` includes scenes that CANNOT be scheduled (a sunrise trigger
+ * whose owner has no coordinates) as well as API errors — from the user's side
+ * both mean the same thing: it will not fire.
+ */
+export async function syncScenarioSchedules(): Promise<SyncSchedulesResult> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?action=sync-schedules`,
+    { method: 'POST', headers, body: JSON.stringify({}) }
+  );
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) {
+    throw new Error(body.error || `Failed to reconcile schedules (${res.status})`);
+  }
+  return body;
+}
+
 export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
   const headers = await authHeaders();
   // Reuses /registry/records?action=a2a-list — consolidated on a single API
@@ -929,6 +1026,11 @@ export interface UserA2APermissions {
   userId: string;
   a2aGrants: { [recordId: string]: string[] };
   availableAgents: A2AAvailableAgent[];
+  /** Grants whose Registry record no longer exists — already filtered out of
+   *  `a2aGrants` by the API, because PUT validates every recordId and one dead
+   *  entry would make every save fail with a 400. Reported so an admin asking
+   *  "why did this user lose access" can see the record was replaced. */
+  staleGrants?: string[];
   updatedAt?: string;
 }
 
@@ -957,6 +1059,7 @@ export async function getUserA2APermissions(
     userId: data.userId,
     a2aGrants: data.a2aGrants || {},
     availableAgents: data.availableAgents || [],
+    staleGrants: data.staleGrants || [],
     updatedAt: data.updatedAt,
   };
 }

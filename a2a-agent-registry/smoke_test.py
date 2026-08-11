@@ -59,9 +59,9 @@ PROMPTS = {
     ),
     # Reads rather than writes: the smoke test should not leave a scene behind
     # that a scheduler would then start firing.
-    "scene-orchestration-agent": (
+    "task-management-agent": (
         "What automations do I have saved?",
-        "⟦A2A:scene-orchestration⟧",
+        "⟦A2A:task-management⟧",
     ),
 }
 

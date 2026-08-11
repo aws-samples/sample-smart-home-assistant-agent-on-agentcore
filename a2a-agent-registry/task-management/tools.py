@@ -1,4 +1,4 @@
-"""Scene-orchestration tools, built per request from the verified caller.
+"""Task-management tools, built per request from the verified caller.
 
 Unlike the other tool-using sub-agents, these do NOT go through the tools Gateway:
 a scene is this agent's own data, not a device command, so there is nothing for
@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 TABLE_ENV = "SCENARIOS_TABLE_NAME"
 DEFAULT_TABLE = "smarthome-scenarios"
+# Read for exactly one field: whether this user has coordinates, which a sunrise or
+# sunset trigger cannot do without. The runtime already has GetItem on this table
+# for prompt governance, so no new grant is involved.
+SKILLS_TABLE_ENV = "SKILLS_TABLE_NAME"
 
 # How many templates find_template considers. The library is small and shared, so
 # this is a context bound rather than a scale one.
@@ -125,6 +129,32 @@ def build_tools(caller) -> list:
     user_id = caller.sub  # closed over; never a tool parameter
     table = _table()
 
+    # Whether this user has coordinates on file, which a solar trigger needs. The
+    # email is the row key here, not the sub: the settings row is written by the
+    # Admin Console and read by the orchestrator, and both key it by email.
+    settings_key = (caller.email or caller.sub)
+
+    def _has_location() -> bool:
+        name = os.environ.get(SKILLS_TABLE_ENV, "")
+        if not name:
+            # No grant, no table name. Treated as "cannot confirm a location",
+            # which refuses the solar scene — the alternative is saving one that
+            # will never fire and saying it worked.
+            logger.warning("no skills table configured; cannot confirm a location")
+            return False
+        try:
+            import boto3
+
+            item = boto3.resource(
+                "dynamodb", region_name=os.environ.get("AWS_REGION", "us-west-2"),
+            ).Table(name).get_item(
+                Key={"userId": settings_key, "skillName": "__settings__"}
+            ).get("Item") or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not read settings: %s", type(exc).__name__)
+            return False
+        return item.get("latitude") is not None and item.get("longitude") is not None
+
     from strands import tool as strands_tool
 
     @strands_tool
@@ -211,6 +241,16 @@ def build_tools(caller) -> list:
         user wanted the scene to take effect immediately. This agent does not
         control devices; do not claim any device changed state.
         """
+        if sceneType == sc.SCENE_SOLAR and not _has_location():
+            # Checked here rather than in validate_trigger, which is a pure
+            # function that never reads DynamoDB — and the user's coordinates live
+            # on their settings row. Refused rather than defaulted: a guessed
+            # location turns the lights on at the wrong time, in a way nobody
+            # thinks to check.
+            return _err(
+                "a sunrise or sunset scene needs this user's location, and none is "
+                "set. Ask an administrator to set the latitude and longitude on "
+                "Identity in the Admin Console, or use a fixed clock time instead.")
         try:
             built = sc.build_scenario(
                 user_id=user_id, name=name,
@@ -259,6 +299,48 @@ def build_tools(caller) -> list:
                     "count": len(items)})
 
     @strands_tool
+    def run_scenario(scenarioId: str) -> str:
+        """Fetch a saved scene's actions so the CALLER can apply them now.
+
+        This is how a one-tap command runs: the user says "run my movie mode", you
+        look it up and hand back its actions, and the orchestrator applies each one
+        under the user's own identity.
+
+        Returns `pendingActions` — the same shape create_scenario returns. This
+        agent still does not control devices, so do not claim anything changed
+        state; report the actions you are handing back.
+
+        Works for any saved scene, not only manual ones: "run my sleep mode now"
+        is a reasonable thing to ask of a scene that normally fires at 23:00.
+        """
+        key = {"userId": user_id, "scenarioKey": sc.strategy_key(scenarioId)}
+        try:
+            item = (table.get_item(Key=key).get("Item")) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("could not read scenario")
+            return _err(f"the scene could not be read: {exc}")
+        if not item:
+            return _err(
+                f"no scene with id {scenarioId!r} — call list_scenarios to see "
+                f"the ids this user has")
+        actions = sc.pending_actions(item)
+        if not actions:
+            # A stored scene always has actions (validate_actions requires a
+            # non-empty list), so this means the row is damaged. Say so rather than
+            # reporting an empty success, which would read as "ran, did nothing".
+            return _err(
+                f"the scene {item.get('name', scenarioId)!r} has no device actions "
+                f"stored, so there is nothing to run")
+        return _ok({
+            "scenario": sc.summarise(item),
+            "pendingActions": actions,
+            "isActive": bool(item.get("isActive")),
+            "note": "pendingActions are for the caller to execute; this agent has "
+                    "not changed any device. An inactive scene can still be run on "
+                    "request — isActive only governs whether it fires by itself.",
+        })
+
+    @strands_tool
     def update_scenario(scenarioId: str, name: str = "", description: str = "",
                         isActive: str = "", sceneType: str = "",
                         conditionValue: str = "", calculationType: str = "",
@@ -296,6 +378,15 @@ def build_tools(caller) -> list:
             if lowered not in ("true", "false"):
                 return _err("isActive must be \"true\" or \"false\"")
             item["isActive"] = lowered == "true"
+
+        if sceneType == sc.SCENE_SOLAR and not _has_location():
+            # Retiming an existing scene to sunset needs a location just as much as
+            # creating one does. Missing this check would leave the one path that
+            # can produce an unschedulable scene.
+            return _err(
+                "a sunrise or sunset scene needs this user's location, and none is "
+                "set. Ask an administrator to set the latitude and longitude on "
+                "Identity in the Admin Console, or use a fixed clock time instead.")
 
         if sceneType:
             try:
@@ -336,4 +427,4 @@ def build_tools(caller) -> list:
                     "pendingActions": sc.pending_actions(item)})
 
     return [find_template, build_trigger, create_scenario, list_scenarios,
-            update_scenario]
+            update_scenario, run_scenario]

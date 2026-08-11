@@ -50,6 +50,9 @@ import {
   deleteRecommendation,
   applyRecommendation,
   listAgentFleet,
+  listScenarios,
+  syncScenarioSchedules,
+  ScenarioRow,
   listBundles,
   listABTests,
   startABTest,
@@ -80,6 +83,7 @@ import {
 } from '../api/adminApi';
 import Link from '@cloudscape-design/components/link';
 import Alert from '@cloudscape-design/components/alert';
+import Autosuggest from '@cloudscape-design/components/autosuggest';
 import Badge from '@cloudscape-design/components/badge';
 import CloudscapeBox from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -127,6 +131,7 @@ export const ACTIVE_TABS = [
   'instanceType',
   'sessions',
   'guardrails',
+  'scenarios',
   'observability',
   'evaluations',
   'optimization',
@@ -215,6 +220,40 @@ const VISION_MODELS = [
   { id: 'us.amazon.nova-lite-v1:0', label: 'Nova Lite' },
   { id: '', label: '── Qwen (multimodal) ──', disabled: true },
   { id: 'qwen.qwen3-vl-235b-a22b', label: 'Qwen3 VL 235B A22B' },
+] as const;
+
+/** Where a user is. Stored on their `__settings__` row. */
+interface UserPlace {
+  timezone: string;
+  latitude: number | null;
+  longitude: number | null;
+}
+
+/** The same thing mid-edit. Coordinates are strings so a half-typed "-12." is a
+ *  state the input can hold; they are parsed on save. */
+interface PlaceDraft {
+  timezone: string;
+  latitude: string;
+  longitude: string;
+}
+
+const EMPTY_PLACE_DRAFT: PlaceDraft = { timezone: '', latitude: '', longitude: '' };
+
+/** A short list of IANA zones, not all 599 of them. These cover the demo's
+ *  users; the field also accepts anything typed, and the API validates against
+ *  the real tz database, so the list is a convenience rather than a whitelist. */
+const COMMON_TIMEZONES = [
+  'Asia/Shanghai',
+  'Asia/Tokyo',
+  'Asia/Singapore',
+  'Asia/Kolkata',
+  'Europe/London',
+  'Europe/Berlin',
+  'America/New_York',
+  'America/Chicago',
+  'America/Los_Angeles',
+  'Australia/Sydney',
+  'UTC',
 ] as const;
 
 interface MetadataEntry {
@@ -494,6 +533,192 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
         empty={
           <CloudscapeBox textAlign="center" padding="m">
             <b>{t('models.noUsers')}</b>
+          </CloudscapeBox>
+        }
+      />
+    </SpaceBetween>
+  );
+};
+
+
+// ---------------------------------------------------------------------------
+// Scenarios Tab — every saved automation, across users
+// ---------------------------------------------------------------------------
+interface ScenariosTabProps {
+  error: string;
+  success: string;
+  clearMessages: () => void;
+  setError: (msg: string) => void;
+  setSuccess: (msg: string) => void;
+}
+
+/**
+ * Read-only, on purpose. A scene is created by an agent at the user's request, so
+ * an operator's questions here are "what exists" and "did it run" — not "let me
+ * author one". The one write is Reconcile, which is idempotent and self-healing.
+ *
+ * `lastRunAt` / `lastRunOk` are the point of the page. A scene that fires at 07:30
+ * has no one watching it, so the run record is the only way to distinguish "works"
+ * from "has never worked".
+ */
+const ScenariosTab: React.FC<ScenariosTabProps> = ({
+  error, success, clearMessages, setError, setSuccess,
+}) => {
+  const [rows, setRows] = useState<ScenarioRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const { t } = useI18n();
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setRows(await listScenarios());
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [setError]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSync = async () => {
+    clearMessages();
+    setSyncing(true);
+    try {
+      const out = await syncScenarioSchedules();
+      const counts = [
+        `${(out.created || []).length} created`,
+        `${(out.updated || []).length} updated`,
+        `${(out.deleted || []).length} removed`,
+      ].join(', ');
+      if (out.failed && out.failed.length > 0) {
+        // Surfaced as a warning rather than swallowed: a scene that cannot be
+        // scheduled will not fire, and the reason (usually a sunrise trigger with
+        // no coordinates for the owner) is actionable.
+        setError(
+          `${t('scenarios.syncPartial')} ${counts}. ` +
+          out.failed.map((f) => `${f.name}: ${f.error}`).join('; ')
+        );
+      } else {
+        setSuccess(`${t('scenarios.syncDone')} ${counts}.`);
+      }
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const runIndicator = (row: ScenarioRow) => {
+    if (!row.lastRunAt) {
+      return <StatusIndicator type="pending">{t('scenarios.neverRun')}</StatusIndicator>;
+    }
+    const when = new Date(row.lastRunAt).toLocaleString();
+    return row.lastRunOk === false ? (
+      <StatusIndicator type="error">{when}</StatusIndicator>
+    ) : (
+      <StatusIndicator type="success">{when}</StatusIndicator>
+    );
+  };
+
+  return (
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
+
+      <Table
+        header={
+          <CloudscapeHeader
+            variant="h2"
+            description={t('scenarios.desc')}
+            counter={rows.length > 0 ? `(${rows.length})` : undefined}
+            actions={
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button iconName="refresh" onClick={load}>{t('overview.refresh')}</Button>
+                <Button variant="primary" loading={syncing} onClick={handleSync}>
+                  {t('scenarios.reconcile')}
+                </Button>
+              </SpaceBetween>
+            }
+          >
+            {t('scenarios.title')}
+          </CloudscapeHeader>
+        }
+        loading={loading}
+        loadingText={t('scenarios.loading')}
+        items={rows}
+        trackBy={(row) => `${row.userId}#${row.scenarioId}`}
+        columnDefinitions={[
+          {
+            id: 'name',
+            header: t('scenarios.colName'),
+            cell: (row) => (
+              <SpaceBetween size="xxs">
+                <b>{row.name || row.scenarioId}</b>
+                {row.description ? (
+                  <span style={{ fontSize: '0.85em', opacity: 0.75 }}>{row.description}</span>
+                ) : null}
+              </SpaceBetween>
+            ),
+          },
+          { id: 'user', header: t('scenarios.colUser'), cell: (row) => row.userId },
+          {
+            id: 'trigger',
+            header: t('scenarios.colTrigger'),
+            cell: (row) => (
+              <SpaceBetween direction="horizontal" size="xxs">
+                <Badge color={row.trigger?.sceneType === 'manual' ? 'grey' : 'blue'}>
+                  {row.trigger?.sceneType || '-'}
+                </Badge>
+                <span>{row.triggerDescription}</span>
+              </SpaceBetween>
+            ),
+          },
+          {
+            // The cron AND its timezone. A bare "cron(0 15 ...)" is unreadable:
+            // 15:00 UTC is 23:00 in Shanghai and 07:00 in Los Angeles, and the
+            // zone is what tells them apart.
+            id: 'schedule',
+            header: t('scenarios.colSchedule'),
+            cell: (row) => (row.scheduled
+              ? <span><code>{row.cron}</code> {row.timezone ? `(${row.timezone})` : ''}</span>
+              : <span style={{ opacity: 0.6 }}>{t('scenarios.noSchedule')}</span>),
+          },
+          {
+            id: 'actions',
+            header: t('scenarios.colActions'),
+            cell: (row) => row.actionCount,
+          },
+          {
+            id: 'active',
+            header: t('scenarios.colActive'),
+            cell: (row) => (row.isActive
+              ? <StatusIndicator type="success">{t('scenarios.active')}</StatusIndicator>
+              : <StatusIndicator type="stopped">{t('scenarios.inactive')}</StatusIndicator>),
+          },
+          {
+            id: 'lastRun',
+            header: t('scenarios.colLastRun'),
+            minWidth: 200,
+            cell: (row) => (
+              <SpaceBetween size="xxs">
+                {runIndicator(row)}
+                {row.lastRunDetail ? (
+                  <span style={{ fontSize: '0.85em', opacity: 0.75 }}>{row.lastRunDetail}</span>
+                ) : null}
+              </SpaceBetween>
+            ),
+          },
+          { id: 'source', header: t('scenarios.colSource'), cell: (row) => row.source || '-' },
+        ]}
+        empty={
+          <CloudscapeBox textAlign="center" padding="m">
+            <b>{t('scenarios.empty')}</b>
+            <CloudscapeBox variant="p" padding={{ top: 'xs' }}>
+              {t('scenarios.emptyHint')}
+            </CloudscapeBox>
           </CloudscapeBox>
         }
       />
@@ -2068,6 +2293,14 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
   // Users tab
   const [cognitoUsers, setCognitoUsers] = useState<CognitoUserInfo[]>([]);
+  // Where each user is, keyed by Cognito sub. Timezone decides when a
+  // time-triggered scene actually fires; the coordinates are what make a
+  // sunrise/sunset trigger computable. Edited in a modal off the Identity table
+  // rather than inline, because the three fields are only valid together.
+  const [userPlaces, setUserPlaces] = useState<Record<string, UserPlace>>({});
+  const [placeUser, setPlaceUser] = useState<CognitoUserInfo | null>(null);
+  const [placeDraft, setPlaceDraft] = useState<PlaceDraft>(EMPTY_PLACE_DRAFT);
+  const [savingPlace, setSavingPlace] = useState(false);
   const [gatewayTools, setGatewayTools] = useState<GatewayTool[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [selectedPermUser, setSelectedPermUser] = useState<CognitoUserInfo | null>(null);
@@ -2213,12 +2446,78 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       const [users, tools] = await Promise.all([listCognitoUsers(), listGatewayTools()]);
       setCognitoUsers(users);
       setGatewayTools(tools);
+      // Location settings, keyed by sub for the table and written back under the
+      // DDB row key (email) the agent actually reads. Fetched per user rather
+      // than in one call because /settings is per-user; the list is small and a
+      // failure on one row must not blank the others.
+      const places: Record<string, UserPlace> = {};
+      await Promise.all(users.map(async (u) => {
+        try {
+          const s = await getSettings(u.email || u.username || u.sub);
+          places[u.sub] = {
+            timezone: s.timezone || '',
+            latitude: s.latitude ?? null,
+            longitude: s.longitude ?? null,
+          };
+        } catch {
+          places[u.sub] = { timezone: '', latitude: null, longitude: null };
+        }
+      }));
+      setUserPlaces(places);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setUsersLoading(false);
     }
   }, []);
+
+  const openPlaceEditor = (user: CognitoUserInfo) => {
+    clearMessages();
+    const place = userPlaces[user.sub] || { timezone: '', latitude: null, longitude: null };
+    setPlaceDraft({
+      timezone: place.timezone,
+      latitude: place.latitude === null ? '' : String(place.latitude),
+      longitude: place.longitude === null ? '' : String(place.longitude),
+    });
+    setPlaceUser(user);
+  };
+
+  const handleSavePlace = async () => {
+    if (!placeUser) return;
+    const lat = placeDraft.latitude.trim();
+    const lon = placeDraft.longitude.trim();
+    // Checked here as well as server-side so the admin sees it next to the field
+    // they typed in rather than as an API error banner. The server check is the
+    // authoritative one.
+    if ((lat === '') !== (lon === '')) {
+      setError(t('identity.placeBothCoords'));
+      return;
+    }
+    clearMessages();
+    setSavingPlace(true);
+    const userId = placeUser.email || placeUser.username || placeUser.sub;
+    try {
+      await updateSettings(userId, {
+        timezone: placeDraft.timezone.trim(),
+        latitude: lat === '' ? null : Number(lat),
+        longitude: lon === '' ? null : Number(lon),
+      });
+      setUserPlaces((prev) => ({
+        ...prev,
+        [placeUser.sub]: {
+          timezone: placeDraft.timezone.trim(),
+          latitude: lat === '' ? null : Number(lat),
+          longitude: lon === '' ? null : Number(lon),
+        },
+      }));
+      setSuccess(t('identity.placeSaved').replace('{user}', placeUser.email || placeUser.username || ''));
+      setPlaceUser(null);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingPlace(false);
+    }
+  };
 
   // Cedar principal.id maps to JWT sub claim (Cognito sub UUID)
   const getActorId = (user: CognitoUserInfo) => user.sub;
@@ -2735,6 +3034,30 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               cell: (u) => <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>,
             },
             {
+              // Timezone and coordinates. Read-only here with an Edit button —
+              // "UTC" shown for an unset zone is the truth, not a placeholder:
+              // that is the zone their scenes are actually scheduled in.
+              id: 'place',
+              header: t('identity.colPlace'),
+              minWidth: 200,
+              cell: (u) => {
+                const place = userPlaces[u.sub];
+                const zone = place?.timezone || 'UTC';
+                const coords = place && place.latitude !== null && place.longitude !== null
+                  ? `${place.latitude.toFixed(2)}, ${place.longitude.toFixed(2)}`
+                  : t('identity.placeNoCoords');
+                return (
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <span>{zone}</span>
+                    <span style={{ opacity: 0.7 }}>({coords})</span>
+                    <Button variant="inline-link" onClick={() => openPlaceEditor(u)}>
+                      {t('identity.placeEdit')}
+                    </Button>
+                  </SpaceBetween>
+                );
+              },
+            },
+            {
               // Promote/demote/delete moved here from Overview (spec 2026-07-29):
               // user management now lives entirely under Build > Identity.
               id: 'actions',
@@ -2795,6 +3118,59 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           <CloudscapeBox variant="p">
             {t('overview.deleteConfirmBody').replace('{email}', deleteUserTarget?.email || deleteUserTarget?.username || '')}
           </CloudscapeBox>
+        </Modal>
+        <Modal
+          visible={!!placeUser}
+          onDismiss={() => setPlaceUser(null)}
+          header={t('identity.placeTitle').replace('{user}', placeUser?.email || placeUser?.username || '')}
+          footer={
+            <CloudscapeBox float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button variant="link" onClick={() => setPlaceUser(null)}>
+                  {t('overview.cancel')}
+                </Button>
+                <Button variant="primary" loading={savingPlace} onClick={handleSavePlace}>
+                  {t('models.save')}
+                </Button>
+              </SpaceBetween>
+            </CloudscapeBox>
+          }
+        >
+          <SpaceBetween size="m">
+            <FormField
+              label={t('identity.placeTimezone')}
+              description={t('identity.placeTimezoneHint')}
+            >
+              <Autosuggest
+                value={placeDraft.timezone}
+                onChange={({ detail }) => setPlaceDraft((p) => ({ ...p, timezone: detail.value }))}
+                options={COMMON_TIMEZONES.map((tz) => ({ value: tz }))}
+                enteredTextLabel={(v) => v}
+                placeholder="UTC"
+              />
+            </FormField>
+            <FormField
+              label={t('identity.placeCoords')}
+              description={t('identity.placeCoordsHint')}
+            >
+              <SpaceBetween direction="horizontal" size="xs">
+                <Input
+                  value={placeDraft.latitude}
+                  onChange={({ detail }) => setPlaceDraft((p) => ({ ...p, latitude: detail.value }))}
+                  placeholder={t('identity.placeLatitude')}
+                  type="number"
+                  inputMode="decimal"
+                />
+                <Input
+                  value={placeDraft.longitude}
+                  onChange={({ detail }) => setPlaceDraft((p) => ({ ...p, longitude: detail.value }))}
+                  placeholder={t('identity.placeLongitude')}
+                  type="number"
+                  inputMode="decimal"
+                />
+              </SpaceBetween>
+            </FormField>
+          </SpaceBetween>
         </Modal>
         </SpaceBetween>
       )}
@@ -3383,6 +3759,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       {/* Models Tab */}
       {activeTab === 'models' && (
         <ModelsTab
+          error={error}
+          success={success}
+          clearMessages={clearMessages}
+          setError={setError}
+          setSuccess={setSuccess}
+        />
+      )}
+
+      {/* Scenarios Tab */}
+      {activeTab === 'scenarios' && (
+        <ScenariosTab
           error={error}
           success={success}
           clearMessages={clearMessages}

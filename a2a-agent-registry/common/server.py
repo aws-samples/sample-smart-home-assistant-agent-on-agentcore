@@ -82,6 +82,20 @@ class CallerIdentity:
         self.raw_token = raw_token
         self.allowed_skills = allowed_skills
 
+    @property
+    def memory_actor(self) -> str:
+        """This caller's AgentCore Memory actor id, or "" if it cannot be formed.
+
+        Delegates to `shared/memory_actor.py` rather than sanitizing here. The
+        orchestrator has always keyed memory by email, so a sub-agent that used
+        `sub` would read a different namespace and quietly retrieve nothing — see
+        that module. `sub` stays the key for scene rows and the runner's
+        per-user credential; those are records, not a shared namespace.
+        """
+        from common.memory import memory_actor_for
+
+        return memory_actor_for(self)
+
     def __repr__(self) -> str:  # pragma: no cover - defensive
         return (f"CallerIdentity(sub={self.sub[:8] + '...' if self.sub else None!r}, "
                 f"email={self.email!r}, raw_token=<redacted>, "

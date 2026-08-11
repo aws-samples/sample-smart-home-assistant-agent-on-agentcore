@@ -32,7 +32,7 @@
 - [9.14. Code Interpreter — Live Agent Code Execution](#914-code-interpreter--live-agent-code-execution)
 - [9.15. Agent Operations Dashboard](#915-agent-operations-dashboard)
 - [9.16. Simulated End Users (Test Data Generation)](#916-simulated-end-users-test-data-generation)
-- [9.17. Scene Orchestration & Scheduled Automations](#917-scene-orchestration--scheduled-automations)
+- [9.17. Task Management & Scheduled Automations](#917-task-management--scheduled-automations)
 - [9.18. The Agents Page (Fleet & Per-Agent Governance)](#918-the-agents-page-fleet--per-agent-governance)
 - [9.19. Simulator Props: Virtual Clock, Screen and Speaker](#919-simulator-props-virtual-clock-screen-and-speaker)
 - [10. API Reference](#10-api-reference)
@@ -59,7 +59,7 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 | AI Agent (code) | `code-interpreter` + AgentCore Code Interpreter (`aws.codeinterpreter.v1`) driven by the text agent's `execute_python` Strands tool | Live Python execution for data analysis, optimization, simulation, and charting over smart-home telemetry. Chatbot's right-side panel auto-opens a "CodeInterpreter" tab rendering each block's code + streamed stdout/stderr + inline matplotlib charts; charts land in `/mnt/workspace/<sid>/code/` (see §9.14). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
 | AI Agents (specialists) | 7 independent AgentCore Runtimes reached over the A2A protocol | Domain specialists the orchestrator delegates to: device control, lighting effects, knowledge QA, scene orchestration, security, energy, appliance maintenance. Each carries the caller's verified identity to the same Gateway, so Cedar evaluates the real end user (see §9.13). |
-| Scene orchestration | scene-orchestration A2A agent + `smarthome-scenarios` table + EventBridge Scheduler + `smarthome-scenario-runner` Lambda | Turns a described routine into a stored scene (trigger + device actions) and executes it on time **as the owner, through the Gateway**, so a scheduled command is authorised exactly like a hand-typed one (see §9.17). |
+| Task management | task-management A2A agent + `smarthome-scenarios` table + EventBridge Scheduler + `smarthome-scenario-runner` Lambda | Turns a described routine into a stored scene (trigger + device actions) and executes it on time **as the owner, through the Gateway**, so a scheduled command is authorised exactly like a hand-typed one (see §9.17). |
 | Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Control Center with AWS-Console-style left-nav: Discover (Overview, **Agents**, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations, Optimization). Supports light/dark themes. |
 | Skill ERP | React + TypeScript + Cloudscape + REST API | End-user skill + A2A agent publishing: authors SKILL.md and A2A records, publishes to AWS Agent Registry for curator approval |
 | Enterprise Knowledge Base | Bedrock KB + **S3 Vectors** + S3 | RAG retrieval with per-user document isolation via S3 prefix + metadata filtering. Vector store is the pay-per-vector S3 Vectors service (no fixed monthly floor). |
@@ -2875,7 +2875,7 @@ roster edit that missed one failed at a different stage each time.
 | `device-control-agent` | `inspect_devices`, `orchestrate_devices`, `resolve_capability` | Claude Haiku 4.5 | control / discover / state / history |
 | `light-effect-agent` | `compose_effect`, `effect_from_description` | Claude Haiku 4.5 | control / discover / state |
 | `knowledge-qa-agent` | `answer_from_docs`, `troubleshoot_from_docs` | Nova Lite | knowledge base |
-| `scene-orchestration-agent` | `compose_scenario`, `manage_scenario`, `suggest_automation` | Claude Haiku 4.5 | — (own DynamoDB table) |
+| `task-management-agent` | `compose_scenario`, `manage_scenario`, `suggest_automation` | Claude Haiku 4.5 | — (own DynamoDB table) |
 
 The first three are prompt-only advisors. The rest reach real backends, which
 is what forced the identity and enforcement work below.
@@ -3065,7 +3065,7 @@ IAM is granted per agent and narrowly:
 |---------------|--------|--------------|
 | `A2AM2MSecretRead` | `secretsmanager:GetSecretValue` on the m2m secret | all |
 | `A2APromptTableRead` | `dynamodb:GetItem` on `smarthome-skills` | all |
-| `A2AScenariosTableAccess` | read/write on `smarthome-scenarios` + its indexes | scene-orchestration only |
+| `A2AScenariosTableAccess` | read/write on `smarthome-scenarios` + its indexes | task-management only |
 
 Separate policy **names** on purpose: `put_role_policy` replaces a document, so
 sharing one name means whichever step runs last wins and the other grant
@@ -3884,10 +3884,10 @@ recreated). Run logs land in `scripts/sim-results/*.jsonl` (gitignored).
 
 ---
 
-### 9.17 Scene Orchestration & Scheduled Automations
+### 9.17 Task Management & Scheduled Automations
 
 A **scene** is a trigger plus a list of device actions: *when this happens, put
-these devices in these states*. The scene-orchestration A2A agent writes them,
+these devices in these states*. The task-management A2A agent writes them,
 an EventBridge Scheduler-driven Lambda executes them, and the Admin Console can
 list them. All three share `shared/scenarios.py`, so what gets validated at write
 time is what gets executed.

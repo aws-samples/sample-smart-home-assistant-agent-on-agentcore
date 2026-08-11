@@ -1,10 +1,10 @@
 {
-  "name": "scene-orchestration-agent",
+  "name": "task-management-agent",
   "description": "A specialist agent that turns a described routine into a saved scene: a trigger (a time, a device's state, or a sensor threshold) plus the device actions to apply. It stores and manages scenes and reusable templates, and returns the actions for the caller to execute — it never controls a device itself.",
   "version": "1.0.0",
   "provider": {
     "organization": "smarthome-agent-harness",
-    "url": "https://example.com/a2a/scene-orchestration-agent"
+    "url": "https://example.com/a2a/task-management-agent"
   },
   "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "skills": [

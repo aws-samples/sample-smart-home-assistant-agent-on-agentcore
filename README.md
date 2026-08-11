@@ -162,7 +162,7 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 | `device-control-agent` | 多设备编排、能力消歧 | Haiku 4.5 | ✅ 经 Gateway |
 | `light-effect-agent` | 心情/图片 → 灯效 | Haiku 4.5 | ✅ 经 Gateway |
 | `knowledge-qa-agent` | 文档问答、故障排查 | Nova Lite | ✅ 知识库 |
-| `scene-orchestration-agent` | 场景/自动化编排 | Haiku 4.5 | ❌ 只规划，见下节 |
+| `task-management-agent` | 任务/自动化（触发器+动作） | Haiku 4.5 | ❌ 只规划，见下节 |
 | `home-security-agent` | 风险评估、事件响应 | Haiku 4.5 | ❌ 纯建议 |
 | `energy-optimization-agent` | 节能测算、电价分析 | Nova Lite | ❌ 纯建议 |
 | `appliance-maintenance-agent` | 保养计划、故障诊断 | Nova Lite | ❌ 纯建议 |
@@ -629,7 +629,7 @@ Skill ERP is a self-service skills site for **regular end users** (no `admin` gr
 | `device-control-agent` | multi-device orchestration, capability disambiguation | Haiku 4.5 | ✅ via Gateway |
 | `light-effect-agent` | mood / image → lighting effect | Haiku 4.5 | ✅ via Gateway |
 | `knowledge-qa-agent` | documentation Q&A, troubleshooting | Nova Lite | ✅ knowledge base |
-| `scene-orchestration-agent` | scenes and automations | Haiku 4.5 | ❌ plans only — see below |
+| `task-management-agent` | saved tasks and automations | Haiku 4.5 | ❌ plans only — see below |
 | `home-security-agent` | risk assessment, incident response | Haiku 4.5 | ❌ advisory |
 | `energy-optimization-agent` | savings estimates, tariff analysis | Nova Lite | ❌ advisory |
 | `appliance-maintenance-agent` | maintenance schedule, diagnosis | Nova Lite | ❌ advisory |
@@ -657,7 +657,7 @@ Other notes:
 
 ### Scenes and scheduled automations
 
-Say "every night at 11pm turn the lights off and set the fan to low" in the chatbot: the orchestrator delegates to the scene-orchestration specialist, which stores it as a **scene** (a trigger plus device actions), and EventBridge Scheduler runs it on time.
+Say "every night at 11pm turn the lights off and set the fan to low" in the chatbot: the orchestrator delegates to the task-management specialist, which stores it as a **scene** (a trigger plus device actions), and EventBridge Scheduler runs it on time.
 
 Three trigger kinds: **time** (24-hour `HH:MM`, scheduled in UTC), **device state**, and **real sensor thresholds** (temperature / humidity / PM2.5 / CO₂ — you must say above or below, because "above 26" and "below 26" build opposite scenes).
 

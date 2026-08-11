@@ -74,7 +74,7 @@ ALL_STEPS = ("cognito", "render", "deploy", "workload", "registry", "persist", "
 # the CDK stack (`skillsTable`) and hardcoded there too; a sub-agent reads it to
 # resolve its governed prompt. Same literal the setup script uses.
 SKILLS_TABLE = "smarthome-skills"
-# The scene-orchestration agent's own table. It is the ONLY table that agent may
+# The task-management agent's own table. It is the ONLY table that agent may
 # write, which is why scenes did not go into the skills table: writing there would
 # let it edit the permission and prompt rows that govern it.
 SCENARIOS_TABLE = "smarthome-scenarios"
@@ -597,7 +597,7 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
 
 def _grant_scenarios_table_access(agent: str, role_arn: str,
                                  state: dict[str, Any]) -> None:
-    """Let the scene-orchestration agent read and write its own scenarios table.
+    """Let the task-management agent read and write its own scenarios table.
 
     The only sub-agent that gets write access to anything, and the grant is
     deliberately narrow in two ways:
@@ -744,6 +744,15 @@ def ensure_registry_record(
     descriptor_payload = {
         "a2aAgentCard": {"data": json.dumps(card_for_registry)},
     }
+    # UpdateRegistryRecord takes the SAME descriptor union wrapped in
+    # `optionalValue`; Create takes it bare. Measured from the service model, not
+    # guessed — passing Create's shape to Update fails validation with "Unknown
+    # parameter in descriptors: a2aAgentCard", and the code below treats any update
+    # failure as "recreate the record". That path works, so a redeploy looked
+    # successful while silently minting a NEW recordId, and a recordId is what
+    # every user's `a2aGrants` map is keyed by. The visible symptom is a user whose
+    # skills were granted yesterday having no `a2a_*` tools today.
+    update_descriptor_payload = {"optionalValue": descriptor_payload}
 
     # AWS Agent Registry (GA namespace) — Registry calls only.
     registry_control = boto3.client(REGISTRY_CLIENT, region_name=state["region"])
@@ -761,7 +770,7 @@ def ensure_registry_record(
             registry_control.update_registry_record(
                 registryId=registry_id,
                 recordId=record_id,
-                descriptors=descriptor_payload,
+                descriptors=update_descriptor_payload,
             )
             log(f"  [{agent}] registry record updated ({record_id})")
         except Exception as e:
@@ -827,7 +836,7 @@ def ensure_registry_record(
                         registry_control.update_registry_record(
                             registryId=registry_id,
                             recordId=record_id,
-                            descriptors=descriptor_payload,
+                            descriptors=update_descriptor_payload,
                         )
                         log(f"  [{agent}] updated existing record ({record_id})")
                         break

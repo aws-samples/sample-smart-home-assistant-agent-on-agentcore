@@ -108,8 +108,27 @@ def unregister_runtime_from_dashboard(runtime_arn: str, region: str) -> None:
         log(f"  warn: dashboard allowlist cleanup failed — {e}")
 
 
+def slug_for(agent: str, entry: dict[str, Any]) -> str:
+    """The slug this deployed agent actually used.
+
+    Taken from the recorded runtime/stack names first and only then from the
+    roster, because the roster is the thing that changes. Renaming an agent
+    removes its old dir name from AGENTS, and a `AGENT_SHORT_SLUG[agent]` lookup
+    would then raise KeyError on exactly the teardown that has to run — leaving a
+    live runtime behind while the traceback says the roster is broken.
+    """
+    stack = entry.get("cfnStack") or ""
+    if stack.startswith("AgentCore-") and stack.endswith("-default"):
+        return stack[len("AgentCore-"):-len("-default")]
+    runtime_id = entry.get("runtimeId") or ""
+    if "_" in runtime_id:
+        return runtime_id.split("_", 1)[0]
+    return AGENT_SHORT_SLUG.get(agent, agent)
+
+
 def teardown_agent(agent: str, entry: dict[str, Any], region: str, registry_id: str) -> None:
     log(f"\n=== {agent} ===")
+    slug = slug_for(agent, entry)
     # This function needs BOTH namespaces. AWS Agent Registry moved out of
     # `bedrock-agentcore` at GA, but workload identities were deliberately left
     # behind — so the record delete below goes through `registry_control` and the
@@ -129,7 +148,7 @@ def teardown_agent(agent: str, entry: dict[str, Any], region: str, registry_id: 
         except Exception as e:
             log(f"  registry record delete failed — {e}")
 
-    cfn_stack = entry.get("cfnStack") or f"AgentCore-{AGENT_SHORT_SLUG[agent]}-default"
+    cfn_stack = entry.get("cfnStack") or f"AgentCore-{slug}-default"
     try:
         cf.describe_stacks(StackName=cfn_stack)
         cf.delete_stack(StackName=cfn_stack)
@@ -144,15 +163,14 @@ def teardown_agent(agent: str, entry: dict[str, Any], region: str, registry_id: 
             log(f"  stack delete failed — {e}")
 
     # Workload identity
-    wid_name = f"{AGENT_SHORT_SLUG[agent]}"
     try:
-        ac.delete_workload_identity(name=wid_name)
-        log(f"  deleted workload identity {wid_name}")
+        ac.delete_workload_identity(name=slug)
+        log(f"  deleted workload identity {slug}")
     except Exception:
         pass
 
     # Local project dir
-    project_dir = Path(entry.get("projectDir") or (AC_PROJECT_DIR / f"{AGENT_SHORT_SLUG[agent]}"))
+    project_dir = Path(entry.get("projectDir") or (AC_PROJECT_DIR / slug))
     if project_dir.exists():
         shutil.rmtree(project_dir)
         log(f"  removed {project_dir}")

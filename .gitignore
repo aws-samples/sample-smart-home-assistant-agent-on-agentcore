@@ -90,6 +90,14 @@ cdk/lambda/*/device_catalog.py
 # Same arrangement for the Agent Registry helper.
 # Source of truth is shared/agent_registry.py.
 cdk/lambda/*/agent_registry.py
-# And for the scenario model, which the scenario runner and the admin API both
-# need. Source of truth is shared/scenarios.py.
+# And for the scenario model plus the solar maths and the shared schedule payload,
+# which the scenario runner and the admin API both need. Source of truth is
+# shared/.
 cdk/lambda/*/scenarios.py
+cdk/lambda/*/solar.py
+cdk/lambda/*/scenario_schedules_shared.py
+cdk/lambda/*/user_settings.py
+# And for the Memory actor-id rule, which the orchestrator's container needs a
+# copy of because it is built from agent/ alone while the A2A sub-agents get all
+# of shared/. Source of truth is shared/memory_actor.py.
+agent/memory_actor.py

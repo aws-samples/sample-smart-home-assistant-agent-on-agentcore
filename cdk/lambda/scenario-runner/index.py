@@ -37,6 +37,7 @@ stored token simply has no scheduled scenes execute, which fails closed.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import os
@@ -47,6 +48,8 @@ import urllib.request
 import boto3
 
 import scenarios as sc
+import solar
+import user_settings
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -57,9 +60,18 @@ STATE_TABLE = os.environ.get("DEVICE_STATE_TABLE", "smarthome-device-state")
 HISTORY_TABLE = os.environ.get("SENSOR_HISTORY_TABLE", "smarthome-sensor-history")
 GATEWAY_URL = os.environ.get("SCENARIO_GATEWAY_URL", "")
 USER_POOL_CLIENT_ID = os.environ.get("USER_POOL_CLIENT_ID", "")
+# The pool itself, for resolving a scene owner's sub to the email their
+# settings row is keyed by. Read-only use of ListUsers.
+USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 # One secret per user, so a single user's credential can be revoked or rotated
 # without touching anyone else's, and so the IAM grant can be prefix-scoped.
 SECRET_PREFIX = os.environ.get("SCENARIO_SECRET_PREFIX", "smarthome/scenario-tokens/")
+# The skills table, read for one thing only: the owner's `__settings__` row, which
+# carries their coordinates. A solar scene cannot be scheduled without them.
+SKILLS_TABLE = os.environ.get("SKILLS_TABLE_NAME", "")
+SCHEDULE_GROUP = os.environ.get("SCENARIO_SCHEDULE_GROUP", "smarthome-scenarios")
+RUNNER_ARN = os.environ.get("SCENARIO_RUNNER_ARN", "")
+SCHEDULER_ROLE_ARN = os.environ.get("SCENARIO_SCHEDULER_ROLE_ARN", "")
 
 # The Gateway tool this Lambda is allowed to reach. Named explicitly rather than
 # calling whatever `tools/list` happens to return: a scheduled run should apply
@@ -67,8 +79,7 @@ SECRET_PREFIX = os.environ.get("SCENARIO_SECRET_PREFIX", "smarthome/scenario-tok
 CONTROL_TOOL_SUFFIX = "control_device"
 
 _ddb = None
-_secrets = None
-_cognito = None
+_clients: dict = {}
 
 
 def _table(name):
@@ -79,14 +90,16 @@ def _table(name):
 
 
 def _client(service):
-    global _secrets, _cognito
-    if service == "secretsmanager":
-        if _secrets is None:
-            _secrets = boto3.client("secretsmanager", region_name=REGION)
-        return _secrets
-    if _cognito is None:
-        _cognito = boto3.client("cognito-idp", region_name=REGION)
-    return _cognito
+    """A cached boto3 client, by service name.
+
+    Keyed on the name rather than falling through to a default: the original
+    version returned the Cognito client for anything that was not
+    "secretsmanager", so adding a third service silently got a client for the
+    wrong API and failed with an unrelated-looking AttributeError.
+    """
+    if service not in _clients:
+        _clients[service] = boto3.client(service, region_name=REGION)
+    return _clients[service]
 
 
 def _plain(value):
@@ -344,12 +357,17 @@ def _load(user_id: str, scenario_key: str) -> dict | None:
         return None
 
 
-def _all_condition_scenarios() -> list[dict]:
-    """Every active scene whose trigger is a condition rather than a clock.
+def _scenarios_of_type(*scene_types: str) -> list[dict]:
+    """Every active, non-template scene whose trigger is one of `scene_types`.
 
     A scan, and honest about it: these rows are bounded by scenes-per-user and the
     sweep runs every five minutes. A GSI on (isActive, sceneType) would be the
     right answer at scale and is not worth a second index at this one.
+
+    An explicit allowlist rather than an exclusion, which is what keeps `manual`
+    out of the sweep for free: a one-tap command must never fire by itself, and a
+    filter written as "everything except time" would have started running them the
+    moment the type was added.
     """
     out = []
     try:
@@ -360,15 +378,93 @@ def _all_condition_scenarios() -> list[dict]:
                 trigger = item.get("trigger") or {}
                 if (item.get("isActive")
                         and not item.get("isTemplate")
-                        and trigger.get("sceneType") in (sc.SCENE_SENSOR,
-                                                         sc.SCENE_DEVICE_STATE)):
+                        and trigger.get("sceneType") in scene_types):
                     out.append(item)
             if "LastEvaluatedKey" not in resp:
                 break
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
     except Exception as exc:  # noqa: BLE001
-        logger.exception("could not sweep scenarios: %s", exc)
+        logger.exception("could not scan scenarios: %s", exc)
     return out
+
+
+def _all_condition_scenarios() -> list[dict]:
+    """The scenes the five-minute sweep evaluates: sensor and device-state only."""
+    return _scenarios_of_type(sc.SCENE_SENSOR, sc.SCENE_DEVICE_STATE)
+
+
+def _user_place(user_id: str) -> tuple[str, tuple[float, float] | None]:
+    """(timezone, coordinates) from the user's `__settings__` row.
+
+    `user_id` here is a Cognito SUB, because that is how a scene row is keyed —
+    while the settings row is keyed by EMAIL, because that is what the chatbot
+    sends and the orchestrator reads. `user_settings.read_settings` crosses that
+    line; see shared/user_settings.py for why the two keys both exist.
+
+    Coordinates are None when unset, which is the answer that stops a solar scene
+    rather than a reason to guess a location. A guessed one would turn the lights on
+    at the wrong time in a way nobody would think to check.
+    """
+    if not SKILLS_TABLE:
+        return "", None
+    item = user_settings.read_settings(
+        _table(SKILLS_TABLE), user_id,
+        cognito=_client("cognito-idp"), user_pool_id=USER_POOL_ID)
+    return user_settings.timezone_of(item), user_settings.coordinates(item)
+
+
+def _recompute_solar_schedules(now: _dt.datetime) -> dict:
+    """Point every active solar scene's schedule at its next occurrence.
+
+    Runs nightly. A solar scene's clock time moves a minute or two a day, so its
+    schedule has to be rewritten rather than declared once — which is why this is
+    the one place the runner needs Scheduler write permission.
+
+    The admin API's reconcile computes the same expression from the same inputs
+    (see cdk/lambda/admin-api/scenario_schedules.py). That duplication is
+    deliberate: if only this pass could name a solar schedule, the reconcile would
+    see one it did not expect and delete it as an orphan on the next scene save.
+    """
+    import scenario_schedules_shared as sched
+
+    scenes = _scenarios_of_type(sc.SCENE_SOLAR)
+    if not scenes:
+        return {"solar": 0, "updated": [], "skipped": []}
+
+    scheduler = _client("scheduler")
+    updated, skipped = [], []
+    places: dict[str, tuple[str, tuple[float, float] | None]] = {}
+    for item in scenes:
+        user_id = item["userId"]
+        trigger = item.get("trigger") or {}
+        name = sc.schedule_name(user_id, item.get("scenarioId", ""))
+        if user_id not in places:
+            places[user_id] = _user_place(user_id)
+        _, place = places[user_id]
+        if place is None:
+            skipped.append({"name": name, "reason": "no coordinates for the owner"})
+            continue
+        when = solar.next_occurrence_utc(
+            trigger.get("subject", ""), place[0], place[1],
+            offset_minutes=sc.solar_offset_minutes(trigger), now=now)
+        if when is None:
+            skipped.append({"name": name,
+                            "reason": "the sun does not do that here right now"})
+            continue
+        try:
+            sched.put_solar_schedule(
+                scheduler, name=name, cron=solar.cron_for_utc(when),
+                user_id=user_id, scenario_key=item["scenarioKey"],
+                description=f"{item.get('name', '')} "
+                            f"({sc.describe_trigger(trigger)})"[:200])
+            updated.append({"name": name, "at": when.isoformat()})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not update solar schedule %s: %s", name, exc)
+            skipped.append({"name": name, "reason": f"{type(exc).__name__}"})
+
+    logger.info("solar recompute: %d updated, %d skipped",
+                len(updated), len(skipped))
+    return {"solar": len(updated), "updated": updated, "skipped": skipped}
 
 
 def _gateway_for(user_id: str) -> tuple[GatewayCall | None, str, str]:
@@ -406,13 +502,28 @@ def _gateway_for(user_id: str) -> tuple[GatewayCall | None, str, str]:
 
 
 def handler(event, context):
-    """Two entry points, distinguished by the payload Scheduler sends.
+    """Three entry points, distinguished by the payload Scheduler sends.
 
-      {"mode": "scenario", "userId": ..., "scenarioKey": ...}  one time-triggered scene
+      {"mode": "scenario", "userId": ..., "scenarioKey": ...}  one scheduled scene
       {"mode": "sweep"}                                        all condition triggers
+      {"mode": "solar"}                                        move solar schedules
+
+    `scenario` serves both `time` and `solar` scenes: by the time the schedule
+    fires there is nothing different about them, because the difference is entirely
+    in when the schedule was set to fire.
     """
     logger.info("event: %s", json.dumps(event, default=str))
     mode = (event or {}).get("mode") or "sweep"
+
+    if mode == "solar":
+        # Nightly. `now` is passed rather than read inside so a manual invoke can
+        # target a specific date when verifying.
+        stamp = (event or {}).get("now")
+        now = (_dt.datetime.fromisoformat(stamp) if stamp
+               else _dt.datetime.now(_dt.timezone.utc))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=_dt.timezone.utc)
+        return _recompute_solar_schedules(now)
 
     if mode == "scenario":
         user_id = event.get("userId", "")

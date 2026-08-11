@@ -1,7 +1,7 @@
 """Scene definitions, their triggers, and validation — shared, pure logic.
 
 A "scenario" is a trigger plus a list of device actions: *when this happens, put
-these devices in these states*. The A2A scene-orchestration agent writes them, the
+these devices in these states*. The A2A task-management agent writes them, the
 scheduler Lambda reads them, and the Admin Console will display them. All three
 need the same notion of what a valid scenario is, so it lives here rather than in
 whichever of them was written first.
@@ -46,7 +46,29 @@ SCENE_SENSOR = "sensor"
 # pm25 and co2 over MQTT and `query_sensor_history` reads them back out of
 # DynamoDB. The predecessor design left this out because its sensors were a
 # random-number generator, which is the only reason it was ever "unsupported".
-SCENE_TYPES = (SCENE_TIME, SCENE_DEVICE_STATE, SCENE_SENSOR)
+#
+# `solar` fires at sunrise or sunset, so its clock time changes every day and
+# depends on where the user is. It therefore has no cron of its own here —
+# `cron_for` returns "" and the runner's daily `mode="solar"` pass computes
+# tomorrow's time and updates the schedule. See shared/solar.py.
+#
+# `manual` never fires by itself. It is a one-tap command: stored actions with a
+# name, run when the user asks for it by name. Both of the automatic execution
+# paths ignore it, which is the reason it is a trigger type rather than a second
+# table — `cron_for` gives it no schedule and the sweep does not collect it.
+SCENE_SOLAR = "solar"
+SCENE_MANUAL = "manual"
+SCENE_TYPES = (SCENE_TIME, SCENE_DEVICE_STATE, SCENE_SENSOR, SCENE_SOLAR,
+               SCENE_MANUAL)
+
+# What a solar trigger's `subject` may be. Mirrors solar.EVENTS; duplicated rather
+# than imported because this module is copied into containers that do not all
+# carry solar.py, and an ImportError here would break every trigger type.
+SOLAR_EVENTS = ("sunrise", "sunset")
+# How far a solar trigger may be shifted, in minutes. Bounded so an offset cannot
+# quietly turn "at sunset" into a different day; ±4 hours covers "an hour before
+# sunset" and every reasonable variant of it.
+MAX_SOLAR_OFFSET_MINUTES = 240
 
 CALC_EQUAL = "equal"
 CALC_ABOVE = "above"
@@ -57,6 +79,13 @@ CALCULATION_TYPES = (CALC_EQUAL, CALC_ABOVE, CALC_BELOW, CALC_CHANGE)
 EXEC_ONCE = "once"
 EXEC_RECURRING = "recurring"
 EXECUTION_TYPES = (EXEC_ONCE, EXEC_RECURRING)
+
+# Who wrote a row. Display only — nothing branches on it, which is why the agent's
+# rename did not require a data migration. `SOURCE_LEGACY_AGENT` is the value rows
+# written before the rename carry; both are valid and both mean the same agent.
+SOURCE_AGENT = "task-management-agent"
+SOURCE_LEGACY_AGENT = "scene-orchestration-agent"
+KNOWN_SOURCES = (SOURCE_AGENT, SOURCE_LEGACY_AGENT)
 
 # 24-hour clock. Deliberately strict: "11pm" and "23:00:00" both parse as a time
 # to a human and neither is what EventBridge Scheduler accepts, so the agent is
@@ -150,7 +179,9 @@ def validate_trigger(trigger: dict) -> tuple[dict, list[str]]:
         raise ScenarioError(
             f"sceneType must be one of {list(SCENE_TYPES)}; got {scene_type!r}. "
             f"Use 'time' for a clock trigger, 'device_state' to react to a "
-            f"device, 'sensor' for a temperature/humidity/pm25/co2 threshold.")
+            f"device, 'sensor' for a temperature/humidity/pm25/co2 threshold, "
+            f"'solar' for sunrise/sunset, 'manual' for a one-tap command that "
+            f"only runs when the user asks for it by name.")
 
     out: dict = {"sceneType": scene_type}
     subject = (str(trigger.get("subject") or "")).strip()
@@ -194,6 +225,60 @@ def validate_trigger(trigger: dict) -> tuple[dict, list[str]]:
             raise ScenarioError(
                 f"a device_state trigger supports 'equal' or 'change'; got {calc!r}")
         out["calculationType"] = calc
+
+    elif scene_type == SCENE_SOLAR:
+        if subject not in SOLAR_EVENTS:
+            raise ScenarioError(
+                f"a solar trigger needs subject 'sunrise' or 'sunset'; "
+                f"got {subject!r}")
+        out["subject"] = subject
+        # The offset in minutes, negative for "before". Stored as an int rather
+        # than Decimal because it is a count, not a measurement, and DynamoDB
+        # takes int fine.
+        if condition in (None, ""):
+            offset = 0
+            auto.append("conditionValue")
+        else:
+            try:
+                offset = int(str(condition).strip())
+            except (TypeError, ValueError):
+                raise ScenarioError(
+                    f"a solar trigger's conditionValue is an offset in whole "
+                    f"minutes — negative for before, 0 for exactly at the event. "
+                    f"Got {condition!r}") from None
+        if abs(offset) > MAX_SOLAR_OFFSET_MINUTES:
+            raise ScenarioError(
+                f"a solar offset must be within ±{MAX_SOLAR_OFFSET_MINUTES} "
+                f"minutes; got {offset}")
+        out["conditionValue"] = offset
+        # Same reasoning as `time`: there is no "above sunset".
+        if calc and calc != CALC_EQUAL:
+            raise ScenarioError(
+                f"a solar trigger only supports calculationType 'equal'; "
+                f"got {calc!r}")
+        if not calc:
+            auto.append("calculationType")
+        out["calculationType"] = CALC_EQUAL
+
+    elif scene_type == SCENE_MANUAL:
+        # No condition, no subject, no comparison. A manual scene is a named set
+        # of actions; asking for a threshold would be asking what a button is
+        # greater than.
+        if subject:
+            raise ScenarioError(
+                "a manual trigger has no subject — it runs when the user asks "
+                "for it by name; omit it")
+        if condition not in (None, ""):
+            raise ScenarioError(
+                f"a manual trigger has no conditionValue — there is nothing to "
+                f"compare. Got {condition!r}")
+        if calc and calc != CALC_EQUAL:
+            raise ScenarioError(
+                f"a manual trigger has no comparison; omit calculationType "
+                f"(got {calc!r})")
+        if not calc:
+            auto.append("calculationType")
+        out["calculationType"] = CALC_EQUAL
 
     else:  # SCENE_SENSOR
         metrics = _sensor_metrics()
@@ -250,6 +335,19 @@ def describe_trigger(trigger: dict) -> str:
     every = trigger.get("executionType") == EXEC_RECURRING
     if scene == SCENE_TIME:
         return f"{'every day at' if every else 'once at'} {value}"
+    if scene == SCENE_SOLAR:
+        try:
+            offset = int(value or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        if offset == 0:
+            return f"every day at {subject}"
+        minutes = abs(offset)
+        when = "before" if offset < 0 else "after"
+        return f"every day {minutes} minutes {when} {subject}"
+    if scene == SCENE_MANUAL:
+        # Says what it does rather than what fires it, because nothing fires it.
+        return "when you ask for it by name"
     if scene == SCENE_DEVICE_STATE:
         if calc == CALC_CHANGE:
             return f"when {subject} changes state"
@@ -337,7 +435,7 @@ def _storable(command: dict) -> dict:
 def build_scenario(user_id: str, name: str, trigger: dict, actions,
                    description: str = "", is_template: bool = False,
                    is_active: bool = True, now: str = "",
-                   source: str = "scene-orchestration-agent") -> dict:
+                   source: str = SOURCE_AGENT) -> dict:
     """A validated scenario row. Raises ScenarioError on anything unstorable."""
     if not user_id:
         raise ScenarioError("userId is required")
@@ -376,7 +474,7 @@ def build_scenario(user_id: str, name: str, trigger: dict, actions,
 def pending_actions(item: dict) -> list[dict]:
     """The scene's actions in the shape the orchestrator executes.
 
-    The scene-orchestration agent never controls a device. It returns these and
+    The task-management agent never controls a device. It returns these and
     the orchestrator calls `control_device` once per entry, carrying the user's
     identity, so every command is authorised by Cedar exactly as a hand-typed one
     is. Giving the sub-agent IoT permissions instead would have made scheduled and
@@ -389,10 +487,21 @@ def pending_actions(item: dict) -> list[dict]:
 def cron_for(trigger: dict) -> str:
     """The EventBridge Scheduler expression for a time trigger, or "".
 
-    Only a `time` trigger gets its own schedule. A device-state or sensor trigger
-    has no clock to fire on — it is evaluated against the current reading on a
-    sweep, so those share one recurring schedule rather than each holding one of
-    their own.
+    Only a `time` trigger gets a cron from THIS function. The other four are each
+    "" for a different reason, and the reasons matter to any caller that reconciles
+    schedules:
+
+      - `device_state` / `sensor` have no clock to fire on. They are evaluated
+        against the current reading by the runner's recurring sweep, which is one
+        shared schedule rather than one per scene.
+      - `solar` has a clock time, but a different one every day and one that
+        depends on the user's coordinates. Its schedule exists and is (re)computed
+        by the runner's daily `mode="solar"` pass via `solar_cron_for`. A
+        reconciler must therefore NOT treat a solar scene's schedule as an orphan
+        just because this function returned "" — see
+        cdk/lambda/admin-api/scenario_schedules.py, where deleting them would have
+        wiped each night's recompute on the next scene save.
+      - `manual` never fires on its own. No schedule is correct.
 
     `cron(m H * * ? *)`, not `rate(...)`: Scheduler's cron requires six fields with
     `?` in either day-of-month or day-of-week, and a five-field Unix expression is
@@ -403,6 +512,48 @@ def cron_for(trigger: dict) -> str:
         return ""
     hour, minute = trigger["conditionValue"].split(":")
     return f"cron({int(minute)} {int(hour)} * * ? *)"
+
+
+def wants_schedule(trigger: dict) -> bool:
+    """Whether this trigger owns a schedule of its own, whoever computes it.
+
+    The distinction `cron_for` cannot express: a solar scene HAS a schedule but
+    this module cannot name its expression, because that needs the user's
+    coordinates and today's date. A reconciler asks this question, not
+    `bool(cron_for(...))` — the latter reports False for solar and the schedule
+    then looks like an orphan to delete.
+    """
+    return trigger.get("sceneType") in (SCENE_TIME, SCENE_SOLAR)
+
+
+def solar_offset_minutes(trigger: dict) -> int:
+    """A solar trigger's offset in whole minutes; 0 when absent or unreadable."""
+    try:
+        return int(trigger.get("conditionValue") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Schedule names are `scn-<user hash>-<scenario id>`. The user id is hashed
+# because a Cognito sub is 36 characters against Scheduler's 64-character limit,
+# and because a schedule name is not the place to publish an identifier.
+# Deterministic, so the same scene always maps to the same schedule and a re-save
+# updates rather than duplicating.
+#
+# Here rather than in the admin Lambda because TWO processes now derive it: the
+# admin API reconciles on save, and the runner recomputes solar times nightly. Two
+# copies of this function would each create a schedule the other treats as an
+# orphan, and they would delete each other's work on alternate runs.
+SCHEDULE_NAME_PREFIX = "scn-"
+
+
+def schedule_name(user_id: str, scenario_id: str) -> str:
+    import hashlib
+
+    user_tag = hashlib.sha256((user_id or "").encode()).hexdigest()[:12]
+    # Scheduler accepts [0-9a-zA-Z-_.]; a scenario id is already a slug.
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in scenario_id)
+    return f"{SCHEDULE_NAME_PREFIX}{user_tag}-{safe}"[:64]
 
 
 def should_fire(trigger: dict, reading) -> bool:
@@ -464,4 +615,8 @@ def summarise(item: dict) -> dict:
         "isActive": bool(item.get("isActive")),
         "isTemplate": bool(item.get("isTemplate")),
         "updatedAt": item.get("updatedAt", ""),
+        # Passed through as stored rather than normalised to the current agent
+        # name: a row written before the rename says so, and rewriting history to
+        # look tidy would hide when a scene was actually created.
+        "source": item.get("source", ""),
     }
