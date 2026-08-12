@@ -1086,10 +1086,9 @@ runtime 没见过的 session id 约 7s,复用的约 0.4s。所以"16s 快路径"
 ./venv/bin/python scripts/probe-routing.py           # 实际路由到哪(读 span)
 ```
 
-已完成的优化与实测结果见
-[`measurements/spec5-report.md`](measurements/spec5-report.md);每一列可以支撑什么结论见
-[`measurements/README.md`](measurements/README.md);背后的设计取舍见
-[`agent-design-principles-zh.md`](agent-design-principles-zh.md)。
+每一列可以支撑什么结论,以及背后的设计取舍,见
+[`agent-design-principles-zh.md`](agent-design-principles-zh.md)。上面这些脚本把结果写到
+`docs/measurements/`(已 gitignore —— 基线只在同一套部署内可比,所以不入库)。
 
 ---
 

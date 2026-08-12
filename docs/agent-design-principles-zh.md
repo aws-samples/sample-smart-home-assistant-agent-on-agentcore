@@ -376,6 +376,21 @@ override 替换出厂 prompt，per-user override 追加。**按请求读、不�
 ./venv/bin/python scripts/probe-routing.py
 ```
 
-[`measurements/README.md`](measurements/README.md) 解释每一列的含义 —— 更重要的是，
-解释**哪一列可以用来支撑哪一种结论**。逐阶段的 before/after 见
-[`measurements/spec5-report.md`](measurements/spec5-report.md)。
+每一列的含义,以及哪一列可以支撑哪种结论:
+
+| 列 | 含义 |
+|---|---|
+| `wall` | 客户端往返。用户真实体感。 |
+| `server` | 容器自己的 `POST /invocations` span。 |
+| `platform` | `wall - server`。花在 AgentCore 里、还没进容器的时间。 |
+| `llmTime` | 所有 `chat` span 之和。 |
+| `toolTime` | 所有 `execute_tool` span 之和 —— 含整个 A2A 跳。 |
+| `harness` | `server - llmTime - toolTime`。容器内我们自己的开销。 |
+| `ttftFirst` | 该轮**第一次**模型调用的首 token 时间。 |
+| `tools` | 取自 `gen_ai.tool.name`,唯一能直接证明"实际跑了什么"的记录。 |
+
+讲用户体感引 `wall`,讲本仓库能控制的部分引 `server`;把 `platform` 记在 harness 账上,
+就是把 AgentCore 自己的建会话耗时(冷 session 约 7s、复用约 0.4s)算成了代码的问题。
+
+每次运行的结果写到 `docs/measurements/`,该目录已 **gitignore** —— 基线只在同一套部署内
+可比,所以归档是测量者本地的东西。引用任何 delta 之前,先自己跑一次基线。

@@ -3514,9 +3514,11 @@ stream, unchanged.
 
 ### Delegation latency, measured
 
-`scripts/measure-baseline.py` archives a comparable baseline; `docs/measurements/`
-holds the runs and `docs/measurements/spec5-report.md` the phase-by-phase report.
-Cold-session means over 10 fixed prompts × 3 repeats:
+`scripts/measure-baseline.py` takes a comparable baseline, writing runs to
+`docs/measurements/` (gitignored — a baseline only compares against another from the
+same deployment). The numbers below are cold-session means over 10 fixed prompts ×
+3 repeats, measured 2026-08-11 on Claude Opus 4.6, and are kept here rather than in
+that directory precisely so the conclusion survives without the raw run:
 
 | Group | wall | platform | server | llm | tool (the A2A hop) | harness |
 |-------|------|----------|--------|-----|--------------------|---------|

@@ -299,7 +299,9 @@ Chatbot 输入框左侧的图标打开右侧抽屉：**56 条示例、17 个能�
 
 ### 性能与实测
 
-所有性能结论都有量具和归档，见 [`docs/measurements/`](docs/measurements/)：
+所有性能结论都有量具。归档写到 `docs/measurements/`（已 gitignore —— 基线只在同一套部署内
+可比，所以是测量者本地的东西；列的含义见
+[`agent-design-principles-zh.md`](docs/agent-design-principles-zh.md)）：
 
 ```bash
 ./venv/bin/python scripts/measure-baseline.py --repeats 3 --label baseline   # 10 条固定 prompt
@@ -690,7 +692,6 @@ python scripts/measure-baseline.py             # 换模型后的延迟基线
 | [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | 管理员运维手册:部署闭环、身份接入、权限管控(含授权复核与工具影响面)、质量评估、提示词优化、Skill 审批流水线、**Agents 机队与逐个 Agent prompt**、**场景联动与定时自动化**、Session 调试、运维大屏、`cdk deploy` 环境变量陷阱 |
 | [`docs/agent-design-principles-zh.md`](docs/agent-design-principles-zh.md) | **Agent 设计理念(中文)**:Harness 设计、Context 工程、Prompt 设计三章。每条都配本仓 file:line 与实测数字;与预期相反的结论会写明预期本身 |
 | [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | 同上,英文版 |
-| [`docs/measurements/`](docs/measurements/) | 延迟与成本实测:测量方法(`README.md`)、Spec 5 逐阶段 before/after 报告(`spec5-report.md`)、可对比的基线归档(JSON) |
 | [`scripts/sim/README.md`](scripts/sim/README.md) | 模拟用户脚本:persona 配置、覆盖范围、安全边界与已知坑位 |
 
 ---
@@ -1019,7 +1020,11 @@ Self-service skill / A2A publishing is the **Skill ERP** site: any confirmed Cog
 
 ### Performance, measured
 
-Every performance claim in this repo has an instrument and an archive under [`docs/measurements/`](docs/measurements/):
+Every performance claim in this repo has an instrument. Runs are written to
+`docs/measurements/`, which is gitignored — a baseline is only comparable against
+another from the same deployment, so the archive is local to whoever measured. The
+columns are explained in
+[`agent-design-principles.md`](docs/agent-design-principles.md):
 
 ```bash
 ./venv/bin/python scripts/measure-baseline.py --repeats 3 --label baseline   # 10 fixed prompts
@@ -1284,7 +1289,6 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 | [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | Architecture diagrams, component design, authentication model, voice-mode implementation details, **A2A identity forwarding and server-side skill enforcement**, **scene orchestration and scheduled execution**, **the Agents fleet page**, AgentCore CLI quirks, ops-dashboard and test-data design, API reference, MQTT schemas, technology choices |
 | [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | Administrator runbook (Chinese): deploy loop, identity, permission management incl. grant verification and tool blast radius, quality evaluation, prompt optimization, skill approval pipeline, **the Agents fleet and per-agent prompts**, **scenes and scheduled automations**, session debugging, ops dashboard, the `cdk deploy` env-var trap |
 | [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | **Agent design principles** — Harness design, context engineering, prompt design. Every entry cites the code (`file:line`) and the number or bug that produced it; where a measurement contradicted the expectation, the expectation is named |
-| [`docs/measurements/`](docs/measurements/) | Latency and cost measurements: method (`README.md`), the phase-by-phase before/after report (`spec5-report.md`), and comparable archived baselines (JSON) |
 | [`scripts/sim/README.md`](scripts/sim/README.md) | Simulated-users script: persona configuration, coverage, safety boundary, known gotchas |
 
 ---

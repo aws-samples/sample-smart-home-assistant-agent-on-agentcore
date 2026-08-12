@@ -112,3 +112,10 @@ agent/device-catalog.json
 # mid-demo that nothing exercises some agent. Source of truth is
 # shared/prompt-examples.json.
 chatbot/src/generated/
+
+# Latency/cost measurement runs (scripts/measure-baseline.py and the ab-* probes).
+# Development-phase output: a baseline is only comparable against another baseline
+# from the SAME deployment, so an archive from one account is noise to anyone else.
+# The conclusions that mattered are inlined in docs/agent-design-principles*.md and
+# docs/architecture-and-design.md instead, so they survive without the raw runs.
+docs/measurements/

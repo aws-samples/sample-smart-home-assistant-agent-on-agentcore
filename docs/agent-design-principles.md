@@ -436,5 +436,23 @@ button cannot drift from what is deployed.
 ./venv/bin/python scripts/probe-routing.py
 ```
 
-`docs/measurements/README.md` explains the columns and, more importantly, which
-ones you may quote for which claim.
+The columns, and which ones may be quoted for which claim:
+
+| Column | What it is |
+|---|---|
+| `wall` | The client's round trip. What a user experiences. |
+| `server` | The container's own `POST /invocations` span. |
+| `platform` | `wall - server`. Time in AgentCore, before our code runs. |
+| `llmTime` | Every `chat` span summed. |
+| `toolTime` | Every `execute_tool` span summed — includes the whole A2A hop. |
+| `harness` | `server - llmTime - toolTime`. Our own overhead inside the container. |
+| `ttftFirst` | Time to first token of the turn's FIRST model call. |
+| `tools` | From `gen_ai.tool.name`, the only direct record of what actually ran. |
+
+Quote `wall` for what a user feels and `server` for what this codebase controls;
+attributing `platform` to the harness is how AgentCore's own session creation
+(~7s on a cold session, ~0.4s reused) gets charged to code that did not cause it.
+
+Runs are written to `docs/measurements/`, which is **gitignored**: a baseline is
+only comparable against another baseline from the same deployment, so the archive
+is local to whoever measured. Take your own before quoting a delta.
