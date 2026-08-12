@@ -129,6 +129,99 @@ def fetch_user_id_token() -> str:
         return ""
 
 
+def _token_groups(token: str) -> list:
+    """The `cognito:groups` claim of a JWT, without verifying it.
+
+    Report-and-test-selection only; the authoritative check is the Runtime
+    authorizer.
+    """
+    import base64
+
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:  # noqa: BLE001
+        return []
+    groups = claims.get("cognito:groups") or []
+    return [groups] if isinstance(groups, str) else list(groups)
+
+
+def fetch_ungranted_user_token() -> str:
+    """A valid idToken for a user holding NO A2A grant.
+
+    The most important negative case: a legitimate signed-in user must not reach a
+    specialist they were not granted. Uses a dedicated account so the test never
+    depends on the demo users' grant state, and so running it cannot change anyone
+    else's access.
+
+    Returns "" when the account cannot be provisioned, and the caller skips rather
+    than silently passing — a skipped negative test is honest, a missing one is not.
+    """
+    outputs_path = HERE.parent / "cdk-outputs.json"
+    if not outputs_path.exists():
+        return ""
+    out = json.loads(outputs_path.read_text())
+    out = out[next(iter(out))]
+    email = "smoke-ungranted@smarthome.local"
+    password = "SmokeTest#Ungranted1"
+    region = out["UserPoolId"].split("_")[0]
+    idp = boto3.client("cognito-idp", region_name=region)
+    try:
+        try:
+            idp.admin_create_user(
+                UserPoolId=out["UserPoolId"], Username=email,
+                UserAttributes=[{"Name": "email", "Value": email},
+                                {"Name": "email_verified", "Value": "true"}],
+                MessageAction="SUPPRESS")
+        except idp.exceptions.UsernameExistsException:
+            pass
+        idp.admin_set_user_password(
+            UserPoolId=out["UserPoolId"], Username=email,
+            Password=password, Permanent=True)
+        # Strip any a2a group a previous global grant may have added, or this user
+        # would not be grantless and the test would silently become a positive one.
+        for group in idp.admin_list_groups_for_user(
+                UserPoolId=out["UserPoolId"], Username=email).get("Groups", []):
+            name = group.get("GroupName", "")
+            if name.startswith("a2a-"):
+                idp.admin_remove_user_from_group(
+                    UserPoolId=out["UserPoolId"], Username=email, GroupName=name)
+        resp = idp.initiate_auth(
+            ClientId=out["UserPoolClientId"], AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={"USERNAME": email, "PASSWORD": password})
+        token = resp["AuthenticationResult"]["IdToken"]
+        if _token_groups(token):
+            print(f"  note: {email} still carries groups {_token_groups(token)}; "
+                  f"the grantless negative case would not be valid")
+            return ""
+        return token
+    except Exception as exc:  # noqa: BLE001
+        print(f"  note: could not provision a grantless user ({exc})")
+        return ""
+
+
+def _granted_skills_from_token(token: str, agent_card_name: str) -> set:
+    """The skills this token grants on this agent, read from `cognito:groups`.
+
+    Only for the report line — the authoritative check is the Runtime authorizer,
+    which refuses before the container is reached. Printing it makes a refusal
+    diagnosable: "0 granted" explains a 403 that would otherwise look like an outage.
+    """
+    import base64
+
+    from common import a2a_groups  # type: ignore
+
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:  # noqa: BLE001
+        return set()
+    return set(a2a_groups.skills_for_agent(
+        claims.get("cognito:groups") or [], agent_card_name))
+
+
 def _card_skill_ids(agent: str) -> list[str]:
     """Read the skill ids this agent publishes straight from its card.json."""
     card_path = HERE / agent / "card.json"
@@ -153,18 +246,15 @@ async def smoke_one(entry: dict, token: str, user_token: str | None = None) -> b
     # the container exposes — AgentCore's edge passes that GET through.
     endpoint = invocation_url.rsplit("/invocations", 1)[0]
 
-    # The skills header is now ENFORCED server-side, so the smoke test has to send
-    # a real grant like the orchestrator does. Sending every skill the agent
-    # publishes is the right analogue of a fully-granted user.
-    headers = {
-        "Authorization": f"Bearer {token}",
-        ALLOWED_SKILLS_HEADER: ",".join(_card_skill_ids(entry["agent"])),
-    }
-    if user_token:
-        headers[USER_TOKEN_HEADER] = user_token
+    # The end user's own token is the ONLY credential now: the Runtime authorizer
+    # validates it and matches its `cognito:groups` claim against this agent's grant
+    # groups, and the server derives the skill set from the same claim. Sending an
+    # m2m token here would be refused at the door, which is the point.
+    headers = {"Authorization": f"Bearer {user_token or token}"}
     print(f"\n=== {agent_long} ===")
     print(f"  endpoint: {endpoint}")
-    print(f"  granted skills: {headers[ALLOWED_SKILLS_HEADER]}")
+    print(f"  granted skills (from the token claim): "
+          f"{sorted(_granted_skills_from_token(user_token or token, agent_long))}")
     async with httpx.AsyncClient(headers=headers, timeout=120) as http:
         try:
             # AgentCore Runtime likely serves the card under /invocations
@@ -225,18 +315,24 @@ async def expect_refusal(entry: dict, token: str, skills_header: str | None,
                          label: str) -> bool:
     """Send a request that SHOULD be refused and report whether it was.
 
-    This is the half of the smoke test that proves the server-side check exists.
-    The header used to be advisory, so anything holding the shared m2m token could
-    call any skill on any agent; a passing positive test says nothing about that.
+    This is the half of the smoke test that proves authorization exists. A passing
+    positive test says nothing about it: an agent that authorizes NOTHING answers
+    every positive probe perfectly.
 
-    A refusal arrives as an ordinary agent reply beginning "Request refused:" —
-    the orchestrator shows tool output to its own model, so a readable refusal is
-    more useful than an opaque 500.
+    Two layers can refuse, and both count:
+      - the Runtime's `customJWTAuthorizer.customClaims`, which rejects a token whose
+        `cognito:groups` holds no grant on this agent, before the container is
+        reached. That arrives as a transport-level 403.
+      - the container, which derives the skill set from the same claim and refuses
+        with a readable "Request refused: ..." reply.
+
+    `skills_header` is accepted but no longer sent as a grant — the client cannot
+    assert its own grant any more, which is the whole point of the change. It is kept
+    in the signature so a caller that passes it does not silently get a DIFFERENT
+    test than it asked for.
     """
     invocation_url = entry["invocationUrl"]
     headers = {"Authorization": f"Bearer {token}"}
-    if skills_header is not None:
-        headers[ALLOWED_SKILLS_HEADER] = skills_header
 
     print(f"\n--- negative: {label} ({entry['agent']}) ---")
     async with httpx.AsyncClient(headers=headers, timeout=120) as http:
@@ -267,6 +363,9 @@ async def expect_refusal(entry: dict, token: str, skills_header: str | None,
                             reply = r.text
             refused = bool(reply) and "refused" in reply.lower()
             print(f"  refused: {refused}")
+            if not refused:
+                print("  !! NOT REFUSED — this token was authorized when it should "
+                      "not have been")
             print(f"  reply: {(reply or '(none)')[:220]}")
             return refused
         except Exception as e:
@@ -298,31 +397,69 @@ async def main() -> int:
     user_token = fetch_user_id_token()
     print(f"fetched user idToken ({len(user_token) if user_token else 0} chars)")
 
+    # A positive probe against an agent this user holds no grant on is not a test:
+    # the authorizer refuses before the container, which is CORRECT behaviour and
+    # would be reported as a failure. Skip it and say so, rather than turning a
+    # working authorization boundary into six red lines.
     results = {}
+    skipped = []
     for entry in state["agents"]:
+        agent_long = AGENT_SHORT_TO_LONG[entry["agent"]]
+        if user_token and not _granted_skills_from_token(user_token, agent_long):
+            skipped.append(entry["agent"])
+            print(f"\n=== {agent_long} ===")
+            print("  SKIPPED: this user holds no grant on this agent, so a positive "
+                  "probe would only re-test the authorizer's refusal. Grant it on "
+                  "Build -> SubAgent Policy and sign in again to include it.")
+            continue
         results[entry["agent"]] = await smoke_one(entry, token, user_token)
 
-    # Negative cases, run against one agent — the check is in shared code, so one
-    # agent exercises the same path all of them use.
+    if skipped:
+        print(f"\nnote: {len(skipped)} agent(s) skipped for lack of a grant: "
+              f"{skipped}")
+
+    # ---- negative cases ----------------------------------------------------
+    # Each of these is a way authorization can fail OPEN, which a positive probe
+    # cannot detect: an agent that authorizes nothing answers every positive probe
+    # perfectly.
     if state["agents"]:
         probe = state["agents"][0]
-        results["negative:no-skills-header"] = await expect_refusal(
-            probe, token, None, "no skills header")
-        results["negative:empty-skills-header"] = await expect_refusal(
-            probe, token, "", "empty skills header")
-        results["negative:other-agents-skill"] = await expect_refusal(
-            probe, token, "some_skill_this_agent_does_not_publish",
-            "a skill this agent does not publish")
 
-    # A tool-using agent must refuse when there is no user identity to act as —
-    # otherwise it would fall back to acting as its own service identity, which is
-    # exactly the cross-user hole the forwarded token exists to close.
-    tool_agents = [e for e in state["agents"]
-                   if (HERE / e["agent"] / "tools.py").exists()]
-    for entry in tool_agents:
-        skills = ",".join(_card_skill_ids(entry["agent"]))
-        results[f"negative:{entry['agent']}-no-user-token"] = await expect_refusal(
-            entry, token, skills, "granted skills but NO user token")
+        # 1. The old service token. It carries no `cognito:groups` at all, so the
+        #    Runtime authorizer must reject it. If this passes, the migration did not
+        #    take effect on this agent and the old client-asserted model still works.
+        results["negative:m2m-token-no-longer-accepted"] = await expect_refusal(
+            probe, token, None, "m2m service token (pre-migration credential)")
+
+        # 2. A real, valid user token belonging to someone with NO grant on any
+        #    agent. This is the case that matters most: a legitimate user must not
+        #    reach a specialist they were not granted.
+        ungranted = fetch_ungranted_user_token()
+        if ungranted:
+            results["negative:valid-user-without-a-grant"] = await expect_refusal(
+                probe, ungranted, None, "valid user token with no grant")
+        else:
+            print("\n--- negative: valid user with no grant — SKIPPED "
+                  "(could not provision a grantless user) ---")
+
+        # 3. Cross-agent: a token granted on agent A must not open agent B. Only
+        #    meaningful when the two agents have genuinely different grants, which is
+        #    why it looks for an agent the user holds nothing on.
+        if user_token:
+            from common import a2a_groups  # type: ignore
+
+            claims_groups = _token_groups(user_token)
+            held = set(a2a_groups.grants_from_claim(claims_groups))
+            other = next(
+                (e for e in state["agents"]
+                 if AGENT_SHORT_TO_LONG[e["agent"]] not in held), None)
+            if other is not None:
+                results["negative:cross-agent-grant"] = await expect_refusal(
+                    other, user_token, None,
+                    f"granted elsewhere but not on {AGENT_SHORT_TO_LONG[other['agent']]}")
+            else:
+                print("\n--- negative: cross-agent — SKIPPED (this user is granted "
+                      "on every deployed agent, so there is no negative to test) ---")
 
     print()
     print("summary:", results)

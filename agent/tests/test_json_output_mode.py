@@ -153,7 +153,7 @@ def test_the_rules_are_appended_last(agent_mod):
     must stay byte-identical for a cache hit, so anything per-request goes after it.
     """
     src = open(_AGENT_PY, encoding="utf-8").read()
-    a2a_at = src.index('+ "\\n\\n" + A2A_DELEGATION_RULES')
+    a2a_at = src.index('+ "\\n\\n" + delegation')
     json_at = src.index('+= "\\n\\n" + JSON_OUTPUT_RULES')
     assert json_at > a2a_at, "JSON rules must be appended after the routing rules"
 

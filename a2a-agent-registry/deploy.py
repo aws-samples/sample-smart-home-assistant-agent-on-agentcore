@@ -68,6 +68,13 @@ from common.agents import (  # noqa: E402
     USER_TOKEN_HEADER,
 )
 
+# Set from --legacy-m2m-auth. Deploys the pre-migration auth model: the m2m client
+# in `allowedClients` and no `cognito:groups` grant check. The two models cannot
+# coexist on one runtime, because a client_credentials token carries no groups claim
+# and would be refused by the check, so this is a switch rather than a flag that
+# widens acceptance. It exists as the rollback for the claim migration.
+LEGACY_M2M_AUTH = False
+
 ALL_STEPS = ("cognito", "render", "deploy", "workload", "registry", "persist", "patch-text-agent")
 
 # The single-table store the Admin Console writes prompt overrides into. Named by
@@ -658,10 +665,8 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         environmentVariables=env,
         protocolConfiguration={"serverProtocol": "A2A"},
         authorizerConfiguration={
-            "customJWTAuthorizer": {
-                "discoveryUrl": discovery_url,
-                "allowedClients": [cognito["clientId"]],
-            }
+            "customJWTAuthorizer": _authorizer_config(
+                agent, discovery_url, cognito, state),
         },
         # Without this the Runtime edge DROPS both custom headers before the
         # container sees them, and it does it silently: the request arrives
@@ -672,12 +677,25 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         # not new, just never applied to the A2A agents (which had nothing to pass
         # through until now).
         requestHeaderConfiguration={
-            "requestHeaderAllowlist": [ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER],
+            # `Authorization` FIRST, and it is the one that matters now: the token in
+            # it is both the credential the authorizer checks AND the source of the
+            # `cognito:groups` claim the container derives the skill set from. The
+            # Runtime edge consumes Authorization and does NOT pass it through unless
+            # it is allowlisted here — measured: with it absent, a fully granted
+            # user's request reached the container with no bearer at all, so the
+            # container fell back to the legacy header path and refused. The platform
+            # said yes and the container said no, which reads like a container bug.
+            #
+            # The two legacy headers stay only for the rollback path
+            # (--legacy-m2m-auth); nothing sends them once the migration is done.
+            "requestHeaderAllowlist": [
+                "Authorization", ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER],
         },
     )
     ac.update_agent_runtime(**update_kwargs)
     log(f"  [{agent}] patched env + CUSTOM_JWT auth (discovery={discovery_url})")
-    log(f"  [{agent}] header allowlist: {ALLOWED_SKILLS_HEADER}, {USER_TOKEN_HEADER}")
+    log(f"  [{agent}] header allowlist: Authorization, {ALLOWED_SKILLS_HEADER}, "
+        f"{USER_TOKEN_HEADER}")
 
     _grant_prompt_table_read(agent, rt_info["roleArn"], state)
     _grant_memory_read(agent, rt_info["roleArn"], memory_env, state)
@@ -732,6 +750,86 @@ def _grant_scenarios_table_access(agent: str, role_arn: str,
     except Exception as exc:  # noqa: BLE001
         log(f"  [{agent}] WARNING: could not grant {SCENARIOS_TABLE} access — "
             f"{exc}. Every scene tool will fail at runtime.")
+
+
+def _authorizer_config(agent: str, discovery_url: str, cognito: dict[str, Any],
+                       state: dict[str, Any]) -> dict[str, Any]:
+    """The Runtime's inbound JWT authorizer, including the grant claim check.
+
+    This is where sub-agent authorization actually happens. `customClaims` matches
+    `cognito:groups` with `CONTAINS_ANY` over every group of this agent, so a caller
+    with no grant is refused by AgentCore before the container is reached — on a
+    claim signed by Cognito, which the caller cannot forge or widen. It replaces
+    `X-A2A-Allowed-Skills`, which the client set itself.
+
+    `CONTAINS_ANY` takes an exact list with no wildcard, so the agent's skills are
+    enumerated here from card.json. **Adding a skill therefore needs a redeploy**:
+    granting a group that this list does not name leaves the user refused at the
+    door with nothing explaining why.
+
+    **The claim check and the old m2m token cannot coexist.** A
+    `client_credentials` token carries no `cognito:groups` at all, so once
+    `customClaims` is set the authorizer refuses it — there is no both-ways window
+    at this layer. The cutover is therefore coordinated: all eight agents get this
+    config, then the orchestrator switches to sending the user token. Delegation
+    fails in between, which is why `--legacy-m2m-auth` exists as the rollback and
+    why the sequence is written down in README's demo notes.
+
+    **`allowedAudience`, not `allowedClients`.** `allowedClients` validates the
+    `client_id` claim, which only an *access* token carries; a Cognito **idToken**
+    carries the app client id in `aud`. Measured against the live runtime: with
+    `allowedClients` set, a fully granted user's idToken was rejected with
+    "Claim 'client_id' value mismatch with configuration" — while an ungranted user
+    got that message *plus* "Authorization denied", which is how we could tell the
+    group check itself was passing.
+
+    The idToken is the right token here regardless: the container needs `sub` and
+    `email` (the knowledge base scopes by email) and requires `token_use == "id"`,
+    and a Cognito access token has neither `aud` nor `email`.
+
+    The m2m client is kept only under `--legacy-m2m-auth`, which also omits the claim
+    check.
+    """
+    from common import a2a_groups  # type: ignore
+
+    card_dict = json.loads((HERE / agent / "card.json").read_text(encoding="utf-8"))
+    card_name = card_dict.get("name") or ""
+    skill_ids = [s["id"] for s in (card_dict.get("skills") or []) if s.get("id")]
+    if not card_name or not skill_ids:
+        raise RuntimeError(
+            f"[{agent}] card.json needs a name and at least one skill id to build "
+            f"the grant claim check (got name={card_name!r}, skills={skill_ids})")
+
+    app_client = state.get("user_pool_client_id", "")
+
+    if LEGACY_M2M_AUTH:
+        log(f"  [{agent}] LEGACY auth: m2m client, no grant claim check")
+        return {
+            "discoveryUrl": discovery_url,
+            "allowedClients": [cognito["clientId"]],
+        }
+
+    if not app_client:
+        raise RuntimeError(
+            f"[{agent}] no UserPoolClientId in cdk-outputs.json. The grant claim "
+            f"path authorizes the END USER's token, so without the app client id "
+            f"every request would be refused. Re-run with --legacy-m2m-auth to "
+            f"deploy the pre-migration auth model instead.")
+
+    groups = a2a_groups.all_groups_for_agent(card_name, skill_ids)
+    log(f"  [{agent}] grant groups ({len(groups)}): {groups}")
+    return {
+        "discoveryUrl": discovery_url,
+        "allowedAudience": [app_client],
+        "customClaims": [{
+            "inboundTokenClaimName": "cognito:groups",
+            "inboundTokenClaimValueType": "STRING_ARRAY",
+            "authorizingClaimMatchValue": {
+                "claimMatchValue": {"matchValueStringList": groups},
+                "claimMatchOperator": "CONTAINS_ANY",
+            },
+        }],
+    }
 
 
 def _grant_prompt_table_read(agent: str, role_arn: str, state: dict[str, Any]) -> None:
@@ -1128,7 +1226,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="Only run these steps.")
     ap.add_argument("--skip", action="append", default=None,
                     help="Skip these steps.")
+    ap.add_argument("--legacy-m2m-auth", action="store_true",
+                    help="Deploy the pre-migration auth model: m2m client_credentials "
+                         "in Authorization, no cognito:groups grant check. This is "
+                         "the rollback for the claim-based migration; it must be "
+                         "paired with an orchestrator that still sends an m2m token.")
     args = ap.parse_args(argv)
+
+    global LEGACY_M2M_AUTH
+    LEGACY_M2M_AUTH = bool(args.legacy_m2m_auth)
+    if LEGACY_M2M_AUTH:
+        log("LEGACY M2M AUTH: sub-agent authorization falls back to the m2m token "
+            "and the cognito:groups grant check is NOT applied")
 
     agents = parse_agent_list(args.agent)
     steps = parse_steps(args.only, args.skip)

@@ -76,7 +76,11 @@ def main() -> int:
 
     env_wanted = {
         "AWS_REGION": region,
-        "MODEL_ID": ac_state.get("modelId") or "moonshotai.kimi-k2.5",
+        # Held in agreement with agent.MODEL_ID and setup-agentcore.DEFAULT_MODEL_ID
+        # by agent/tests/test_default_model.py — a restore that wrote a stale default
+        # would silently downgrade the model on every deploy, which is exactly the
+        # class of failure this script exists to prevent.
+        "MODEL_ID": ac_state.get("modelId") or "us.anthropic.claude-sonnet-4-6",
         "NOVA_SONIC_MODEL_ID": "amazon.nova-sonic-v1:0",
         "BYPASS_TOOL_CONSENT": "true",
         "SKILLS_TABLE_NAME": cdk_out.get("SkillsTableName", "smarthome-skills"),
@@ -124,16 +128,13 @@ def main() -> int:
             f"arn:aws:bedrock-agentcore:{region}:{account}:"
             f"gateway/{ac_state['gatewayId']}")
 
-    # The A2A wiring, which is what makes every specialist reachable. Absent it,
-    # the orchestrator registers no `a2a_*` tools and answers everything itself.
-    if A2A_STATE.exists():
-        cognito = (json.loads(A2A_STATE.read_text()).get("cognito") or {})
-        if cognito.get("m2mSecretArn"):
-            env_wanted["A2A_M2M_SECRET_ARN"] = cognito["m2mSecretArn"]
-        if cognito.get("tokenUrl"):
-            env_wanted["A2A_COGNITO_TOKEN_URL"] = cognito["tokenUrl"]
-        if cognito.get("scope"):
-            env_wanted["A2A_COGNITO_SCOPE"] = cognito["scope"]
+    # A2A needs no env wiring any more. Authorization is a `cognito:groups` claim on
+    # the caller's own token, checked by each sub-agent's Runtime authorizer, so the
+    # orchestrator mints no service token and reads no secret. The three A2A_COGNITO_*
+    # / A2A_M2M_* vars this used to restore are gone with `agent/tools/a2a_auth.py`.
+    #
+    # REGISTRY_ID above is now the only A2A-related var, and it is still the gate: no
+    # REGISTRY_ID means no AgentCards resolve and no `a2a_*` tool is registered.
 
     ac = boto3.client("bedrock-agentcore-control", region_name=region)
     rt = ac.get_agent_runtime(agentRuntimeId=runtime_id)

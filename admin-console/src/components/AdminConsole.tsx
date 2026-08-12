@@ -20,6 +20,8 @@ import {
   removeUserFromAdminGroup,
   deleteCognitoUser,
   listGatewayTools,
+  getModelCatalog,
+  CatalogModel,
   getUserPermissions,
   updateUserPermissions,
   listMemoryActors,
@@ -32,14 +34,13 @@ import {
   startKBSync,
   getKBSyncStatus,
   listRegistryRecords,
+  listRegistrySkills,
+  RegistrySkill,
   reviewRegistryRecord,
   importRegistryRecords,
   listA2aAgents,
   A2AAgentRecord,
-  getUserA2APermissions,
-  updateUserA2APermissions,
   listA2aGrantsForRecord,
-  A2AAvailableAgent,
   A2AGrantSummary,
   getAgentPrompts,
   saveAgentPrompt,
@@ -105,6 +106,7 @@ import ExpandableSection from '@cloudscape-design/components/expandable-section'
 import { getConfig } from '../config';
 import { getCurrentUserEmail } from '../auth/CognitoAuth';
 import { useI18n } from '../i18n';
+import SubAgentPolicyPage from './SubAgentPolicy/SubAgentPolicyPage';
 import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
 import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
@@ -128,6 +130,7 @@ export const ACTIVE_TABS = [
   'skills',
   'agentPrompts',
   'users',
+  'subAgentPolicy',
   'memories',
   'identity',
   'instanceType',
@@ -158,71 +161,15 @@ interface ActorRow {
 // Skill name validation (matches Strands SDK pattern)
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
 
-// Available Bedrock model IDs for the model selector
-const AVAILABLE_MODELS = [
-  { id: 'moonshotai.kimi-k2.5', label: 'Kimi K2.5 (Moonshot)' },
-  { id: 'moonshot.kimi-k2-thinking', label: 'Kimi K2 Thinking (Moonshot)' },
-  { id: '', label: '── Claude 4.6 ──', disabled: true },
-  { id: 'us.anthropic.claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { id: 'us.anthropic.claude-opus-4-6-v1', label: 'Claude Opus 4.6' },
-  { id: '', label: '── Claude 4.5 ──', disabled: true },
-  { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5' },
-  { id: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5' },
-  { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5' },
-  { id: '', label: '── Claude 4 ──', disabled: true },
-  { id: 'us.anthropic.claude-sonnet-4-20250514-v1:0', label: 'Claude Sonnet 4' },
-  { id: 'us.anthropic.claude-opus-4-20250514-v1:0', label: 'Claude Opus 4' },
-  { id: 'us.anthropic.claude-opus-4-1-20250805-v1:0', label: 'Claude Opus 4.1' },
-  { id: '', label: '── Claude 3.x ──', disabled: true },
-  { id: 'us.anthropic.claude-3-7-sonnet-20250219-v1:0', label: 'Claude 3.7 Sonnet' },
-  { id: 'us.anthropic.claude-3-5-haiku-20241022-v1:0', label: 'Claude 3.5 Haiku' },
-  { id: '', label: '── DeepSeek ──', disabled: true },
-  { id: 'deepseek.v3.2', label: 'DeepSeek V3.2' },
-  { id: 'deepseek.v3-v1:0', label: 'DeepSeek V3.1' },
-  { id: 'deepseek.r1-v1:0', label: 'DeepSeek R1' },
-  { id: '', label: '── Qwen ──', disabled: true },
-  { id: 'qwen.qwen3-235b-a22b-2507-v1:0', label: 'Qwen3 235B A22B' },
-  { id: 'qwen.qwen3-next-80b-a3b', label: 'Qwen3 Next 80B A3B' },
-  { id: 'qwen.qwen3-32b-v1:0', label: 'Qwen3 32B (Dense)' },
-  { id: 'qwen.qwen3-vl-235b-a22b', label: 'Qwen3 VL 235B A22B' },
-  { id: 'qwen.qwen3-coder-480b-a35b-v1:0', label: 'Qwen3 Coder 480B A35B' },
-  { id: 'qwen.qwen3-coder-30b-a3b-v1:0', label: 'Qwen3 Coder 30B A3B' },
-  { id: '', label: '── GLM (Z.AI) ──', disabled: true },
-  { id: 'zai.glm-5', label: 'GLM 5' },
-  { id: 'zai.glm-4.7', label: 'GLM 4.7' },
-  { id: 'zai.glm-4.7-flash', label: 'GLM 4.7 Flash' },
-  { id: '', label: '── MiniMax ──', disabled: true },
-  { id: 'minimax.minimax-m2.5', label: 'MiniMax M2.5' },
-  { id: 'minimax.minimax-m2.1', label: 'MiniMax M2.1' },
-  { id: 'minimax.minimax-m2', label: 'MiniMax M2' },
-  { id: '', label: '── Meta Llama ──', disabled: true },
-  { id: 'us.meta.llama4-maverick-17b-instruct-v1:0', label: 'Llama 4 Maverick 17B' },
-  { id: 'us.meta.llama4-scout-17b-instruct-v1:0', label: 'Llama 4 Scout 17B' },
-  { id: 'us.meta.llama3-3-70b-instruct-v1:0', label: 'Llama 3.3 70B Instruct' },
-  { id: '', label: '── OpenAI ──', disabled: true },
-  { id: 'openai.gpt-oss-120b-1:0', label: 'GPT OSS 120B' },
-  { id: 'openai.gpt-oss-20b-1:0', label: 'GPT OSS 20B' },
-] as const;
-
-// Multimodal (vision-capable) Bedrock models offered to the vision agent.
-// Intentionally a narrower subset of AVAILABLE_MODELS — only models that
-// accept image inputs in Bedrock Converse. Admins pick any one per user;
-// empty string = use VISION_MODEL_ID env default (Claude Haiku 4.5).
-const VISION_MODELS = [
-  { id: '', label: '── Claude (multimodal) ──', disabled: true },
-  { id: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5' },
-  { id: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5' },
-  { id: 'us.anthropic.claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { id: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5' },
-  { id: 'us.anthropic.claude-opus-4-6-v1', label: 'Claude Opus 4.6' },
-  { id: 'us.anthropic.claude-3-7-sonnet-20250219-v1:0', label: 'Claude 3.7 Sonnet' },
-  { id: 'us.anthropic.claude-3-5-haiku-20241022-v1:0', label: 'Claude 3.5 Haiku' },
-  { id: '', label: '── Nova ──', disabled: true },
-  { id: 'us.amazon.nova-pro-v1:0', label: 'Nova Pro' },
-  { id: 'us.amazon.nova-lite-v1:0', label: 'Nova Lite' },
-  { id: '', label: '── Qwen (multimodal) ──', disabled: true },
-  { id: 'qwen.qwen3-vl-235b-a22b', label: 'Qwen3 VL 235B A22B' },
-] as const;
+// The model picker's contents are no longer listed here. They come from
+// `GET /settings/{userId}?action=catalog`, which merges bedrock-runtime's
+// ListFoundationModels + ListInferenceProfiles with bedrock-mantle's
+// OpenAI-compatible /models listing (cdk/lambda/admin-api/model_catalog.py).
+//
+// The hardcoded list was 33 entries that had to be hand-edited whenever Bedrock
+// shipped a model, and it could not express which endpoint served an entry — which
+// stopped being a cosmetic gap once the default model became one that Converse
+// cannot reach at all. See docs/architecture-and-design.md section 8.8.
 
 /** Where a user is. Stored on their `__settings__` row. */
 interface UserPlace {
@@ -307,11 +254,30 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
   const [userVisionModels, setUserVisionModels] = useState<Record<string, string>>({});
   const [savedUserVisionModels, setSavedUserVisionModels] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+  // The picker's contents, fetched live from both Bedrock endpoints rather than
+  // hardcoded here. `catalogError` is why the list can be short: a failed listing
+  // and an account with nothing enabled are otherwise the same empty dropdown.
+  const [catalog, setCatalog] = useState<CatalogModel[]>([]);
+  const [catalogDefaultId, setCatalogDefaultId] = useState('');
+  const [catalogError, setCatalogError] = useState('');
   const { t } = useI18n();
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
+      // Before the settings, because the endpoint each saved model resolves to
+      // comes from here — a save must not write a modelId with no endpoint beside
+      // it just because the catalog had not arrived yet.
+      try {
+        const cat = await getModelCatalog();
+        setCatalog(cat.models || []);
+        setCatalogDefaultId(cat.defaultModelId || '');
+        setCatalogError(cat.catalogError || '');
+      } catch (err: any) {
+        setCatalog([]);
+        setCatalogError(err.message || String(err));
+      }
+
       const globalSettings = await getSettings('__global__');
       setGlobalModelId(globalSettings.modelId || '');
       setSavedGlobalModelId(globalSettings.modelId || '');
@@ -346,11 +312,21 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  /** The endpoint serving a model id, from the catalog we just loaded.
+   *
+   *  Sent with the save so the agent reads it instead of resolving it on a cold
+   *  start. Empty when the catalog could not be loaded or does not know the id;
+   *  the API treats that as "unset" and the agent falls back to its own lookup,
+   *  which is why a missing catalog does not block saving. */
+  const endpointFor = (modelId: string) =>
+    catalog.find((m) => m.id === modelId)?.endpoint ?? '';
+
   const handleSaveGlobal = async () => {
     clearMessages();
     try {
       await updateSettings('__global__', {
         modelId: globalModelId,
+        modelEndpoint: endpointFor(globalModelId),
         visionModelId: globalVisionModelId,
       });
       setSavedGlobalModelId(globalModelId);
@@ -367,7 +343,11 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     const newModel = userModels[user.sub] || '';
     const newVisionModel = userVisionModels[user.sub] || '';
     try {
-      await updateSettings(userId, { modelId: newModel, visionModelId: newVisionModel });
+      await updateSettings(userId, {
+        modelId: newModel,
+        modelEndpoint: endpointFor(newModel),
+        visionModelId: newVisionModel,
+      });
       setSavedUserModels((prev) => ({ ...prev, [user.sub]: newModel }));
       setSavedUserVisionModels((prev) => ({ ...prev, [user.sub]: newVisionModel }));
       setSuccess(t('models.userUpdated').replace('{user}', user.email || user.username || ''));
@@ -376,55 +356,120 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     }
   };
 
-  const modelOptions = [
-    { value: '', label: t('models.notSet') },
-    ...AVAILABLE_MODELS.map((m, i) =>
-      (m as any).disabled
-        ? { value: `__group__${i}`, label: m.label, disabled: true }
-        : { value: (m as any).id as string, label: m.label }
-    ),
-  ];
-  const userModelOptions = [
-    { value: '', label: t('models.useGlobalDefault') },
-    ...AVAILABLE_MODELS.map((m, i) =>
-      (m as any).disabled
-        ? { value: `__group__${i}`, label: m.label, disabled: true }
-        : { value: (m as any).id as string, label: m.label }
-    ),
-  ];
-  const visionModelOptions = [
-    { value: '', label: t('models.notSet') },
-    ...VISION_MODELS.map((m, i) =>
-      (m as any).disabled
-        ? { value: `__vgroup__${i}`, label: m.label, disabled: true }
-        : { value: (m as any).id as string, label: m.label }
-    ),
-  ];
-  const userVisionModelOptions = [
-    { value: '', label: t('models.useGlobalDefault') },
-    ...VISION_MODELS.map((m, i) =>
-      (m as any).disabled
-        ? { value: `__vgroup__${i}`, label: m.label, disabled: true }
-        : { value: (m as any).id as string, label: m.label }
-    ),
-  ];
-  const findOption = (opts: typeof modelOptions, value: string) =>
-    opts.find((o) => o.value === value) ?? opts[0];
+  /** Catalog entries as Cloudscape option groups, one group per provider.
+   *
+   *  The endpoint is on the label rather than hidden, because it is the field that
+   *  decides which code path a turn takes and it is the first thing to check when
+   *  a model misbehaves. The model id is in the description for the same reason:
+   *  the label is a best-effort display string for Mantle models, the id is what
+   *  the docs and the logs use. */
+  const optionsFor = (predicate: (m: CatalogModel) => boolean, emptyLabel: string) => {
+    const byProvider = new Map<string, CatalogModel[]>();
+    for (const m of catalog) {
+      if (!predicate(m)) continue;
+      const list = byProvider.get(m.provider) ?? [];
+      list.push(m);
+      byProvider.set(m.provider, list);
+    }
+    return [
+      { value: '', label: emptyLabel },
+      ...[...byProvider.entries()].map(([provider, models]) => ({
+        label: provider,
+        options: models.map((m) => ({
+          value: m.id,
+          label: m.deprecated ? `${m.label} (${t('models.deprecated')})` : m.label,
+          description: `${m.id} · ${m.endpoint}`,
+        })),
+      })),
+    ];
+  };
+
+  const modelOptions = optionsFor(() => true, t('models.notSet'));
+  const userModelOptions = optionsFor(() => true, t('models.useGlobalDefault'));
+  // Only models the catalog states accept image input. Mantle models never
+  // qualify: that listing returns ids only, so their capability is unknown rather
+  // than absent, and the vision path runs on Converse either way.
+  const visionModelOptions = optionsFor((m) => m.vision, t('models.notSet'));
+  const userVisionModelOptions = optionsFor((m) => m.vision, t('models.useGlobalDefault'));
+
+  /** The selected option for a stored id.
+   *
+   *  Falls back to a synthetic option rather than to the first entry, so a model
+   *  the catalog no longer offers is shown as itself with a warning instead of
+   *  silently reading as "Not set" — which would invite an admin to save and
+   *  thereby wipe a working configuration. */
+  const findOption = (
+    opts: ReturnType<typeof optionsFor>,
+    value: string,
+  ): { value: string; label: string; description?: string } => {
+    if (!value) return opts[0] as any;
+    for (const entry of opts) {
+      if ('options' in entry) {
+        const hit = (entry as any).options.find((o: any) => o.value === value);
+        if (hit) return hit;
+      } else if ((entry as any).value === value) {
+        return entry as any;
+      }
+    }
+    return { value, label: `${value} (${t('models.notInCatalog')})`, description: value };
+  };
 
   return (
     <SpaceBetween size="l">
       {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
       {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
+      {/* A short list because a listing FAILED is a different situation from an
+          account with nothing enabled, and only one of them is worth an admin's
+          time in the Bedrock console. Warning rather than error: whatever did load
+          is still selectable. */}
+      {catalogError && (
+        <Alert type="warning" header={t('models.catalogFailedHeader')}>
+          {t('models.catalogFailed').replace('{error}', catalogError)}
+        </Alert>
+      )}
+
       <Container
         header={
-          <CloudscapeHeader variant="h2" description={t('models.globalHint')}>
+          <CloudscapeHeader
+            variant="h2"
+            description={t('models.globalHint')}
+            actions={
+              <Button
+                iconName="refresh"
+                onClick={async () => {
+                  clearMessages();
+                  try {
+                    const cat = await getModelCatalog(true);
+                    setCatalog(cat.models || []);
+                    setCatalogDefaultId(cat.defaultModelId || '');
+                    setCatalogError(cat.catalogError || '');
+                    setSuccess(t('models.catalogRefreshed')
+                      .replace('{n}', String((cat.models || []).length)));
+                  } catch (err: any) {
+                    setError(err.message);
+                  }
+                }}
+              >
+                {t('models.refreshCatalog')}
+              </Button>
+            }
+          >
             {t('models.globalDefault')}
           </CloudscapeHeader>
         }
       >
         <SpaceBetween size="s">
-          <FormField label={t('models.textModelLabel')}>
+          <FormField
+            label={t('models.textModelLabel')}
+            // What actually runs when this is unset. Without it "Not set" says
+            // nothing about which model users are talking to.
+            description={
+              catalogDefaultId
+                ? t('models.envDefaultHint').replace('{model}', catalogDefaultId)
+                : undefined
+            }
+          >
             <div style={{ minWidth: 320 }}>
               <Select
                 selectedOption={findOption(modelOptions, globalModelId)}
@@ -2407,7 +2452,14 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [shellTarget, setShellTarget] = useState<ShellTarget | null>(null);
 
   // Integration Registry
-  const [integrationsSubTab, setIntegrationsSubTab] = useState<'overview' | 'a2a'>('overview');
+  const [integrationsSubTab, setIntegrationsSubTab] =
+    useState<'overview' | 'a2a' | 'skills'>('overview');
+  // Approved SKILL records. Separate from the Build -> Skills page, which shows what
+  // is running; this shows what the registry has approved and who imported it.
+  const [registrySkills, setRegistrySkills] = useState<RegistrySkill[]>([]);
+  const [registrySkillsLoading, setRegistrySkillsLoading] = useState(false);
+  const [registrySkillsError, setRegistrySkillsError] = useState('');
+  const [skillDrawer, setSkillDrawer] = useState<RegistrySkill | null>(null);
   const [a2aAgents, setA2aAgents] = useState<A2AAgentRecord[]>([]);
   const [a2aLoading, setA2aLoading] = useState(false);
   const [a2aError, setA2aError] = useState<string>('');
@@ -2435,14 +2487,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [policyModeSaving, setPolicyModeSaving] = useState(false);
   const [permOriginal, setPermOriginal] = useState<string[]>([]);
 
-  // A2A grants inside the Manage Permissions modal.
-  // userA2aGrants maps recordId → array of granted skillIds.
-  const [userA2aGrants, setUserA2aGrants] = useState<Record<string, string[]>>({});
-  const [userA2aGrantsOriginal, setUserA2aGrantsOriginal] = useState<Record<string, string[]>>({});
-  const [availableA2aAgents, setAvailableA2aAgents] = useState<A2AAvailableAgent[]>([]);
-  // Why the catalog is empty, when it is empty for a reason worth showing.
-  const [a2aCatalogError, setA2aCatalogError] = useState<string>('');
-  const [expandedA2aAgents, setExpandedA2aAgents] = useState<Record<string, boolean>>({});
 
   // File manager (shown when editing a skill)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
@@ -2667,31 +2711,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         selections[tool.name] = initialAllowed.includes(tool.name);
       }
       setUserToolSelections(selections);
-
-      // A2A permissions load in parallel with tool perms. Failures are
-      // soft (log + show empty) so a Registry hiccup doesn't block the
-      // tool-permissions workflow.
-      try {
-        const a2a = await getUserA2APermissions(getActorId(user));
-        // Normalize to sorted lists for deterministic dirty checks.
-        const normGrants: Record<string, string[]> = {};
-        for (const [rid, skills] of Object.entries(a2a.a2aGrants || {})) {
-          normGrants[rid] = [...skills].sort();
-        }
-        setAvailableA2aAgents(a2a.availableAgents || []);
-        setUserA2aGrants(normGrants);
-        setUserA2aGrantsOriginal(normGrants);
-        setExpandedA2aAgents({});
-        // Empty for the ordinary case. Set when the API could not read the
-        // Registry at all, which is otherwise identical to an empty registry.
-        setA2aCatalogError(a2a.catalogError || '');
-      } catch (err: any) {
-        console.warn('Failed to load A2A permissions', err);
-        setAvailableA2aAgents([]);
-        setUserA2aGrants({});
-        setUserA2aGrantsOriginal({});
-        setA2aCatalogError(err?.message || String(err));
-      }
     } catch (err: any) {
       setError(err.message);
     }
@@ -2708,18 +2727,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       await updateUserPermissions(getActorId(selectedPermUser), selectedTools);
       setPermOriginal(selectedTools);
 
-      // Drop empty skill lists before sending; the server treats an empty map
-      // as "delete the row", which is what we want for a user with no grants.
-      const grantsToSend: Record<string, string[]> = {};
-      for (const [rid, skills] of Object.entries(userA2aGrants)) {
-        if (skills && skills.length > 0) {
-          grantsToSend[rid] = [...skills].sort();
-        }
-      }
-      await updateUserA2APermissions(getActorId(selectedPermUser), grantsToSend);
-      setUserA2aGrantsOriginal(grantsToSend);
-      setUserA2aGrants(grantsToSend);
-
       setSuccess(t('users.permsUpdated').replace('{user}', selectedPermUser.email || selectedPermUser.username || ''));
     } catch (err: any) {
       setError(err.message);
@@ -2732,10 +2739,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     setSelectedPermUser(null);
     setUserToolSelections({});
     setPermOriginal([]);
-    setUserA2aGrants({});
-    setUserA2aGrantsOriginal({});
-    setAvailableA2aAgents([]);
-    setExpandedA2aAgents({});
   };
 
   const permIsDirty = (() => {
@@ -2744,30 +2747,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       .map(([k]) => k)
       .sort();
     const orig = [...permOriginal].sort();
-    if (JSON.stringify(current) !== JSON.stringify(orig)) return true;
-    // Also compare A2A grants (ignore empty entries on either side).
-    const normalize = (g: Record<string, string[]>) => {
-      const out: Record<string, string[]> = {};
-      for (const [k, v] of Object.entries(g)) {
-        if (v && v.length > 0) out[k] = [...v].sort();
-      }
-      return out;
-    };
-    return (
-      JSON.stringify(normalize(userA2aGrants)) !==
-      JSON.stringify(normalize(userA2aGrantsOriginal))
-    );
+    return JSON.stringify(current) !== JSON.stringify(orig);
   })();
 
-  const toggleA2aSkill = (recordId: string, skillId: string) => {
-    setUserA2aGrants((prev) => {
-      const existing = prev[recordId] || [];
-      const next = existing.includes(skillId)
-        ? existing.filter((s) => s !== skillId)
-        : [...existing, skillId];
-      return { ...prev, [recordId]: next };
-    });
-  };
 
   const handleSaveSettings = async () => {
     clearMessages();
@@ -2842,6 +2824,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   }, [a2aDrawer]);
 
   useEffect(() => {
+    if (activeTab === 'integrations' && integrationsSubTab === 'skills') {
+      setRegistrySkillsLoading(true);
+      setRegistrySkillsError('');
+      listRegistrySkills()
+        .then(({ skills, catalogError }) => {
+          setRegistrySkills(skills);
+          setRegistrySkillsError(catalogError);
+        })
+        .catch((err) => setRegistrySkillsError(err.message))
+        .finally(() => setRegistrySkillsLoading(false));
+    }
     if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
       setA2aLoading(true);
       setA2aError('');
@@ -4050,6 +4043,18 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         </SpaceBetween>
       )}
 
+      {/* SubAgent Policy Tab — its own component; AdminConsole.tsx was already
+          4700+ lines and an A2A grant is a different object from a gateway tool. */}
+      {activeTab === 'subAgentPolicy' && (
+        <SubAgentPolicyPage
+          error={error}
+          success={success}
+          clearMessages={clearMessages}
+          setError={setError}
+          setSuccess={setSuccess}
+        />
+      )}
+
       {/* Tool Access Tab */}
       {activeTab === 'users' && (
         <SpaceBetween size="l">
@@ -4161,72 +4166,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   </>
                 )}
 
-                <div className="perm-section-header">
-                  <b>{t('users.a2a.sectionTitle')}</b>
-                </div>
-                {availableA2aAgents.length === 0 ? (
-                  a2aCatalogError ? (
-                    // A failed lookup is not an empty registry. Rendered as a
-                    // warning rather than the neutral empty state so an admin
-                    // stops looking for records to approve and looks at the
-                    // configuration instead.
-                    <StatusIndicator type="warning">
-                      {t('users.a2a.loadFailed').replace('{error}', a2aCatalogError)}
-                    </StatusIndicator>
-                  ) : (
-                    <CloudscapeBox color="text-body-secondary" padding="s">
-                      {t('users.a2a.none')}
-                    </CloudscapeBox>
-                  )
-                ) : (
-                  <div className="perm-a2a-list">
-                    {availableA2aAgents.map((agent) => {
-                      const granted = userA2aGrants[agent.recordId] || [];
-                      const expanded = !!expandedA2aAgents[agent.recordId];
-                      return (
-                        <div key={agent.recordId} className="perm-a2a-agent">
-                          <div
-                            className="perm-a2a-agent-header"
-                            onClick={() =>
-                              setExpandedA2aAgents((prev) => ({
-                                ...prev,
-                                [agent.recordId]: !prev[agent.recordId],
-                              }))
-                            }
-                          >
-                            <span className="perm-a2a-chevron">{expanded ? '▾' : '▸'}</span>
-                            <span className="perm-a2a-name">{agent.name}</span>
-                            <span className="perm-a2a-count">
-                              {t('users.a2a.grantedCount')
-                                .replace('{n}', String(granted.length))
-                                .replace('{total}', String(agent.skills.length))}
-                            </span>
-                          </div>
-                          {expanded && (
-                            <div className="perm-a2a-skills">
-                              {agent.skills.map((skill) => (
-                                <label key={skill.id} className="perm-a2a-skill-item">
-                                  <input
-                                    type="checkbox"
-                                    checked={granted.includes(skill.id)}
-                                    onChange={() =>
-                                      toggleA2aSkill(agent.recordId, skill.id)
-                                    }
-                                  />
-                                  <span className="perm-a2a-skill-id">{skill.id}</span>
-                                  <span className="perm-a2a-skill-desc">
-                                    {skill.description}
-                                  </span>
-                                </label>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
+                {/* The A2A grant section used to live here. It moved to
+                    Build -> SubAgent Policy on 2026-08-12: it had no way to express
+                    a global default (this panel is keyed on one selected user), and
+                    an A2A grant is now a Cognito group checked by the sub-agent
+                    itself rather than a Cedar policy on this gateway. Deliberately
+                    NOT duplicated here — two write paths to one grant is how they
+                    end up disagreeing. */}
                 <SpaceBetween direction="horizontal" size="xs">
                   <Button onClick={handleCancelPermissions}>{t('users.cancel')}</Button>
                   <Button
@@ -4351,10 +4297,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         <SpaceBetween size="l">
           <SegmentedControl
             selectedId={integrationsSubTab}
-            onChange={({ detail }) => setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a')}
+            onChange={({ detail }) =>
+              setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a' | 'skills')}
             options={[
               { id: 'overview', text: t('integrations.sub.overview') },
               { id: 'a2a', text: t('integrations.sub.a2a') },
+              { id: 'skills', text: t('integrations.sub.skills') },
               { id: 'mcp', text: `${t('integrations.sub.mcp')} · ${t('integrations.comingSoon')}`, disabled: true },
               { id: 'apigw', text: `${t('integrations.sub.apiGw')} · ${t('integrations.comingSoon')}`, disabled: true },
             ]}
@@ -4393,6 +4341,144 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               <Container header={<CloudscapeHeader variant="h3">{t('integrations.roadmap')}</CloudscapeHeader>}>
                 <CloudscapeBox color="text-body-secondary">{t('integrations.roadmapDesc')}</CloudscapeBox>
               </Container>
+            </SpaceBetween>
+          )}
+
+          {integrationsSubTab === 'skills' && (
+            <SpaceBetween size="l">
+              {/* A failed registry read and an empty registry produce the same empty
+                  table, and only one is worth an admin's time. */}
+              {registrySkillsError && (
+                <Alert type="warning" header={t('integrations.skills.loadFailedTitle')}>
+                  {t('integrations.skills.loadFailed').replace('{error}', registrySkillsError)}
+                </Alert>
+              )}
+              <Table
+                header={
+                  <CloudscapeHeader
+                    variant="h2"
+                    counter={`(${registrySkills.length})`}
+                    description={t('integrations.skills.desc')}
+                  >
+                    {t('integrations.skills.title')}
+                  </CloudscapeHeader>
+                }
+                loading={registrySkillsLoading}
+                loadingText={t('integrations.skills.loading')}
+                items={registrySkills}
+                trackBy="recordId"
+                columnDefinitions={[
+                  { id: 'name', header: t('integrations.skills.col.name'), cell: (r) => r.name },
+                  {
+                    id: 'description',
+                    header: t('integrations.skills.col.description'),
+                    cell: (r) => r.description || '—',
+                  },
+                  { id: 'version', header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
+                  {
+                    id: 'publishedBy',
+                    header: t('integrations.skills.col.publishedBy'),
+                    cell: (r) => r.publishedBy || '—',
+                  },
+                  {
+                    // The question an admin actually has about an approved skill.
+                    id: 'importedBy',
+                    header: t('integrations.skills.col.importedBy'),
+                    cell: (r) => (r.importedBy.length === 0
+                      ? <Badge color="grey">{t('integrations.skills.notImported')}</Badge>
+                      : <span>{r.importedBy.map(displayUserId).join(', ')}</span>),
+                  },
+                  { id: 'license', header: t('integrations.skills.col.license'), cell: (r) => r.license || '—' },
+                  {
+                    id: 'updated',
+                    header: t('integrations.skills.col.updated'),
+                    cell: (r) => (r.updatedAt ? r.updatedAt.slice(0, 19).replace('T', ' ') : '—'),
+                  },
+                  {
+                    id: 'actions',
+                    header: t('integrations.skills.col.actions'),
+                    minWidth: 100,
+                    cell: (r) => <Button onClick={() => setSkillDrawer(r)}>{t('integrations.skills.view')}</Button>,
+                  },
+                ]}
+                empty={
+                  <CloudscapeBox textAlign="center" padding="m">
+                    <b>{t('integrations.skills.empty')}</b>
+                    <CloudscapeBox variant="p" color="text-body-secondary" padding={{ top: 'xs' }}>
+                      {registrySkillsError
+                        ? t('integrations.skills.emptyBecauseError')
+                        : t('integrations.skills.emptyHint')}
+                    </CloudscapeBox>
+                  </CloudscapeBox>
+                }
+              />
+
+              {skillDrawer && (
+                <Modal
+                  visible
+                  onDismiss={() => setSkillDrawer(null)}
+                  size="large"
+                  header={skillDrawer.name}
+                  footer={
+                    <CloudscapeBox float="right">
+                      <Button onClick={() => setSkillDrawer(null)}>
+                        {t('integrations.skills.close')}
+                      </Button>
+                    </CloudscapeBox>
+                  }
+                >
+                  <SpaceBetween size="m">
+                    <p>{skillDrawer.description}</p>
+                    {skillDrawer.readError && (
+                      <Alert type="warning" header={t('integrations.skills.readErrorTitle')}>
+                        {t('integrations.skills.readError').replace('{error}', skillDrawer.readError)}
+                      </Alert>
+                    )}
+                    <dl className="drawer-fields">
+                      <dt>{t('integrations.skills.drawer.recordId')}</dt>
+                      <dd><code>{skillDrawer.recordId}</code></dd>
+                      <dt>{t('integrations.skills.drawer.dedupName')}</dt>
+                      <dd><code>{skillDrawer.dedupName || '—'}</code></dd>
+                      <dt>{t('integrations.skills.col.version')}</dt>
+                      <dd>{skillDrawer.version || '—'}</dd>
+                      <dt>{t('integrations.skills.col.license')}</dt>
+                      <dd>{skillDrawer.license || '—'}</dd>
+                      <dt>{t('integrations.skills.drawer.compatibility')}</dt>
+                      <dd>{skillDrawer.compatibility || '—'}</dd>
+                      <dt>{t('integrations.skills.col.publishedBy')}</dt>
+                      <dd>{skillDrawer.publishedBy || '—'}</dd>
+                    </dl>
+
+                    {/* Access: which scopes are actually running this. The mirror of
+                        the A2A drawer's grants summary. */}
+                    <div>
+                      <b>{t('integrations.skills.drawer.access')}</b>
+                      {skillDrawer.importedBy.length === 0 ? (
+                        <CloudscapeBox color="text-body-secondary" padding={{ top: 'xs' }}>
+                          {t('integrations.skills.drawer.noAccess')}
+                        </CloudscapeBox>
+                      ) : (
+                        <ul>
+                          {skillDrawer.importedBy.map((scope) => (
+                            <li key={scope}><code>{displayUserId(scope)}</code></li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    <div>
+                      <b>SKILL.md</b>
+                      {skillDrawer.skillMd ? (
+                        <pre className="skill-md-preview">{skillDrawer.skillMd}</pre>
+                      ) : (
+                        <CloudscapeBox color="text-body-secondary" padding={{ top: 'xs' }}>
+                          {t('integrations.skills.drawer.noSkillMd')}
+                        </CloudscapeBox>
+                      )}
+                    </div>
+                  </SpaceBetween>
+                </Modal>
+              )}
             </SpaceBetween>
           )}
 

@@ -59,10 +59,11 @@ stranger's traffic out of the numbers.
 
 Traps this script exists to avoid re-learning
 ---------------------------------------------
-  - `userId` must be present and must be the EMAIL. It becomes `actor_id`, and
-    A2A grants are keyed on it; omitted it defaults to "default", which
-    `load_user_a2a_permissions` skips, so NOT ONE `a2a_*` tool is registered and
-    every delegation "fails" for a reason unrelated to the prompt.
+  - `userId` must be present and must be the EMAIL. It becomes `actor_id`, which
+    scopes skills, prompts and memory. A2A grants no longer come from it — they are
+    read from the caller's `cognito:groups` claim — so a run whose token carries no
+    grant registers NOT ONE `a2a_*` tool and every delegation "fails" for a reason
+    unrelated to the prompt.
   - One fresh session id per invocation. A shared session lets an earlier answer
     bias the next routing decision, and it also makes the spans of two prompts
     indistinguishable — the session id is the only join key. It also costs the

@@ -978,6 +978,15 @@ export class SmartHomeStack extends cdk.Stack {
         "cognito-idp:AdminAddUserToGroup",
         "cognito-idp:AdminRemoveUserFromGroup",
         "cognito-idp:AdminDeleteUser",
+        // SubAgent Policy materialises A2A grants into `a2a-*` groups, which are
+        // what each sub-agent Runtime's authorizer checks (see §9.5.1). CreateGroup
+        // because a grant on a newly approved sub-agent has no group yet.
+        "cognito-idp:CreateGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:ListGroups",
+        // Revoking a grant otherwise does nothing until the user's token expires,
+        // because group membership is baked in at issue time.
+        "cognito-idp:AdminUserGlobalSignOut",
       ],
       resources: [userPool.userPoolArn],
     }));
@@ -1125,6 +1134,22 @@ export class SmartHomeStack extends cdk.Stack {
     adminLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ["iam:PassRole"],
       resources: [kbServiceRole.roleArn],
+    }));
+
+    // Live model catalog for the Models page (cdk/lambda/admin-api/model_catalog.py).
+    // ListInferenceProfiles as well as ListFoundationModels, because the id you can
+    // actually invoke for a newer Claude model is the cross-region profile id, not
+    // the base model id — offering the bare id produces "on-demand throughput isn't
+    // supported" at invoke time. Read-only: nothing here can invoke a model or
+    // change configuration. Bedrock Mantle needs its own grants and is not
+    // integrated in this build (see agent/model_provider.py).
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel",
+        "bedrock:ListInferenceProfiles",
+      ],
+      resources: ["*"],
     }));
 
     // Grant user-init Lambda access to KB docs bucket (create user folder on signup)

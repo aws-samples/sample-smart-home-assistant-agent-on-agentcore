@@ -22,6 +22,7 @@
 - [9.4. Admin Console Design](#94-admin-console-design)
 - [9.4.1. User Provisioning (Identity Tab)](#941-user-provisioning-identity-tab)
 - [9.5. Per-User Tool Permission Management](#95-per-user-tool-permission-management)
+- [9.5.1. SubAgent Policy](#951-subagent-policy)
 - [9.6. Enterprise Knowledge Base](#96-enterprise-knowledge-base)
 - [9.7. Voice Mode (Nova Sonic Bi-directional Streaming)](#97-voice-mode-nova-sonic-bi-directional-streaming)
 - [9.8. Skill ERP & AWS Agent Registry](#98-skill-erp--aws-agent-registry)
@@ -1204,6 +1205,13 @@ last.
 
 The A2A specialists deliberately do **not** cache — see §9.13 for the measurement.
 
+**These numbers are Anthropic-specific.** They were measured with explicit Anthropic
+cache points via `CacheConfig(strategy="auto")` on `bedrock-runtime`, and the default
+model (`us.anthropic.claude-sonnet-4-6`) is on that path, so they still describe it.
+They would NOT describe a Bedrock Mantle model: caching there is automatic prefix
+caching with no cache point to place. Mantle is not integrated (§8.8), but if it is
+re-added, this table needs re-measuring rather than inheriting.
+
 `create_agent` also logs `prompt caching: strands=<version> model=<id>
 strategy=<...>` once per agent build. That line exists because the failure is
 silent in both directions: caching that quietly stops working looks identical to
@@ -1222,33 +1230,59 @@ Administrators can assign different LLM models to each user (or set a global def
 ```
 PK: userId (e.g., "zihangh@amazon.com" or "__global__")
 SK: "__settings__"
-modelId: "us.anthropic.claude-sonnet-4-6"          # text agent model
+modelId: "us.anthropic.claude-sonnet-4-6"          # text agent model (a cross-region profile id)
+modelEndpoint: "runtime"                             # which Bedrock endpoint serves modelId
 visionModelId: "us.anthropic.claude-haiku-4-5-..."   # vision (multimodal) model
 ```
 
-`PUT /settings/{userId}` accepts either field independently — absent fields retain their existing values so callers can patch one without clobbering the other.
+`PUT /settings/{userId}` accepts either field independently — absent fields retain their existing values so callers can patch one without clobbering the other. `modelEndpoint` is written by the console alongside `modelId`, resolved from the live catalog at the moment the admin picks the model (see below).
 
-**Resolution order (text):** user-specific `modelId` > `__global__` `modelId` > `MODEL_ID` env var (default: `moonshotai.kimi-k2.5`).
+**Resolution order (text):** user-specific `modelId` > `__global__` `modelId` > `MODEL_ID` env var (default: `us.anthropic.claude-sonnet-4-6`).
 
 **Resolution order (vision):** user-specific `visionModelId` > `__global__` `visionModelId` > `VISION_MODEL_ID` env var (default: `us.anthropic.claude-haiku-4-5-20251001-v1:0`). The agent reads this via `load_user_settings(actor_id)` and threads it into `vision.caption_images(..., model_id=...)`.
 
-**Available text models** (Admin Console dropdown):
-- Moonshot: Kimi K2.5, Kimi K2 Thinking
-- Claude 4.6: Sonnet, Opus
-- Claude 4.5: Sonnet, Opus, Haiku
-- Claude 4: Sonnet, Opus, Opus 4.1
-- Claude 3.x: 3.7 Sonnet, 3.5 Haiku
-- DeepSeek: V3.2, V3.1, R1
-- Qwen: Qwen3 235B, Next 80B, 32B Dense, VL 235B, Coder 480B, Coder 30B
-- GLM (Z.AI): GLM 5, GLM 4.7, GLM 4.7 Flash
-- MiniMax: M2.5, M2.1, M2
-- Meta Llama: Llama 4 Maverick/Scout, Llama 3.3 70B
-- OpenAI: GPT OSS 120B/20B
+**Available text models** are no longer a hardcoded list. `GET /settings/{userId}?action=catalog`
+on the admin API builds it live from two `bedrock-runtime` calls:
 
-**Available vision models** (separate dropdown — only multimodal models that accept images in Bedrock Converse):
-- Claude: Haiku 4.5, Sonnet 4.5/4.6, Opus 4.5/4.6, 3.7 Sonnet, 3.5 Haiku
-- Nova: Pro, Lite
-- Qwen: Qwen3 VL 235B A22B
+| Call | Why both |
+|---|---|
+| `bedrock:ListFoundationModels` | The models, with `inputModalities` (vision) and `modelLifecycle` (deprecation) |
+| `bedrock:ListInferenceProfiles` | The id you can actually **invoke**. A newer Claude model rejects its bare id with "Invocation of model ID ... with on-demand throughput isn't supported"; the cross-region profile id (`us.`, `global.`) is the invocable one |
+
+**One row per model.** Where a base model has a system-defined profile the profile id
+wins and the bare id is dropped: offering both would show two entries differing only
+in routing, and the bare one is the one that fails at invoke time. Where there is no
+profile, the bare id is offered if it supports `ON_DEMAND`. Live on this deployment
+that yields **88 models**.
+
+This replaced 33 hand-maintained entries in `AdminConsole.tsx` that had to be edited
+every time Bedrock shipped a model. The response carries a `catalogError` string: when
+a listing fails the console renders a warning rather than an empty picker, because a
+failed lookup and a genuinely empty account are otherwise the same empty dropdown —
+the same reasoning as the A2A catalog in §9.9.
+
+`modelEndpoint` is stored next to `modelId` and always resolves to `runtime` today. It
+exists because the agent cannot call the admin API, so a second endpoint would need the
+answer stored at selection time rather than re-derived on every cold start.
+
+**Bedrock Mantle is deliberately not integrated.** The `bedrock-mantle` endpoint is the
+only way to reach the GPT-5.x family, and a working two-path version of this was built
+and verified against the live endpoint before being removed on request. The findings are
+kept in `agent/model_provider.py` so re-adding it does not repeat the discovery:
+
+- The listing is `https://bedrock-mantle.{region}.api.aws/v1/models`. The `/openai/v1`
+  path shown in the Gemma 4 blog and the GPT-5.6 Luna model card **404s** for listing.
+- Mantle serves two OpenAI-compatible APIs on different paths and **no model accepts
+  both**: `openai.gpt-5.6-luna` and `google.gemma-4-31b` are Responses-only
+  (`/openai/v1`), `minimax.minimax-m2.5` is Chat-Completions-only (`/v1`). The wrong one
+  returns `400 The model '...' does not support the '...' API`.
+- Nothing reports which format a model accepts — `/v1/models` and `/v1/models/{id}`
+  return status and data-retention only. It has to be probed and cached.
+- Auth is a short-term bearer token (`aws-bedrock-token-generator`), not SigV4, and
+  needs `bedrock-mantle:CreateInference|Get*|List*` plus `CallWithBearerToken`.
+
+**Vision models** are the same catalog filtered to `inputModalities` containing
+`IMAGE` — 44 of the 88 on this deployment.
 
 ### 8.9 Per-Login Session ID and Session Tracking
 
@@ -1816,10 +1850,13 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
   post-deploy test. `setup-agentcore.py` stops DynamoDB-tracked sessions for this
   reason; an ad-hoc `agentcore deploy` does not.
 - **`restore-text-runtime-config.py` is not optional.** `agentcore deploy` strips
-  the 12 A2A/table env vars, `protocolConfiguration`, the header allowlist and the
+  the A2A/table env vars, `protocolConfiguration`, the header allowlist and the
   `/mnt/workspace` mount. Without the A2A vars the orchestrator registers **no**
   `a2a_*` tools and answers every specialist question itself — silently. Measured
-  on real deploys during this work: 12 vars restored each time.
+  on real deploys during this work: 12 vars restored each time. That count drops to
+  10 once A2A runs through the Gateway (§9.13), since `A2A_M2M_SECRET_ARN` and
+  `A2A_COGNITO_TOKEN_URL` no longer exist — the same reasoning that makes routing
+  through the gateway worth the extra hop.
 
 ### 9.2 Deployment Architecture
 
@@ -1998,16 +2035,17 @@ admin-console/
 - **Self-service registration**: The login page has three modes — sign in, sign up, confirm. The pool sets `UsernameAttributes: ["email"]`, so the email *is* the username (no separate username field, unlike the chatbot's older form), and `email` being in `AutoVerifiedAttributes` means Cognito emails a 6-digit code; `resendConfirmationCode` covers a lost email. Both the sign-up and confirm forms carry an info Alert stating that registering does **not** grant console access — the account needs the `admin` group, and until then the chatbot is the usable surface. Without that notice, a new user's first experience is an unexplained "Access Denied".
 - **AWS-Console-style side navigation** with four collapsible sections (Discover / Build / Deploy / Assess) plus a Docs link. This replaces the previous top tab-bar layout and matches the AWS Console's IA.
 - **Light/Dark theme toggle** in the top-right, persisted to `localStorage` under `admin.theme`. Initial paint honors `prefers-color-scheme` on first visit.
-- **Fifteen pages** organised under those four sections:
+- **Sixteen pages** organised under those four sections:
 
 | Section | Page | Purpose |
 |---|---|---|
 | Discover | **Overview** | Product intro + architecture diagram (collapsed by default, so the metrics are on screen when the page opens) and the **agent operations dashboard** — a monitoring-wall view of six live metric groups (see [§9.15](#915-agent-operations-dashboard)). Demo launchers live in the side nav's **Demos** group rather than on this page, so they stay reachable from anywhere |
-| Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table) and **A2A Agents** (lists approved A2A records from AWS Agent Registry with publisher info; details modal shows the full agent card). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
-| Build | **Models** | Global default model + per-user model override table for both text agent (`modelId`) and vision agent (`visionModelId`); resolution priority: per-user > global > env var |
+| Discover | **Integration Registry** | Sub-tabs: Overview (Lambda targets / MCP servers / API Gateway / A2A agents status table), **A2A Agents** (approved `AGENT` records from AWS Agent Registry with publisher info; drawer shows the full agent card) and **Skills** (approved `SKILL` records, drawer shows SKILL.md plus which scopes imported it, with the import action inline). MCP / API Gateway sub-tabs are "Coming soon" placeholders. See §9.9. |
+| Build | **Models** | Global default model + per-user model override table for both text agent (`modelId`) and vision agent (`visionModelId`); resolution priority: per-user > global > env var. The picker is built from the live two-endpoint catalog, not a hardcoded list (see [§8.8](#88-per-user-model-selection)) |
 | Build | **Skills** | Skill CRUD with all [Agent Skills spec](https://agentskills.io/specification) fields, file manager, metadata editor, and **"Add approved skill from AWS Agent Registry"** import flow |
 | Build | **Prompt** | Edit the text-agent and voice-agent system prompts per user or globally; agent runtime concatenates global + per-user addendum (see [§8.10](#810-agent-system-prompts-text--voice)) |
-| Build | **Tool Policy** | Per-user tool permissions. Lists built-in Strands/AgentCore tools (default-allowed) and Gateway-scanned tools (opt-in) side-by-side with Cloudscape `Badge`s tagging the source. Cedar policy enforcement with ENFORCE/LOG_ONLY toggle. |
+| Build | **Tool Policy** | Per-user tool permissions. Lists built-in Strands/AgentCore tools (default-allowed) and Gateway-scanned tools (opt-in) side-by-side with Cloudscape `Badge`s tagging the source. Cedar policy enforcement with ENFORCE/LOG_ONLY toggle. A2A grants used to live here; they moved to SubAgent Policy. |
+| Build | **SubAgent Policy** | Which A2A specialists each user may reach. Scope selector for `__global__` plus each Cognito user, a checkbox tree of approved sub-agents and their AgentCard skills, and an effective-permission preview showing what per-user grants replace. Granting here is sufficient — the orchestrator discovers and routes to the sub-agent with no prompt or code change (see [§9.5.1](#951-subagent-policy)) |
 | Build | **Memories** | Long-term memory viewer — per-user facts and preferences from AgentCore Memory. Actor IDs are resolved back to the user's email via the sanitizer mirror. |
 | Build | **Knowledge Base** | Enterprise KB document management, sync, and per-user access control via Bedrock KB |
 | Build | **Identity** | Registered-users table (Cognito User Pool) **and all user management** — create user, promote/demote admin, delete. These actions used to live on Overview; they were consolidated here on 2026-07-29 so Overview is architecture + demos + metrics only. Self-demotion and self-deletion stay disabled. |
@@ -2245,6 +2283,174 @@ Cedar `principal.id` maps to the JWT `sub` claim (Cognito sub UUID). The Admin C
 | `__system__` | `__tool_policy_{toolName}__` | Policy ID for each tool |
 
 **Scalability:** One Cedar policy per tool (not per user). Each tool policy lists authorized user IDs. Cedar statement limit is 153KB (~3,800 user IDs per tool). Suitable for most deployments.
+
+### 9.5.1 SubAgent Policy
+
+Which A2A specialists a user may reach. This was a section inside the Tool Policy
+permissions panel until 2026-08-12; it is now its own page under Build, for two
+reasons. It had no `__global__` entry point, because the panel is keyed on a
+selected Cognito user and a global default has no user to select. And an A2A grant
+is a different kind of object from an MCP tool grant: the unit is an AgentCard
+skill on a separately deployed agent, not a tool on this gateway.
+
+**Scope and merge.** The scope selector offers `__global__` plus each Cognito user,
+the same convention Skills and Prompts already use. Per-user grants **replace**
+global grants per sub-agent, they do not union with them:
+
+```
+global:  knowledge-qa -> [answer, troubleshoot]      alice:  knowledge-qa -> [answer]
+         light-effect -> [compose]
+
+effective for alice:   knowledge-qa -> [answer]       <- replaced, so alice has fewer
+                       light-effect -> [compose]      <- inherited
+```
+
+This is what `agent/agent.py` already did (`merged.update(_read(actor_id))`), and it
+is the semantics that lets an admin narrow one user below the global baseline.
+Changing it to a union would have silently widened effective access for every
+existing user, which is why the page renders an **effective-permission preview**
+under per-user scope: a user with one skill ticked has been cut from four to one,
+not granted one, and a checkbox tree alone cannot show that.
+
+**Where enforcement lives.** Authorization is an OAuth custom-claim check performed
+by each sub-agent Runtime's own JWT authorizer, before any of our code runs:
+
+| Concern | Owner |
+|---|---|
+| Whether a user can reach a given sub-agent | The sub-agent Runtime's `customJWTAuthorizer.customClaims`, matching `cognito:groups` with `CONTAINS_ANY` over that agent's group names |
+| Which skill within it | The sub-agent deriving the skill set from the same verified `cognito:groups` claim, replacing the client-asserted `X-A2A-Allowed-Skills` header |
+| Who the request is for | The `Authorization` token itself, which is now the end user's own token rather than a service token with no `sub` |
+| What the model is offered | The orchestrator reading `cognito:groups` off that same token to decide which `a2a_*` tools to register and which routing rows to generate |
+
+Group names encode `(agent, skill)` — `a2a-knowledge-qa-agent.answer_from_docs`.
+`CONTAINS_ANY` takes an exact list with no wildcards, so each Runtime's authorizer
+lists all of its own skill groups and means "this user holds at least one grant on
+me". Adding a skill is therefore an `UpdateAgentRuntime`, a configuration change
+rather than a data change.
+
+**Two authorizer details that are easy to get wrong, both found by deploying it.**
+
+`allowedAudience`, *not* `allowedClients`. `allowedClients` validates the `client_id`
+claim, which only an **access** token carries; a Cognito **idToken** carries the app
+client id in `aud`. With `allowedClients` set, a fully granted user's idToken was
+rejected as `Claim 'client_id' value mismatch with configuration` — while an
+*ungranted* user got that message **plus** `Authorization denied`. That difference is
+what showed the group check was already passing and only the client check was
+failing; without comparing the two messages it reads as "claims do not work". The
+idToken is the right token regardless: the container needs `sub` and `email` (the
+knowledge base scopes by email) and requires `token_use == "id"`, and an access token
+has neither `aud` nor `email`.
+
+`Authorization` must be in the Runtime's `requestHeaderAllowlist`. The Runtime edge
+consumes that header for the authorizer and does **not** pass it to the container
+unless it is allowlisted. Measured: a granted user's request reached the container
+with no bearer at all, so `resolve_caller` found nothing to read claims from and fell
+back to the legacy header path, refusing with "X-A2A-Allowed-Skills is missing". The
+platform said yes and the container said no, which reads like a container bug. This is
+the same allowlist trap already recorded for the forwarded user token in §9.13 — now
+hit twice, from opposite directions.
+
+The point is that discovery and enforcement now read the *same signed claim*. They
+cannot drift, and a bug in tool registration cannot become an access-control hole.
+
+**Cedar does not own sub-agent authorization, and this was established by
+experiment rather than assumed.** The design originally made gateway policy the
+authoritative boundary. Probing the live gateway showed:
+
+- A2A target requests *are* gated: with no policy, the gateway returns 403 `No
+  policy applies to the request (denied by default)`.
+- But no action identifier matches. `action == "{target}"`,
+  `"{target}___{skill}"` and `"{target}___InvokeAgentRuntime"` all leave the
+  request denied, `context has targetName` is false, and there is no gateway
+  policy log group to read the real action from.
+- The only policy that applies is one with **unconstrained `action`** — which
+  also permits every MCP tool for that principal, breaking Tool Policy.
+
+`StartPolicyGeneration`, which holds the authoritative action schema for the
+gateway, settles it with a control: asked to allow a user "to call the
+control_device tool" it emits valid Cedar naming
+`SmartHomeDeviceControl___control_device`; asked to allow the same user "to invoke
+the target named spikeA2APass" it returns `Non-translatable: cannot be expressed`.
+Same generator, same gateway. The action does not exist in the schema.
+
+So Cedar stays what it always was — the authorization layer for **tools** on the
+gateway, including the tool calls a sub-agent makes on the user's behalf — and A2A
+access is authorized by the claim check above instead. This is written out because
+the tempting mistake later is to assume the gateway is checking something it is not.
+
+`allowedScopes` on the same authorizer is *not* an alternative for this. Scopes come
+from the OAuth client, not the user: a `client_credentials` token has no `sub` at
+all, and Cognito does not restrict a user's access-token scopes per user. Per
+sub-agent scopes remain worth having as hardening, so a token leaked for one
+specialist does not open the other seven, but they cannot express "alice may reach
+knowledge-qa".
+
+**What moving to the user's own token simplifies.** The two-token split (§9.13)
+existed only because the m2m token has no `sub`. With the user's token in
+`Authorization`:
+
+| Before | After |
+|---|---|
+| `Authorization` m2m + `X-SuperApp-User-Token` user token | One token, and the second header is deleted |
+| Gateway target needs `OAUTH` outbound with the m2m client in the token vault | The target's **default** `JWT_PASSTHROUGH` is now the correct setting |
+| `X-A2A-Allowed-Skills` asserted by the client, only narrowable downstream | Skill set derived from a signed claim the client cannot widen |
+| Custom headers must be added to `metadataConfiguration.allowedRequestHeaders`, which defaults to only `x-amzn-bedrock-agentcore-policy-session-id` and silently strips the rest | No custom headers, so that second allowlist stops mattering |
+| m2m app client, its Secrets Manager secret, and a token-endpoint round trip | All removed |
+
+That header-allowlist default is worth recording even though this design no longer
+depends on it: it is a *second* allowlist behind the Runtime's own
+`requestHeaderConfiguration` (§9.13), it defaults to stripping, and a stripped
+header here would have disabled skill enforcement and end-user identity at once.
+
+**Revocation is immediate, at a cost.** Group membership is baked into the token at
+issue, so a revoked grant would otherwise keep working until the token refreshed —
+an hour here. Revoking therefore also calls `AdminUserGlobalSignOut` on the affected
+users, which signs them out of the chatbot as a side effect of an admin permission
+change. Narrowing a grant asks for confirmation and names who will be signed out,
+because discovering that after clicking Save is not acceptable; a change to the
+global default can sign out everyone.
+
+**DDB authors intent, groups are the materialised result.** The console keeps the
+`__global__` plus per-user model with the replace semantics above, and saving
+recomputes each affected user's group membership:
+
+```
+DDB __a2a_permissions__     intent (global + per-user, replace semantics)
+       │  materialised on save
+       ▼
+Cognito groups per user     the single runtime truth: signed, platform-enforced
+       ├→ sub-agent authorizer   admission to the agent
+       ├→ sub-agent server       which skill
+       └→ orchestrator           which a2a_* tools and routing rows
+```
+
+A one-way materialisation drifts, which is why the page carries a **reconcile**
+action comparing intent against actual membership — the same lesson as
+`sync-schedules` for scenes (§9.17). A sync without a reconcile is not a sync. The
+per-grant status column shows that comparison; it replaced the Cedar policy status
+column the earlier design called for, keeping the reason it existed (saving can
+return 200 while the write behind it did not land) with new contents.
+
+**Scale, and why the save is concurrent.** A change to `__global__` affects every
+user, and each user costs a list-groups plus an add or remove per changed group.
+Measured on this deployment (40 users, 8 sub-agents, 17 groups):
+
+| | Result |
+|---|---|
+| Serial materialisation | Past API Gateway's 29s ceiling — caller got **504** while the Lambda kept going and finished. Correct write, reported as failure |
+| `CreateGroup` inside the per-user loop | ~680 racing calls; Cognito answered most with `TooManyRequestsException` and **33 of 39 users got no membership at all** |
+| Groups created once up front + 8 concurrent workers + backoff | 13.8s for a normal save |
+
+So `ensure_groups` runs once before any membership work — a group is shared, and
+creating it per user was never anything but waste. Membership calls retry on
+throttling, because a throttle otherwise leaves a user silently without a grant the
+admin just gave them.
+
+The very first full application across every user can still exceed 29s. It converges
+server-side, so the page reports "saved and still being applied, use Reconcile to
+confirm, do not re-save" rather than an error — claiming failure would be false and
+would invite a retry of work already in flight. Steady-state saves touch few users and
+do not reach this.
 
 ### 9.6 Enterprise Knowledge Base
 
@@ -3001,12 +3207,13 @@ AWS console.
 ### 9.9 Integration Registry & A2A Agents
 
 The Admin Console's **Integration Registry** tab (renamed from
-"Integrations") surfaces external tool integrations. It has four sub-tabs:
+"Integrations") surfaces external tool integrations. It has five sub-tabs:
 
 | Sub-tab | Status |
 |---|---|
 | Overview | Active — a 4-row status table (Lambda Targets / MCP Servers / API Gateway / A2A Agents). Lambda Targets and A2A Agents are marked "active"; MCP Servers and API Gateway show "planned". |
 | A2A Agents | Active — lists approved A2A records from AWS Agent Registry with publisher info and a details drawer. See below. |
+| Skills | Active — lists approved `SKILL` records from the same registry: name, description, version, publisher, license, compatibility, last updated. The drawer renders SKILL.md and an Access section listing which scopes have imported the record, reverse-looked-up from `importedFromRegistry` on the skills table, mirroring the A2A drawer's grants summary. Import stays `POST /registry/import` and is surfaced here as an action, so an admin goes from overview to import without switching pages. |
 | MCP Servers | Disabled placeholder ("Coming soon"). |
 | API Gateway | Disabled placeholder ("Coming soon"). |
 
@@ -3045,6 +3252,7 @@ rather than getting paths of their own. The full dispatch table:
 | GET | *(none)* | list registry records (optionally `?status=APPROVED`) |
 | GET | `a2a-list` | approved A2A records + `publishedBy` |
 | GET | `a2a-grants` | which users hold grants on one record |
+| GET | `skill-list` | approved `SKILL` records + `publishedBy` + which scopes imported them |
 | GET | `fleet` | the Agents page's derived fleet (§9.18) |
 | GET | `scenarios` | every saved scene with its schedule + last-run state (§9.17) |
 | GET | `export-scenes` | one user's scenes as portable JSON (§9.20) |
@@ -3068,11 +3276,12 @@ agents only after running the second-stage deploy in
 Approval happens **in the Admin Console** — see *Skill review* below. Approved
 records appear in the admin A2A Agents sub-tab.
 
-**Per-user A2A permissions.** Admins grant A2A skill access per user inside
-the existing Users → Manage Permissions modal (single write entry point;
-the Integration Registry drawer shows the same data read-only). Grants
-live in the skills table under a reserved sort key
-`__a2a_permissions__` — the row carries
+**Per-user A2A permissions.** Admins grant A2A skill access on the **SubAgent
+Policy** page under Build (§9.5.1), which is the single write entry point; the
+Integration Registry drawer shows the same data read-only. Until 2026-08-12 the
+write surface was a section inside the Users → Manage Permissions modal, which
+had no way to express a global default. Grants live in the skills table under a
+reserved sort key `__a2a_permissions__` — the row carries
 `a2aGrants = Map<String, List<String>>` (recordId → skillId list).
 `__global__` and per-user rows merge at agent runtime, with per-user
 winning on the same recordId. The Admin API reuses
@@ -3098,6 +3307,47 @@ The text agent calls downstream A2A agents as a standard **A2A client**:
 JSON-RPC `message/send` against AgentCore Runtime's native A2A protocol mode
 (port 9000, `/` mount). The upstream orchestrator and each downstream
 specialist are independent AgentCore Runtimes.
+
+Since 2026-08-12 the call carries **one token — the end user's own idToken** — and
+each specialist's Runtime authorizes it directly. It goes straight to the
+specialist's Runtime, not through the Gateway.
+
+**A Gateway HTTP passthrough hop was designed in and then dropped.** The reason for
+it was to unify authentication: A2A ran its own Cognito m2m flow in parallel with the
+JWT the agent already forwards to the gateway for MCP tools. Moving authorization
+into the user's own token achieved that unification *without* the hop, so the hop
+would have bought centralised egress and gateway-level observability at the price of
+a round trip and eight targets to keep in step with the roster. What the passthrough
+spike did establish, kept here because it is not obvious and cost real time:
+
+- `{"http":{"passthrough":{"endpoint":..., "protocolType":"A2A"}}}` works, and
+  `A2A` targets get a default schema automatically.
+- `http.agentcoreRuntime` (just a runtime ARN) also exists and is a neater fit for an
+  AgentCore Runtime, but forwarding to the invocations URL returned
+  `404 UnknownOperationException`; the `passthrough` shape forwarded correctly.
+- A target's `metadataConfiguration.allowedRequestHeaders` defaults to **only**
+  `x-amzn-bedrock-agentcore-policy-session-id`. Any custom header is stripped unless
+  listed. That is a *second* header allowlist behind the Runtime's own, and both
+  default to dropping — see the Runtime one below, which bit this design for real.
+- Outbound defaults to `JWT_PASSTHROUGH`. Under the old m2m model that was the one
+  option that could not work (the specialists' `allowedClients` held the m2m client,
+  so they answered `401 Missing Authentication Token`); under the current model it
+  would be the correct default. The option flipped from wrong to right without the
+  gateway config changing, which is worth remembering before reading old notes.
+- `CALLER_IAM_CREDENTIALS` is unavailable regardless: it needs an `AWS_IAM` or
+  `AUTHENTICATE_ONLY` gateway and this one is `CUSTOM_JWT`.
+
+**What the switch deleted.** `agent/tools/a2a_auth.py`, `A2A_M2M_SECRET_ARN`,
+`A2A_COGNITO_TOKEN_URL`, `A2A_COGNITO_SCOPE`, the Secrets Manager read on the invoke
+path, and both custom headers (`X-A2A-Allowed-Skills`, `X-SuperApp-User-Token`). The
+env-var count `restore-text-runtime-config.py` puts back went from 12 to **10**,
+measured on the live restore — three fewer things a deploy can silently strip.
+
+`build_a2a_tools` needed almost no change, because it already passed an explicit
+endpoint into `_local_agent_card(card_dict, endpoint_url)`; the AgentCard's own `url`
+was being overwritten anyway. What changed is the key: grants now arrive keyed on the
+AgentCard **name** rather than a Registry recordId, because that is what a grant group
+encodes and what the sub-agent knows itself as.
 
 **Eight specialist agents** live under
 [`a2a-agent-registry/`](../a2a-agent-registry/README.md). The roster is a
@@ -3146,10 +3396,12 @@ a2a-agent-registry/
 #### Identity: two tokens, because one cannot answer both questions
 
 The `Authorization` header carries an OAuth2 **client_credentials** m2m token
-(Cognito app client `smarthome-a2a-m2m`, scope `a2a-server/invoke`, secret in
-Secrets Manager). Every downstream Runtime validates it with
-`customJWTAuthorizer`. That token proves *an authorised service is calling* and
-nothing else — it has no `sub`.
+(Cognito app client `smarthome-a2a-m2m`, scope `a2a-server/invoke`). Every
+downstream Runtime validates it with `customJWTAuthorizer`. That token proves *an
+authorised service is calling* and nothing else — it has no `sub`. The token is
+now minted by the Gateway from a token-vault credential provider rather than by
+the agent from a Secrets Manager secret; what arrives at the specialist is
+unchanged, which is why the specialists needed no edit.
 
 A specialist that touches a user's devices needs the **end user**, so the
 caller's idToken rides in its own header, `X-SuperApp-User-Token` — the same
@@ -3359,6 +3611,23 @@ an automation even though turning things off is normally the orchestrator's own
 job. Single-device actions stay local — delegating a light switch adds seconds
 for nothing.
 
+**That table is generated, not written.** It was hand-maintained until 2026-08-12,
+which meant granting a new specialist on the SubAgent Policy page registered its
+tools but left the prompt unaware of them, so the model kept answering from its own
+knowledge. The rows are now built at request time from each granted AgentCard
+skill's name, description and examples — the same source the tool descriptions
+already use (`a2a.py:246`) — while the static preamble above (delegation costs
+seconds, a match makes the call mandatory, route on subject) stays hand-written.
+Granting is therefore sufficient: no prompt edit, no code change, no redeploy.
+
+The cost is that row quality now depends on what specialist authors write in their
+cards. The judgement calls the hand-written table carried, such as documentation
+questions outranking the device name they mention, do not emerge from a skill
+description on their own, which is what `test_delegation_rules.py` and the
+delegation evals have to hold. Prompt caching is unaffected: the prefix is still
+byte-identical across one user's turns, with each distinct grant set occupying its
+own cache entry.
+
 `agent/tests/test_delegation_rules.py` derives every valid tool name from the
 AgentCards and fails if the prompt routes to one that does not exist. It found
 two deployed skills the table never mentioned (`inspect_devices`,
@@ -3424,7 +3693,7 @@ IAM is granted per agent and narrowly:
 
 | Inline policy | Grants | Which agents |
 |---------------|--------|--------------|
-| `A2AM2MSecretRead` | `secretsmanager:GetSecretValue` on the m2m secret | all |
+| `A2AM2MSecretRead` | `secretsmanager:GetSecretValue` on the m2m secret. **Removed from the orchestrator** once A2A moved behind the Gateway — the Gateway holds that credential now. Still present on the specialists for their own inbound validation | all |
 | `A2APromptTableRead` | `dynamodb:GetItem` on `smarthome-skills` | all |
 | `A2ASharedMemoryRead` | `bedrock-agentcore:RetrieveMemoryRecords` on the shared Memory — **and nothing else**, so a future edit that tried to write fails rather than quietly poisoning it (§9.13) | all |
 | `A2AScenariosTableAccess` | read/write on `smarthome-scenarios` + its indexes | task-management only |

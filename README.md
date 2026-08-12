@@ -60,12 +60,12 @@ diff 一遍。
 | [AWS CLI](https://aws.amazon.com/cli/) | >= 2.x | AWS 凭证配置 | [官方安装指南](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
 | [agentcore CLI](https://www.npmjs.com/package/@aws/agentcore) | >= 0.13.0 | 部署 AgentCore 资源（Gateway / Runtime / Memory） | `npm install -g @aws/agentcore` · [Starter Toolkit 文档](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) |
 | [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.43.67 | 部署脚本中的 AgentCore / Agent Registry API 调用 | 见下方[快速开始](#快速开始)的 `pip install`（`scripts/01-install-deps.sh` 会自动升级） |
-| AWS 账号 | — | 需开通 Bedrock AgentCore、Kimi K2.5 和 Nova Sonic 模型访问权限 | 见下方说明 |
+| AWS 账号 | — | 需开通 Bedrock AgentCore、Claude Sonnet 4.6 和 Nova Sonic 模型访问权限 | 见下方说明 |
 
 > **agentcore CLI 走 npm，不是 pip。** 早期版本的本文档写的是 `pip install strands-agents-builder`，那个包提供的是 `strands` 命令（一个 Strands 示例 agent），**并不会**安装 `deploy.sh` 所需的 `agentcore`。正确方式是 `npm install -g @aws/agentcore`；`deploy.sh` 启动时会校验版本 >= 0.13.0（该版本修掉了一个会让 `agentcore deploy` 失败的 scaffold-test 回归）。升级用 `npm install -g @aws/agentcore@latest`。
 
 **重要：** 部署前需在 [Bedrock 控制台 > 模型访问](https://console.aws.amazon.com/bedrock/home#/modelaccess) 中申请：
-- **Kimi K2.5**（`moonshotai.kimi-k2.5`）用于文字聊天
+- **Claude Sonnet 4.6**（调用时用跨区 profile id `us.anthropic.claude-sonnet-4-6`）用于文字聊天
 - **Amazon Nova Sonic**（`amazon.nova-2-sonic-v1:0`）用于语音对讲
 
 ### 部署者 IAM 权限
@@ -129,10 +129,10 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 1. 打开部署输出里的聊天机器人 URL，注册/登录
 2. 输入框左侧 🎤 按钮切换语音 / 文字模式
-3. **文字模式**：输入即发，Kimi K2.5（或管理员指定的模型）回复
+3. **文字模式**：输入即发，Claude Sonnet 4.6（或管理员在 Build → Models 指定的模型）回复
 4. **语音模式**：浏览器弹出麦克风授权 → 听到预渲染欢迎语"欢迎使用智能家居设备助手" → 开始语音对话，Nova Sonic 双向流式处理
 5. 语音模式下说"把风扇打开到中档"等指令，Agent 会通过 MCP 网关真实触发 IoT 设备命令
-6. **浏览器实时预览**（右侧默认折叠的 rail，点击展开）：问 Agent 任何需要查实时网页的问题（"example.com 现在显示什么"、"去淘宝上搜 iPhone 16"、"Amazon 上 100 美元以下耳机排名"），无需手动说"use browse_web"—— skill 描述会让 Kimi 自行调用。右侧 DCV 实时流按 1280×800 渲染（窗口更小时自动出现滚动条），每步截图保存到 Agent 的 `/mnt/workspace/<session>/browser/`，"文件"标签页可下载。任务完成后 AgentCore 会话保持 **15 分钟** 不关，点 **"接管控制"** 就能自己继续浏览/验证码/点筛选，不需要重新触发一次工具。详见 [架构文档 §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation)
+6. **浏览器实时预览**（右侧默认折叠的 rail，点击展开）：问 Agent 任何需要查实时网页的问题（"example.com 现在显示什么"、"去淘宝上搜 iPhone 16"、"Amazon 上 100 美元以下耳机排名"），无需手动说"use browse_web"—— skill 描述会让模型自行调用。右侧 DCV 实时流按 1280×800 渲染（窗口更小时自动出现滚动条），每步截图保存到 Agent 的 `/mnt/workspace/<session>/browser/`，"文件"标签页可下载。任务完成后 AgentCore 会话保持 **15 分钟** 不关，点 **"接管控制"** 就能自己继续浏览/验证码/点筛选，不需要重新触发一次工具。详见 [架构文档 §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation)
 7. **示例提示词库**：输入框左侧图标打开右侧抽屉 —— **56 条示例、17 个能力分组**、可按中英文搜索，覆盖八个专家 Agent 的全部 18 个 skill（灯效、场景联动、日出日落定时、能耗、安全、维护、文档问答、多域并发）。点一条只填入输入框、不自动发送。抽屉**任何时候都能打开**；欢迎屏的快捷 chips 依然保留，但那些只在还没说过话时显示。示例正文来自 `shared/prompt-examples.json`，模拟用户脚本读的是**同一份文件**，且有覆盖率测试断言每个已发布 skill 都被覆盖 —— 详见[架构文档 §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library)
 8. **逐轮反馈**：每条回复下有 👍/👎，点 👎 可补一句原因。投票携带该轮的委派 trace，写入 `smarthome-feedback` 表，直接驱动 Overview 的「用户满意度」卡片
 
@@ -149,7 +149,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | **Discover** | **Overview** | 产品说明 + 架构图（默认折叠）以及 **Agent 运维统计大屏**（见下节）。三个 Demo 入口已移至侧边栏「演示入口」分组 |
 | Discover | **Agents** | **机队总览**：1 主 + 8 子 + 1 语音 + 1 A/B 变体 + 1 Tool，含运行时名、状态、skill 数与实时指标。点进详情页可**逐个 Agent 编辑 system prompt**（保存后下一次请求即生效，不用重新部署容器）。列表由 Runtime ARN + Registry 记录推导，新部署的子 Agent 自动出现 |
 | Discover | **Integration Registry** | 工具集成概览 + 从 AWS Agent Registry 读取已批准的 **A2A Agent** 记录（显示名称/端点/能力/发布者） |
-| **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型（Kimi、Claude 4.5/4.6、DeepSeek、Qwen、Llama 4、OpenAI GPT 等） |
+| **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型。清单由 `ListFoundationModels` + `ListInferenceProfiles` **实时拉取**（本部署 88 个），不再硬编码 |
 | Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AWS Agent Registry 导入已批准技能** |
 | Build | **Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时叠加拼接 |
 | Build | **Tool Policy** | 按用户配置可调用的工具（Cedar 策略）；内置工具与 Gateway 工具并列并用 Badge 区分；ENFORCE / LOG_ONLY 切换。每个 Gateway 工具旁列出**谁在用它** —— 撤掉 `control_device` 会同时停掉聊天指令、定时场景和两个子 Agent |
@@ -480,7 +480,7 @@ curl -X POST http://localhost:8080/invocations \
 
 本方案全部采用 AWS Serverless 托管服务，按实际用量付费。以下按日活用户（DAU）1 万、10 万、100 万三个量级估算月度成本（us-west-2，价格截至 2025 年）。
 
-**假设**：每用户每天 10 次对话，每次含 1 次 LLM 调用 + 1.5 次工具调用 + 0.3 次 KB 查询；LLM 为 Kimi K2.5（输入 ~800 tokens，输出 ~200 tokens）；知识库 1000 个文档（~500MB），每月同步 4 次；语音模式对话中每 10 次文本调用搭配 2 次 Nova Sonic 语音对话。
+**假设**：每用户每天 10 次对话，每次含 1 次 LLM 调用 + 1.5 次工具调用 + 0.3 次 KB 查询；LLM 为 Kimi K2.5（输入 ~800 tokens，输出 ~200 tokens。**这份成本估算是按 Kimi 单价算的，默认模型已改为 Claude Sonnet 4.6，单价更高——数字未重算，换算前不要直接引用**）；知识库 1000 个文档（~500MB），每月同步 4 次；语音模式对话中每 10 次文本调用搭配 2 次 Nova Sonic 语音对话。
 
 | 模块 | 服务 | 1 万 DAU | 10 万 DAU | 100 万 DAU |
 |------|------|---------|----------|-----------|
@@ -552,7 +552,7 @@ cd cdk && npx cdk destroy --all --force
 - **`agentcore CLI not found`** → `npm install -g @aws/agentcore`（**不是** pip 包；详见[前置条件](#前置条件)）
 - **`agentcore deploy fails: Target not found in aws-targets.json`** → 部署脚本会自动生成，手动跑的话创建 `[{"name": "default", "region": "us-west-2", "account": "YOUR_ACCOUNT_ID"}]`
 - **`CDK synth fails: pyproject.toml not found`** → `agent/pyproject.toml` 必须存在（仓库已含）
-- **`Bedrock Model Access Denied`** → Bedrock 控制台申请 Kimi K2.5 + Nova Sonic 访问权限
+- **`Bedrock Model Access Denied`** → Bedrock 控制台申请当前默认模型（Claude Sonnet 4.6）+ Nova Sonic 访问权限；换过模型的话申请那一个
 - **`@aws-sdk/client-bedrockagentcorecontrol does not exist`** → 正常，AgentCore 资源由 `agentcore` CLI 创建（步骤 6），不由 CDK 直接创建
 - **销毁失败 `Gateway has targets associated`** → 销毁脚本会按顺序处理；手动跑时 `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → 账号已经达到 AWS Agent Registry 的默认配额（5）。如果该账号已经有名为 `SmartHomeSkillsRegistry` 的 Registry，部署脚本会自动复用；否则需在 AWS Service Quotas 控制台申请提额，或删除不用的 Registry。
@@ -577,12 +577,116 @@ cd cdk && npx cdk destroy --all --force
 
 ---
 
+## 演示注意事项（Demo 前必读）
+
+三块功能各有一个「看起来正常但其实没生效」的失败模式。**每一条都是实测踩过的**，不是理论风险。
+
+### 一、模型清单（实时拉取）
+
+默认模型 **`us.anthropic.claude-sonnet-4-6`**,走 `bedrock-runtime` 的 Converse。注意这是
+**跨区 inference profile id**:裸的 `anthropic.claude-sonnet-4-6` 不支持按需调用,直接用会报
+"on-demand throughput isn't supported"。
+
+模型清单**不再硬编码**,由 `ListFoundationModels` + `ListInferenceProfiles` 实时合并
+(本部署实测 **88 个模型**),所以 Bedrock 上新模型之后不用改代码。有 inference profile 的
+模型只显示 profile id,裸 id 故意不给——给了就是给一个会在调用时失败的选项。
+
+演示前检查:
+
+| 检查 | 怎么看 | 出问题的样子 |
+|---|---|---|
+| 模型清单能拉到 | Build → Models 页顶部**没有**黄色告警 | 有告警说明两个 listing 之一失败了,下拉框会缺一批模型。**这不等于账号里没开通模型**,通常是 `bedrock:ListInferenceProfiles` 权限没到位 |
+| 模型通路正常 | Runtime 日志 `model path: ... endpoint=runtime caching=cache-point strategy=anthropic` | `strategy=unavailable` 表示该模型不支持 cache point,只影响成本不影响功能;这一行是判断缓存有没有生效的**唯一**信号 |
+
+**Bedrock Mantle 目前没有集成。** GPT-5.x 系列只在 `bedrock-mantle` 上,双通路版本做完并在实环境
+验证过之后按要求撤掉了。重新接入前请先读 `agent/model_provider.py` 里记下的实测结论,尤其是这几条
+(都不是从文档能看出来的):
+
+- listing 在 `.../v1/models`;文档(Gemma 4 blog、GPT-5.6 Luna model card)写的 `/openai/v1`
+  这条路 listing 会 **404**。
+- Mantle 上两套 OpenAI 兼容 API 在不同路径,而且**没有模型同时支持两套**:
+  `openai.gpt-5.6-luna`、`google.gemma-4-31b` 只支持 Responses(`/openai/v1`),
+  `minimax.minimax-m2.5` 只支持 Chat Completions(`/v1`)。用错的那套会返回
+  `400 The model '...' does not support the '...' API`。
+- **没有任何接口告诉你某个模型支持哪套** —— `/v1/models` 和 `/v1/models/{id}` 只返回状态和
+  数据保留策略。只能探测 + 缓存。
+- 鉴权是短期 bearer token(`aws-bedrock-token-generator`),不是 SigV4;IAM 另需
+  `bedrock-mantle:CreateInference|Get*|List*` 与 `CallWithBearerToken`。
+
+**关于 prompt caching 的 98% 数字**:那是 Anthropic 显式 cache point 的实测值,当前默认模型正好
+走这条路,所以数字仍然成立。但它**不描述 Mantle**(自动前缀缓存,形状不同),将来接回去要重测。
+
+### 二、SubAgent Policy（A2A 授权改成 Cognito 组）
+
+**授权模型已经换了。** 以前是 DDB 里一行 grants + 客户端自报 `X-A2A-Allowed-Skills`；现在一个授权就是一个 **Cognito 组** `a2a-<agent>.<skill>`，由每个 sub-agent Runtime 的 `customJWTAuthorizer.customClaims` 校验 `cognito:groups`——**在我们的代码跑之前，由平台拒绝**，调用方无法伪造或放宽。
+
+为什么不用 AgentCore Policy（Cedar）：**实测证实 Cedar 表达不了这一层**。A2A target 没有对应的 Cedar action，AWS 自己的 `StartPolicyGeneration` 对「允许某用户调用某 target」直接回 `Non-translatable: cannot be expressed`，而同一个生成器对「允许某用户调用 control_device 工具」能正常生成。细节见 `docs/superpowers/specs/2026-08-12-*-design.md` §2.4。
+
+**已完成切换（2026-08-12）**，8 个 sub-agent 全部在跑 claim 校验。切换过程踩到三个坑，都写进代码注释了，这里列出来是因为它们**都不会报错、只会静默拒绝或静默放开**：
+
+| 坑 | 症状 | 结论 |
+|---|---|---|
+| 用了 `allowedClients` | 已授权用户被拒:`Claim 'client_id' value mismatch` | `allowedClients` 校验的是 **access token** 才有的 `client_id`;idToken 带的是 `aud`,所以要用 **`allowedAudience`**。判断依据:未授权用户拿到的是这条消息**再加上** `Authorization denied`,两条对比才能看出组校验本身是通的 |
+| `Authorization` 不在 header 白名单 | 平台放行了,容器却回「X-A2A-Allowed-Skills is missing」 | Runtime edge 会**吃掉** Authorization,不显式加白名单容器根本读不到 token,于是回退到旧的 header 路径 |
+| `CreateGroup` 写在 per-user 循环里 | 保存返回 200,但 39 个用户里 33 个一个组都没进 | 组是共享的,一次建好即可;Cognito 对 ~680 次并发 CreateGroup 直接 `TooManyRequestsException` |
+
+验证结果:已授权用户拿到专家真实回复(带 `⟦A2A:home-security⟧` 标记),未授权用户被**平台层**拒绝(401,容器都没进),旧 m2m token 已彻底失效。`smoke_test.py` 三条负向用例全通过。
+
+演示时必须知道的三件事：
+
+1. **撤销权限会把用户踢下线。** 组成员关系是签在 token 里的，不强制刷新的话撤销要等到 token 过期（1h）才生效。所以撤销时会调 `AdminUserGlobalSignOut`。**改全局默认可能一次踢掉所有人**——演示中途别改全局。
+2. **授权是即时的，但要重新登录才能看到。** 加组之后用户当前的 token 里还没有那个组，需要重新登录（或等 token 刷新）才能拿到。**演示脚本要把「授权 → 重新登录 → 提问」按这个顺序走**，否则会看到「明明勾上了却说没有这个专家」。
+3. **首次全局授权会超时,但不是失败。** 把 8 个 sub-agent 一次性授权给全部用户,是 40 用户 × 17 组 ≈ 680 次
+   Cognito 调用,超过 API Gateway 的 29s 上限。**后台会继续跑完**——页面会提示「仍在写入」并让你点「对账组成员」
+   确认,不要重复保存。稳定态下每次改动只涉及少数用户,不会触发这个。
+4. **两套存储要对账。** DDB 存的是意图（global + per-user，per-user 按 sub-agent **覆盖** global，不是并集），Cognito 组是物化后的运行时真相。保存时同步，但单向同步会漂移，所以页面上有对账动作。演示前跑一次对账，确认没有 out-of-sync 用户。
+
+自动发现（需求里的「不需要改提示词」）：路由表现在是**每轮从已授权的 AgentCard 生成的**，所以授权一个新 sub-agent 之后不用改 prompt、不用改代码、不用重新部署，主 agent 就会路由过去。代价是路由表质量取决于 sub-agent 作者在 card 里写的 skill description。
+
+### 三、Integration Registry
+
+A2A Agents 与 Skills 两个子页都是从 AgentCore Registry 读 **APPROVED** 记录。空列表和「查询失败」在页面上是**两种不同的显示**：查询失败会显示原因（warning），空就是空。看到空列表先确认是哪一种，再去 Bedrock 控制台找。
+
+### 部署顺序（改了 A2A 鉴权之后不能乱）
+
+sub-agent 的 authorizer 一旦加上 claim 校验，**旧的 m2m token 立刻不被接受**（client_credentials token 里没有 `cognito:groups`）。两种模型无法在同一个 runtime 上并存，所以这是一次**协调切换**，中间有一段委派不可用的窗口：
+
+```bash
+# 1. CDK：admin Lambda 的新 IAM（Cognito 建组/踢下线、Bedrock Mantle、ListInferenceProfiles）
+cd cdk && npx cdk deploy --require-approval never && cd ..
+
+# 2. 建组并给演示用户授权（没有组的话，切换后所有委派都会被拒）
+#    控制台 Build → SubAgent Policy 勾选，或直接调 PUT /users/{userId}/permissions?action=a2a
+
+# 3. 八个 sub-agent 换成 claim 校验
+python a2a-agent-registry/deploy.py            # 想回滚旧模型时加 --legacy-m2m-auth
+
+# 4. 主 runtime：先同步代码再部署，否则发的是旧代码
+python scripts/sync-agent-code.py
+agentcore deploy
+python scripts/restore-text-runtime-config.py  # deploy 会清掉 runtime env，这步不是可选的
+
+# 5. 验证
+python a2a-agent-registry/smoke_test.py        # 含三条负向授权用例
+python scripts/measure-baseline.py             # 换模型后的延迟基线
+```
+
+> `smoke_test.py` 对**没有授权**的 agent 会报 SKIPPED 而不是 FAIL —— 对一个没授权的 agent 做正向探测
+> 测不到任何东西(authorizer 本来就该拒),把它算成失败只会得到 6 条红线。要覆盖全部 8 个,先在
+> SubAgent Policy 里全部勾上并重新登录。
+
+顺序反了会怎样：先部署主 runtime 再部署 sub-agent，主 agent 发用户 token 而 sub-agent 还在等 m2m token，**八个专家全部 401**。
+
+`--legacy-m2m-auth` 是 sub-agent 侧的回滚开关，但主 runtime 已经不再签发 m2m token 了，所以真回滚需要连代码一起回退。
+
+---
+
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
 | 本 README | 部署、使用、本地开发、成本估算、故障排除 |
-| [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | 架构图、组件设计、认证模型、语音模式实现细节、**A2A 专家 Agent 的身份透传与 skill 强制**、**场景编排与定时执行**、**Agents 机队页**、AgentCore CLI 坑、运维大屏与测试数据设计、API 参考、MQTT 命令、技术选型 |
+| [`docs/architecture-and-design.md`](docs/architecture-and-design.md) | 架构图、组件设计、认证模型、语音模式实现细节、**A2A 专家 Agent 的身份透传与 skill 强制**、**SubAgent Policy 与 Cognito 组授权（§9.5.1，含 Cedar 为何不可用的实测）**、**双 endpoint 模型通路与 Bedrock Mantle（§8.8）**、**场景编排与定时执行**、**Agents 机队页**、AgentCore CLI 坑、运维大屏与测试数据设计、API 参考、MQTT 命令、技术选型 |
 | [`docs/admin_manual_管理员使用手册.md`](docs/admin_manual_管理员使用手册.md) | 管理员运维手册:部署闭环、身份接入、权限管控(含授权复核与工具影响面)、质量评估、提示词优化、Skill 审批流水线、**Agents 机队与逐个 Agent prompt**、**场景联动与定时自动化**、Session 调试、运维大屏、`cdk deploy` 环境变量陷阱 |
 | [`docs/agent-design-principles-zh.md`](docs/agent-design-principles-zh.md) | **Agent 设计理念(中文)**:Harness 设计、Context 工程、Prompt 设计三章。每条都配本仓 file:line 与实测数字;与预期相反的结论会写明预期本身 |
 | [`docs/agent-design-principles.md`](docs/agent-design-principles.md) | 同上,英文版 |
@@ -673,12 +777,12 @@ service model rather than the docs, diff the deployed copy against the repo.
 | [AWS CLI](https://aws.amazon.com/cli/) | >= 2.x | AWS credentials | [Official install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
 | [agentcore CLI](https://www.npmjs.com/package/@aws/agentcore) | >= 0.13.0 | Deploy AgentCore resources (Gateway / Runtime / Memory) | `npm install -g @aws/agentcore` · [Starter Toolkit docs](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) |
 | [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) | >= 1.43.67 | AgentCore / Agent Registry API calls in setup script | Via the `pip install` in [Quick Start](#quick-start) below (`scripts/01-install-deps.sh` upgrades it automatically) |
-| AWS Account | — | With Bedrock AgentCore, Kimi K2.5 and Nova Sonic model access | See below |
+| AWS Account | — | With Bedrock AgentCore, Claude Sonnet 4.6 and Nova Sonic model access | See below |
 
 > **The agentcore CLI comes from npm, not pip.** Earlier revisions of this README said `pip install strands-agents-builder`; that package provides a `strands` command (a sample Strands agent) and does **not** install the `agentcore` binary `deploy.sh` needs. Use `npm install -g @aws/agentcore`. `deploy.sh` checks for >= 0.13.0 on startup (that release fixed a scaffold-test regression that broke `agentcore deploy`). Upgrade with `npm install -g @aws/agentcore@latest`.
 
 **Important:** In [Bedrock Console > Model Access](https://console.aws.amazon.com/bedrock/home#/modelaccess), request access to:
-- **Kimi K2.5** (`moonshotai.kimi-k2.5`) for text chat
+- **Claude Sonnet 4.6** (invoked as the cross-region profile id `us.anthropic.claude-sonnet-4-6`) for text chat
 - **Amazon Nova Sonic** (`amazon.nova-2-sonic-v1:0`) for voice conversation
 
 ### Deployer IAM Permissions
@@ -742,7 +846,7 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 
 1. Open the chatbot URL from the deploy output, sign up / sign in
 2. 🎤 button left of the input box toggles voice / text mode
-3. **Text mode**: type and send, Kimi K2.5 (or per-user overridden model) responds
+3. **Text mode**: type and send, Claude Sonnet 4.6 (or the model an admin set in Build → Models) responds
 4. **Voice mode**: browser prompts for mic access → you hear the pre-rendered welcome clip "欢迎使用智能家居设备助手" → start talking, Nova Sonic does bi-directional streaming
 5. Voice-mode commands like "打开风扇到中档" trigger actual MQTT device commands via the MCP gateway
 6. **Live browser preview** (right-side rail, collapsed by default — click a label to expand): ask the agent any live-web question ("what does example.com say right now?", "find top 3 wireless earbuds under $100 on Amazon", "summarize the Python Wikipedia page") without saying `browse_web` — the skill description auto-routes it to the tool. The right panel streams the real Chrome via DCV at 1280×800 (scrollbars appear when the panel is narrower); each step is screenshotted into the agent's `/mnt/workspace/<session>/browser/` which the Files tab can browse and download. After the tool returns, the AgentCore session stays alive for **15 minutes** — click **Take control** to drive the browser manually (fill captchas, click filters, etc.) without a new tool call. See [architecture §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation).
@@ -1096,7 +1200,7 @@ curl -X POST http://localhost:8080/invocations \
 
 Fully AWS Serverless, pay-per-use. Estimates below are for 10K / 100K / 1M Daily Active Users (us-west-2, 2025 pricing).
 
-**Assumptions**: each user averages 10 conversations/day with 1 LLM call + 1.5 tool calls + 0.3 KB queries; LLM is Kimi K2.5 (~800 input tokens, ~200 output); KB has 1,000 docs (~500MB), synced 4x/month; roughly 2 of every 10 conversations use Nova Sonic voice mode.
+**Assumptions**: each user averages 10 conversations/day with 1 LLM call + 1.5 tool calls + 0.3 KB queries; LLM is Kimi K2.5 (~800 input tokens, ~200 output. **This estimate is priced on Kimi; the default model is now Claude Sonnet 4.6, which costs more — these figures have not been recomputed, so do not quote them without converting**); KB has 1,000 docs (~500MB), synced 4x/month; roughly 2 of every 10 conversations use Nova Sonic voice mode.
 
 | Module | Service | 10K DAU | 100K DAU | 1M DAU |
 |--------|---------|---------|----------|--------|
@@ -1147,7 +1251,7 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 - **`agentcore CLI not found`** → `npm install -g @aws/agentcore` (**not** a pip package; see [Prerequisites](#prerequisites))
 - **`agentcore deploy fails: Target not found in aws-targets.json`** → setup script seeds this; if running manually, create `[{"name": "default", "region": "us-west-2", "account": "YOUR_ACCOUNT_ID"}]`
 - **`CDK synth fails: pyproject.toml not found`** → `agent/pyproject.toml` must exist (included in repo)
-- **`Bedrock Model Access Denied`** → request access to Kimi K2.5 + Nova Sonic in the Bedrock console
+- **`Bedrock Model Access Denied`** → request access to the current default model (Claude Sonnet 4.6) + Nova Sonic in the Bedrock console; if you changed models, request that one
 - **`@aws-sdk/client-bedrockagentcorecontrol does not exist`** → expected; AgentCore resources are created by the `agentcore` CLI (step 6), not by CDK directly
 - **Teardown fails `Gateway has targets associated`** → the teardown script handles order; manually: `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → the account is at the AWS Agent Registry default quota (5). If a registry named `SmartHomeSkillsRegistry` already exists the deploy script reuses it automatically; otherwise request a quota increase in AWS Service Quotas or delete an unused registry.

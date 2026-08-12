@@ -252,6 +252,7 @@ const App: React.FC = () => {
         { type: 'link' as const, text: t('tab.skills'), href: '#/skills' },
         { type: 'link' as const, text: t('nav.prompt'), href: '#/agentPrompts' },
         { type: 'link' as const, text: t('nav.toolPolicy'), href: '#/users' },
+        { type: 'link' as const, text: t('nav.subAgentPolicy'), href: '#/subAgentPolicy' },
         { type: 'link' as const, text: t('tab.memories'), href: '#/memories' },
         { type: 'link' as const, text: t('tab.knowledgeBase'), href: '#/knowledgeBase' },
         { type: 'link' as const, text: t('tab.identity'), href: '#/identity' },

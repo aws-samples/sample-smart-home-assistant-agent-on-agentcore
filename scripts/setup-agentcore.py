@@ -34,6 +34,13 @@ AGENTCORE_DIR = os.path.join(PROJECT_ROOT, ".agentcore-project")
 # rather than imported. shared/tests/test_registry_namespace.py holds them together.
 REGISTRY_CLIENT = "agent-registry-control"
 
+# The orchestrator's default model, written into the runtime env in two places
+# below. A cross-region inference profile id: the bare `anthropic.claude-sonnet-4-6`
+# is not on-demand invocable. Repeated here rather than imported for the same reason
+# as REGISTRY_CLIENT above: this script does not import the agent tree.
+# agent/tests/test_default_model.py holds the copies in agreement.
+DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
+
 
 def get_stack_outputs():
     cf = boto3.client("cloudformation", region_name=REGION)
@@ -1380,7 +1387,7 @@ def main():
         rt.pop("authorizerType", None)
         rt.pop("authorizerConfiguration", None)
         rt["environmentVariables"] = {
-            "MODEL_ID": "moonshotai.kimi-k2.5",
+            "MODEL_ID": DEFAULT_MODEL_ID,
             "AWS_REGION": REGION,
         }
 
@@ -1838,7 +1845,7 @@ def main():
         ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
         rt_info = ac.get_agent_runtime(agentRuntimeId=runtime_id)
         existing_env = rt_info.get("environmentVariables", {})
-        existing_env["MODEL_ID"] = "moonshotai.kimi-k2.5"
+        existing_env["MODEL_ID"] = DEFAULT_MODEL_ID
         existing_env["AWS_REGION"] = REGION
         # Add skills table name for dynamic skill loading from DynamoDB
         skills_table = outputs.get("SkillsTableName", "smarthome-skills")

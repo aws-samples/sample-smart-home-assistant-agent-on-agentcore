@@ -130,6 +130,11 @@ export async function listUsers(): Promise<string[]> {
 export interface UserSettings {
   userId: string;
   modelId: string;
+  /** Which Bedrock endpoint serves `modelId` — `runtime` (Converse) or `mantle`
+   *  (OpenAI-compatible). Resolved from the live catalog when the model is
+   *  chosen and stored alongside it, because the AGENT is the consumer and it
+   *  cannot call the admin API. Empty means the agent works it out itself. */
+  modelEndpoint?: string;
   /** Optional per-user Bedrock multimodal model used by the vision captioning
    *  pipeline. Empty string = use the global default. */
   visionModelId?: string;
@@ -142,6 +147,47 @@ export interface UserSettings {
    *  sunset trigger cannot be computed from one of them. */
   latitude?: number | null;
   longitude?: number | null;
+}
+
+/** One selectable model, as the live catalog describes it. */
+export interface CatalogModel {
+  id: string;
+  label: string;
+  provider: string;
+  /** `runtime` = bedrock-runtime / Converse. `mantle` = bedrock-mantle /
+   *  OpenAI-compatible. A model served by both is reported as `runtime`. */
+  endpoint: 'runtime' | 'mantle';
+  /** Accepts image input. Always false for `mantle` models: that listing returns
+   *  ids only and says nothing about modalities, so this is "not stated" rather
+   *  than "not capable". The vision path runs on Converse regardless. */
+  vision: boolean;
+  deprecated: boolean;
+}
+
+export interface ModelCatalog {
+  models: CatalogModel[];
+  defaultModelId: string;
+  /** Non-empty when a listing FAILED. An empty `models` with an empty
+   *  `catalogError` means the account genuinely has nothing selectable; the two
+   *  must not be rendered the same way, or an admin goes looking for models to
+   *  enable when the real problem is a missing permission. */
+  catalogError: string;
+}
+
+/** The model picker's catalog, merged live from both Bedrock endpoints.
+ *
+ *  Rides `GET /settings/{userId}?action=catalog` rather than a `/models/catalog`
+ *  of its own: the admin Lambda's API Gateway resource policy is near its 20 KB
+ *  cap (see cdk/lib/smarthome-stack.ts). `userId` is ignored by the handler. */
+export async function getModelCatalog(refresh = false): Promise<ModelCatalog> {
+  const headers = await authHeaders();
+  const qs = `action=catalog${refresh ? '&refresh=1' : ''}`;
+  const res = await fetch(`${getBaseUrl()}/settings/__global__?${qs}`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load model catalog (${res.status})`);
+  }
+  return res.json();
 }
 
 export async function getSettings(userId: string): Promise<UserSettings> {
@@ -163,6 +209,7 @@ export async function updateSettings(
   // null for a coordinate to clear it.
   settings: {
     modelId?: string;
+    modelEndpoint?: string;
     visionModelId?: string;
     timezone?: string;
     latitude?: number | null;
@@ -1136,10 +1183,30 @@ export async function getUserA2APermissions(
   };
 }
 
+/** What materialising grant intent into Cognito groups actually did.
+ *
+ *  Returned by the save so the page can show that the two stores agree. A save can
+ *  succeed at writing intent and fail at writing membership, and only the second one
+ *  is what the sub-agents enforce on — so "saved" alone is not enough to report. */
+export interface A2AGroupSync {
+  ok: boolean;
+  error?: string;
+  users?: Array<{
+    username: string;
+    added: string[];
+    removed: string[];
+    narrowed: boolean;
+  }>;
+  /** Users signed out because their grants narrowed. Group membership is baked into
+   *  a token at issue, so without this a revoke does nothing until it expires. */
+  signedOut?: string[];
+  errors?: string[];
+}
+
 export async function updateUserA2APermissions(
   userId: string,
   a2aGrants: { [recordId: string]: string[] }
-): Promise<void> {
+): Promise<A2AGroupSync | undefined> {
   const headers = await authHeaders();
   const res = await fetch(
     `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=a2a`,
@@ -1156,6 +1223,101 @@ export async function updateUserA2APermissions(
       (body.error || `Failed to update A2A permissions (${res.status})`) + detail
     );
   }
+  const data = await res.json().catch(() => ({} as any));
+  return data.groupSync as A2AGroupSync | undefined;
+}
+
+/** One approved SKILL record, as the Integration Registry's Skills sub-tab shows it. */
+export interface RegistrySkill {
+  recordId: string;
+  name: string;
+  /** The registry dedup key, which may carry a collision suffix. Shown in the
+   *  drawer because it is what the API takes, while `name` is what humans read. */
+  dedupName: string;
+  description: string;
+  version: string;
+  status: string;
+  updatedAt: string;
+  publishedBy: string;
+  /** Scopes (`__global__` or a user id) that already imported this record. Answers
+   *  "is this live for anyone", which the record itself cannot. */
+  importedBy: string[];
+  license: string;
+  compatibility: string;
+  skillMd: string;
+  /** Set when the record exists but its descriptors could not be read. The row is
+   *  still listed: a malformed skill is something a curator needs to see, and
+   *  dropping it looks identical to it not existing. */
+  readError?: string;
+}
+
+/** Approved SKILL records from AWS Agent Registry.
+ *
+ *  `catalogError` non-empty means the LOOKUP failed — distinct from an empty
+ *  registry, and the two must not render alike. */
+export async function listRegistrySkills(): Promise<{
+  skills: RegistrySkill[];
+  catalogError: string;
+}> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=skill-list`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list registry skills (${res.status})`);
+  }
+  const data = await res.json();
+  return { skills: data.skills || [], catalogError: data.catalogError || '' };
+}
+
+export interface A2AReconcileRow {
+  username: string;
+  missing?: string[];
+  extra?: string[];
+  inSync: boolean;
+  error?: string;
+}
+
+export interface A2AReconcileResult {
+  ok: boolean;
+  catalogError?: string;
+  users: A2AReconcileRow[];
+  outOfSync?: string[];
+}
+
+/** Compare grant intent against the Cognito groups that actually enforce it.
+ *
+ *  Read-only. Called on `__global__` it walks every user. A one-way materialisation
+ *  drifts, and a sync with no way to see the drift is not a sync — same reasoning as
+ *  `sync-schedules` for scenes. */
+export async function reconcileA2AGrants(
+  userId = '__global__'
+): Promise<A2AReconcileResult> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=a2a-reconcile`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to reconcile grants (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Apply the reconcile: re-materialise intent for every affected user. */
+export async function repairA2AGrants(
+  userId = '__global__'
+): Promise<A2AGroupSync> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=a2a-reconcile`,
+    { method: 'PUT', headers }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to repair grants (${res.status})`);
+  }
+  return res.json();
 }
 
 export async function listA2aGrantsForRecord(

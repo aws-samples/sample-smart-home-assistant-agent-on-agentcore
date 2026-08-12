@@ -1,31 +1,39 @@
 """A2A client tools for the smarthome text agent.
 
-``build_a2a_tools(grants, registry_id, token_provider)`` resolves each granted
-A2A record's AgentCard from AgentCore Registry, then returns one Strands tool
-per (recordId, grantedSkillId) pair.
+``build_a2a_tools(grants, registry_id, user_token)`` resolves each granted agent's
+AgentCard from AgentCore Registry, then returns one Strands tool per
+(agentCardName, grantedSkillId) pair.
+
+``grants`` is keyed on the AgentCard **name**, not a Registry recordId, because a
+grant is a Cognito group named ``a2a-<agent>.<skill>`` and the name is what the
+sub-agent knows itself as. See ``a2a_groups.py``.
 
 Each tool:
   - Has a name like ``a2a_energy_optimization_agent_estimate_savings``.
   - Description = AgentCard skill description + examples (AI-readable).
-  - Closure pins endpoint_url + allowed_skill_ids + token_provider + the user's
-    idToken so the LLM cannot forge any of them. The LLM-facing signature is
-    ``_invoke(message: str)`` and nothing else — identity is never a parameter.
-  - Sends an A2A JSON-RPC ``message/send`` with
-      Authorization: Bearer <m2m JWT>        (service identity; Runtime checks it)
-      X-A2A-Allowed-Skills: <csv>            (ENFORCED downstream, not a hint)
-      X-SuperApp-User-Token: <user idToken>  (who this is actually for)
+  - Closure pins endpoint_url and the user's token so the LLM cannot forge either.
+    The LLM-facing signature is ``_invoke(message: str)`` and nothing else —
+    identity is never a parameter.
+  - Sends an A2A JSON-RPC ``message/send`` with a single header:
+      Authorization: Bearer <the end user's own idToken>
 
-Why the user token rides in its own header: the m2m token is a
-client_credentials token with no ``sub``, so it identifies the calling service
-and nothing else. A sub-agent that touches a user's devices needs the end user,
-and ``Authorization`` is already taken by the token the Runtime's CUSTOM_JWT
-authorizer validates — the same split the main runtime uses when the chatbot
-sends its idToken in X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken.
+One token, because the authorization now lives in that token's claims. Each
+sub-agent Runtime's ``customJWTAuthorizer.customClaims`` matches ``cognito:groups``
+against its own grant groups, so a caller with no grant is refused by AgentCore
+before the container is reached, and the sub-agent derives *which* skills from the
+same verified claim.
 
-The sub-agent re-verifies that token (signature, issuer, audience, expiry) rather
-than trusting it, and uses the resulting sub to call the same Gateway the main
-agent does, so Cedar evaluates the real end user. See
-a2a-agent-registry/common/user_identity.py.
+That replaced three separate mechanisms: a ``client_credentials`` m2m token in
+``Authorization`` (which had no ``sub``, hence a second header carrying the user),
+and ``X-A2A-Allowed-Skills``, which the client set itself and could therefore widen.
+A signed claim cannot be widened by the caller, and it is checked by the platform
+rather than by us. The sub-agent still re-verifies the token independently rather
+than trusting this hop — see a2a-agent-registry/common/user_identity.py.
+
+The call goes straight to the sub-agent's Runtime rather than through the Gateway.
+A Gateway passthrough hop was designed in to unify auth; unifying it on the user's
+token achieved that without the hop, so adding one would now cost a round trip and
+eight targets to keep in step for centralised egress alone.
 
 All failures are soft: the tool returns a string beginning with
 ``"A2A agent call failed: ..."`` so the LLM can apologise / fall back rather
@@ -46,6 +54,8 @@ from functools import lru_cache
 from typing import Any, Callable
 
 import boto3
+
+import a2a_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +85,14 @@ _SLUG_RE = re.compile(r"[^a-z0-9_]+")
 
 
 def _slug(raw: str) -> str:
-    return _SLUG_RE.sub("_", raw.lower()).strip("_") or "x"
+    """Kept as a thin alias so this module reads unchanged.
+
+    The definition lives in a2a_prompt because the routing table and the tool builder
+    must derive identical names: if they disagreed, the prompt would confidently name
+    a tool that does not exist and the model would fall back to its own knowledge
+    with nothing logged.
+    """
+    return a2a_prompt.slug(raw)
 
 
 # ----------------------------------------------------------------------------
@@ -169,22 +186,77 @@ def fetch_agent_card(registry_id: str, record_id: str) -> dict:
 # Tool construction
 # ----------------------------------------------------------------------------
 
+@lru_cache(maxsize=4)
+def _cards_by_name_cached(registry_id: str, _time_bucket: int) -> dict[str, dict]:
+    """{AgentCard name: card} for every APPROVED agent record in the registry.
+
+    Grants arrive keyed on the card NAME, because that is what a Cognito grant group
+    encodes and what the sub-agent knows itself as. Records are still where the card
+    lives, so this is the name -> card lookup.
+
+    One paginated list per minute per container rather than a get per grant: a user
+    with five grants used to cost five sequential round trips on the request path.
+    Listing is also what makes a grant for a deprecated record resolve to "no such
+    agent" instead of a 404 mid-turn.
+    """
+    client = _registry_client()
+    out: dict[str, dict] = {}
+    token = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "registryId": registry_id,
+            "filters": [
+                {"name": "recordType", "values": ["AGENT"]},
+                {"name": "status", "values": ["APPROVED"]},
+            ],
+        }
+        if token:
+            kwargs["nextToken"] = token
+        resp = client.list_registry_records(**kwargs)
+        for summary in (resp.get("registryRecords") or resp.get("records") or []):
+            record_id = summary.get("recordId")
+            if not record_id:
+                continue
+            # The list response carries no descriptors, so the card still needs a
+            # get. Cached with the whole map, so this is once a minute, not per turn.
+            try:
+                detail = client.get_registry_record(
+                    registryId=registry_id, recordId=record_id)
+                raw = read_agent_card(detail)
+                if not raw:
+                    continue
+                card = json.loads(raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not read the card for %s: %s", record_id, exc)
+                continue
+            name = card.get("name", "")
+            if name:
+                out[name] = card
+        token = resp.get("nextToken")
+        if not token:
+            return out
+
+
+def cards_by_name(registry_id: str) -> dict[str, dict]:
+    return _cards_by_name_cached(registry_id, int(time.time() // 60))
+
+
 def build_a2a_tools(
     grants: dict[str, list[str]],
     registry_id: str,
-    token_provider: Callable[[], str],
     user_token: str | None = None,
 ) -> list[Any]:
-    """Return a list of Strands tools — one per granted (record, skill) pair.
+    """Return a list of Strands tools — one per granted (agent, skill) pair.
 
-    ``user_token`` is the caller's idToken, already validated by the Runtime
-    before ``invoke_agent`` ran. It is forwarded so a sub-agent can act as that
-    user against the same Gateway, under the same Cedar policies. Optional so an
-    unauthenticated path still builds tools that work for prompt-only agents;
-    tool-using sub-agents refuse a request that arrives without it.
+    ``grants`` is keyed on AgentCard name, as a Cognito grant group encodes it.
 
-    Soft-fails on per-record AgentCard resolution: logs a warning and skips
-    that record. Returns an empty list if ``grants`` is empty.
+    ``user_token`` is the caller's own token and is now the ONLY credential: the
+    sub-agent's Runtime authorizer validates it and checks its `cognito:groups` claim
+    for a grant, so there is no separate service token. Without it no tool can be
+    built, because there is nothing to authenticate with.
+
+    Soft-fails per agent: logs a warning and skips one whose card cannot be
+    resolved. Returns an empty list if ``grants`` is empty.
     """
     if not grants:
         return []
@@ -192,19 +264,34 @@ def build_a2a_tools(
     # Import lazily so test code that patches strands works consistently.
     from strands import tool as strands_tool
 
+    try:
+        catalog = cards_by_name(registry_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("A2A card catalog fetch failed: %s", e)
+        return []
+
     tools: list[Any] = []
-    for record_id, skill_ids in grants.items():
+    for agent_name, skill_ids in grants.items():
         if not skill_ids:
             continue
-        try:
-            card = fetch_agent_card(registry_id, record_id)
-        except Exception as e:
-            logger.warning("A2A AgentCard fetch failed for %s: %s", record_id, e)
+        card = catalog.get(agent_name)
+        if card is None:
+            # A grant group for an agent with no approved record. Skipped rather
+            # than guessed: the group may predate a record being deprecated.
+            logger.warning(
+                "grant names agent %r, which has no approved Registry record; "
+                "skipped", agent_name)
             continue
+        # Straight to the sub-agent's Runtime, not through the Gateway. Routing A2A
+        # through a Gateway passthrough target was designed in to unify auth, and
+        # that reason evaporated once the user's own token became the credential:
+        # the sub-agent's authorizer validates it and checks the grant claim
+        # directly. A gateway hop would now buy centralised egress and its own
+        # observability at the price of a round trip and eight targets to keep in
+        # step, so it is deliberately not in this path. See docs §9.13.
         endpoint_url = card.get("url", "")
-        agent_name = card.get("name", "")
-        if not endpoint_url or not agent_name:
-            logger.warning("A2A card %s missing url/name; skipped", record_id)
+        if not endpoint_url:
+            logger.warning("A2A card %s has no endpoint; skipped", agent_name)
             continue
 
         card_skill_ids = {s.get("id") for s in (card.get("skills") or [])}
@@ -219,8 +306,6 @@ def build_a2a_tools(
                 agent_name=agent_name,
                 endpoint_url=endpoint_url,
                 skill=skill,
-                allowed_skill_ids=list(skill_ids),
-                token_provider=token_provider,
                 user_token=user_token,
                 # The card we already have. Passing it removes the per-call
                 # GET /.well-known/agent-card.json whose only used field was
@@ -237,12 +322,10 @@ def _make_skill_tool(
     agent_name: str,
     endpoint_url: str,
     skill: dict,
-    allowed_skill_ids: list[str],
-    token_provider: Callable[[], str],
     user_token: str | None = None,
     card_dict: dict | None = None,
 ):
-    tool_name = f"a2a_{_slug(agent_name)}_{_slug(skill.get('id', 'x'))}"
+    tool_name = a2a_prompt.tool_name(agent_name, skill.get("id", "x"))
     desc_parts = [skill.get("description", "").strip() or skill.get("name", "")]
     examples = skill.get("examples") or []
     if examples:
@@ -254,8 +337,6 @@ def _make_skill_tool(
     # `_user_token` is pinned here for the same reason the MCP wrappers pin the
     # sub: it must not be reachable from the LLM-facing signature.
     _endpoint = endpoint_url
-    _allowed = list(allowed_skill_ids)
-    _token = token_provider
     _user_token = user_token
     _card = dict(card_dict or {})
 
@@ -269,8 +350,6 @@ def _make_skill_tool(
                 # rather than prepended so the request stays the first thing the
                 # specialist reads.
                 message=message + _device_context(message),
-                allowed_skill_ids=_allowed,
-                token_provider=_token,
                 user_token=_user_token,
                 card_dict=_card,
             )
@@ -475,8 +554,6 @@ def _local_agent_card(card_dict: dict, endpoint_url: str):
 def _send_a2a_message(
     endpoint_url: str,
     message: str,
-    allowed_skill_ids: list[str],
-    token_provider: Callable[[], str],
     user_token: str | None = None,
     card_dict: dict | None = None,
 ) -> str:
@@ -499,18 +576,18 @@ def _send_a2a_message(
             "short cooldown; report it as unavailable rather than retrying")
 
     async def _run() -> str:
-        headers = {
-            "Authorization": f"Bearer {token_provider()}",
-            "X-A2A-Allowed-Skills": ",".join(allowed_skill_ids),
-        }
-        if user_token:
-            # Forward the end user so the sub-agent can act as them. It arrives
-            # here already validated by the Runtime, and the sub-agent verifies
-            # it again independently rather than trusting this hop.
-            token = user_token
-            if token.lower().startswith("bearer "):
-                token = token.split(" ", 1)[1].strip()
-            headers["X-SuperApp-User-Token"] = token
+        # One token, and it is the end user's own. The sub-agent's Runtime authorizer
+        # validates it and checks its `cognito:groups` claim for a grant on itself,
+        # so there is no service token to mint and no second header to allowlist.
+        # The sub-agent verifies it again independently rather than trusting this hop.
+        token = (user_token or "").strip()
+        if token.lower().startswith("bearer "):
+            token = token.split(" ", 1)[1].strip()
+        if not token:
+            raise A2AUnavailable(
+                "no user token on this turn, and the end user's token is the only "
+                "credential a specialist accepts")
+        headers = {"Authorization": f"Bearer {token}"}
         timeout = httpx.Timeout(_READ_TIMEOUT, connect=_CONNECT_TIMEOUT)
         async with httpx.AsyncClient(headers=headers, timeout=timeout) as http:
             card = _local_agent_card(card_dict or {}, endpoint_url)

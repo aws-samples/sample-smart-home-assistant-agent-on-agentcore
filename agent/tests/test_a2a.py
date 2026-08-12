@@ -46,56 +46,52 @@ CARD_SECURITY = {
 
 
 def _patch_card_fetch(monkeypatch, cards):
-    """Make fetch_agent_card return the given dict for each known recordId.
+    """Make the registry serve these cards, keyed by AgentCard NAME.
 
-    Raises ValueError otherwise — lets us verify soft-fail behaviour.
+    Grants arrive keyed on the card name now (that is what a Cognito grant group
+    encodes), so the lookup is a name -> card map built once per container rather
+    than a get per recordId. A name that is absent must be skipped softly, which is
+    what the "unknown agent" test relies on.
     """
     from tools import a2a as a2a_mod
 
-    def _fake(registry_id, record_id):
-        if record_id not in cards:
-            raise ValueError(f"unknown recordId {record_id}")
-        return cards[record_id]
-
-    monkeypatch.setattr(a2a_mod, "fetch_agent_card", _fake)
+    by_name = {c["name"]: c for c in cards.values()}
+    monkeypatch.setattr(a2a_mod, "cards_by_name", lambda registry_id: by_name)
 
 
 def _patch_send(monkeypatch, replies):
-    """replies: dict[endpoint_url, callable(message, allowed_skill_ids) -> str]"""
+    """replies: dict[endpoint_url, callable(message) -> str]"""
     from tools import a2a as a2a_mod
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+    def _fake_send(endpoint_url, message,
                    user_token=None, card_dict=None):
-        # Ensure token_provider is callable (matches production contract).
-        assert callable(token_provider)
         handler = replies.get(endpoint_url)
         if handler is None:
             raise RuntimeError(f"no stub for endpoint {endpoint_url}")
-        return handler(message, allowed_skill_ids)
+        return handler(message)
 
     monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
 
 
 def test_empty_grants_returns_empty_list():
     from tools.a2a import build_a2a_tools
-    assert build_a2a_tools({}, "rid", lambda: "tok") == []
+    assert build_a2a_tools({}, "rid") == []
 
 
 def test_build_tools_one_per_granted_skill(monkeypatch):
     from tools.a2a import build_a2a_tools
 
     _patch_card_fetch(monkeypatch, {
-        "rec-energy": CARD_ENERGY,
-        "rec-security": CARD_SECURITY,
+        "energy-optimization-agent": CARD_ENERGY,
+        "home-security-agent": CARD_SECURITY,
     })
 
     tools = build_a2a_tools(
         grants={
-            "rec-energy": ["estimate_savings", "tariff_analysis"],
-            "rec-security": ["risk_assessment"],
+            "energy-optimization-agent": ["estimate_savings", "tariff_analysis"],
+            "home-security-agent": ["risk_assessment"],
         },
         registry_id="test-registry",
-        token_provider=lambda: "tok",
     )
     assert len(tools) == 3
     names = sorted(getattr(t, "tool_name", None) or getattr(t, "__name__", "") for t in tools)
@@ -109,12 +105,11 @@ def test_build_tools_one_per_granted_skill(monkeypatch):
 def test_build_tools_filters_unauthorized_skills(monkeypatch):
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
 
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},  # tariff_analysis omitted
+        grants={"energy-optimization-agent": ["estimate_savings"]},  # tariff_analysis omitted
         registry_id="test-registry",
-        token_provider=lambda: "tok",
     )
     assert len(tools) == 1
     name = getattr(tools[0], "tool_name", None) or getattr(tools[0], "__name__", "")
@@ -127,17 +122,14 @@ def test_registry_failure_is_soft(monkeypatch):
     from tools.a2a import build_a2a_tools
 
     # rec-energy resolves fine, rec-missing blows up — we still get one tool.
-    def _fake(registry_id, record_id):
-        if record_id == "rec-energy":
-            return CARD_ENERGY
-        raise RuntimeError(f"boom {record_id}")
-
-    monkeypatch.setattr(a2a_mod, "fetch_agent_card", _fake)
+    # Only one of the two granted agents has an approved record. The other must be
+    # skipped softly: a grant group can outlive the record it names.
+    monkeypatch.setattr(a2a_mod, "cards_by_name",
+                        lambda registry_id: {"energy-optimization-agent": CARD_ENERGY})
 
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"], "rec-missing": ["anything"]},
+        grants={"energy-optimization-agent": ["estimate_savings"], "no-such-agent": ["anything"]},
         registry_id="test-registry",
-        token_provider=lambda: "tok",
     )
     assert len(tools) == 1
 
@@ -145,12 +137,11 @@ def test_registry_failure_is_soft(monkeypatch):
 def test_tool_description_carries_skill_doc_and_examples(monkeypatch):
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
 
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},
+        grants={"energy-optimization-agent": ["estimate_savings"]},
         registry_id="test-registry",
-        token_provider=lambda: "tok",
     )
     tool = tools[0]
     # Strands tool carries the description on its spec
@@ -167,7 +158,7 @@ def test_tool_invocation_soft_fails_on_send_error(monkeypatch):
     from tools import a2a as a2a_mod
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
 
     def _raise(*a, **kw):
         raise RuntimeError("network boom")
@@ -175,9 +166,8 @@ def test_tool_invocation_soft_fails_on_send_error(monkeypatch):
     monkeypatch.setattr(a2a_mod, "_send_a2a_message", _raise)
 
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},
+        grants={"energy-optimization-agent": ["estimate_savings"]},
         registry_id="test-registry",
-        token_provider=lambda: "tok",
     )
     # Invoke the underlying function (strands.tool wraps it but keeps the
     # callable). Strands tools are usually invoked via .invoke() or by the
@@ -201,16 +191,14 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     from tools import a2a as a2a_mod
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
     calls = []
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+    def _fake_send(endpoint_url, message,
                    user_token=None, card_dict=None):
         calls.append({
             "endpoint": endpoint_url,
             "message": message,
-            "allowed": list(allowed_skill_ids),
-            "token": token_provider(),
             "user_token": user_token,
         })
         return f"⟦A2A⟧ echo: {message}"
@@ -218,9 +206,8 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
 
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},
+        grants={"energy-optimization-agent": ["estimate_savings"]},
         registry_id="test-registry",
-        token_provider=lambda: "tok-abc",
     )
     wrapped = tools[0]
     for attr in ("func", "_func", "callable", "__wrapped__"):
@@ -234,17 +221,14 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["endpoint"] == CARD_ENERGY["url"]
     assert calls[0]["message"] == "How much can I save?"
-    assert calls[0]["allowed"] == ["estimate_savings"]
-    assert calls[0]["token"] == "tok-abc"
 
 
 # ---------------------------------------------------------------------------
-# User identity forwarding
+# User identity
 #
-# A sub-agent that touches devices needs the end user, and the m2m token in
-# Authorization cannot supply one — it is a client_credentials token with no
-# `sub`. The user's idToken therefore rides in its own header, pinned in the
-# tool closure so the LLM can never name a different user.
+# The end user's own token IS the credential: the sub-agent's Runtime authorizer
+# validates it and checks its `cognito:groups` claim for a grant. It is pinned in
+# the tool closure so the LLM can never name a different user.
 # ---------------------------------------------------------------------------
 
 def _invoke_tool(wrapped, message):
@@ -260,10 +244,9 @@ def _capture_sends(monkeypatch):
 
     calls = []
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+    def _fake_send(endpoint_url, message,
                    user_token=None, card_dict=None):
-        calls.append({"user_token": user_token,
-                      "allowed": list(allowed_skill_ids)})
+        calls.append({"user_token": user_token})
         return "⟦A2A⟧ ok"
 
     monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
@@ -273,34 +256,45 @@ def _capture_sends(monkeypatch):
 def test_user_token_is_forwarded_to_the_sub_agent(monkeypatch):
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
     calls = _capture_sends(monkeypatch)
 
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},
+        grants={"energy-optimization-agent": ["estimate_savings"]},
         registry_id="test-registry",
-        token_provider=lambda: "tok-abc",
         user_token="Bearer user.id.token",
     )
     _invoke_tool(tools[0], "hello")
     assert calls[0]["user_token"] == "Bearer user.id.token"
 
 
-def test_user_token_is_absent_when_there_is_none(monkeypatch):
-    """An unauthenticated path still builds working tools for prompt-only
-    specialists; the tool-using ones refuse on the far side."""
-    from tools.a2a import build_a2a_tools
+def test_no_user_token_refuses_locally_rather_than_calling(monkeypatch):
+    """The user's token is now the ONLY credential, so a turn without one has
+    nothing to authenticate with. It must refuse here rather than send an
+    unauthenticated request and surface a 401 as a specialist failure."""
+    import httpx
+    from tools import a2a as a2a_mod
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
-    calls = _capture_sends(monkeypatch)
+    opened = []
 
-    tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},
-        registry_id="test-registry",
-        token_provider=lambda: "tok-abc",
-    )
-    _invoke_tool(tools[0], "hello")
-    assert calls[0]["user_token"] is None
+    class _NoClient:
+        def __init__(self, headers=None, timeout=None):
+            opened.append(headers)
+
+        async def __aenter__(self):
+            raise AssertionError("a request was sent with no credential")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", _NoClient)
+    with pytest.raises(a2a_mod.A2AUnavailable, match="only credential"):
+        a2a_mod._send_a2a_message(
+            endpoint_url="https://example.invalid/invocations",
+            message="hi",
+            user_token=None,
+        )
+    assert opened == [], "an HTTP client was constructed before the credential check"
 
 
 def test_the_llm_facing_signature_takes_only_a_message(monkeypatch):
@@ -308,12 +302,11 @@ def test_the_llm_facing_signature_takes_only_a_message(monkeypatch):
     parameter, so the model cannot supply or override one."""
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
     _capture_sends(monkeypatch)
     tools = build_a2a_tools(
-        grants={"rec-energy": ["estimate_savings"]},
+        grants={"energy-optimization-agent": ["estimate_savings"]},
         registry_id="test-registry",
-        token_provider=lambda: "tok-abc",
         user_token="Bearer user.id.token",
     )
     spec = tools[0].tool_spec
@@ -348,13 +341,13 @@ def test_bearer_prefix_is_stripped_before_the_header_is_set(monkeypatch):
         a2a_mod._send_a2a_message(
             endpoint_url="https://example.invalid/invocations",
             message="hi",
-            allowed_skill_ids=["estimate_savings"],
-            token_provider=lambda: "m2m-token",
             user_token="Bearer  user.id.token  ",
         )
-    assert sent["X-SuperApp-User-Token"] == "user.id.token"
-    assert sent["Authorization"] == "Bearer m2m-token"
-    assert sent["X-A2A-Allowed-Skills"] == "estimate_savings"
+    # One header, carrying the end user's own token. The grant travels inside it as
+    # a `cognito:groups` claim, so there is nothing else to send.
+    assert sent["Authorization"] == "Bearer user.id.token"
+    assert "X-SuperApp-User-Token" not in sent
+    assert "X-A2A-Allowed-Skills" not in sent
 
 
 # ---------------------------------------------------------------------------
@@ -370,16 +363,16 @@ def test_the_registry_card_is_passed_to_the_send_so_no_fetch_is_needed(monkeypat
 
     seen = {}
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+    def _fake_send(endpoint_url, message,
                    user_token=None, card_dict=None):
         seen["card"] = card_dict
         return "ok"
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
     monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
 
-    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
-                            registry_id="reg", token_provider=lambda: "m2m")
+    tools = build_a2a_tools(grants={"energy-optimization-agent": ["estimate_savings"]},
+                            registry_id="reg")
     _invoke_tool(tools[0], "hi")
     assert seen["card"], "the card was not threaded through; a fetch would happen"
     assert seen["card"]["name"] == "energy-optimization-agent"
@@ -562,9 +555,9 @@ def test_an_open_breaker_reports_unavailable_rather_than_a_failed_call(monkeypat
     from tools import a2a as a2a_mod
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
-    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
-                            registry_id="reg", token_provider=lambda: "m2m")
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
+    tools = build_a2a_tools(grants={"energy-optimization-agent": ["estimate_savings"]},
+                            registry_id="reg")
 
     a2a_mod._breaker.clear()
     for _ in range(a2a_mod._BREAKER_THRESHOLD):
@@ -601,10 +594,10 @@ def test_the_device_brief_is_appended_to_the_delegated_message(monkeypatch):
     from tools import a2a as a2a_mod
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
     sent = []
 
-    def _fake_send(endpoint_url, message, allowed_skill_ids, token_provider,
+    def _fake_send(endpoint_url, message,
                    user_token=None, card_dict=None):
         sent.append(message)
         return "ok"
@@ -613,8 +606,8 @@ def test_the_device_brief_is_appended_to_the_delegated_message(monkeypatch):
     monkeypatch.setattr(a2a_mod, "_device_context",
                         lambda msg: "\n\nDevices already identified: living-strip-1")
 
-    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
-                            registry_id="reg", token_provider=lambda: "m2m")
+    tools = build_a2a_tools(grants={"energy-optimization-agent": ["estimate_savings"]},
+                            registry_id="reg")
     _invoke_tool(tools[0], "make the living room cosy")
 
     # The model's request stays FIRST — the brief is context, not the instruction.
@@ -631,16 +624,16 @@ def test_no_brief_leaves_the_message_byte_for_byte_unchanged(monkeypatch):
     from tools import a2a as a2a_mod
     from tools.a2a import build_a2a_tools
 
-    _patch_card_fetch(monkeypatch, {"rec-energy": CARD_ENERGY})
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
     sent = []
     monkeypatch.setattr(
         a2a_mod, "_send_a2a_message",
-        lambda endpoint_url, message, allowed_skill_ids, token_provider,
+        lambda endpoint_url, message,
         user_token=None, card_dict=None: sent.append(message) or "ok")
     monkeypatch.setattr(a2a_mod, "_device_context", lambda msg: "")
 
-    tools = build_a2a_tools(grants={"rec-energy": ["estimate_savings"]},
-                            registry_id="reg", token_provider=lambda: "m2m")
+    tools = build_a2a_tools(grants={"energy-optimization-agent": ["estimate_savings"]},
+                            registry_id="reg")
     _invoke_tool(tools[0], "how much could I save?")
     assert sent == ["how much could I save?"]
 

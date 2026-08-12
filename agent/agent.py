@@ -14,11 +14,26 @@ import re
 
 from strands import Agent, AgentSkills
 from strands.vended_plugins.skills import Skill
-from strands.models.bedrock import BedrockModel, CacheConfig
+from strands.models.bedrock import CacheConfig
 from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client
 from bedrock_agentcore import BedrockAgentCoreApp
 from memory.session import get_memory_session_manager, _sanitize_actor_id
+
+# Which of the two Bedrock endpoints serves a given model, and the Strands
+# provider that reaches it. The default model is Mantle-only, so this is not
+# optional plumbing. See agent/model_provider.py.
+import model_provider
+
+# The Cognito group convention that carries A2A grants. Same file as
+# shared/a2a_groups.py, copied because only `agent/` is packaged into this CodeZip;
+# shared/tests/test_a2a_groups_parity.py holds them identical.
+import a2a_groups
+# Claim parsing lives in its own module so it can be imported and tested without
+# pulling in strands/playwright/browser-use.
+from a2a_grants import grants_from_user_token
+# The generated half of the delegation prompt. Also import-light.
+import a2a_prompt
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -36,7 +51,13 @@ if not GATEWAY_URL:
         elif key.startswith("AGENTCORE_GATEWAY_") and key.endswith("_ARN"):
             GATEWAY_ARN = val
 
-MODEL_ID = os.environ.get("MODEL_ID", "moonshotai.kimi-k2.5")
+# Reached over Converse on `bedrock-runtime` via its cross-region inference profile
+# (the bare `anthropic.claude-sonnet-4-6` id is not on-demand invocable). Bedrock
+# Mantle is not integrated in this build — see agent/model_provider.py for what that
+# would take. Keep in agreement with model_catalog.DEFAULT_MODEL_ID, the two writes
+# in scripts/setup-agentcore.py and restore-text-runtime-config.py;
+# agent/tests/test_default_model.py holds the four copies together.
+MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SKILLS_TABLE_NAME = os.environ.get("SKILLS_TABLE_NAME", "")
 # Dedicated table for per-login AgentCore Runtime sessions (text + voice).
@@ -103,43 +124,21 @@ def load_user_settings(actor_id: str) -> dict:
         resp = table.get_item(Key={"userId": uid, "skillName": "__settings__"})
         item = resp.get("Item")
         if item and item.get("modelId"):
-            return {"modelId": item["modelId"]}
+            # `modelEndpoint` rides along with the model it describes. It is a
+            # HINT, not a requirement: an older row predating this field, or one a
+            # deploy has rewritten, simply has no endpoint and model_provider
+            # works it out instead.
+            return {
+                "modelId": item["modelId"],
+                "modelEndpoint": item.get("modelEndpoint", ""),
+            }
     return {}
 
 
-def load_user_a2a_permissions(actor_id: str) -> dict[str, list[str]]:
-    """Return {registryRecordId: [allowed_skill_id, ...]} for this user.
 
-    Global grants (``__global__``) are merged with per-user grants; per-user
-    wins on the same recordId. Same merge semantics as ``load_skills_from_dynamodb``.
-    A missing row means "no grants"; the agent simply registers no A2A tools.
-    """
-    if not SKILLS_TABLE_NAME:
-        return {}
-    table = _get_dynamodb().Table(SKILLS_TABLE_NAME)
-    merged: dict[str, list[str]] = {}
 
-    def _read(uid: str) -> dict:
-        if not uid or uid in ("default",):
-            return {}
-        try:
-            resp = table.get_item(Key={"userId": uid, "skillName": "__a2a_permissions__"})
-        except Exception as e:
-            logger.warning(f"A2A perms read failed for {uid}: {e}")
-            return {}
-        item = resp.get("Item") or {}
-        grants = item.get("a2aGrants") or {}
-        # DynamoDB can hand us sets; normalise to lists of str.
-        out: dict[str, list[str]] = {}
-        for rid, skills in grants.items():
-            if isinstance(skills, (set, list, tuple)):
-                out[rid] = sorted(str(s) for s in skills)
-        return out
 
-    merged.update(_read("__global__"))
-    if actor_id and actor_id != "__global__":
-        merged.update(_read(actor_id))
-    return merged
+
 
 
 def load_system_prompt(actor_id: str, agent_type: str,
@@ -282,7 +281,17 @@ request. If you must refuse, refuse in JSON: {"error": "..."}."""
 # tool call must not be delegated, or every light switch pays for a conversation.
 # Delegation is for work that genuinely needs a specialist: multi-device
 # orchestration, capability reasoning, creative generation.
-A2A_DELEGATION_RULES = """SPECIALIST AGENTS (A2A) — ROUTING RULES. These OVERRIDE the
+# The two hand-written halves of the delegation section. The TABLE between them is
+# generated per turn from the granted AgentCards (a2a_prompt.build_routing_table),
+# which is what makes granting a sub-agent sufficient — no prompt edit, no redeploy.
+#
+# What stays hand-written is what cannot be derived from a skill description: that a
+# delegation costs at least two serial LLM calls plus network (measured 5-15s), so
+# anything one tool call can do must not be delegated; that a match makes the call
+# mandatory; routing on subject rather than phrasing; NOW versus LATER; the two-step
+# choreography; and asking independent specialists in the same turn. Those came from
+# measured behaviour, not from the cards.
+A2A_DELEGATION_PREAMBLE = """SPECIALIST AGENTS (A2A) — ROUTING RULES. These OVERRIDE the
 capability list above wherever the two disagree.
 
 Some of your tools are named `a2a_<agent>_<skill>`. Each is a separate specialist
@@ -292,42 +301,9 @@ right, because the specialist is the part of this system that is governed,
 auditable and kept up to date.
 
 MATCH THE REQUEST TO A TOOL BY NAME. Read your tool list each turn and route:
+"""
 
-  the user asks about                         call
-  ------------------------------------------  --------------------------------
-  what a product can do, a spec, a manual,    a2a_knowledge_qa_agent_answer_from_docs
-  a mode/preset list, "what does X support"
-  a symptom, a fault, "why is X doing this"   a2a_knowledge_qa_agent_troubleshoot_from_docs
-  a mood, scene or picture turned into        a2a_light_effect_agent_compose_effect
-  lighting ("calm ocean", "cosy", "party")
-  a described image turned into lighting      a2a_light_effect_agent_effect_from_description
-  a routine, schedule or automation           a2a_task_management_agent_compose_scenario
-  ("every night at 23:00…", "when it gets
-  hot…", "at sunset…", "save this as
-  movie mode")
-  listing, changing or RUNNING a saved        a2a_task_management_agent_manage_scenario
-  automation ("run my movie mode",
-  "what automations do I have")
-  advice on what to automate                  a2a_task_management_agent_suggest_automation
-  lights moving WITH MUSIC right now          a2a_scene_sync_agent_music_feast
-  ("dance to the music", "on the beat")
-  lights following the SCREEN right now       a2a_scene_sync_agent_video_feast
-  ("watching a film, follow the TV",
-  "cinema mode")
-  security risk, an intrusion, a gap          a2a_home_security_agent_risk_assessment
-  responding to a security incident           a2a_home_security_agent_incident_response
-  saving energy, running cost, consumption    a2a_energy_optimization_agent_estimate_savings
-  electricity tariffs, time-of-use vs flat    a2a_energy_optimization_agent_tariff_analysis
-  filters, servicing, wear, upkeep            a2a_appliance_maintenance_agent_*
-  several devices coordinated to one          a2a_device_control_agent_orchestrate_devices
-  outcome, where order or choice matters
-  which device the user means, or whether     a2a_device_control_agent_resolve_capability
-  a device can do the thing they asked
-  a reading across SEVERAL devices, or a      a2a_device_control_agent_inspect_devices
-  state question spanning the whole home
-  (one device's own state is still yours)
-
-Route on the SUBJECT of the request, not on how it is phrased. "What animation
+A2A_DELEGATION_EPILOGUE = """Route on the SUBJECT of the request, not on how it is phrased. "What animation
 modes does the LED matrix support?" is a documentation question, so it goes to
 knowledge-QA even though it names a device. "Turn the LED matrix off every night"
 is an automation, so it goes to task-management even though turning something
@@ -406,7 +382,23 @@ failure.
 
 The one exception is when the user asked only to SAVE a scene for later. Then say
 it is saved and do not apply anything — but that is the user declining execution,
-not you skipping it."""
+not you skipping it.
+"""
+
+
+def build_delegation_rules(grants: dict, cards: dict) -> str:
+    """The delegation section for this turn, or "" when nothing is granted.
+
+    A user with no specialists is told nothing about specialists — the same reason
+    the section was always conditional, now applied per sub-agent rather than
+    all-or-nothing.
+    """
+    table = a2a_prompt.build_routing_table(grants, cards)
+    if not table:
+        return ""
+    return "\n".join([A2A_DELEGATION_PREAMBLE.rstrip(), "",
+                       table, "", A2A_DELEGATION_EPILOGUE.lstrip()])
+
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*\n(.*?)\n?\s*```\s*$", re.DOTALL)
@@ -457,10 +449,16 @@ def _strands_version() -> str:
 
 
 def create_agent(tools=None, session_manager=None, skills=None, model_id=None,
-                 system_prompt=None, headers=None):
-    model = BedrockModel(
-        model_id=model_id or MODEL_ID,
-        region_name=AWS_REGION,
+                 system_prompt=None, headers=None, model_endpoint=None):
+    effective_model_id = model_id or MODEL_ID
+    # Which Bedrock endpoint serves this model. `model_endpoint` is the hint the
+    # admin console stored next to the model id; model_provider falls back to the
+    # Mantle listing and then to Converse. See agent/model_provider.py.
+    endpoint = model_provider.resolve_endpoint(
+        effective_model_id, model_endpoint or "")
+    model = model_provider.build_model(
+        effective_model_id,
+        endpoint,
         streaming=True,
         # Prompt caching (spec 5 S3). Measured on this deployment: the prefix in
         # front of every turn — system prompt (~1.6k tokens), the A2A routing
@@ -485,27 +483,27 @@ def create_agent(tools=None, session_manager=None, skills=None, model_id=None,
         # logs a warning and proceeds uncached. Cache hits need an EXACT prefix
         # match, which is why the static system prompt, skills and tools sit in
         # front and the user's message last — the order the prompt already used.
+        #
+        # Ignored on the Mantle path, which caches prefixes automatically and has
+        # no cache point to place. The 98% figure above is therefore an
+        # Anthropic-path measurement and does NOT describe the default model.
         cache_config=CacheConfig(strategy="auto"),
     )
 
-    # Log once per agent build whether caching actually engaged, because when it
-    # does not the failure is silent in BOTH directions: the answer is identical
-    # and the only trace is a CloudWatch metric that stays at zero. Diagnosing it
-    # from the outside cost an hour — the spans carry no cache fields, so
-    # `InputTokenCount` high + `CacheReadInputTokenCount` absent was the only
-    # signal, and it is indistinguishable from "the code was never deployed".
-    #
-    # `_cache_strategy` is Strands' own model-support check: it returns
-    # "anthropic" for a Claude model id and None otherwise, so this line says
-    # both which Strands is installed and whether it will place a cache point.
+    # Log once per agent build which model path was taken and whether caching
+    # engaged, because when it does not the failure is silent in BOTH directions:
+    # the answer is identical and the only trace is a CloudWatch metric that stays
+    # at zero. Diagnosing it from the outside cost an hour — the spans carry no
+    # cache fields, so `InputTokenCount` high + `CacheReadInputTokenCount` absent
+    # was the only signal, and it is indistinguishable from "the code was never
+    # deployed". The endpoint is in the line for the same reason: "why is this
+    # model answering nothing" and "we routed it to the wrong endpoint" are
+    # otherwise indistinguishable from outside.
     try:
-        logger.info(
-            "prompt caching: strands=%s model=%s strategy=%s",
-            _strands_version(), model.config.get("model_id"),
-            getattr(model, "_cache_strategy", "unavailable"),
-        )
+        logger.info("%s", model_provider.describe(
+            model, effective_model_id, endpoint, _strands_version()))
     except Exception as exc:  # noqa: BLE001 — diagnostics must never break a turn
-        logger.info("prompt caching: could not report state (%s)", exc)
+        logger.info("model path: could not report state (%s)", exc)
 
     if skills:
         skills_plugin = AgentSkills(skills=skills)
@@ -576,6 +574,7 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
 
     skills = None
     user_model_id = None
+    user_model_endpoint = None
     user_system_prompt = None
     if SKILLS_TABLE_NAME:
         try:
@@ -585,6 +584,7 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
         try:
             settings = load_user_settings(actor_id)
             user_model_id = settings.get("modelId") or None
+            user_model_endpoint = settings.get("modelEndpoint") or None
             if user_model_id:
                 logger.info(f"Using per-user model: {user_model_id} for actor {actor_id}")
         except Exception as e:
@@ -861,39 +861,40 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                 wrapped_tools.append(execute_python)
                 logger.info(f"execute_python registered for actor={actor_id}")
 
-            # A2A tools — only when the deploy step patched the A2A envs into
-            # this runtime. Any failure here is soft: log and continue with no
-            # A2A tools so the main agent path stays healthy.
+            # A2A tools. Which sub-agents this user may reach comes from the
+            # `cognito:groups` claim on their own token — the SAME claim each
+            # sub-agent Runtime's authorizer checks (docs §9.5.1). Reading it here
+            # rather than from DynamoDB is what makes what the model is offered and
+            # what the platform will allow impossible to disagree about; the old DDB
+            # read could show the model a tool that was then refused mid-turn.
+            #
+            # Any failure is soft: log and continue with no A2A tools so the main
+            # agent path stays healthy.
             a2a_tools = []
-            if (
-                os.environ.get("A2A_M2M_SECRET_ARN")
-                and os.environ.get("A2A_COGNITO_TOKEN_URL")
-                and os.environ.get("REGISTRY_ID")
-            ):
+            if os.environ.get("REGISTRY_ID"):
                 try:
                     from tools.a2a import build_a2a_tools
-                    from tools.a2a_auth import build_token_provider
-                    grants = load_user_a2a_permissions(actor_id)
+                    grants = grants_from_user_token(auth_header)
                     if grants:
                         a2a_tools = build_a2a_tools(
                             grants=grants,
                             registry_id=os.environ["REGISTRY_ID"],
-                            token_provider=build_token_provider(),
-                            # Forward the caller's idToken so a sub-agent with
-                            # tools can act as this user against the same Gateway,
-                            # under the same Cedar policies. Pinned in the tool
-                            # closure, never a parameter the LLM can set.
+                            # The user's own token IS the credential now. The
+                            # sub-agent's authorizer validates it and checks the
+                            # grant claim, so there is no separate service token and
+                            # no second header. Pinned in the tool closure, never a
+                            # parameter the LLM can set.
                             user_token=auth_header,
                         )
                         logger.info(
                             f"A2A tools registered: {len(a2a_tools)} for actor={actor_id} "
-                            f"(user identity forwarded: {bool(auth_header)})"
+                            f"across {len(grants)} sub-agent(s) from the token claim"
                         )
-                        if not auth_header:
-                            logger.warning(
-                                "No user token to forward — sub-agents that act on "
-                                "devices will refuse these calls"
-                            )
+                    elif not auth_header:
+                        logger.warning(
+                            "No user token on this turn — sub-agent grants live in "
+                            "its claims, so no a2a_* tool can be registered"
+                        )
                 except Exception as e:
                     logger.warning(f"A2A tool registration failed (skipped): {e}")
 
@@ -911,10 +912,25 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             # explicitly so both paths get it.
             effective_system_prompt = user_system_prompt or SYSTEM_PROMPT
             if a2a_tools:
-                effective_system_prompt = (
-                    effective_system_prompt
-                    + "\n\n" + A2A_DELEGATION_RULES
-                )
+                # The routing table is built from the cards this user was granted,
+                # so a newly granted sub-agent appears in the prompt with no edit
+                # here and no redeploy. `cards_by_name` is the same cached catalog
+                # `build_a2a_tools` just used, so the two cannot disagree about
+                # which agents exist.
+                try:
+                    from tools.a2a import cards_by_name
+
+                    delegation = build_delegation_rules(
+                        grants, cards_by_name(os.environ["REGISTRY_ID"]))
+                except Exception as exc:  # noqa: BLE001
+                    # A prompt without the table still has the tools and their
+                    # descriptions, so this degrades rather than breaking the turn.
+                    logger.warning(f"could not build the routing table: {exc}")
+                    delegation = ""
+                if delegation:
+                    effective_system_prompt = (
+                        effective_system_prompt + "\n\n" + delegation
+                    )
             # LAST, so it wins on formatting. Everything before it — including an
             # admin's governed prompt — may ask for prose; the caller asking for
             # JSON is asking about the wire format, and the instruction nearest the
@@ -924,7 +940,7 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             if json_output:
                 effective_system_prompt += "\n\n" + JSON_OUTPUT_RULES
 
-            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=effective_system_prompt, headers=headers)
+            agent = create_agent(tools=all_tools, session_manager=session_manager, skills=skills, model_id=user_model_id, model_endpoint=user_model_endpoint, system_prompt=effective_system_prompt, headers=headers)
             # `unfence_json` only when the caller asked for JSON: the model
             # sometimes wraps a delegated reply in a ```json fence despite the
             # prompt forbidding it, and a fence breaks JSON.parse exactly as
@@ -940,7 +956,7 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
         if json_output:
             no_gateway_prompt = (no_gateway_prompt or SYSTEM_PROMPT) + \
                 "\n\n" + JSON_OUTPUT_RULES
-        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, system_prompt=no_gateway_prompt, headers=headers)
+        agent = create_agent(session_manager=session_manager, skills=skills, model_id=user_model_id, model_endpoint=user_model_endpoint, system_prompt=no_gateway_prompt, headers=headers)
         _post = unfence_json if json_output else (lambda t: t)
         if on_event is not None:
             return _post(_run_streamed(agent, prompt, on_event))

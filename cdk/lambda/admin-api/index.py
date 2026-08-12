@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
+from concurrent import futures
+
 import boto3
 from boto3.dynamodb.conditions import Key
 
@@ -20,6 +22,8 @@ import dashboard  # Overview ops-dashboard aggregation; see dashboard.py
 # Copied in beside this file at build time by scripts/01-install-deps.sh — CDK
 # packages each Lambda with Code.fromAsset(<dir>), so shared/ is not deployed.
 import agent_registry as registry_ns
+import model_catalog  # live Bedrock model catalog; see model_catalog.py
+import subagent_policy  # A2A grant intent -> Cognito groups; see subagent_policy.py
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -330,11 +334,16 @@ def get_settings(event):
     item = resp.get("Item")
     if not item:
         return response(200, {"userId": user_id, "modelId": "",
+                              "modelEndpoint": "",
                               "visionModelId": "", "timezone": "",
                               "latitude": None, "longitude": None})
     return response(200, {
         "userId": item["userId"],
         "modelId": item.get("modelId", ""),
+        # Which Bedrock endpoint serves modelId — "runtime" or "mantle". Stored
+        # rather than derived because the AGENT is the consumer and it cannot call
+        # this Lambda; see model_catalog.endpoint_for.
+        "modelEndpoint": item.get("modelEndpoint", ""),
         "visionModelId": item.get("visionModelId", ""),
         "timezone": item.get("timezone", ""),
         # Decimal is not JSON-serialisable, and the coordinates are stored as
@@ -342,6 +351,27 @@ def get_settings(event):
         "latitude": _coord_out(item.get("latitude")),
         "longitude": _coord_out(item.get("longitude")),
     })
+
+
+def get_model_catalog(event):
+    """GET /settings/{userId}?action=catalog — the live model picker catalog.
+
+    Always 200, even when a listing failed: the response carries `catalogError`
+    and whatever models were reachable. Failing the request would leave the Models
+    page with nothing to render and no stated reason, which is the ambiguity this
+    endpoint exists to remove.
+
+    `?refresh=1` skips the container cache, for an admin who has just enabled a
+    model in the Bedrock console and does not want to wait out the TTL.
+    """
+    params = event.get("queryStringParameters") or {}
+    refresh = params.get("refresh") in ("1", "true", "yes")
+    try:
+        return response(200, model_catalog.catalog(refresh=refresh))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("model catalog failed")
+        return response(200, {"models": [], "defaultModelId": model_catalog.DEFAULT_MODEL_ID,
+                              "catalogError": str(exc)})
 
 
 def _coord_out(value):
@@ -433,10 +463,27 @@ def update_settings(event):
         return response(400, {"error": err})
     ts = now_iso()
 
+    # Resolve the endpoint here, at the moment the model is chosen, so the agent
+    # reads it instead of working it out on a cold start. Resolution failing is not
+    # a reason to reject the save: the agent falls back to its own lookup when this
+    # is empty, whereas a 500 here would leave the admin unable to change models
+    # because an unrelated listing was throttled.
+    model_endpoint = body.get("modelEndpoint", "")
+    if model_id and not model_endpoint:
+        if model_id == existing.get("modelId"):
+            model_endpoint = existing.get("modelEndpoint", "")
+        if not model_endpoint:
+            try:
+                model_endpoint = model_catalog.endpoint_for(model_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not resolve endpoint for %s: %s", model_id, exc)
+                model_endpoint = ""
+
     item = {
         "userId": user_id,
         "skillName": "__settings__",
         "modelId": model_id,
+        "modelEndpoint": model_endpoint,
         "visionModelId": vision_model_id,
         "timezone": location["timezone"],
         "updatedAt": ts,
@@ -452,6 +499,7 @@ def update_settings(event):
     return response(200, {
         "message": f"Settings updated for '{user_id}'",
         "modelId": model_id,
+        "modelEndpoint": model_endpoint,
         "visionModelId": vision_model_id,
         "timezone": location["timezone"],
         "latitude": _coord_out(location.get("latitude")),
@@ -1493,11 +1541,183 @@ def update_user_a2a_permissions(event):
         except Exception:
             pass
 
+    # Materialise the new intent into Cognito group membership. This is what the
+    # sub-agents actually authorize on, so a save that skipped it would look
+    # successful and change nothing the platform can see.
+    sync = _materialise_a2a_grants(user_id, ddb_key, catalog)
+
     return response(200, {
         "userId": user_id,
         "a2aGrants": grants,
         "updatedAt": ts,
+        "groupSync": sync,
     })
+
+
+def _record_card_names(catalog: dict) -> dict[str, str]:
+    """recordId -> AgentCard name.
+
+    Grants are stored by recordId, which survives a rename; group names are keyed on
+    the card name, which is what the sub-agent knows itself as (it reads it from its
+    own card.json). This is the join between the two.
+    """
+    return {rid: (card.get("name") or "") for rid, card in catalog.items()}
+
+
+def _affected_usernames(user_id: str) -> list[str]:
+    """The Cognito usernames whose membership a change to `user_id` affects.
+
+    A per-user change affects one user. A change to `__global__` affects **every**
+    user, because global grants are inherited by anyone without an override — which
+    is also why narrowing the global default can sign everyone out.
+    """
+    if user_id != "__global__":
+        return [user_id]
+    usernames = []
+    params = {"UserPoolId": COGNITO_USER_POOL_ID, "Limit": 60}
+    while True:
+        resp = cognito_client.list_users(**params)
+        for user in resp.get("Users", []):
+            if user.get("Username"):
+                usernames.append(user["Username"])
+        token = resp.get("PaginationToken")
+        if not token:
+            return usernames
+        params["PaginationToken"] = token
+
+
+def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
+    """Push grant intent into Cognito groups, signing out anyone who lost access.
+
+    Never raises: the DDB write has already happened and returning 500 here would
+    tell the admin their change failed when the intent was in fact saved. The result
+    is reported so the UI can show that the two stores disagree, which is the whole
+    reason the page carries a sync status column.
+    """
+    if not COGNITO_USER_POOL_ID:
+        return {"ok": False, "error": "COGNITO_USER_POOL_ID not configured"}
+
+    names = _record_card_names(catalog)
+    results, signed_out, errors = [], [], []
+
+    def _one(username: str) -> dict:
+        per_user = ({} if username == "__global__"
+                    else subagent_policy.read_intent(table, username))
+        effective = subagent_policy.effective_grants(global_intent, per_user)
+        wanted = subagent_policy.wanted_groups(effective, names)
+        res = subagent_policy.materialise_user(
+            cognito_client, COGNITO_USER_POOL_ID, username, wanted)
+        # A removal only takes effect on the next token, so close the window rather
+        # than leaving a revoke that does nothing for an hour.
+        res["signedOut"] = bool(res["narrowed"]) and subagent_policy.force_token_refresh(
+            cognito_client, COGNITO_USER_POOL_ID, username)
+        return res
+
+    try:
+        global_intent = subagent_policy.read_intent(table, "__global__")
+        usernames = _affected_usernames(user_id)
+
+        # Create every group ONCE before touching memberships. Groups are shared, so
+        # doing this per user was pure waste and it throttled: measured on 39 users
+        # and 17 groups, Cognito rejected most CreateGroup calls with
+        # TooManyRequestsException and only 6 users ended up with any membership.
+        wanted_any: set = set()
+        for username in usernames:
+            per_user = ({} if username == "__global__"
+                        else subagent_policy.read_intent(table, username))
+            wanted_any |= subagent_policy.wanted_groups(
+                subagent_policy.effective_grants(global_intent, per_user), names)
+        errors.extend(subagent_policy.ensure_groups(
+            cognito_client, COGNITO_USER_POOL_ID, wanted_any))
+
+        # Concurrent, because a change to `__global__` touches EVERY user and each
+        # one costs a list-groups plus an add or remove per changed group. Measured
+        # serially on 39 users and three groups: past API Gateway's 29s ceiling, so
+        # the caller got a 504 while the Lambda kept going and finished. The write
+        # was correct and the admin was told it failed, which is the worst pairing.
+        #
+        # Eight workers, not more: these are Cognito admin APIs on one user pool, and
+        # the point is to fit the request budget, not to saturate the service.
+        with futures.ThreadPoolExecutor(max_workers=8) as pool:
+            pending = {pool.submit(_one, u): u for u in usernames}
+            for future in futures.as_completed(pending):
+                username = pending[future]
+                try:
+                    res = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("group sync failed for %s: %s", username, exc)
+                    errors.append(f"{username}: {exc}")
+                    continue
+                results.append(res)
+                if res.get("signedOut"):
+                    signed_out.append(username)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("group materialisation failed")
+        return {"ok": False, "error": str(exc)}
+
+    return {
+        "ok": not errors,
+        "users": results,
+        "signedOut": signed_out,
+        "errors": errors,
+    }
+
+
+def reconcile_a2a_grants(event):
+    """GET /users/{userId}/permissions?action=a2a-reconcile — intent vs reality.
+
+    Read-only. Compares what DDB says each user should hold against the `a2a-`
+    groups they actually hold, for every user when called on `__global__`. A one-way
+    materialisation drifts, and a sync with no way to see the drift is not a sync.
+    """
+    if not COGNITO_USER_POOL_ID:
+        return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
+
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", "")) or "__global__"
+
+    try:
+        catalog = {c["recordId"]: c for c in _fetch_approved_a2a_cards()}
+    except Exception as exc:  # noqa: BLE001
+        # Without the catalog there are no card names, so every group would look
+        # "extra" and the reconcile would advise stripping every grant.
+        return response(200, {"ok": False, "catalogError": str(exc), "users": []})
+
+    names = _record_card_names(catalog)
+    global_intent = subagent_policy.read_intent(table, "__global__")
+    out = []
+    for username in _affected_usernames(user_id):
+        per_user = ({} if username == "__global__"
+                    else subagent_policy.read_intent(table, username))
+        effective = subagent_policy.effective_grants(global_intent, per_user)
+        wanted = subagent_policy.wanted_groups(effective, names)
+        try:
+            out.append(subagent_policy.diff_user(
+                cognito_client, COGNITO_USER_POOL_ID, username, wanted))
+        except Exception as exc:  # noqa: BLE001
+            out.append({"username": username, "error": str(exc), "inSync": False})
+
+    return response(200, {
+        "ok": True,
+        "users": out,
+        "outOfSync": [u["username"] for u in out if not u.get("inSync")],
+    })
+
+
+def repair_a2a_grants(event):
+    """PUT /users/{userId}/permissions?action=a2a-reconcile — apply the reconcile.
+
+    Materialises intent for every affected user, which is the same code path a save
+    takes. Separate from the read so looking is never a mutation.
+    """
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", "")) or "__global__"
+    try:
+        catalog = {c["recordId"]: c for c in _fetch_approved_a2a_cards()}
+    except Exception as exc:  # noqa: BLE001
+        return response(502, {"error": f"cannot read the A2A catalog: {exc}"})
+    return response(200, _materialise_a2a_grants(
+        user_id, _resolve_ddb_user_key(user_id), catalog))
 
 
 def list_a2a_grants_for_record(event):
@@ -2525,6 +2745,139 @@ def _scan_a2a_ownership_map():
     return owner_map
 
 
+def list_registry_skills(_event):
+    """GET /registry/records?action=skill-list — approved SKILL records for the
+    Integration Registry's Skills sub-tab.
+
+    The read-only sibling of `list_a2a_agents`. Two enrichments the raw records do
+    not carry:
+
+      - `publishedBy`, from the Skill ERP ownership rows, so a curator can see who
+        published something without opening each record.
+      - `importedBy`, the scopes that have already imported this record into the
+        skills table (`importedFromRegistry`). Without it the page cannot answer
+        "is this live for anyone", which is the question an admin actually has, and
+        the Import button would invite a duplicate import of something already in
+        use.
+
+    Always 200. A record whose descriptors cannot be parsed contributes a row with
+    the metadata that did read rather than being dropped: a skill that is present but
+    malformed is a thing the curator needs to see, and silently omitting it looks
+    identical to it not existing.
+    """
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    try:
+        records = registry_ns.list_records(
+            registry_control, REGISTRY_ID,
+            record_type=registry_ns.RECORD_TYPE_SKILL,
+            status=registry_ns.STATUS_APPROVED)
+    except Exception as exc:  # noqa: BLE001
+        # Same reasoning as the A2A catalog: a failed lookup must not render as an
+        # empty registry, or an admin goes looking for records to approve.
+        logger.warning("failed to list SKILL records: %s", exc)
+        return response(200, {"skills": [], "catalogError": str(exc)})
+
+    owner_map = {}
+    try:
+        owner_map = _scan_skill_ownership_map()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to build the skill ownership map: %s", exc)
+
+    imported_map = {}
+    try:
+        imported_map = _scan_imported_skill_map()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to build the imported-skill map: %s", exc)
+
+    out = []
+    for record in records:
+        record_id = record.get("recordId", "")
+        display = record.get("displayName") or record.get("name", "")
+        row = {
+            "recordId": record_id,
+            "name": display,
+            "dedupName": record.get("name", ""),
+            "description": record.get("description", ""),
+            "version": record.get("recordVersion", ""),
+            "status": record.get("status", ""),
+            "updatedAt": _a2a_iso(record.get("updatedAt")),
+            "publishedBy": (owner_map.get(record_id) or {}).get("email", ""),
+            "importedBy": sorted(imported_map.get(record_id, [])),
+            "license": "",
+            "compatibility": "",
+            "skillMd": "",
+        }
+        try:
+            detail = registry_control.get_registry_record(
+                registryId=REGISTRY_ID, recordId=record_id)
+            definition_raw, skill_md = registry_ns.read_skill_definition(detail)
+            row["skillMd"] = skill_md or ""
+            if definition_raw:
+                meta = (json.loads(definition_raw) or {}).get("_meta") or {}
+                row["license"] = meta.get("license", "") or ""
+                row["compatibility"] = meta.get("compatibility", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not read SKILL descriptors for %s: %s",
+                           record_id, exc)
+            row["readError"] = str(exc)
+        out.append(row)
+
+    return response(200, {"skills": out, "catalogError": ""})
+
+
+def _scan_skill_ownership_map():
+    """{recordId: {sub, email}} from the Skill ERP's skill ownership rows.
+
+    Mirrors `_scan_a2a_ownership_map`, which filters on `recordType == "a2a"`; skill
+    rows are the other half of the same `__erp_owner__` partition.
+    """
+    from boto3.dynamodb.conditions import Attr
+
+    owner_map = {}
+    scan_params = {
+        "FilterExpression": Attr("userId").eq("__erp_owner__")
+        & Attr("recordType").eq("skill"),
+    }
+    while True:
+        resp = table.scan(**scan_params)
+        for item in resp.get("Items", []):
+            sk = item.get("skillName", "")
+            record_id = sk.split(":", 1)[1] if ":" in sk else sk
+            owner_map[record_id] = {
+                "sub": item.get("ownerSub", ""),
+                "email": item.get("ownerEmail", ""),
+            }
+        if "LastEvaluatedKey" not in resp:
+            return owner_map
+        scan_params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+
+def _scan_imported_skill_map():
+    """{recordId: [scope, ...]} for records already imported into the skills table.
+
+    `importedFromRegistry` is written by `import_registry_records`, so this is the
+    reverse lookup: which scopes are actually running a given registry skill.
+    """
+    from boto3.dynamodb.conditions import Attr
+
+    out: dict[str, set] = {}
+    scan_params = {
+        "FilterExpression": Attr("importedFromRegistry").exists(),
+        "ProjectionExpression": "userId, importedFromRegistry",
+    }
+    while True:
+        resp = table.scan(**scan_params)
+        for item in resp.get("Items", []):
+            record_id = item.get("importedFromRegistry")
+            if record_id:
+                out.setdefault(str(record_id), set()).add(item.get("userId", ""))
+        if "LastEvaluatedKey" not in resp:
+            return {k: sorted(v) for k, v in out.items()}
+        scan_params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+
 def list_a2a_agents(_event):
     """GET /registry/a2a-agents — list approved A2A records with publishedBy enrichment."""
     if not REGISTRY_ID:
@@ -3301,13 +3654,22 @@ def _dispatch(event, context):
     if resource == "/memories/{actorId}" and method == "GET":
         return get_memory_records(event)
     if resource == "/users/{userId}/permissions" and method == "GET":
-        # action=a2a → A2A grants + approved catalog; else → legacy tool perms.
-        if (event.get("queryStringParameters") or {}).get("action") == "a2a":
+        # action=a2a → A2A grants + approved catalog; a2a-reconcile → intent vs the
+        # Cognito groups that actually enforce it; else → legacy tool perms. All on
+        # one resource because the admin Lambda's resource policy is near the 20 KB
+        # cap (see cdk/lib/smarthome-stack.ts).
+        action = (event.get("queryStringParameters") or {}).get("action")
+        if action == "a2a":
             return get_user_a2a_permissions(event)
+        if action == "a2a-reconcile":
+            return reconcile_a2a_grants(event)
         return get_user_permissions(event)
     if resource == "/users/{userId}/permissions" and method == "PUT":
-        if (event.get("queryStringParameters") or {}).get("action") == "a2a":
+        action = (event.get("queryStringParameters") or {}).get("action")
+        if action == "a2a":
             return update_user_a2a_permissions(event)
+        if action == "a2a-reconcile":
+            return repair_a2a_grants(event)
         return update_user_permissions(event)
 
     # Skill routes — also carry agent-prompt traffic on the {userId}/{skillName}
@@ -3365,6 +3727,13 @@ def _dispatch(event, context):
     if resource == "/skills/{userId}/{skillName}/files/download-url" and method == "POST":
         return get_download_url(event)
     if resource == "/settings/{userId}" and method == "GET":
+        # ?action=catalog rides this resource rather than getting a /models/catalog
+        # of its own, for the reason spelled out at smarthome-stack.ts:770 — the
+        # admin Lambda's auto-generated resource policy is near the 20 KB cap, so a
+        # new API Gateway method is not free. The catalog ignores {userId}; the
+        # Models page fetches it once per page load, not once per user row.
+        if (event.get("queryStringParameters") or {}).get("action") == "catalog":
+            return get_model_catalog(event)
         return get_settings(event)
     if resource == "/settings/{userId}" and method == "PUT":
         return update_settings(event)
@@ -3383,6 +3752,8 @@ def _dispatch(event, context):
             return list_a2a_agents(event)
         if action == "a2a-grants":
             return list_a2a_grants_for_record(event)
+        if action == "skill-list":
+            return list_registry_skills(event)
         if action == "fleet":
             return list_agent_fleet(event)
         if action == "scenarios":

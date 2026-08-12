@@ -113,6 +113,6 @@ def test_the_static_prefix_still_precedes_the_dynamic_parts():
     being rebuilt around per-request data.
     """
     src = AGENT_PY.read_text(encoding="utf-8")
-    assert re.search(r'\+\s*"\\n\\n"\s*\+\s*A2A_DELEGATION_RULES', src), (
-        "the A2A rules should be appended to the end of the system prompt; "
+    assert re.search(r'\+\s*"\\n\\n"\s*\+\s*delegation', src), (
+        "the delegation section should be appended to the end of the system prompt; "
         "inserting per-request content before them would break every cache hit")

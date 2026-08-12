@@ -11,7 +11,7 @@ Three things this got wrong before it worked, all of which made correct behaviou
 look broken:
 
   - `userId` in the payload becomes `actor_id`, and A2A grants are keyed on it.
-    Omit it and it defaults to "default", which load_user_a2a_permissions skips —
+    Omit it and it defaults to "default", which scopes nothing to a real user —
     so no a2a_* tool is registered at all and every delegation "fails".
   - That key is the EMAIL, not the sub. The chatbot sends `email or username or
     sub` and the Admin Console resolves sub -> email when writing grants.
@@ -85,7 +85,7 @@ for label, prompt in PROMPTS:
     # next routing decision, which is the opposite of measuring each intent.
     sid = f"p5-{uuid.uuid4().hex}"[:40] + "0" * 24
     # `userId` is what becomes actor_id, and A2A grants are keyed on it. Omitting
-    # it defaults to "default", which load_user_a2a_permissions skips outright — so
+    # it defaults to "default", which scopes nothing to a real user — so
     # NO a2a_* tool is registered and every delegation "fails" for a reason that
     # has nothing to do with the prompt. The first run of this probe measured
     # exactly that and looked like six routing bugs.

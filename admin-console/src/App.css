@@ -1012,6 +1012,23 @@ a.btn {
 .drawer-fields dt { color: var(--admin-text-secondary, #656871); font-weight: 500; }
 .drawer-fields dd { margin: 0; }
 .drawer-skills { padding-left: 16px; margin: 0; }
+
+/* SKILL.md preview in the Integration Registry drawer. Theme variables, not fixed
+   colours — hardcoding them is what made Tool Policy unreadable in dark mode. */
+.skill-md-preview {
+  margin: 8px 0 0;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--admin-border, #d5dbdb);
+  border-radius: 8px;
+  background: var(--admin-surface-alt, #fafafa);
+  color: var(--admin-text, #16191f);
+}
 .drawer-skills > li { margin-bottom: 6px; }
 
 /* ---- Remote Shell modal ---- */

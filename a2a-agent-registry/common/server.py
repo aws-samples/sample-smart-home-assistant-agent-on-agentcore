@@ -30,14 +30,31 @@ the tools (and the Strands Agent holding them) are rebuilt per request from the
 verified caller identity. Agent construction measures at well under a
 millisecond, so this costs nothing next to an LLM call.
 
-Server-side skill enforcement
------------------------------
-The client sends ``X-A2A-Allowed-Skills`` listing what the caller was granted.
-That header used to be parsed and ignored, which made per-skill authorisation
-purely client-side: the Admin Console's checkboxes trimmed the orchestrator's
-tool list but nothing stopped anything holding the shared m2m token from calling
-any skill on any agent. It is now enforced here — a request whose header excludes
-every skill this agent publishes is refused.
+Authorization comes from a signed claim
+--------------------------------------
+A grant is a Cognito group (``a2a-<agent>.<skill>``, see ``common/a2a_groups.py``)
+on the end user's own token. Two checks, in this order:
+
+  1. This Runtime's ``customJWTAuthorizer.customClaims`` matches ``cognito:groups``
+     with ``CONTAINS_ANY`` over every group of this agent, so AgentCore refuses a
+     caller with no grant on this agent *before* the container is reached.
+  2. This module derives the skill subset from the same claim, after verifying the
+     token itself.
+
+The previous design read ``X-A2A-Allowed-Skills``, a header the *client* set. That
+made the grant client-asserted: the server could only refuse a skill the caller had
+already declined to claim, so anything holding the shared m2m token could widen its
+own access simply by sending a longer header. A claim signed by Cognito cannot be
+widened by the caller, and it is checked by the platform rather than by us.
+
+Rollout note (remove once all eight agents run the claim path)
+-------------------------------------------------------------
+``resolve_caller`` still accepts the old two-token shape, because the orchestrator
+switches to sending the user token in ``Authorization`` in one step for all agents,
+so every agent has to accept both before any of them can rely on the new one. The
+legacy branch logs at warning so the migration's tail is visible rather than
+becoming permanent. Deleting it is a three-line change plus the m2m client id
+leaving ``allowedClients``.
 """
 
 from __future__ import annotations
@@ -59,6 +76,11 @@ from common.governed_prompt import resolve_system_prompt
 # because the request path reads it and there is no way to thread an argument
 # through the Strands/A2A executor internals.
 _SKILL_IDS: frozenset[str] = frozenset()
+
+# This agent's AgentCard name, which grant group names are keyed on. Set from
+# card.json at startup alongside _SKILL_IDS, for the same reason: the request path
+# needs it and there is no way to thread an argument through the executor.
+_AGENT_NAME: str = ""
 
 
 class CallerIdentity:
@@ -167,29 +189,93 @@ def enforce_allowed_skills(allowed: frozenset[str], skill_ids: frozenset[str]) -
         )
 
 
+GROUPS_CLAIM = "cognito:groups"
+
+
+def _agent_name() -> str:
+    """This agent's AgentCard name, which is what group names are keyed on."""
+    return _AGENT_NAME
+
+
+def _strip_bearer(raw: str) -> str:
+    raw = (raw or "").strip()
+    return raw.split(" ", 1)[1].strip() if raw.lower().startswith("bearer ") else raw
+
+
+def skills_from_claims(claims: dict, agent_name: str) -> frozenset[str]:
+    """The skills this token grants on this agent, from ``cognito:groups``.
+
+    Empty means no grant, which the caller turns into a refusal. Deliberately not
+    "empty means unrestricted": that inversion is the one bug in an authorization
+    path that nobody notices, because everything keeps working.
+    """
+    from common import a2a_groups
+
+    if not agent_name:
+        # Without a name there is nothing to match groups against, and treating
+        # that as "all skills" would turn a startup problem into an open door.
+        # `serve` refuses to start without it, so reaching this means the request
+        # path is running against a module that was never initialised.
+        raise PermissionError(
+            "this agent does not know its own card name, so it cannot tell which "
+            "grants apply to it and refuses rather than guessing")
+    return a2a_groups.skills_for_agent(claims.get(GROUPS_CLAIM) or [], agent_name)
+
+
 def resolve_caller(a2a_context, require_user_identity: bool) -> CallerIdentity:
     """Verify the request's identity and skill grant. Raises on refusal.
 
-    The m2m token in ``Authorization`` has already been checked by the Runtime's
-    CUSTOM_JWT authorizer before anything reaches this container, so the caller is
-    known to be an authorised service. What that token cannot say is WHICH end
-    user is behind the call — it is a client_credentials token with no ``sub`` —
-    hence the separate user token.
+    Primary path: ``Authorization`` carries the end user's own token. It has already
+    been validated by this Runtime's authorizer, including the ``cognito:groups``
+    match that proves a grant on this agent exists, but it is verified again here —
+    the same reasoning that has always applied to a forwarded token, and it is how
+    we get the claims to derive the skill subset from.
+
+    Legacy path (temporary, see the module docstring): the old two-token shape,
+    where ``Authorization`` was an m2m token with no ``sub`` and the grant arrived
+    in a client-set header.
     """
     headers = _headers_from_context(a2a_context)
-    allowed = _parse_allowed_skills(headers)
-    enforce_allowed_skills(allowed, _SKILL_IDS)
+    from common.user_identity import UserTokenError, verify_user_token
 
+    bearer = _strip_bearer(headers.get("authorization", ""))
+    if bearer:
+        try:
+            claims = verify_user_token(bearer)
+        except UserTokenError as exc:
+            claims = None
+            # Not fatal by itself: during the migration this is what an m2m token
+            # looks like here, and the legacy branch below handles it. Logged
+            # without the token.
+            logger.info("Authorization did not verify as a user token: %s", exc)
+        if claims is not None:
+            allowed = skills_from_claims(claims, _agent_name())
+            enforce_allowed_skills(allowed, _SKILL_IDS)
+            return CallerIdentity(
+                sub=claims["sub"],
+                email=claims.get("email", ""),
+                raw_token=bearer,
+                allowed_skills=allowed,
+            )
+
+    # ---- legacy two-token path; delete with the m2m client id ----
+    legacy_allowed = _parse_allowed_skills(headers)
     raw = headers.get(USER_TOKEN_HEADER.lower(), "")
+    if legacy_allowed or raw:
+        logger.warning(
+            "legacy A2A auth path used (client-asserted %s + %s). The caller has "
+            "not been migrated to Cognito group claims.",
+            ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER)
+    enforce_allowed_skills(legacy_allowed, _SKILL_IDS)
+
     if not raw:
         if require_user_identity:
             raise PermissionError(
                 f"{USER_TOKEN_HEADER} is missing — this agent acts on a user's "
                 f"devices and cannot do so without a verified user identity"
             )
-        return CallerIdentity(sub="", email="", raw_token="", allowed_skills=allowed)
-
-    from common.user_identity import UserTokenError, verify_user_token
+        return CallerIdentity(sub="", email="", raw_token="",
+                              allowed_skills=legacy_allowed)
 
     try:
         claims = verify_user_token(raw)
@@ -201,8 +287,8 @@ def resolve_caller(a2a_context, require_user_identity: bool) -> CallerIdentity:
     return CallerIdentity(
         sub=claims["sub"],
         email=claims.get("email", ""),
-        raw_token=raw[7:].strip() if raw.lower().startswith("bearer ") else raw,
-        allowed_skills=allowed,
+        raw_token=_strip_bearer(raw),
+        allowed_skills=legacy_allowed,
     )
 
 
@@ -427,7 +513,7 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
     a tool-using agent reaches a per-user backend, and running one without a
     verified user is how cross-user access happens.
     """
-    global _SKILL_IDS
+    global _SKILL_IDS, _AGENT_NAME
 
     logging.basicConfig(level=logging.INFO)
 
@@ -452,6 +538,16 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
     _SKILL_IDS = frozenset(
         s["id"] for s in (card_dict.get("skills") or []) if s.get("id")
     )
+    # The card's `name` is what grant group names are keyed on, and the admin
+    # console derives them from the same field on the Registry record. Read from
+    # the card rather than an env var precisely because env vars get stripped by
+    # deploys here (§9.2) — an agent that lost its name would refuse every request.
+    _AGENT_NAME = card_dict.get("name", "")
+    if not _AGENT_NAME:
+        raise RuntimeError(
+            f"{cj} has no `name`; grant groups are keyed on it and this agent "
+            "would refuse every request")
+
     if require_user_identity is None:
         require_user_identity = tools_factory is not None
 

@@ -1,16 +1,17 @@
 """The delegation prompt must name tools that exist, and not contradict itself.
 
-`A2A_DELEGATION_RULES` is appended to the system prompt whenever a user has A2A
-grants, and it routes by naming tools explicitly — `a2a_knowledge_qa_agent_
-answer_from_docs` rather than "the documentation specialist". That is what made
-routing reliable, and it is also what makes the prompt able to go stale: a skill
-renamed in an AgentCard leaves the prompt pointing at a tool that no longer
-exists, and the model quietly falls back to answering from its own knowledge. The
-reply still looks fine, which is the problem.
+The ROUTING TABLE is now generated from the granted AgentCards
+(`a2a_prompt.build_routing_table`), so a renamed skill can no longer leave the table
+pointing at a tool that does not exist — the table and the tools come from one
+source. What remains checkable, and is checked here, is the HAND-WRITTEN half:
+`A2A_DELEGATION_PREAMBLE` and `A2A_DELEGATION_EPILOGUE` still name specific tools
+and agents in their guidance, and those mentions can go stale exactly the way the
+whole table used to. A stale mention reads fine and makes the model fall back to its
+own knowledge, which is why it needs a test rather than a review.
 
-The tool names are built by `agent/tools/a2a.py` as
-`a2a_{slug(agent name)}_{slug(skill id)}`, so they are derivable from the cards —
-which is what these tests do rather than restating them.
+Tool names come from `a2a_prompt.tool_name`, which both the prompt and the tool
+builder use, so they are derivable from the cards — which is what these tests do
+rather than restating them.
 """
 
 import json
@@ -70,21 +71,29 @@ def _expected_tool_names():
     return names
 
 
-RULES = _constant("A2A_DELEGATION_RULES")
+RULES = _constant("A2A_DELEGATION_PREAMBLE") + "\n" + _constant("A2A_DELEGATION_EPILOGUE")
 PROMPT = _constant("SYSTEM_PROMPT")
 # Tool names the rules mention. A trailing `*` is a deliberate wildcard for a
 # family of skills, so it is matched as a prefix.
 MENTIONED = set(re.findall(r"\ba2a_[a-z0-9_]+\*?", RULES))
 
 
-def test_the_slug_helper_matches_the_one_that_builds_the_tool_names():
-    """If tools/a2a.py changes how it slugs, every name in the prompt is wrong and
-    nothing anywhere would say so."""
+def test_the_prompt_and_the_tool_builder_share_one_name_function():
+    """Two derivations of the tool name could disagree, and the symptom would be a
+    prompt naming a tool that does not exist with nothing logged."""
     src = _read(os.path.join(ROOT, "agent", "tools", "a2a.py"))
-    assert 'tool_name = f"a2a_{_slug(agent_name)}_{_slug(skill.get(\'id\', \'x\'))}"' in src
-    assert 'r"[^a-z0-9_]+"' in src, (
-        "the slug character class changed; update _slug in this test to match — "
-        "note it must keep `_` or multi-word skill ids collapse")
+    assert "a2a_prompt.tool_name(agent_name" in src, (
+        "tools/a2a.py no longer builds tool names via a2a_prompt.tool_name; the "
+        "generated routing table would then be able to disagree with the tools")
+
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "agent"))
+    import a2a_prompt
+
+    assert a2a_prompt.tool_name("knowledge-qa-agent", "answer_from_docs") == \
+        "a2a_knowledge_qa_agent_answer_from_docs"
+    # The `_` must survive slugging or multi-word skill ids collapse together.
+    assert a2a_prompt.slug("answer_from_docs") == "answer_from_docs"
 
 
 def test_every_tool_the_rules_name_actually_exists():
@@ -104,22 +113,71 @@ def test_every_tool_the_rules_name_actually_exists():
         f"{sorted(unknown)}. Known: {sorted(expected)}")
 
 
-def test_every_deployed_specialist_is_routable():
-    """A specialist nobody is told to call is a specialist that never gets used.
-    Skill-level granularity is deliberate — each card skill becomes its own tool —
-    but each AGENT must appear in the routing table at least once."""
-    agents = {n.rsplit("_", 1)[0] for n in _expected_tool_names()}
-    # Compare on the agent prefix, since a wildcard covers a whole family.
-    covered = set()
-    for mention in MENTIONED:
-        stem = mention.rstrip("*")
-        for agent in agents:
-            if stem.startswith(agent) or agent.startswith(stem):
-                covered.add(agent)
-    missing = agents - covered
-    assert not missing, (
-        f"deployed specialist(s) absent from the routing rules, so the model is "
-        f"never told to use them: {sorted(missing)}")
+def test_every_granted_specialist_gets_a_generated_row():
+    """The property the whole generation change exists for.
+
+    Granting a sub-agent must be sufficient to make the model route to it. Before,
+    the table was hand-written, so a newly granted specialist had its tools
+    registered and was never mentioned in the prompt — the model kept answering
+    from its own knowledge and nothing reported it. Here every deployed card is
+    treated as granted, and every one of them must produce a row naming its real
+    tool.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "agent"))
+    import a2a_prompt
+
+    cards, grants = {}, {}
+    for entry in sorted(os.listdir(A2A_DIR)):
+        card_path = os.path.join(A2A_DIR, entry, "card.json")
+        if not os.path.isfile(card_path):
+            continue
+        data = json.loads(_read(card_path))
+        name = data.get("name", "")
+        skills = [s["id"] for s in (data.get("skills") or []) if s.get("id")]
+        if not name or not skills:
+            continue
+        cards[name] = data
+        grants[name] = skills
+
+    assert cards, "no deployed AgentCards found to check against"
+    table = a2a_prompt.build_routing_table(grants, cards)
+
+    for name, skills in grants.items():
+        for skill in skills:
+            tool = a2a_prompt.tool_name(name, skill)
+            assert tool in table, (
+                f"{tool} is deployed and granted but got no routing row, so the "
+                f"model is never told to call it")
+
+
+def test_an_ungranted_specialist_gets_no_row():
+    """The other half: a user must not be told about specialists they cannot reach,
+    or the model calls one and the platform refuses it mid-turn."""
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "agent"))
+    import a2a_prompt
+
+    cards = {
+        "knowledge-qa-agent": {"skills": [
+            {"id": "answer_from_docs", "description": "Answer from the manual."}]},
+        "home-security-agent": {"skills": [
+            {"id": "risk_assessment", "description": "Assess risk."}]},
+    }
+    table = a2a_prompt.build_routing_table(
+        {"knowledge-qa-agent": ["answer_from_docs"]}, cards)
+    assert "a2a_knowledge_qa_agent_answer_from_docs" in table
+    assert "home_security" not in table
+
+
+def test_no_grants_produces_no_section_at_all():
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "agent"))
+    import a2a_prompt
+
+    assert a2a_prompt.build_routing_table({}, {}) == ""
+    # A grant for an agent with no card must not produce an empty header either.
+    assert a2a_prompt.build_routing_table({"ghost-agent": ["s"]}, {}) == ""
 
 
 def test_the_rules_override_the_capability_list_explicitly():
