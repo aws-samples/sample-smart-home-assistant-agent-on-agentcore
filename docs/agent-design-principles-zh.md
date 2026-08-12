@@ -183,6 +183,7 @@ tool。runner Lambda 到点后**以 owner 身份、经由 Gateway** 执行。所
 | A2A 目录读取失败 | 200 且 `availableAgents: []` —— 和「registry 里本来就没有」完全一样 |
 | registry 等待轮询 `ACTIVE` | 没有任何 registry 会返回这个状态，于是这个等待只能超时后放行 |
 | CSS 引用了 Cloudscape 带哈希的变量 | `var()` 的兜底值生效，两个面板在深色模式下保持白色，看起来像是故意的 |
+| 只按深色写的 CSS 跑在浅色模式 | 对比度 1.32:1，17 个可用的勾选框看起来是禁用的，被报成「工具权限坏了」 |
 | episodic memory 用了按用户组织的 namespace | API 接受了；记录照抽取、照计费，写到没人读的地方 |
 | 聊天记录没有被限高的祖先 | `overflow-y: auto` 从未生效，于是整个页面变长，而不是消息列表内滚 |
 

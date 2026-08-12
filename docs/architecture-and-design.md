@@ -450,11 +450,30 @@ rather than a broken reference. Nothing warned: an unresolvable `var()` is not a
 error in CSS, it is a fallback.
 
 The lesson generalises past this repo: **a defaulted lookup and a correct lookup
-are indistinguishable in the output.** The fix is mechanical (use the aliases), but
-the guard is a grep — `var(--color-` appearing anywhere in a `*.css` under an app
-is a bug by construction. The chatbot's `App.css` still opens with a `:root` block
-built this way; five of its six aliases turned out to be unused, and the survivor
-resolves to its fallback, so it is dead code rather than a live defect.
+are indistinguishable in the output.** The fix is mechanical (use the aliases), and
+the guard is now a test rather than a habit: `shared/tests/test_theme_tokens.py`
+fails on any `var(--color-` in an app's CSS, requires all three apps to publish
+aliases for both modes, and **measures the published palettes for WCAG AA contrast**.
+
+**The second failure mode is a hardcoded colour that only suits one mode**, and it
+is the one that produced a bug report. The admin console's `App.css` was written
+dark-only and published no aliases at all, so ~65 rules carried literals like
+`#e0e0e0` and `#8888aa`. Correct on a dark surface; on white, `.perm-tool-name`
+measured **1.32:1** (AA wants 4.5:1). The Tool Policy permission list therefore
+looked greyed out and was reported as "per-user tool permissions no longer work" —
+while every one of the 17 checkboxes was enabled and interactive and `/tools`
+returned all 17. A contrast failure is indistinguishable from a disabled control,
+which is why this is in the silent-success family rather than a cosmetic issue.
+
+Contrast has to be **measured, not eyeballed**: the first two values chosen for the
+dim tier came out at 3.34:1 and 4.49:1, both below the floor and both fine to the
+eye. Two things the test deliberately does not flag, because they are correct: the
+ANSI palette and the remote shell's foregrounds (they render on hardcoded dark
+terminal panes in both themes), and white text on filled buttons. Distinguishing
+those from genuine bugs meant checking placement **in the components** —
+`ShellModal.tsx` renders in the modal body, `AnsiOutput.tsx` renders in the dark
+pane — because an alias sweep driven by CSS order alone produced dark-on-dark text
+in three rules.
 
 #### Security model & known limitation
 

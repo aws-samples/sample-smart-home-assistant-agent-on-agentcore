@@ -23,7 +23,7 @@
 
 .loading-text {
   margin-top: 16px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 14px;
 }
 
@@ -49,7 +49,7 @@
 }
 
 .access-denied p {
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 14px;
 }
 
@@ -98,7 +98,7 @@
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.15);
   background: rgba(255, 255, 255, 0.05);
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
@@ -125,7 +125,7 @@
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.04);
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -175,7 +175,7 @@
 
 .login-subtitle {
   font-size: 13px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
 }
 
 .login-error {
@@ -219,7 +219,7 @@
   display: block;
   font-size: 13px;
   font-weight: 500;
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
   margin-bottom: 6px;
 }
 
@@ -231,7 +231,7 @@
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(10, 10, 20, 0.6);
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   font-size: 14px;
   font-family: inherit;
   outline: none;
@@ -275,7 +275,7 @@
   padding: 10px 24px;
   border: none;
   background: transparent;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 14px;
   font-weight: 500;
   font-family: inherit;
@@ -286,7 +286,7 @@
 }
 
 .tab:hover {
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
 }
 
 .tab-active {
@@ -313,7 +313,7 @@
 .toolbar-label {
   font-size: 13px;
   font-weight: 500;
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
 }
 
 .toolbar-select {
@@ -321,7 +321,7 @@
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(20, 20, 35, 0.95);
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   font-size: 13px;
   font-family: inherit;
   outline: none;
@@ -353,7 +353,7 @@
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(10, 10, 20, 0.6);
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   font-size: 13px;
   font-family: inherit;
   outline: none;
@@ -367,7 +367,7 @@
 
 .settings-hint {
   font-size: 12px;
-  color: #666688;
+  color: var(--admin-text-dim, #8c8c94);
   font-style: italic;
 }
 
@@ -407,7 +407,7 @@ a.btn {
 .btn-secondary {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
 }
 
 .btn-secondary:hover {
@@ -467,7 +467,7 @@ a.btn {
   text-align: left;
   font-size: 12px;
   font-weight: 600;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
@@ -476,7 +476,7 @@ a.btn {
 .skills-table td {
   padding: 14px 16px;
   font-size: 14px;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
@@ -503,13 +503,13 @@ a.btn {
 
 .cell-tools {
   font-size: 13px;
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
   font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
 .cell-date {
   font-size: 13px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   white-space: nowrap;
 }
 
@@ -530,7 +530,7 @@ a.btn {
 .skill-form-container h3 {
   font-size: 18px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--admin-text-strong, #000716);
   margin: 0 0 24px 0;
 }
 
@@ -556,7 +556,7 @@ a.btn {
 }
 
 .empty-state p {
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 14px;
 }
 
@@ -569,7 +569,7 @@ a.btn {
 .loading {
   padding: 40px;
   text-align: center;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 14px;
 }
 
@@ -598,13 +598,13 @@ a.btn {
 
 .modal h3 {
   font-size: 18px;
-  color: #ffffff;
+  color: var(--admin-text-strong, #000716);
   margin: 0 0 12px 0;
 }
 
 .modal p {
   font-size: 14px;
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
   line-height: 1.5;
   margin: 0 0 24px 0;
 }
@@ -625,7 +625,7 @@ a.btn {
 .modal-hint {
   margin: 0 0 8px 0 !important;
   font-size: 13px !important;
-  color: #8888aa !important;
+  color: var(--admin-text-secondary, #656871) !important;
 }
 
 .registry-records-list {
@@ -645,7 +645,7 @@ a.btn {
 .form-section-label {
   font-size: 12px;
   font-weight: 600;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 20px 0 12px 0;
@@ -677,7 +677,7 @@ a.btn {
   border-radius: 6px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(10, 10, 20, 0.6);
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   font-size: 13px;
   font-family: 'SF Mono', 'Fira Code', monospace;
   outline: none;
@@ -703,13 +703,13 @@ a.btn {
 .file-manager h4 {
   font-size: 16px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--admin-text-strong, #000716);
   margin: 0 0 4px 0;
 }
 
 .file-manager-hint {
   font-size: 13px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   margin: 0 0 16px 0;
 }
 
@@ -728,7 +728,7 @@ a.btn {
   padding: 10px 14px;
   border: none;
   background: rgba(10, 10, 20, 0.5);
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   font-size: 14px;
   font-weight: 500;
   font-family: inherit;
@@ -743,7 +743,7 @@ a.btn {
 
 .file-dir-arrow {
   font-size: 12px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   width: 14px;
 }
 
@@ -755,7 +755,7 @@ a.btn {
 .file-dir-count {
   margin-left: auto;
   font-size: 12px;
-  color: #666688;
+  color: var(--admin-text-dim, #8c8c94);
 }
 
 .file-dir-body {
@@ -773,7 +773,7 @@ a.btn {
   text-align: left;
   font-size: 11px;
   font-weight: 600;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
@@ -782,7 +782,7 @@ a.btn {
 .file-table td {
   padding: 8px 10px;
   font-size: 13px;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
@@ -812,7 +812,7 @@ a.btn {
 .perm-editor h3 {
   font-size: 18px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--admin-text-strong, #000716);
   margin: 0 0 8px 0;
 }
 
@@ -822,7 +822,7 @@ a.btn {
 
 .perm-hint {
   font-size: 13px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   margin: 0 0 20px 0;
 }
 
@@ -831,7 +831,7 @@ a.btn {
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
 }
 
 .perm-select-bar {
@@ -872,7 +872,7 @@ a.btn {
 .perm-tool-name {
   font-size: 14px;
   font-weight: 600;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   font-family: 'SF Mono', 'Fira Code', monospace;
   min-width: 160px;
   flex-shrink: 0;
@@ -880,14 +880,14 @@ a.btn {
 
 .perm-tool-desc {
   font-size: 13px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   line-height: 1.4;
   flex: 1;
 }
 
 .perm-tool-target {
   font-size: 12px;
-  color: #666688;
+  color: var(--admin-text-dim, #8c8c94);
   background: rgba(255, 255, 255, 0.04);
   padding: 2px 8px;
   border-radius: 4px;
@@ -915,7 +915,7 @@ a.btn {
 
 .badge-inactive {
   background: rgba(255, 255, 255, 0.04);
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -927,7 +927,7 @@ a.btn {
 
 .badge-group {
   background: rgba(255, 255, 255, 0.04);
-  color: #aaaacc;
+  color: var(--admin-text-secondary, #656871);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -969,7 +969,7 @@ a.btn {
 .sub-tab {
   background: transparent;
   border: none;
-  color: #aaa;
+  color: var(--admin-text-secondary, #656871);
   padding: 8px 14px;
   font-size: 13px;
   cursor: pointer;
@@ -980,7 +980,7 @@ a.btn {
   border-bottom-color: #4a9eff;
 }
 .sub-tab-disabled {
-  color: #555;
+  color: var(--admin-text-dim, #8c8c94);
   cursor: not-allowed;
 }
 
@@ -1007,9 +1007,9 @@ a.btn {
   align-items: center;
   margin-bottom: 16px;
 }
-.drawer-body { color: #ddd; font-size: 13px; }
+.drawer-body { color: var(--admin-text, #0f141a); font-size: 13px; }
 .drawer-fields { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; margin-top: 12px; }
-.drawer-fields dt { color: #888; font-weight: 500; }
+.drawer-fields dt { color: var(--admin-text-secondary, #656871); font-weight: 500; }
 .drawer-fields dd { margin: 0; }
 .drawer-skills { padding-left: 16px; margin: 0; }
 .drawer-skills > li { margin-bottom: 6px; }
@@ -1033,12 +1033,12 @@ a.btn {
   flex-wrap: wrap;
 }
 .shell-field-label {
-  color: #aaa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 13px;
   width: 90px;
 }
 .shell-radio {
-  color: #ddd;
+  color: var(--admin-text, #0f141a);
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1053,24 +1053,28 @@ a.btn {
   min-height: 60px;
   font-family: ui-monospace, monospace;
   background: #1a1a1a;
+  /* Fixed light text: this widget sits on the hardcoded dark terminal
+     background above, in BOTH themes, so it must not follow --admin-text. */
   color: #ddd;
   border: 1px solid #2a2a2a;
   padding: 8px;
 }
 .shell-byte-counter {
-  color: #888;
+  color: var(--admin-text-secondary, #656871);
   font-size: 11px;
   margin-left: 98px;
   margin-bottom: 10px;
 }
 .shell-timeout-value {
-  color: #ddd;
+  color: var(--admin-text, #0f141a);
   font-size: 12px;
   min-width: 48px;
 }
 .shell-history-select {
   flex: 1;
   background: #1a1a1a;
+  /* Fixed light text: this widget sits on the hardcoded dark terminal
+     background above, in BOTH themes, so it must not follow --admin-text. */
   color: #ddd;
   border: 1px solid #2a2a2a;
   padding: 6px;
@@ -1079,7 +1083,7 @@ a.btn {
   gap: 10px;
 }
 .shell-exit-footer {
-  color: #888;
+  color: var(--admin-text-secondary, #656871);
   font-size: 12px;
   margin-top: 8px;
   border-top: 1px solid #2a2a2a;
@@ -1091,6 +1095,8 @@ a.btn {
   height: 60vh;
   overflow: auto;
   background: #0a0a0a;
+  /* Fixed light text: this widget sits on the hardcoded dark terminal
+     background above, in BOTH themes, so it must not follow --admin-text. */
   color: #ddd;
   padding: 10px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -1101,7 +1107,8 @@ a.btn {
   margin: 0;
 }
 .shell-stderr { color: #ff6b6b; }
-.shell-truncated { color: #888; font-style: italic; }
+/* Inside the dark ANSI pane (AnsiOutput.tsx), so fixed light, not themed. */
+.shell-truncated { color: #999; font-style: italic; }
 
 /* ---- ANSI subset (foreground colors only) ---- */
 .ansi-bold { font-weight: 700; }
@@ -1128,7 +1135,7 @@ a.btn {
   padding-bottom: 4px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 13px;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
 }
 .perm-a2a-list {
   display: flex;
@@ -1152,19 +1159,19 @@ a.btn {
 }
 .perm-a2a-chevron {
   width: 12px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   font-size: 12px;
   flex-shrink: 0;
 }
 .perm-a2a-name {
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 13px;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   flex-shrink: 0;
 }
 .perm-a2a-count {
   font-size: 12px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
 }
 .perm-a2a-skills {
   padding: 4px 14px 10px 34px;
@@ -1192,13 +1199,13 @@ a.btn {
 .perm-a2a-skill-id {
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 12px;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
   min-width: 160px;
   flex-shrink: 0;
 }
 .perm-a2a-skill-desc {
   font-size: 12px;
-  color: #8888aa;
+  color: var(--admin-text-secondary, #656871);
   line-height: 1.4;
   flex: 1;
 }
@@ -1212,7 +1219,7 @@ a.btn {
   margin: 8px 0;
   padding-left: 20px;
   font-size: 13px;
-  color: #e0e0e0;
+  color: var(--admin-text, #0f141a);
 }
 .drawer-access-list li {
   margin: 2px 0;
@@ -1223,7 +1230,7 @@ a.btn {
    consequence they need to see before acting. */
 .perm-tool-consumers {
   font-size: 11px;
-  color: var(--color-text-status-inactive, #8d99a8);
+  color: var(--admin-text-dim, #74747f);
   font-family: ui-monospace, Menlo, Consolas, monospace;
   white-space: nowrap;
 }
