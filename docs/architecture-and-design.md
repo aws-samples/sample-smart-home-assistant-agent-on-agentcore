@@ -1857,6 +1857,18 @@ Two failure modes this creates, both fixed:
   regex), etc. Fix: re-run `setup-agentcore.py` (or at minimum its Lambda-patch
   block) after any standalone `cdk deploy`.
 
+A third failure mode, which the two above do not cover: **a patched var that is
+present and syntactically valid but points at the wrong resource.** A placeholder
+announces itself (the regex rejects it) and a missing var announces itself
+(`MEMORY_ID not configured`); a plausible-but-wrong value does neither. A
+`REGISTRY_ID` naming a registry in the legacy `bedrock-agentcore` namespace reads
+as ordinary configuration and simply yields a shorter A2A catalog. Because these
+values are hand-editable and read at module import, drift between the four
+consumers (admin Lambda, skill-erp Lambda, orchestrator runtime,
+`agentcore-state.json`) is invisible until someone counts records.
+`scripts/check-registry-wiring.py` compares all four and validates the registry;
+it is also the reason to never hand-patch these vars rather than re-running setup.
+
 **`agentcore deploy` returns non-zero on a benign post-success quirk.** The
 AgentCore CLI validates its local `agentcore/.cli/deployed-state.json` *after*
 the CloudFormation deploy completes and rejects empty `gatewayArn` fields
@@ -3434,9 +3446,9 @@ appends every A2A runtime ARN to the admin Lambda's
   the same thing for a live id read through the wrong namespace. Measured:
   `Zuy3YNKrPQ5uwE9t` is READY with 8 agent records under `agent-registry-control`
   and a 404 under `bedrock-agentcore-control`. One id was "corrected" to a legacy
-  registry holding only 3 records on the strength of that 404, and the resulting
-  short catalog was then attributed to two unrelated causes (§1.13.1 of the design
-  principles). `scripts/check-registry-wiring.py` compares all four `REGISTRY_ID`
+  registry on the strength of that 404 — it holds 5 records but only 3 of type
+  AGENT, and the catalog lists only agents — and the resulting short catalog was
+  then attributed to two unrelated causes (§1.13.1 of the design principles). `scripts/check-registry-wiring.py` compares all four `REGISTRY_ID`
   consumers and names the namespace explicitly.
 - **A registry's status is `READY`, never `ACTIVE`.** The enum is
   CREATING/READY/UPDATING/CREATE_FAILED/UPDATE_FAILED/DELETING/DELETE_FAILED —

@@ -888,7 +888,7 @@ python3 scripts/simulate-users.py run --days-back 45
 | 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
 | 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
 | `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
-| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Integration Registry** 里给。8 个专家全部有已批准记录、共 18 个 skill 可授权;目录为空时的排查见 [§11.11](#1111--a2a-目录为空两个-namespace-各有一套-registry)) |
+| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Tool Policy → Manage Permissions** 里给(Integration Registry 只读)。8 个专家全部有已批准记录、共 18 个 skill 可授权;目录为空时的排查见 [§11.11](#1111--a2a-目录为空两个-namespace-各有一套-registry) |
 | 满意度卡片显示「尚无反馈」 | 该时间范围内没有投票。跑 `run`(会自动投票)或在 Chatbot 里点几下赞/踩。**空表不会显示成 CSAT 0** —— 那会把「没数据」画成「评分极低」 |
 | 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 这三个环境变量推导出的 Runtime。修复:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),A2A 则重跑 `python a2a-agent-registry/deploy.py --only patch-text-agent`。**注意**:2026-08-05 之前部署的环境没有 `DASHBOARD_EXTRA_RUNTIME_ARNS`,升级后必须重跑一次才会生效 |
 
@@ -942,6 +942,20 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 4. **Tool Policy 切 LOG_ONLY 重放** → 鉴别是 Cedar 拒绝还是模型没调工具。
 5. **Quality Evaluation 跑一次 offline eval** → 判断回归是提示词还是模型引起。
 
+**在这五步之前,先排掉「配置指向了错的东西」这一类** —— 它最省时间,也最容易被误诊成上面
+任何一步:
+
+```bash
+./venv/bin/python scripts/check-registry-wiring.py   # 4 个 REGISTRY_ID 消费方是否一致
+./venv/bin/python scripts/sync-agent-code.py --check  # 部署的是不是当前代码
+```
+
+> **一条通用的排查纪律:确认你查的是哪一个 namespace / 哪一份副本 / 哪一个容器。**
+> 「`GetRegistry` 报 404」看着像 id 失效,但 id 正确而 namespace 用错时报的是同一个错
+> (§11.11);「功能不生效」看着像逻辑 bug,但可能部署的是五小时前的副本(§2.5);
+> 「改了环境变量没用」看着像没保存,但暖容器仍在跑旧值。**一个无法区分两种原因的观察,
+> 对任何一种都不是证据。**
+
 ### 11.7 变更安全清单
 
 - 改 Prompt / Skill → DynamoDB 即时生效,不需 `agentcore deploy`。
@@ -950,15 +964,25 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 - 改 CDK (Lambda / IAM / API GW) → `bash scripts/04-cdk-deploy.sh`,**然后必须再跑
   `python scripts/setup-agentcore.py`** —— 见下条。
 - 改 Cognito 用户组 / 添加 admin → Cognito 控制台直接操作,不走 CDK。
+- **不要手工改 `REGISTRY_ID`**(或任何 `setup-agentcore.py` 负责的变量)。真值在
+  `agentcore-state.json` 里,重跑该脚本即可;手工改一次就会让四个消费方失去同步,而症状
+  (可授权的 A2A Agent 变少)看不出是配置漂移。2026-08-10 就这么错过一次,详见 §11.11。
+  改完用 `scripts/check-registry-wiring.py` 自查。
 
 ### 11.8 ⚠️ `cdk deploy` 会静默抹掉 admin Lambda 的一半环境变量
 
-admin Lambda 的环境变量来自两处:CDK 声明 7 个,`setup-agentcore.py` 在部署后补 10 个
-(`GATEWAY_ID`、`MEMORY_ID`、`REGISTRY_ID`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、
-7 个 `OPTIMIZATION_*` / `AB_TEST_*` ARN),因为它们指向 synth 时还不存在的资源。
+admin Lambda 的环境变量来自两处:CDK 声明 **15** 个(内联 8 + `addEnvironment` 7),
+`setup-agentcore.py` 在部署后补 **12** 个(`GATEWAY_ID`、`MEMORY_ID`、
+`VOICE_AGENT_RUNTIME_ARN`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、`KB_ID` / `KB_DATA_SOURCE_ID`、
+`OPTIMIZATION_*` / `*_ONLINE_EVAL_ARN` / `AB_TEST_ROLE_ARN` 等),因为它们指向 synth 时
+还不存在的资源。当前部署共 27 个。
 
 CloudFormation 里 `environment` 是**整张表**,所以任何一次 `cdk deploy` 都会把函数重置回
-CDK 的那 7 个,其余全部丢失。**全过程没有任何报错**,而症状离病因很远:
+CDK 的那 15 个,补写的 12 个全部丢失。**全过程没有任何报错**,而症状离病因很远。
+
+还有一类**数不出来**的丢失:`REGISTRY_ID` 和 `AGENT_RUNTIME_ARN` 由 CDK 声明,但声明的值是
+`PLACEHOLDER_SET_BY_SETUP_SCRIPT`。`cdk deploy` 之后它们**还在**(总数看起来正常),值却是
+占位符 —— 所以**按个数核对是查不出来的**,必须看值。
 
 | 丢失的变量 | 表象 |
 |---|---|
@@ -971,11 +995,16 @@ CDK 的那 7 个,其余全部丢失。**全过程没有任何报错**,而症状�
 然后 `cd a2a-agent-registry && python deploy.py --only patch-text-agent` 补回 A2A 的
 8 条 Runtime ARN。
 
-**核对**:
+**核对**:按**名字和值**核对,不要按个数 —— 新增一个变量总数就变了,而占位符根本不改变
+总数。(这份手册此前写「期望 28」,实测是 27:一个会随代码漂移、且查不出占位符的判据。)
 
 ```bash
+# 这四个必须有真实值,不能是 null,也不能是 PLACEHOLDER_*
 aws lambda get-function-configuration --function-name smarthome-admin-api \
-  --query "length(Environment.Variables)"      # 期望 28,不是 14
+  --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"
+
+# Registry 那条链单独有一键自查(比对 4 个消费方 + registry 可用性)
+./venv/bin/python scripts/check-registry-wiring.py
 ```
 
 `cdk/lambda/admin-api/tests/test_env_contract.py` 记录了哪一侧拥有哪个变量,
@@ -1091,7 +1120,9 @@ patch 回去。**注意 `REGISTRY_ID` 是在模块导入时读取的**,改完环
 > 导入期的 `boto3.client("agent-registry-control")` 会直接 `UnknownServiceError`,Lambda
 > 根本返回不了 200。②「角色缺 `ListRegistryRecords`」——该权限一直在 CDK 里授着,且以
 > `agent-registry:` 前缀。真实原因只有一个:admin Lambda 的 `REGISTRY_ID` 被手工改成了一个
-> **旧 namespace** 的 id,那个 registry 里只有 3 条记录。
+> **旧 namespace** 的 id。那个 registry 共 5 条记录,但只有 3 条是 agent 记录
+> (energy-optimization、appliance-maintenance、home-security;另外 2 条是 skill 记录),
+> 而目录只列 agent —— 于是「8 个专家」变成了「3 个」。
 >
 > 教训是这个仓库反复出现的那一类:**空列表 + 200 + 一条 warning,无法区分「本来就没有」和
 > 「读失败了」**。现在读失败会随响应返回 `catalogError`,控制台渲染成告警而不是中性的

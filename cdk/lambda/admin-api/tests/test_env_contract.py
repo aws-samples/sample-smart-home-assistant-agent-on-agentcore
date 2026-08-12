@@ -1,16 +1,31 @@
 """The admin Lambda's env vars come from two places, and CDK silently wins.
 
-CDK declares seven variables. Ten more are patched in afterwards by
-`scripts/setup-agentcore.py` — GATEWAY_ID, MEMORY_ID, REGISTRY_ID, the seven
-OPTIMIZATION_*/AB_TEST_* ARNs — because they name resources that do not exist at
-synth time.
+CDK declares 15 variables (8 in the inline `environment:` map, 7 via
+`addEnvironment`). Twelve more are patched in afterwards by
+`scripts/setup-agentcore.py` — GATEWAY_ID, MEMORY_ID, VOICE_AGENT_RUNTIME_ARN,
+DASHBOARD_EXTRA_RUNTIME_ARNS, KB_ID/KB_DATA_SOURCE_ID, the OPTIMIZATION_* /
+*_ONLINE_EVAL_ARN / AB_TEST_ROLE_ARN set — because they name resources that do not
+exist at synth time. 27 in total on the current deployment.
 
 `environment:` on a CfnFunction is the WHOLE map, so any `cdk deploy` resets the
-function to CDK's seven and drops the rest. Nothing errors. The symptoms are
+function to CDK's 15 and drops the other 12. Nothing errors. The symptoms are
 remote from the cause: `/tools` quietly returns built-ins only (so the Tool Policy
 modal shows no gateway tools and an admin cannot grant `control_device` at all),
-`/optimization/*` answers ConfigurationError, and the A2A catalog fails a
-`registryId` regex because the value is gone rather than wrong.
+and `/optimization/*` answers ConfigurationError.
+
+Do NOT verify this by counting. Two of the variables — REGISTRY_ID and
+AGENT_RUNTIME_ARN — are declared BY CDK with the literal value
+`PLACEHOLDER_SET_BY_SETUP_SCRIPT`, so a reset leaves them present with a
+placeholder and the total unchanged. A count check sees nothing. (The admin manual
+and README both carried "expect 28" for a while; the real number was 27, and it
+moves whenever a variable is added.) Check the VALUES of the vars you care about,
+and for the Registry chain use `scripts/check-registry-wiring.py`.
+
+A wrong value is worse than a missing one, because the code cannot tell. A
+REGISTRY_ID pointing at a registry in the LEGACY `bedrock-agentcore` namespace
+reads as a perfectly valid configuration and simply returns a shorter catalog —
+which on 2026-08-10 was misdiagnosed as a stale botocore and a missing IAM grant
+before anyone checked the id itself.
 
 This has now bitten twice. These tests do not stop it — only re-running the setup
 script does — but they name the contract, so the next person who adds a variable
