@@ -128,22 +128,41 @@ def test_every_agent_has_the_files_deploy_expects():
             assert skill.get("id"), f"{name} has a skill with no id"
 
 
-def test_the_tool_using_agents_are_the_expected_ones():
+def test_every_agent_is_now_tool_using():
     """deploy.py picks the tools path by the presence of tools.py, and a
     tool-using agent additionally requires a verified user identity on every
     request. Which agents cross that line is worth pinning: adding tools.py to an
-    agent silently changes its auth requirements."""
+    agent silently changes its auth requirements.
+
+    Since 2026-08-12 that is all of them. The last three — energy-optimization,
+    home-security, appliance-maintenance — were prompt-only, and that was the
+    weakest claim in the whole design: an agent that reads nothing returns the same
+    answer to every user, so a reviewable skill document would have been strictly
+    better. They now read the caller's own fleet, which means every one of them
+    needs a verified identity, and a request arriving without a user token is
+    refused rather than answered generically.
+    """
     with_tools = {
         name for name in agents.AGENT_NAMES
         if os.path.exists(os.path.join(REGISTRY_DIR, name, "tools.py"))
     }
-    assert with_tools == {"device-control", "light-effect", "knowledge-qa",
-                          "task-management", "scene-sync"}, with_tools
-    # The three original advisors stay prompt-only — they touch no user data, and
-    # requiring an identity they never had would break them.
-    prompt_only = set(agents.AGENT_NAMES) - with_tools
-    assert prompt_only == {"energy-optimization", "home-security",
-                           "appliance-maintenance"}, prompt_only
+    assert with_tools == set(agents.AGENT_NAMES), (
+        f"these agents have no tools.py and would answer without reading anything: "
+        f"{sorted(set(agents.AGENT_NAMES) - with_tools)}")
+
+
+def test_only_the_security_agent_reaches_the_web_search_gateway():
+    """deploy.py hands out WEBSEARCH_GATEWAY_URL to whichever tools.py names
+    WEB_SEARCH. Pinned because that URL points at a gateway in ANOTHER REGION with
+    its own Cedar policies, so widening it is a decision rather than a detail."""
+    wants_web = set()
+    for name in agents.AGENT_NAMES:
+        path = os.path.join(REGISTRY_DIR, name, "tools.py")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                if "WEB_SEARCH" in fh.read():
+                    wants_web.add(name)
+    assert wants_web == {"home-security"}, wants_web
 
 
 def test_every_tools_module_exports_build_tools():

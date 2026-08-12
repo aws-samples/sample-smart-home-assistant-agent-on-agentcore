@@ -27,7 +27,17 @@ from __future__ import annotations
 # the Registry record name. The slug names the agentcore project, the CFN stack
 # and the runtime.
 AGENTS: dict[str, tuple[str, str]] = {
+    # These three were prompt-only until 2026-08-12, which was the weakest part of
+    # the story: an agent that reads nothing produces the same answer for every
+    # user, and a skill document could have produced it more cheaply and been
+    # reviewable. They now ship a tools.py like the rest, and each runs a chain no
+    # single tool call collapses — energy prices the real fleet against a rated-draw
+    # table, security correlates live state against cited advisories, maintenance
+    # derives a service date from a measured slope and checks it against the manual.
     "energy-optimization": ("energy-optimization-agent", "sha2aenergy"),
+    # The only agent that reaches the web-search gateway (a second gateway, in
+    # us-east-1). deploy.py grants it the URL because its tools.py names
+    # WEB_SEARCH — no agent name is hardcoded, so the wiring follows the code.
     "home-security": ("home-security-agent", "sha2asecurity"),
     "appliance-maintenance": ("appliance-maintenance-agent", "sha2amaintenance"),
     # Agents with tools ship a tools.py, so deploy.py generates a main.py that

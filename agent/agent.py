@@ -1,4 +1,5 @@
 import os
+import contextlib
 import json
 import logging
 import re
@@ -50,6 +51,17 @@ if not GATEWAY_URL:
             GATEWAY_URL = val
         elif key.startswith("AGENTCORE_GATEWAY_") and key.endswith("_ARN"):
             GATEWAY_ARN = val
+
+# The web-search gateway, which is a SECOND gateway in a DIFFERENT region because
+# the `web-search` connector is only offered in us-east-1. Its tools are reached
+# with the same end-user idToken — the gateway's Cognito authorizer points at the
+# us-west-2 user pool's discovery URL, which is region-independent.
+#
+# Read from an explicit variable rather than the AGENTCORE_GATEWAY_*_URL scan
+# above: that scan takes the LAST match it happens to iterate over, so leaving
+# this to it would intermittently swap the two gateways and drop every device
+# tool. Empty means "no web search", which must stay a working configuration.
+WEBSEARCH_GATEWAY_URL = os.environ.get("WEBSEARCH_GATEWAY_URL", "")
 
 # Reached over Converse on `bedrock-runtime` via its cross-region inference profile
 # (the bare `anthropic.claude-sonnet-4-6` id is not on-demand invocable). Bedrock
@@ -604,8 +616,36 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
         else:
             logger.warning("No Authorization header available — gateway per-user policies won't apply")
         mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
-        with mcp_client:
+        # ExitStack rather than nested `with`: web search is a second gateway and a
+        # second client, and it must be able to fail without taking the device
+        # tools down with it. A nested `with` would put the whole tool-assembly
+        # block one indent deeper for a capability that is optional.
+        with contextlib.ExitStack() as _gw_stack:
+            _gw_stack.enter_context(mcp_client)
             mcp_tools = get_mcp_tools(mcp_client)
+
+            # Web search, from its own gateway. Appended to the same list so it
+            # flows through the normal partition below: `WebSearch` is not in
+            # `scoped_suffixes`, so it lands in `non_scoped_tools` and is handed to
+            # the model unwrapped — correct, because it reads public pages and has
+            # no user partition to inject.
+            #
+            # Per-user gating still happens: the gateway runs its own Cedar policy
+            # engine in ENFORCE mode, so an ungranted user's `tools/list` does not
+            # include it. That is why there is no skill-name check here.
+            if WEBSEARCH_GATEWAY_URL:
+                try:
+                    ws_client = MCPClient(lambda: streamablehttp_client(
+                        WEBSEARCH_GATEWAY_URL, headers=gw_headers or None))
+                    _gw_stack.enter_context(ws_client)
+                    ws_tools = get_mcp_tools(ws_client)
+                    mcp_tools = mcp_tools + ws_tools
+                    logger.info("web-search gateway: %d tool(s) available",
+                                len(ws_tools))
+                except Exception as e:  # noqa: BLE001
+                    # Soft: the whole turn must not fail because an optional
+                    # capability in another region is unreachable.
+                    logger.warning("web-search gateway unavailable (skipped): %s", e)
 
             # Every MCP tool that reaches a per-user backend (KB, IoT, ...)
             # is wrapped so the agent's runtime-validated identity is injected

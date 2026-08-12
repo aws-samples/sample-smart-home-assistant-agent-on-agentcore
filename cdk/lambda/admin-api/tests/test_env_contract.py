@@ -108,8 +108,18 @@ def test_the_scenario_variables_are_declared_in_cdk():
 
 def test_every_env_var_the_code_reads_is_set_by_someone():
     """A variable read but never set is a feature that silently does nothing.
-    Both sources count; the point is that nobody has to guess."""
-    code = _read(os.path.join(LAMBDA_DIR, "index.py"))
+    Both sources count; the point is that nobody has to guess.
+
+    Scans every module in the Lambda, not just index.py. It used to scan index.py
+    alone, which meant moving a config read into a helper module — exactly what
+    `gateway_catalog` did with WEBSEARCH_GATEWAY_ID — walked straight past the
+    check that exists to catch it.
+    """
+    code = "\n".join(
+        _read(os.path.join(LAMBDA_DIR, name))
+        for name in sorted(os.listdir(LAMBDA_DIR))
+        if name.endswith(".py")
+    )
     stack = _read(STACK)
     setup = _read(SETUP)
 
@@ -126,10 +136,27 @@ def test_every_env_var_the_code_reads_is_set_by_someone():
 
 
 def test_the_gateway_id_absence_is_what_empties_the_tool_list():
-    """Pins the causal link the symptom hides: without GATEWAY_ID, /tools returns
-    built-ins only and the Tool Policy modal offers no gateway tools — so an
-    administrator cannot grant or revoke control_device, and the Cedar policies
-    that the scheduled runner depends on cannot be edited at all."""
-    code = _read(os.path.join(LAMBDA_DIR, "index.py"))
-    assert "if not GATEWAY_ID:" in code
-    assert 'return response(200, {"tools": tools})' in code
+    """Pins the causal link the symptom hides: with no gateway configured, /tools
+    returns built-ins only and the Tool Policy modal offers no gateway tools — so
+    an administrator cannot grant or revoke control_device, and the Cedar policies
+    that the scheduled runner depends on cannot be edited at all.
+
+    Asserted against `gateway_catalog.gateways()` rather than a source substring:
+    there are two gateway env vars now, and the condition that matters is "no
+    gateway at all", not "this one particular variable is unset".
+    """
+    import gateway_catalog
+
+    saved = (gateway_catalog.GATEWAY_ID, gateway_catalog.WEBSEARCH_GATEWAY_ID)
+    try:
+        gateway_catalog.GATEWAY_ID = ""
+        gateway_catalog.WEBSEARCH_GATEWAY_ID = ""
+        assert gateway_catalog.gateways() == []
+        gateway_catalog.GATEWAY_ID = "gw-tools"
+        assert [g.label for g in gateway_catalog.gateways()] == ["tools"]
+        gateway_catalog.WEBSEARCH_GATEWAY_ID = "gw-websearch"
+        # Order matters: a bare tool-name collision resolves to the gateway that
+        # has always existed, not to whichever was scanned first.
+        assert [g.label for g in gateway_catalog.gateways()] == ["tools", "websearch"]
+    finally:
+        gateway_catalog.GATEWAY_ID, gateway_catalog.WEBSEARCH_GATEWAY_ID = saved

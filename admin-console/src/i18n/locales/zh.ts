@@ -678,6 +678,7 @@ const zh: Record<string, string> = {
   'integrations.skills.col.name': '技能',
   'integrations.skills.col.description': '说明',
   'integrations.skills.col.version': '版本',
+  'integrations.skills.col.status': '状态',
   'integrations.skills.col.publishedBy': '发布者',
   'integrations.skills.col.importedBy': '已导入到',
   'integrations.skills.col.license': '许可证',

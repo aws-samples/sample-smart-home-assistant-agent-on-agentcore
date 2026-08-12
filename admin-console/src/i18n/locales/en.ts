@@ -682,6 +682,7 @@ const en: Record<string, string> = {
   'integrations.skills.col.name': 'Skill',
   'integrations.skills.col.description': 'Description',
   'integrations.skills.col.version': 'Version',
+  'integrations.skills.col.status': 'Status',
   'integrations.skills.col.publishedBy': 'Published by',
   'integrations.skills.col.importedBy': 'Imported by',
   'integrations.skills.col.license': 'License',

@@ -1,18 +1,21 @@
 {
   "name": "appliance-maintenance-agent",
-  "description": "A specialist agent that advises on smart-home appliance maintenance schedules and troubleshooting.",
-  "version": "1.0.0",
+  "description": "A specialist agent that advises on smart-home appliance maintenance and troubleshooting, deriving service dates from each appliance's measured wear trend and checking them against what the product manuals actually document.",
+  "version": "2.0.0",
   "provider": {
     "organization": "smarthome-agent-harness",
     "url": "https://example.com/a2a/appliance-maintenance-agent"
   },
-  "defaultModelId": "us.amazon.nova-lite-v1:0",
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "skills": [
     {
       "id": "maintenance_schedule",
       "name": "Maintenance schedule",
-      "description": "Recommend routine-maintenance intervals (filter change, descaling, firmware update) for a specified appliance.",
-      "tags": ["appliance", "maintenance"],
+      "description": "Recommend routine-maintenance intervals (filter change, descaling, firmware update) for a specified appliance, quoting the documented threshold from the manual.",
+      "tags": [
+        "appliance",
+        "maintenance"
+      ],
       "examples": [
         "When should I replace my AC filter?",
         "How often should I descale the rice cooker?"
@@ -21,11 +24,29 @@
     {
       "id": "troubleshoot",
       "name": "Troubleshoot",
-      "description": "Diagnose a reported appliance problem and give step-by-step troubleshooting guidance.",
-      "tags": ["appliance", "troubleshoot"],
+      "description": "Diagnose a reported appliance problem using its live state and recent history, then relay the documented procedure step by step.",
+      "tags": [
+        "appliance",
+        "troubleshoot"
+      ],
       "examples": [
         "My dishwasher won't drain, what should I check?",
         "Oven is preheating slower than usual — likely cause?"
+      ]
+    },
+    {
+      "id": "service_forecast",
+      "name": "Usage-based service forecast",
+      "description": "Predict when each appliance will actually need servicing, from the measured slope of its wear metric (filter_life, water_level, bin_level) cross-referenced against the threshold documented in its manual. Returns a date and shows both the measurement and the document it was checked against.",
+      "tags": [
+        "appliance",
+        "maintenance",
+        "forecast"
+      ],
+      "examples": [
+        "When will my air purifier filter actually need changing?",
+        "Which appliance needs attention first, and when?",
+        "Build me a service schedule from how I actually use these"
       ]
     }
   ]

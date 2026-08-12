@@ -1,7 +1,7 @@
 {
   "name": "home-security-agent",
-  "description": "A specialist agent that assesses smart-home security posture and guides incident response.",
-  "version": "1.0.0",
+  "description": "A specialist agent that assesses a smart home's real security posture and guides incident response. Enumerates the user's own fleet and live state, and correlates it against current published advisories from standards bodies and national CERTs.",
+  "version": "2.0.0",
   "provider": {
     "organization": "smarthome-agent-harness",
     "url": "https://example.com/a2a/home-security-agent"
@@ -11,7 +11,7 @@
     {
       "id": "risk_assessment",
       "name": "Risk assessment",
-      "description": "Evaluate the user's stated smart-home setup and identify the biggest security gaps ranked by severity.",
+      "description": "Evaluate the user's actual devices and their live state, and identify the biggest security gaps ranked by severity. Every finding names a device the user owns.",
       "tags": ["security", "assessment"],
       "examples": [
         "What's my biggest security gap?",
@@ -21,11 +21,22 @@
     {
       "id": "incident_response",
       "name": "Incident response",
-      "description": "Given a smart-home alert or observation, recommend immediate actions and follow-up steps.",
+      "description": "Given a smart-home alert or observation, separate an event from a baseline using sensor history before escalating, then recommend immediate actions and follow-up steps.",
       "tags": ["security", "incident"],
       "examples": [
         "Motion detected at 2am, what to do?",
         "My smart lock shows a failed unlock attempt — steps?"
+      ]
+    },
+    {
+      "id": "advisory_review",
+      "name": "Advisory review against the live fleet",
+      "description": "Cross-reference the device classes and protocols this household actually runs against currently published advisories from standards bodies, national CERTs and protocol vendors, then rank what applies with cited sources and dates. The answer changes as the web changes, so it cannot be precomputed into a document.",
+      "tags": ["security", "advisory", "live-web"],
+      "examples": [
+        "Are there any current advisories affecting the kit I actually own?",
+        "Check my devices against known Zigbee and Matter issues this year",
+        "Is anything I own subject to a published vulnerability?"
       ]
     }
   ]

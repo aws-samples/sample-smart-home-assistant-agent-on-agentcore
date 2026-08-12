@@ -34,6 +34,16 @@ QUERY_STATE = "query_device_state"
 QUERY_HISTORY = "query_sensor_history"
 QUERY_KB = "query_knowledge_base"
 NAVIGATE = "navigate_to_page"
+# The AWS-managed web-search connector. On a DIFFERENT gateway in a DIFFERENT
+# region (us-east-1) because the connector is not offered in us-west-2, so a
+# session that wants it opens a second MCP client — see GatewaySession.
+WEB_SEARCH = "WebSearch"
+
+# Tools that take no `user_id`. Everything else on the tools gateway partitions on
+# the caller, and injecting an identity into a tool that has none is not harmless:
+# the connector validates its input schema and rejects the unexpected property, so
+# the model sees a tool that always errors.
+NO_USER_SCOPE = frozenset({WEB_SEARCH, NAVIGATE})
 
 
 def gateway_url() -> str:
@@ -50,6 +60,17 @@ def gateway_url() -> str:
         if key.startswith("AGENTCORE_GATEWAY_") and key.endswith("_URL"):
             return value
     return ""
+
+
+def websearch_gateway_url() -> str:
+    """The web-search Gateway URL, or "" when web search is not provisioned.
+
+    Its OWN variable rather than a name matching the prefix scan above: that scan
+    returns whichever key it iterates over last, so a second matching name would
+    intermittently return the web-search gateway as the tools gateway and every
+    device tool would vanish.
+    """
+    return os.environ.get("WEBSEARCH_GATEWAY_URL", "")
 
 
 def mcp_text(result) -> str:
@@ -114,26 +135,55 @@ class GatewaySession:
         self.client.start()
 
         self.available: dict[str, str] = {}
+        # Which client serves each suffix. Needed because web search is on a second
+        # gateway: calling it on the tools client would 404 the tool name.
+        self._client_for: dict[str, object] = {}
+        self._extra_clients: list = []
         try:
-            tools = []
-            token = None
-            while True:
-                page = self.client.list_tools_sync(pagination_token=token)
-                tools.extend(page)
-                if page.pagination_token is None:
-                    break
-                token = page.pagination_token
-            for t in tools:
-                name = getattr(t, "tool_name", "")
-                for suffix in wanted:
-                    if name == suffix or name.endswith("___" + suffix):
-                        self.available[suffix] = name
+            self._discover(self.client, wanted)
         except Exception as exc:  # noqa: BLE001
             self.client.stop(None, None, None)
             raise RuntimeError(f"could not reach the device gateway: {exc}") from exc
 
+        # Web search, from its own gateway in another region. Opened only when
+        # asked for, so the seven sub-agents that do not want it pay nothing.
+        #
+        # Failure here is soft and deliberately unlike the tools gateway above: web
+        # search is an added capability, and an unreachable us-east-1 must not stop
+        # a security review that can still read the user's actual devices.
+        if WEB_SEARCH in wanted:
+            ws_url = websearch_gateway_url()
+            if not ws_url:
+                logger.info("no WEBSEARCH_GATEWAY_URL — web search unavailable")
+            else:
+                try:
+                    ws_client = MCPClient(lambda: streamablehttp_client(
+                        ws_url, headers={"Authorization": f"Bearer {caller.raw_token}"}))
+                    ws_client.start()
+                    self._extra_clients.append(ws_client)
+                    self._discover(ws_client, (WEB_SEARCH,))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("web-search gateway unreachable (skipped): %s", exc)
+
         logger.info("gateway tools available to sub=%s...: %s",
                     caller.sub[:8], sorted(self.available))
+
+    def _discover(self, client, wanted: tuple[str, ...]) -> None:
+        """Page `list_tools` on one client and record what it serves."""
+        tools = []
+        token = None
+        while True:
+            page = client.list_tools_sync(pagination_token=token)
+            tools.extend(page)
+            if page.pagination_token is None:
+                break
+            token = page.pagination_token
+        for t in tools:
+            name = getattr(t, "tool_name", "")
+            for suffix in wanted:
+                if name == suffix or name.endswith("___" + suffix):
+                    self.available[suffix] = name
+                    self._client_for[suffix] = client
 
     def has(self, suffix: str) -> bool:
         return suffix in self.available
@@ -146,9 +196,32 @@ class GatewaySession:
         `caller.email` explicitly — the two identifiers are not interchangeable
         and using the wrong one silently returns another scope's documents (or,
         more likely, none).
+
+        Tools in `NO_USER_SCOPE` get no identity at all. Web search reads public
+        pages, and the connector validates its input schema strictly — an
+        unexpected `user_id` is rejected, so injecting one would turn the tool into
+        one that always errors.
         """
-        return mcp_text(self.client.call_tool_sync(
+        client = self._client_for.get(suffix, self.client)
+        if suffix in NO_USER_SCOPE:
+            arguments = dict(args)
+        else:
+            arguments = {**args, "user_id": user_id or self.caller.sub}
+        return mcp_text(client.call_tool_sync(
             tool_use_id=str(uuid.uuid4()),
             name=self.available[suffix],
-            arguments={**args, "user_id": user_id or self.caller.sub},
+            arguments=arguments,
         ))
+
+    def close(self) -> None:
+        """Stop every client this session opened.
+
+        The per-request Agent is discarded when the request ends, but the
+        background pump of a second client is not reachable from it, so an
+        unstopped web-search client would leak a thread per request.
+        """
+        for client in [*self._extra_clients, self.client]:
+            try:
+                client.stop(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass

@@ -41,8 +41,18 @@ interface Group {
   id: string;
   titleZh: string;
   titleEn: string;
+  /** `<agentDir>.<skillId>`, per each sub-agent's card.json. */
   covers: string[];
+  /** Gateway and agent-side tool names this group exercises. */
+  usesTools?: string[];
+  /** Built-in skill names, per the directories under `agent/skills`. */
+  usesSkills?: string[];
   examples: Example[];
+}
+
+/** The sub-agent name out of a `<agentDir>.<skillId>` coverage entry. */
+function agentOf(entry: string) {
+  return entry.split('.')[0];
 }
 
 interface Props {
@@ -118,6 +128,23 @@ export function PromptExamples({ onPick, onClose }: Props) {
               headerText={`${title(g)} (${g.examples.length})`}
             >
               <SpaceBetween size="xs">
+                {/* What each group actually exercises. The data was already in the
+                    file and rendered nowhere, so a presenter had to know from
+                    memory which prompt hits which specialist — and during a demo
+                    that is exactly what nobody remembers. Sub-agents are listed
+                    once per agent rather than once per skill: three badges reading
+                    the same agent name is noise. */}
+                <div className="example-covers">
+                  {[...new Set(g.covers.map(agentOf))].map((name) => (
+                    <Badge key={name} color="blue">{`A2A: ${name}`}</Badge>
+                  ))}
+                  {(g.usesTools ?? []).map((name) => (
+                    <Badge key={name} color="green">{name}</Badge>
+                  ))}
+                  {(g.usesSkills ?? []).map((name) => (
+                    <Badge key={name} color="grey">{name}</Badge>
+                  ))}
+                </div>
                 {g.examples.map((ex) => (
                   <div key={ex.en} className="example-row">
                     <Button variant="link" onClick={() => onPick(text(ex))}>

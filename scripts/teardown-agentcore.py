@@ -213,6 +213,34 @@ def main():
         except Exception as e:
             print(f"  Skipped (already deleted or not found): {e}")
 
+    # The web-search gateway lives in ANOTHER REGION (us-east-1; the connector is
+    # not offered in the home region), so `client` above cannot reach it. Falls back
+    # to a name lookup when the state file predates the id, because the resource
+    # that gets left behind is the one nobody thinks to look for — in a region this
+    # project otherwise never touches.
+    ws_region = state.get("websearchGatewayRegion", "") or "us-east-1"
+    ws_id = state.get("websearchGatewayId", "")
+    try:
+        ws_client = boto3.client("bedrock-agentcore-control", region_name=ws_region)
+        if not ws_id:
+            for g in ws_client.list_gateways().get("items", []):
+                if g.get("name") == "smarthome-websearch-gw":
+                    ws_id = g["gatewayId"]
+                    break
+        if ws_id:
+            print(f"  Deleting web-search gateway ({ws_region}): {ws_id}")
+            for t in ws_client.list_gateway_targets(
+                    gatewayIdentifier=ws_id).get("items", []):
+                try:
+                    ws_client.delete_gateway_target(
+                        gatewayIdentifier=ws_id, targetId=t["targetId"])
+                except Exception:
+                    pass
+            ws_client.delete_gateway(gatewayIdentifier=ws_id)
+            print("  Web-search gateway deleted.")
+    except Exception as e:
+        print(f"  Skipped web-search gateway: {e}")
+
     if registry_id:
         print(f"  Deleting registry: {registry_id}")
         # AWS Agent Registry moved namespace at GA — `client` above is the

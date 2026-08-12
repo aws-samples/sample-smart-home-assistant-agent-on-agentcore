@@ -23,6 +23,7 @@ import dashboard  # Overview ops-dashboard aggregation; see dashboard.py
 # packages each Lambda with Code.fromAsset(<dir>), so shared/ is not deployed.
 import agent_registry as registry_ns
 import model_catalog  # live Bedrock model catalog; see model_catalog.py
+import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.py
 import subagent_policy  # A2A grant intent -> Cognito groups; see subagent_policy.py
 
 logger = logging.getLogger()
@@ -1162,62 +1163,42 @@ BUILTIN_TOOLS = [
 
 def list_gateway_tools(_event):
     """GET /tools — list built-in Strands/AgentCore tools + tools discovered
-    on the AgentCore Gateway. Each entry is tagged with a `source` field:
-    `builtin` for the curated list above, `gateway` for everything scanned."""
+    on every AgentCore Gateway. Each entry is tagged with a `source` field:
+    `builtin` for the curated list above, `gateway` for everything scanned.
+
+    Target parsing lives in `gateway_catalog` because the Cedar write path needs
+    exactly the same answer. When the two walked the targets separately, adding a
+    kind of target the Tool Policy page could list but `build_cedar_statement`
+    could not name was a one-line mistake away.
+
+    `catalogError` is reported rather than swallowed: an unreachable gateway and a
+    gateway with no targets both produce a short list, and only one of them is
+    something an admin should act on.
+    """
     tools = [dict(t, source="builtin") for t in BUILTIN_TOOLS]
 
-    if not GATEWAY_ID:
-        return response(200, {"tools": tools})
+    if not gateway_catalog.gateways():
+        return response(200, {"tools": tools, "catalogError": ""})
 
-    try:
-        targets_resp = agentcore_control.list_gateway_targets(
-            gatewayIdentifier=GATEWAY_ID
-        )
-        for target_summary in targets_resp.get("items", []):
-            target_id = target_summary["targetId"]
-            target_name = target_summary.get("name", "")
-            try:
-                target = agentcore_control.get_gateway_target(
-                    gatewayIdentifier=GATEWAY_ID,
-                    targetId=target_id,
-                )
-                # Extract tools from MCP lambda target configuration
-                target_config = target.get("targetConfiguration", {})
-                mcp = target_config.get("mcp", {})
-                lambda_cfg = mcp.get("lambda", {})
-                tool_schema = lambda_cfg.get("toolSchema", {})
+    import tool_consumers
 
-                # Tool schema can be inline or in S3
-                tool_defs = tool_schema.get("inlinePayload", [])
-                if not tool_defs and "s3" in tool_schema:
-                    s3_uri = tool_schema["s3"].get("uri", "")
-                    if s3_uri.startswith("s3://"):
-                        # Parse s3://bucket/key
-                        parts = s3_uri[5:].split("/", 1)
-                        if len(parts) == 2:
-                            obj = s3_client.get_object(Bucket=parts[0], Key=parts[1])
-                            tool_defs = json.loads(obj["Body"].read())
+    catalog, errors = gateway_catalog.catalog(s3_client)
+    for entry in catalog:
+        tools.append({
+            "name": entry["name"],
+            "description": entry["description"],
+            "targetName": entry["targetName"],
+            "source": "gateway",
+            # Which gateway, so the page can say why a tool sits in another region.
+            "gatewayLabel": entry["gatewayLabel"],
+            "region": entry["region"],
+            # Which agents call this tool, so the Tool Policy page can
+            # say who breaks when it is revoked. Derived from each
+            # agent's declared tool list — see tool_consumers.py.
+            "consumers": tool_consumers.consumers_for(entry["name"]),
+        })
 
-                for tool_def in tool_defs:
-                    import tool_consumers
-
-                    tools.append({
-                        "name": tool_def.get("name", ""),
-                        "description": tool_def.get("description", ""),
-                        "targetName": target_name,
-                        "source": "gateway",
-                        # Which agents call this tool, so the Tool Policy page can
-                        # say who breaks when it is revoked. Derived from each
-                        # agent's declared tool list — see tool_consumers.py.
-                        "consumers": tool_consumers.consumers_for(
-                            tool_def.get("name", "")),
-                    })
-            except Exception as e:
-                logger.warning(f"Failed to get target {target_id}: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to list gateway tools (returning built-ins only): {e}")
-
-    return response(200, {"tools": tools})
+    return response(200, {"tools": tools, "catalogError": "; ".join(errors)})
 
 
 def get_user_permissions(event):
@@ -1271,8 +1252,21 @@ def update_user_permissions(event):
         # Remove permissions entry if no tools selected
         table.delete_item(Key={"userId": user_id, "skillName": "__permissions__"})
 
-    # Determine which tools need policy rebuild
-    affected_tools = set(old_tools) | set(new_tools)
+    # Determine which tools need policy rebuild.
+    #
+    # The SYMMETRIC difference — only tools whose membership actually changed for
+    # this user. It was the union, which is wrong in a way that is invisible until
+    # it is not: a tool with no Cedar policy is allow-all (measured — the tools
+    # gateway runs in ENFORCE mode with zero policies and serves all six tools),
+    # and rebuilding materialises a permit naming only the users who hold the tool
+    # in DynamoDB. Just 14 of 40 users have a `__permissions__` row here, so
+    # granting ONE new tool to ONE user would have created permits for the six
+    # device tools and revoked them from the other 26 — reported as a successful
+    # save of an unrelated grant.
+    #
+    # A tool present in both old and new cannot need a new policy: the policy is
+    # derived from every user holding it, and that set did not change.
+    affected_tools = set(old_tools) ^ set(new_tools)
 
     if not GATEWAY_ID:
         return response(200, {
@@ -1835,25 +1829,48 @@ def get_memory_records(event):
 # Cedar Policy Helpers
 # ---------------------------------------------------------------------------
 
-def ensure_policy_engine():
-    """Get or create the policy engine. Returns (policyEngineId, policyEngineArn)."""
+def _policy_engine_sk(region):
+    """The DynamoDB sort key holding one region's policy engine.
+
+    The original single-region key is kept verbatim for the home region so an
+    existing deployment keeps using the engine it already has; a second region
+    gets its own row. Sharing one row would have made the second region's
+    provisioning overwrite the first's engine id, and the symptom is every tool
+    policy in us-west-2 quietly targeting an engine in another region.
+    """
+    if region == REGION:
+        return "__policy_engine__"
+    return f"__policy_engine_{region}__"
+
+
+def ensure_policy_engine(region=None):
+    """Get or create the policy engine for one region.
+
+    Returns (policyEngineId, policyEngineArn). A policy engine is a regional
+    resource, so the web-search gateway in us-east-1 cannot share the engine that
+    governs the tools gateway in us-west-2 — hence the parameter.
+    """
+    region = region or REGION
+    control = gateway_catalog.control(region)
+    sk = _policy_engine_sk(region)
+
     # Check DynamoDB first
-    resp = table.get_item(Key={"userId": "__system__", "skillName": "__policy_engine__"})
+    resp = table.get_item(Key={"userId": "__system__", "skillName": sk})
     item = resp.get("Item")
     if item and item.get("policyEngineId"):
         return item["policyEngineId"], item.get("policyEngineArn", "")
 
     # Create policy engine
     try:
-        create_resp = agentcore_control.create_policy_engine(
+        create_resp = control.create_policy_engine(
             name="SmartHomeUserPermissions",
             description="Per-user tool access control for SmartHome Gateway",
         )
         engine_id = create_resp["policyEngineId"]
         engine_arn = create_resp.get("policyEngineArn", "")
-    except agentcore_control.exceptions.ConflictException:
+    except control.exceptions.ConflictException:
         # Already exists — list and find it
-        list_resp = agentcore_control.list_policy_engines()
+        list_resp = control.list_policy_engines()
         for eng in list_resp.get("policyEngines", []):
             if eng.get("name") == "SmartHomeUserPermissions":
                 engine_id = eng["policyEngineId"]
@@ -1865,7 +1882,7 @@ def ensure_policy_engine():
     # Poll until ACTIVE (max 30s)
     for _ in range(15):
         try:
-            get_resp = agentcore_control.get_policy_engine(policyEngineId=engine_id)
+            get_resp = control.get_policy_engine(policyEngineId=engine_id)
             if get_resp.get("status") == "ACTIVE":
                 engine_arn = get_resp.get("policyEngineArn", engine_arn)
                 break
@@ -1876,18 +1893,26 @@ def ensure_policy_engine():
     # Store in DynamoDB
     table.put_item(Item={
         "userId": "__system__",
-        "skillName": "__policy_engine__",
+        "skillName": sk,
         "policyEngineId": engine_id,
         "policyEngineArn": engine_arn,
+        "region": region,
         "updatedAt": now_iso(),
     })
 
     return engine_id, engine_arn
 
 
-def ensure_gateway_policy_engine(policy_engine_arn):
-    """Associate the policy engine with the gateway if not already."""
-    gw = agentcore_control.get_gateway(gatewayIdentifier=GATEWAY_ID)
+def ensure_gateway_policy_engine(policy_engine_arn, gateway_id=None, region=None):
+    """Associate the policy engine with the gateway if not already.
+
+    Defaults to the tools gateway in the home region so existing callers keep
+    their behaviour; the web-search gateway passes its own id and region.
+    """
+    gateway_id = gateway_id or GATEWAY_ID
+    region = region or REGION
+    control = gateway_catalog.control(region)
+    gw = control.get_gateway(gatewayIdentifier=gateway_id)
 
     existing_config = gw.get("policyEngineConfiguration")
     if existing_config and existing_config.get("arn") == policy_engine_arn:
@@ -1897,6 +1922,9 @@ def ensure_gateway_policy_engine(policy_engine_arn):
     gw_role_arn = gw.get("roleArn", "")
     if gw_role_arn:
         gw_role_name = gw_role_arn.split("/")[-1]
+        # IAM is global, so this is deliberately NOT the gateway's region — the two
+        # gateways share one service role and granting it twice in two regions
+        # would be the same PutRolePolicy call made twice.
         iam_client = boto3.client("iam", region_name=REGION)
         try:
             iam_client.put_role_policy(
@@ -1927,7 +1955,7 @@ def ensure_gateway_policy_engine(policy_engine_arn):
     # name, roleArn and authorizerType are the API's required members, so they are
     # read straight off the GetGateway response.
     update_kwargs = dict(
-        gatewayIdentifier=GATEWAY_ID,
+        gatewayIdentifier=gateway_id,
         name=gw["name"],
         roleArn=gw["roleArn"],
         authorizerType=gw["authorizerType"],
@@ -1946,57 +1974,8 @@ def ensure_gateway_policy_engine(policy_engine_arn):
         update_kwargs["protocolType"] = gw["protocolType"]
     if gw.get("authorizerConfiguration"):
         update_kwargs["authorizerConfiguration"] = gw["authorizerConfiguration"]
-    agentcore_control.update_gateway(**update_kwargs)
-    logger.info(f"Associated policy engine {policy_engine_arn} (ENFORCE) with gateway {GATEWAY_ID}")
-
-
-def _get_gateway_arn():
-    """Get the gateway ARN (cached in module-level after first call)."""
-    global _gateway_arn_cache
-    if not hasattr(_get_gateway_arn, '_cache'):
-        gw = agentcore_control.get_gateway(gatewayIdentifier=GATEWAY_ID)
-        _get_gateway_arn._cache = gw.get("gatewayArn", "")
-    return _get_gateway_arn._cache
-
-
-def _get_tool_action_map(refresh=False):
-    """Build a map of tool_name -> Cedar action name ({TargetName}___{toolName}).
-
-    Cached for the life of the container, which is fine for reads but wrong right
-    after a new Gateway target is registered: a warm container keeps the old map,
-    build_cedar_statement falls back to the BARE tool name, and the resulting
-    policy names an action the Gateway never emits. The policy is then ACTIVE and
-    permits nothing — a silent deny that looks like a working deploy. Pass
-    refresh=True on the write path so a policy is never built from a stale map.
-    """
-    if refresh:
-        _get_tool_action_map._cache = None
-    if getattr(_get_tool_action_map, '_cache', None) is None:
-        action_map = {}
-        targets = agentcore_control.list_gateway_targets(gatewayIdentifier=GATEWAY_ID)
-        for t in targets.get("items", []):
-            target_name = t.get("name", "")
-            try:
-                target = agentcore_control.get_gateway_target(
-                    gatewayIdentifier=GATEWAY_ID, targetId=t["targetId"])
-                mcp = target.get("targetConfiguration", {}).get("mcp", {})
-                lambda_cfg = mcp.get("lambda", {})
-                tool_schema = lambda_cfg.get("toolSchema", {})
-                tool_defs = tool_schema.get("inlinePayload", [])
-                if not tool_defs and "s3" in tool_schema:
-                    s3_uri = tool_schema["s3"].get("uri", "")
-                    if s3_uri.startswith("s3://"):
-                        parts = s3_uri[5:].split("/", 1)
-                        if len(parts) == 2:
-                            obj = s3_client.get_object(Bucket=parts[0], Key=parts[1])
-                            tool_defs = json.loads(obj["Body"].read())
-                for td in tool_defs:
-                    tool_name = td.get("name", "")
-                    action_map[tool_name] = f"{target_name}___{tool_name}"
-            except Exception as e:
-                logger.warning(f"Failed to get tools for target {target_name}: {e}")
-        _get_tool_action_map._cache = action_map
-    return _get_tool_action_map._cache
+    control.update_gateway(**update_kwargs)
+    logger.info(f"Associated policy engine {policy_engine_arn} (ENFORCE) with gateway {gateway_id}")
 
 
 def build_cedar_statement(tool_name, user_ids):
@@ -2009,20 +1988,35 @@ def build_cedar_statement(tool_name, user_ids):
     Requires gateway with authorizerType: CUSTOM_JWT so that principal.id
     is available during policy evaluation.
 
+    `user_ids` must be Cognito **subs**, not emails. `principal.id` carries the
+    token's `sub`; the Admin Console keys these rows on `user.sub` for exactly this
+    reason. Measured on a live gateway: the identical statement written with an
+    email is ACTIVE and matches nobody, so the tool vanishes from `tools/list` and
+    the grant reads as a successful save that silently denies.
+
+    The `principal is ...` guard is load-bearing rather than defensive. Without it
+    the policy does not merely fail to match — it fails to ATTACH, with
+    `attribute 'id' on entity type 'AgentCore::UnauthenticatedUser' not found`,
+    leaving the policy UPDATE_FAILED while CreatePolicy/UpdatePolicy returned 200.
+
     Cedar schema (discovered via StartPolicyGeneration):
       action == AgentCore::Action::"{TargetName}___{toolName}"
       resource == AgentCore::Gateway::"{gatewayArn}"
       principal.id for user identity (from JWT)
+
+    Returns (statement, entry) where `entry` is the tool's gateway_catalog row —
+    the caller needs it to write the policy to the engine in the tool's OWN
+    region. Returning the region alongside the statement rather than looking it up
+    again is deliberate: the two lookups could disagree, and the failure mode is a
+    valid-looking policy in the wrong region's engine, which permits nothing.
     """
-    action_map = _get_tool_action_map()
-    action_name = action_map.get(tool_name)
-    if action_name is None:
+    entry = gateway_catalog.entry_for(tool_name, s3_client)
+    if entry is None:
         # Re-read the targets once: a tool registered after this container warmed
         # up is absent from the cached map, and the old fallback to the bare tool
         # name produced a policy that permits nothing while reporting success.
-        action_map = _get_tool_action_map(refresh=True)
-        action_name = action_map.get(tool_name)
-    if action_name is None:
+        entry = gateway_catalog.entry_for(tool_name, s3_client, refresh=True)
+    if entry is None:
         # Still unknown — the tool is not on any Gateway target. Refuse rather
         # than writing a policy whose action the Gateway will never emit.
         raise ValueError(
@@ -2030,10 +2024,11 @@ def build_cedar_statement(tool_name, user_ids):
             f"Cedar action name exists for it; refusing to write a policy that "
             f"would silently permit nothing"
         )
-    gateway_arn = _get_gateway_arn()
+    action_name = entry["actionName"]
+    gateway_arn = gateway_catalog.gateway_arn(entry["gatewayId"], entry["region"])
 
     if not user_ids:
-        return ""  # No permit → default-deny blocks this tool
+        return "", entry  # No permit → default-deny blocks this tool
 
     conditions = " || ".join(
         f'(principal.id) == "{uid}"' for uid in sorted(user_ids)
@@ -2047,10 +2042,10 @@ def build_cedar_statement(tool_name, user_ids):
         f'  ((principal is AgentCore::OAuthUser) || (principal is AgentCore::IamEntity)) &&\n'
         f'  ({conditions})\n'
         f'}};'
-    )
+    ), entry
 
 
-def _wait_for_policy_settled(engine_id, policy_id, timeout=30):
+def _wait_for_policy_settled(engine_id, policy_id, timeout=30, region=None):
     """Block until a policy leaves CREATING/UPDATING. Returns its final status.
 
     UpdatePolicy and DeletePolicy both reject with ConflictException ("Policy
@@ -2062,9 +2057,10 @@ def _wait_for_policy_settled(engine_id, policy_id, timeout=30):
     """
     deadline = time.time() + timeout
     status = ""
+    control = gateway_catalog.control(region or REGION)
     while time.time() < deadline:
         try:
-            status = agentcore_control.get_policy(
+            status = control.get_policy(
                 policyEngineId=engine_id, policyId=policy_id).get("status", "")
         except Exception as e:
             logger.warning(f"Could not read policy {policy_id} status: {e}")
@@ -2077,11 +2073,84 @@ def _wait_for_policy_settled(engine_id, policy_id, timeout=30):
 
 
 def rebuild_tool_policy(tool_name):
-    """Scan DynamoDB for all users with this tool and create/update/delete the Cedar policy."""
-    engine_id, engine_arn = ensure_policy_engine()
-    ensure_gateway_policy_engine(engine_arn)
+    """Scan DynamoDB for all users with this tool and create/update/delete the Cedar policy.
 
-    # Scan for all users who have this tool in their permissions
+    The tool's own gateway decides which region's policy engine the policy is
+    written to. Web search lives on a gateway in us-east-1, and a policy written
+    to the us-west-2 engine for it would be ACTIVE, valid and completely inert.
+    """
+    # Resolve the gateway BEFORE provisioning an engine: `build_cedar_statement`
+    # raises for a tool no gateway exposes, and provisioning an engine first would
+    # leave a resource behind for a tool that cannot be governed.
+    cedar_stmt, entry = build_cedar_statement(tool_name, _tool_user_ids(tool_name))
+    region = entry["region"]
+    engine_id, engine_arn = ensure_policy_engine(region)
+    ensure_gateway_policy_engine(engine_arn, entry["gatewayId"], region)
+    control = gateway_catalog.control(region)
+
+    user_ids = _tool_user_ids(tool_name)
+
+    # Look up existing policy for this tool in DynamoDB
+    policy_record = table.get_item(
+        Key={"userId": "__system__", "skillName": f"__tool_policy_{tool_name}__"}
+    ).get("Item")
+    existing_policy_id = policy_record.get("policyId") if policy_record else None
+
+    policy_name = f"ToolPolicy_{tool_name.replace('-', '_')}"
+
+    if not cedar_stmt:
+        # No users have this tool → delete the permit policy (default-deny blocks it)
+        if existing_policy_id:
+            try:
+                _wait_for_policy_settled(engine_id, existing_policy_id, region=region)
+                control.delete_policy(
+                    policyEngineId=engine_id, policyId=existing_policy_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete policy {existing_policy_id}: {e}")
+            table.delete_item(
+                Key={"userId": "__system__", "skillName": f"__tool_policy_{tool_name}__"})
+            logger.info(f"Deleted permit policy for tool '{tool_name}' (no authorized users)")
+        return
+
+    if existing_policy_id:
+        # A policy still settling from a previous edit rejects the update with
+        # ConflictException, which would leave DynamoDB and Cedar disagreeing
+        # about who may call this tool.
+        _wait_for_policy_settled(engine_id, existing_policy_id, region=region)
+        control.update_policy(
+            policyEngineId=engine_id,
+            policyId=existing_policy_id,
+            definition={"cedar": {"statement": cedar_stmt}},
+            validationMode="IGNORE_ALL_FINDINGS",
+        )
+        logger.info(f"Updated policy {existing_policy_id} for tool '{tool_name}' "
+                    f"with {len(user_ids)} users in {region}")
+    else:
+        # Create new policy
+        create_resp = control.create_policy(
+            policyEngineId=engine_id,
+            name=policy_name,
+            definition={"cedar": {"statement": cedar_stmt}},
+            description=f"Controls access to the {tool_name} tool",
+            validationMode="IGNORE_ALL_FINDINGS",
+        )
+        new_policy_id = create_resp["policyId"]
+        table.put_item(Item={
+            "userId": "__system__",
+            "skillName": f"__tool_policy_{tool_name}__",
+            "policyId": new_policy_id,
+            "policyName": policy_name,
+            # Which engine holds it, so a later delete does not have to re-derive
+            # the region from a catalog that may have changed under it.
+            "region": region,
+            "updatedAt": now_iso(),
+        })
+        logger.info(f"Created policy {new_policy_id} for tool '{tool_name}' "
+                    f"with {len(user_ids)} users in {region}")
+
+
+def _tool_user_ids(tool_name):
+    """Every user whose stored permissions include this tool."""
     user_ids = []
     scan_params = {
         "FilterExpression": "skillName = :sk",
@@ -2098,61 +2167,7 @@ def rebuild_tool_policy(tool_name):
         if "LastEvaluatedKey" not in resp:
             break
         scan_params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-
-    # Look up existing policy for this tool in DynamoDB
-    policy_record = table.get_item(
-        Key={"userId": "__system__", "skillName": f"__tool_policy_{tool_name}__"}
-    ).get("Item")
-    existing_policy_id = policy_record.get("policyId") if policy_record else None
-
-    policy_name = f"ToolPolicy_{tool_name.replace('-', '_')}"
-
-    cedar_stmt = build_cedar_statement(tool_name, user_ids)
-
-    if not cedar_stmt:
-        # No users have this tool → delete the permit policy (default-deny blocks it)
-        if existing_policy_id:
-            try:
-                _wait_for_policy_settled(engine_id, existing_policy_id)
-                agentcore_control.delete_policy(
-                    policyEngineId=engine_id, policyId=existing_policy_id)
-            except Exception as e:
-                logger.warning(f"Failed to delete policy {existing_policy_id}: {e}")
-            table.delete_item(
-                Key={"userId": "__system__", "skillName": f"__tool_policy_{tool_name}__"})
-            logger.info(f"Deleted permit policy for tool '{tool_name}' (no authorized users)")
-        return
-
-    if existing_policy_id:
-        # A policy still settling from a previous edit rejects the update with
-        # ConflictException, which would leave DynamoDB and Cedar disagreeing
-        # about who may call this tool.
-        _wait_for_policy_settled(engine_id, existing_policy_id)
-        agentcore_control.update_policy(
-            policyEngineId=engine_id,
-            policyId=existing_policy_id,
-            definition={"cedar": {"statement": cedar_stmt}},
-            validationMode="IGNORE_ALL_FINDINGS",
-        )
-        logger.info(f"Updated policy {existing_policy_id} for tool '{tool_name}' with {len(user_ids)} users")
-    else:
-        # Create new policy
-        create_resp = agentcore_control.create_policy(
-            policyEngineId=engine_id,
-            name=policy_name,
-            definition={"cedar": {"statement": cedar_stmt}},
-            description=f"Controls access to the {tool_name} tool",
-            validationMode="IGNORE_ALL_FINDINGS",
-        )
-        new_policy_id = create_resp["policyId"]
-        table.put_item(Item={
-            "userId": "__system__",
-            "skillName": f"__tool_policy_{tool_name}__",
-            "policyId": new_policy_id,
-            "policyName": policy_name,
-            "updatedAt": now_iso(),
-        })
-        logger.info(f"Created policy {new_policy_id} for tool '{tool_name}' with {len(user_ids)} users")
+    return user_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2818,6 +2833,12 @@ def list_registry_skills(_event):
                 meta = (json.loads(definition_raw) or {}).get("_meta") or {}
                 row["license"] = meta.get("license", "") or ""
                 row["compatibility"] = meta.get("compatibility", "") or ""
+                # The built-in skills are published by the deploy, not by a person
+                # through the Skill ERP, so they have no ownership row and would
+                # show a bare "—" under Published by. "the deploy did" is a real
+                # answer and a more useful one.
+                if not row["publishedBy"]:
+                    row["publishedBy"] = meta.get("publishedBy", "") or ""
         except Exception as exc:  # noqa: BLE001
             logger.warning("could not read SKILL descriptors for %s: %s",
                            record_id, exc)

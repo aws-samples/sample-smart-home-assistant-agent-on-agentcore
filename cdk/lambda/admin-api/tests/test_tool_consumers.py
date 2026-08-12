@@ -39,17 +39,24 @@ def _read(path):
 
 
 def _orchestrator_suffixes():
-    """What agent.py wraps, plus navigate_to_page.
+    """What agent.py wraps, plus the tools it deliberately does not wrap.
 
-    `navigate_to_page` is deliberately NOT in `scoped_suffixes` — a deep link is
-    identical for every user, so there is no identity to inject. It is still a
-    tool the orchestrator calls, so reading only `scoped_suffixes` would claim
-    nobody uses it.
+    Two tools are absent from `scoped_suffixes` on purpose, because neither has an
+    identity to inject: a deep link is identical for every user, and web search
+    reads public pages (the connector rejects an unexpected `user_id` outright).
+    Both are still tools the orchestrator calls, so reading only `scoped_suffixes`
+    would claim nobody uses them — and this map exists to answer "who breaks if I
+    revoke this", where a false "nobody" is the worst available answer.
     """
     src = _read(AGENT_PY)
     match = re.search(r"scoped_suffixes = \(([^)]*)\)", src, re.S)
     assert match, "scoped_suffixes not found; the generator reads the same shape"
-    return set(re.findall(r'"([a-z_]+)"', match.group(1))) | {"navigate_to_page"}
+    unscoped = {"navigate_to_page"}
+    # Mirrors the generator: claimed only while agent.py actually opens the
+    # second (web-search) MCP client.
+    if "WEBSEARCH_GATEWAY_URL" in src:
+        unscoped.add("WebSearch")
+    return set(re.findall(r'"([a-z_]+)"', match.group(1))) | unscoped
 
 
 def _declared_by_subagents():
@@ -142,13 +149,42 @@ def test_navigate_to_page_is_orchestrator_only():
     assert tool_consumers.consumers_for("navigate_to_page") == ["smarthome"]
 
 
-def test_a_prompt_only_agent_claims_no_tools():
-    """home-security, appliance-maintenance and energy-optimization ship no
-    tools.py, so they must not appear anywhere in the map."""
-    prompt_only = {"sha2asecurity", "sha2amaintenance", "sha2aenergy"}
+def test_every_sub_agent_now_claims_at_least_one_tool():
+    """The inverse of what this test used to assert.
+
+    Until 2026-08-12 home-security, appliance-maintenance and energy-optimization
+    shipped no tools.py and had to appear nowhere in the map. They now all read the
+    caller's own fleet, so the opposite is the invariant worth holding: an agent
+    that claims no tool is back to answering from the model alone, which is the
+    thing a skill document does better.
+    """
+    from common.agents import AGENT_SHORT_SLUG, SCENARIO_AGENT
+
     listed = {a for agents in tool_consumers.TOOL_CONSUMERS.values() for a in agents}
-    assert not (prompt_only & listed), (
-        f"prompt-only agent(s) listed as tool consumers: {sorted(prompt_only & listed)}")
+    # task-management is the one documented exception, and it is not a gap: it owns
+    # a DynamoDB table of scenes and returns device ACTIONS for the orchestrator to
+    # execute, holding no device path of its own. That split is what keeps every
+    # scene-driven command inside Cedar's reach (shared/scenarios.py), so it has a
+    # tools.py and no Gateway tool by design.
+    expected_absent = {AGENT_SHORT_SLUG[SCENARIO_AGENT]}
+    missing = sorted(set(AGENT_SHORT_SLUG.values()) - listed - expected_absent)
+    assert not missing, (
+        f"these sub-agents declare no Gateway tool, so they answer without reading "
+        f"anything: {missing}")
+    assert not (expected_absent & listed), (
+        f"{sorted(expected_absent)} gained a Gateway tool — if that is intended, the "
+        f"scene-writing agent now has a device path of its own, which is the thing "
+        f"shared/scenarios.py exists to prevent")
+
+
+def test_web_search_is_claimed_by_the_orchestrator_and_the_security_agent():
+    """It lives on a second gateway in another region, so who can reach it is a
+    decision. The orchestrator gets it unwrapped (no identity to inject); the
+    security agent asks for it by name in its WANTED tuple."""
+    assert tool_consumers.consumers_for("WebSearch") == ["smarthome", "sha2asecurity"]
+    # Prefixed form too — the Gateway advertises SmartHomeWebSearch___WebSearch.
+    assert tool_consumers.consumers_for(
+        "SmartHomeWebSearch___WebSearch") == ["smarthome", "sha2asecurity"]
 
 
 def test_the_generated_file_says_it_is_generated():

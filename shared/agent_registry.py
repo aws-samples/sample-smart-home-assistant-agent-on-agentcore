@@ -270,6 +270,48 @@ def skill_record_descriptors(skill_definition: dict | str,
     return {"agentSkillsDefinition": descriptor}
 
 
+def as_update_descriptors(descriptors: dict) -> dict:
+    """Rewrite a Create-shaped descriptor tree into UpdateRegistryRecord's shape.
+
+    `CreateRegistryRecord` takes descriptors bare. `UpdateRegistryRecord` wraps
+    EVERY level in `optionalValue` — the union, each descriptor, and each field:
+
+        create  {"a2aAgentCard": {"data": "<json>"}}
+        update  {"optionalValue": {"a2aAgentCard": {"optionalValue":
+                    {"data": {"optionalValue": "<json>"}}}}}
+
+    Measured from the botocore service model rather than guessed:
+
+        c = boto3.client("agent-registry-control")
+        c.meta.service_model.operation_model("UpdateRegistryRecord") \\
+         .input_shape.members["descriptors"]                     # -> optionalValue
+         ...members["optionalValue"].members["a2aAgentCard"]     # -> optionalValue
+         ...members["optionalValue"].members["data"]             # -> optionalValue
+
+    Why a function rather than wrapping by hand at each call site: wrapping only
+    the outer level is a fix that LOOKS right and is not. `a2a-agent-registry/
+    deploy.py` carries the same logic (it cannot import this module — the deploy
+    scripts run from their own directory), and the two are held identical by
+    shared/tests/test_update_descriptor_shape.py. Getting it wrong there caused a
+    redeploy to fall back to delete-and-recreate, minting a NEW recordId while
+    reporting success — and `a2aGrants` is keyed by recordId, so every specialist
+    granted yesterday had no tools today, with nothing in any log.
+
+    A partially-wrapped payload does not fail cleanly everywhere, either: passing
+    `{"optionalValue": <bare tree>}` to a SKILL update raises ParamValidationError
+    naming the inner fields, which is at least loud. Passing a bare value where one
+    is optional can be accepted and ignored.
+    """
+    def wrap(value, depth: int):
+        if isinstance(value, dict):
+            return {"optionalValue": {k: wrap(v, depth + 1) for k, v in value.items()}}
+        return {"optionalValue": value}
+
+    return {"optionalValue": {
+        name: wrap(fields, 0) for name, fields in descriptors.items()
+    }}
+
+
 def read_agent_card(record: dict) -> str:
     """Pull the AgentCard JSON string out of a GA record.
 

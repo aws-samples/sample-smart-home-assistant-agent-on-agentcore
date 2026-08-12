@@ -68,19 +68,31 @@ def consumers_for(tool_name: str) -> list[str]:
 
 
 def orchestrator_suffixes() -> list[str]:
-    """The suffixes agent.py wraps, plus the one it deliberately does not.
+    """The suffixes agent.py wraps, plus the ones it deliberately does not.
 
-    `navigate_to_page` is absent from `scoped_suffixes` on purpose — a deep link
-    is identical for every user, so there is no identity to inject. It is still a
-    tool the orchestrator calls, so it belongs in this map; reading only
-    `scoped_suffixes` would claim nobody uses it.
+    `scoped_suffixes` is only the tools that need an identity injected, so reading
+    it alone under-reports what the orchestrator can call — and this map exists to
+    answer "who breaks if I revoke this", where a false "nobody" is the worst
+    possible answer.
+
+    Two tools are unscoped on purpose:
+      - `navigate_to_page`: a deep link is identical for every user, so there is
+        no identity to inject.
+      - `WebSearch`: it reads public pages, and the connector rejects an
+        unexpected `user_id` outright. It comes from a second gateway, so it is
+        only claimed here when agent.py actually opens that client.
     """
     src = AGENT_PY.read_text(encoding="utf-8")
     match = re.search(r"scoped_suffixes = \(([^)]*)\)", src, re.S)
     if not match:
         raise SystemExit("scoped_suffixes not found in agent/agent.py")
     found = re.findall(r'"([a-z_]+)"', match.group(1))
-    return found + ["navigate_to_page"]
+    extra = ["navigate_to_page"]
+    # Derived from the code rather than hardcoded: if the second MCP client is
+    # ever removed, this stops claiming the orchestrator can search the web.
+    if "WEBSEARCH_GATEWAY_URL" in src:
+        extra.append("WebSearch")
+    return found + extra
 
 
 def subagent_wanted() -> dict[str, list[str]]:

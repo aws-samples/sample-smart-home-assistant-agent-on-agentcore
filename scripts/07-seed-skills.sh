@@ -8,10 +8,21 @@ set -e
 #   - Reads the SKILL.md files under `agent/skills/` and writes each one into
 #     the `smarthome-skills` DynamoDB table as a `__global__` skill, so the
 #     agent has the built-in device-control skills on first invocation.
-#   - Idempotent: uses PutItem, overwriting any existing rows with the same key.
+#   - Publishes those same skills to AWS Agent Registry as approved SKILL
+#     records, so `Admin Console -> Integration Registry -> Skills` shows what
+#     is actually deployed. The two stores answer different questions: DynamoDB
+#     is what the agent LOADS, the Registry is what a curator can SEE and
+#     approve. Seeding only the first left that page holding one record while
+#     nine skills were live, which reads as a broken page rather than an
+#     unpublished one.
+#   - Idempotent: PutItem for DynamoDB; the Registry step keys on a dedup name
+#     and updates in place, because recordIds are what `importedFromRegistry`
+#     points at and churning them would orphan every import.
 #
 # Prerequisites:
 #   - CDK stack deployed (provides the DynamoDB table)
+#   - AgentCore setup run (provides the registry id in agentcore-state.json).
+#     The Registry step is skipped with a warning if it has not been.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,5 +36,14 @@ fi
 
 echo "==> Seeding built-in skills to DynamoDB..."
 python3 "$SCRIPT_DIR/scripts/seed-skills.py"
+
+echo "==> Publishing built-in skills to AWS Agent Registry..."
+if [ -f "$SCRIPT_DIR/agentcore-state.json" ]; then
+    python3 "$SCRIPT_DIR/scripts/publish-builtin-skills.py"
+else
+    echo "    Skipped: agentcore-state.json not found (run scripts/06-deploy-agentcore.sh"
+    echo "    first, then re-run this step). The agent still works — only the"
+    echo "    Integration Registry > Skills overview will be missing its records."
+fi
 
 echo "==> Step 7 complete."

@@ -1224,6 +1224,160 @@ def _ensure_optimization_infra(runtime_id: str, runtime_arn: str,
     }
 
 
+WEBSEARCH_GATEWAY_NAME = "smarthome-websearch-gw"
+# The web-search connector is offered in us-east-1 only. Measured, because the
+# error does not say so: `create_gateway_target` in us-west-2 answers
+# "Connector integration web-search is not available for this account", which
+# reads as an entitlement problem and sent the first attempt looking at IAM.
+WEBSEARCH_REGION = "us-east-1"
+# Pinned rather than left to the default. 1.2.0 is the first version exposing
+# request-level `filters` (domain include/exclude, published-date bounds), which
+# the security sub-agent uses to scope an advisory lookup to vendor domains.
+WEBSEARCH_CONNECTOR_VERSION = "1.2.0"
+
+
+def _ensure_websearch_gateway(tools_gateway_id: str, discovery_url: str,
+                              client_id: str, region: str) -> dict:
+    """Provision the web-search gateway and its connector target. Idempotent.
+
+    A SECOND gateway, in a DIFFERENT region, for one tool. Both halves of that are
+    forced rather than chosen:
+
+      - Region: the connector is not offered in us-west-2 (see WEBSEARCH_REGION).
+      - Separate gateway: a gateway is regional, so the tool cannot be a target on
+        the us-west-2 tools gateway even though every other tool is.
+
+    It reuses the tools gateway's service role (IAM is global) and its Cognito
+    authorizer config, so the same end-user idToken authorizes both. That the
+    discovery URL names a us-west-2 user pool while the gateway lives in us-east-1
+    is fine and is verified live — the URL is just HTTPS.
+
+    Returns {"gatewayId", "gatewayUrl", "region"}, or {} when the connector is
+    unavailable. Empty must degrade to "web search is absent" rather than to a
+    failed deploy: it is an added capability, not a dependency.
+    """
+    ac_home = boto3.client("bedrock-agentcore-control", region_name=region)
+    ac = boto3.client("bedrock-agentcore-control", region_name=WEBSEARCH_REGION)
+
+    try:
+        tools_gw = ac_home.get_gateway(gatewayIdentifier=tools_gateway_id)
+        role_arn = tools_gw["roleArn"]
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [websearch] Cannot read the tools gateway role ({exc}) — skipped")
+        return {}
+
+    # The gateway's service role must be allowed to invoke the connector. The
+    # resource is service-owned and per-region, so both regions are granted: the
+    # role is shared, and granting only one leaves a target that is READY and
+    # fails at call time.
+    try:
+        iam = boto3.client("iam")
+        iam.put_role_policy(
+            RoleName=role_arn.split("/")[-1],
+            PolicyName="AgentCoreWebSearchInvoke",
+            PolicyDocument=json.dumps({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Sid": "InvokeWebSearch",
+                    "Effect": "Allow",
+                    "Action": "bedrock-agentcore:InvokeWebSearch",
+                    "Resource": [
+                        f"arn:aws:bedrock-agentcore:{WEBSEARCH_REGION}:aws:tool/web-search.v1",
+                        f"arn:aws:bedrock-agentcore:{region}:aws:tool/web-search.v1",
+                    ],
+                }],
+            }),
+        )
+        print("  [websearch] Granted InvokeWebSearch to the gateway service role")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [websearch] Warning: could not grant InvokeWebSearch: {exc}")
+
+    # Look up an existing gateway by name before creating one.
+    gw_id = ""
+    gw_url = ""
+    try:
+        paginator = ac.get_paginator("list_gateways")
+        for page in paginator.paginate():
+            for gw in page.get("items", []):
+                if gw.get("name") == WEBSEARCH_GATEWAY_NAME:
+                    gw_id = gw.get("gatewayId", "")
+                    break
+            if gw_id:
+                break
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [websearch] Warning: could not list gateways: {exc}")
+
+    if not gw_id:
+        try:
+            resp = ac.create_gateway(
+                name=WEBSEARCH_GATEWAY_NAME,
+                description=(
+                    "Web Search connector target for the smart home orchestrator. "
+                    f"In {WEBSEARCH_REGION} because the connector is not offered "
+                    f"in {region}."
+                ),
+                roleArn=role_arn,
+                protocolType="MCP",
+                authorizerType="CUSTOM_JWT",
+                authorizerConfiguration={"customJWTAuthorizer": {
+                    "discoveryUrl": discovery_url,
+                    "allowedAudience": [client_id],
+                }},
+            )
+            gw_id = resp["gatewayId"]
+            gw_url = resp.get("gatewayUrl", "")
+            print(f"  [websearch] Created gateway {gw_id} in {WEBSEARCH_REGION}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [websearch] Warning: gateway creation failed ({exc}) — "
+                  f"web search will be absent")
+            return {}
+
+    # Wait for READY; CreateGatewayTarget on a CREATING gateway is rejected.
+    for _ in range(30):
+        try:
+            got = ac.get_gateway(gatewayIdentifier=gw_id)
+        except Exception:  # noqa: BLE001
+            break
+        gw_url = got.get("gatewayUrl", gw_url)
+        if got.get("status") != "CREATING":
+            break
+        time.sleep(4)
+
+    # The connector target. Already-exists is the normal case on a re-run.
+    existing = set()
+    try:
+        for t in ac.list_gateway_targets(gatewayIdentifier=gw_id).get("items", []):
+            existing.add(t.get("name", ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [websearch] Warning: could not list targets: {exc}")
+
+    if "SmartHomeWebSearch" not in existing:
+        try:
+            ac.create_gateway_target(
+                gatewayIdentifier=gw_id,
+                name="SmartHomeWebSearch",
+                targetConfiguration={"mcp": {"connector": {
+                    "source": {"connectorId": "web-search",
+                               "version": WEBSEARCH_CONNECTOR_VERSION},
+                    "configurations": [{"name": "WebSearch", "parameterValues": {}}],
+                }}},
+                credentialProviderConfigurations=[
+                    {"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+            )
+            print(f"  [websearch] Created target SmartHomeWebSearch "
+                  f"(connector v{WEBSEARCH_CONNECTOR_VERSION})")
+        except Exception as exc:  # noqa: BLE001
+            # The most likely cause is the connector being unavailable in this
+            # account or region. Say which tool is missing, not just that a call
+            # failed, or the next person greps for "WebSearch" and finds nothing.
+            print(f"  [websearch] Warning: connector target failed ({exc}) — "
+                  f"the WebSearch tool will not appear on the Tool Policy page")
+    else:
+        print("  [websearch] Target SmartHomeWebSearch already present")
+
+    return {"gatewayId": gw_id, "gatewayUrl": gw_url, "region": WEBSEARCH_REGION}
+
+
 def _ensure_bundles_runtime(primary_runtime_id: str, primary_runtime_arn: str,
                             region: str) -> dict:
     """Provision the bundles runtime — same container image as the primary
@@ -1839,6 +1993,26 @@ def main():
     # Welcome audio is baked directly into the CodeZip (see step 2); no S3
     # upload is needed, and no runtime GetObject round-trip at connect time.
 
+    # Web search: a second gateway, in us-east-1, because the `web-search`
+    # connector is not offered in the home region. Provisioned HERE — before the
+    # runtime env patch below and the admin Lambda patch further down — because
+    # both of those need its id, and computing it after them left
+    # WEBSEARCH_GATEWAY_URL unset on the runtime while the admin Lambda had it.
+    # The visible symptom of that split is the Tool Policy page offering a
+    # WebSearch checkbox for a tool the agent cannot reach.
+    websearch_info = {}
+    if gateway_id:
+        try:
+            websearch_info = _ensure_websearch_gateway(
+                tools_gateway_id=gateway_id,
+                discovery_url=discovery_url,
+                client_id=client_id,
+                region=REGION,
+            )
+        except Exception as e:
+            print(f"  [websearch] Warning: provisioning failed: {e}")
+            websearch_info = {}
+
     # Patch runtime env vars (agentcore CLI drops custom env vars during deploy)
     if runtime_id:
         print("Patching runtime environment variables...")
@@ -1875,6 +2049,12 @@ def main():
         # rewrites the event names and breaks evaluation.
         if gateway_arn:
             existing_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
+        # The web-search gateway's MCP URL, as its own variable. NOT named
+        # AGENTCORE_GATEWAY_*_URL: agent.py scans that prefix for the tools gateway
+        # and takes the last match it iterates over, so a second matching name
+        # would intermittently swap the two and drop every device tool.
+        if websearch_info.get("gatewayUrl"):
+            existing_env["WEBSEARCH_GATEWAY_URL"] = websearch_info["gatewayUrl"]
         # The EPISODIC strategy's id. Episodes are stored under
         # `/strategy/{memoryStrategyId}/actor/{actorId}/` — a path that cannot be
         # built from the actor alone — and the id is minted with the strategy, so it
@@ -2486,6 +2666,13 @@ def main():
                 "RUNTIME_SESSIONS_TABLE_NAME": outputs.get(
                     "RuntimeSessionsTableName", "smarthome-runtime-sessions"
                 ),
+                # The web-search gateway. Empty when the connector could not be
+                # provisioned, which `gateway_catalog.gateways()` reads as "one
+                # gateway" — the Tool Policy page then simply has no WebSearch row
+                # rather than erroring.
+                "WEBSEARCH_GATEWAY_ID": websearch_info.get("gatewayId", ""),
+                "WEBSEARCH_GATEWAY_REGION": websearch_info.get(
+                    "region", WEBSEARCH_REGION),
             })
             # Merge optimization infra ARNs (empty dict on failure → admin
             # Lambda will return 500 ConfigurationError on /optimization/*).
@@ -2902,6 +3089,14 @@ def main():
             "voiceRuntimeArn": voice_runtime_arn,
             "knowledgeBaseId": kb_id, "dataSourceId": kb_data_source_id,
             "registryId": registry_id,
+            # The web-search gateway, in another region. Recorded so
+            # restore-text-runtime-config.py can put WEBSEARCH_GATEWAY_URL back
+            # after a deploy drops it, and so teardown.py knows there is a second
+            # gateway to delete — a gateway left behind in a region nobody looks at
+            # is the kind of thing that is found on a bill.
+            "websearchGatewayId": websearch_info.get("gatewayId", ""),
+            "websearchGatewayUrl": websearch_info.get("gatewayUrl", ""),
+            "websearchGatewayRegion": websearch_info.get("region", ""),
         }, f, indent=2)
 
     print("\n" + "=" * 60)

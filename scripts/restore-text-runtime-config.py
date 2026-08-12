@@ -91,6 +91,12 @@ def main() -> int:
     }
     if ac_state.get("registryId"):
         env_wanted["REGISTRY_ID"] = ac_state["registryId"]
+    # The web-search gateway's MCP URL. A second gateway in us-east-1, because the
+    # connector is not offered in us-west-2. Restored here for the same reason as
+    # everything else in this dict: a deploy drops it, and the symptom is the model
+    # simply never searching the web, with no error anywhere.
+    if ac_state.get("websearchGatewayUrl"):
+        env_wanted["WEBSEARCH_GATEWAY_URL"] = ac_state["websearchGatewayUrl"]
 
     # The EPISODIC strategy id, resolved from the live memory rather than stored,
     # because `agentcore.json` does not carry it and the id is minted with the

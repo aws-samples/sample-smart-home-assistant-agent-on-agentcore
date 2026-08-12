@@ -1,18 +1,21 @@
 {
   "name": "energy-optimization-agent",
-  "description": "A specialist agent that advises on home energy savings, appliance scheduling, and electricity-tariff strategy.",
-  "version": "1.0.0",
+  "description": "A specialist agent that audits a home's real device usage and advises on energy savings, appliance scheduling and electricity-tariff strategy. Reads the user's own fleet, live state and up to a week of history, and prices it against a published rated-draw table so every figure can be checked.",
+  "version": "2.0.0",
   "provider": {
     "organization": "smarthome-agent-harness",
     "url": "https://example.com/a2a/energy-optimization-agent"
   },
-  "defaultModelId": "us.amazon.nova-lite-v1:0",
+  "defaultModelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "skills": [
     {
       "id": "estimate_savings",
       "name": "Estimate savings",
-      "description": "Estimate how much energy or money a specific behavior change (dimming, scheduling, device swap) would save the user.",
-      "tags": ["energy", "savings"],
+      "description": "Estimate how much energy or money a specific behaviour change (dimming, scheduling, a device swap) would save, computed from the named device's rated draw, its current state and its measured usage rather than from a typical figure.",
+      "tags": [
+        "energy",
+        "savings"
+      ],
       "examples": [
         "How much can I save by dimming LEDs at night?",
         "What's the payback on switching my oven to convection mode?"
@@ -21,11 +24,29 @@
     {
       "id": "tariff_analysis",
       "name": "Tariff analysis",
-      "description": "Compare time-of-use vs. flat-rate tariffs for the user's typical usage pattern and recommend the better option.",
-      "tags": ["energy", "tariff"],
+      "description": "Compare time-of-use against flat-rate pricing for this household's actual load profile, and say which hours the heavy appliances should move to.",
+      "tags": [
+        "energy",
+        "tariff"
+      ],
       "examples": [
         "Compare TOU vs flat rate for my usage",
         "When should I run the rice cooker on a TOU plan?"
+      ]
+    },
+    {
+      "id": "usage_audit",
+      "name": "Whole-home usage audit",
+      "description": "Audit every device the user owns and rank the savings opportunities. Enumerates the fleet, reads live state, pulls up to a week of history per device, prices each against its rated draw, and returns the ranked list with the kWh and dollar basis for each line. Requires the whole chain — no single reading answers it.",
+      "tags": [
+        "energy",
+        "audit",
+        "multi-device"
+      ],
+      "examples": [
+        "Audit my whole home and tell me where the money is going",
+        "Which three changes would cut my bill the most?",
+        "What is costing me money that I am not using?"
       ]
     }
   ]

@@ -11,14 +11,37 @@
     "in Python. That is the same fact stored twice, and the drift does not fail:",
     "the symptom is 'nobody demoed the security agent', discovered live, with no",
     "error anywhere. shared/tests/test_prompt_examples.py asserts every deployed",
-    "A2A skill is covered by some example.",
+    "A2A skill, every Gateway tool and every built-in skill is covered by some",
+    "example, in both directions.",
     "",
-    "`covers` uses <agentDir>.<skillId> from a2a-agent-registry/*/card.json, NOT",
-    "the a2a_* tool name. Tool names are derived by the orchestrator from the",
-    "AgentCard `name`; asserting against the card is asserting against the source.",
+    "Three annotation fields, all rendered as badges in the drawer so a presenter",
+    "can see what a prompt is about to exercise without knowing it by heart:",
+    "",
+    "  covers      <agentDir>.<skillId> from a2a-agent-registry/*/card.json, NOT",
+    "              the a2a_* tool name. Tool names are derived by the orchestrator",
+    "              from the AgentCard `name`; asserting against the card is",
+    "              asserting against the source.",
+    "  usesTools   Gateway tool names (control_device, WebSearch, ...) plus the",
+    "              agent-side ones registered in agent.py (browse_web,",
+    "              execute_python, http_request, file_write). Checked against",
+    "              cdk/lambda/admin-api/tool_consumers.py, which is itself",
+    "              generated from the agents' declarations.",
+    "  usesSkills  directory names under agent/skills/.",
+    "",
+    "An empty list means 'this group calls none'; a MISSING key fails the tests,",
+    "because absent and empty have to be distinguishable — one is a decision and",
+    "the other is an author who did not consider it.",
     "",
     "`tier`: light = seconds, safe to run in bulk. heavy = browser/code-interpreter",
-    "sessions, 19-141s measured, only under `run --heavy`."
+    "sessions, 19-141s measured, only under `run --heavy`.",
+    "",
+    "Browser examples deliberately name sites that do NOT gate on human",
+    "verification. AgentCore's browser runs with enableWebBotAuth=true, which only",
+    "helps on sites that participate in web-bot-auth; Google and Amazon do not, so",
+    "they serve a CAPTCHA and the demo dies mid-sentence. books.toscrape.com exists",
+    "for scraping practice, httpbin.org echoes the request, and csa-iot.org /",
+    "wikipedia / news.ycombinator.com serve bots normally. Re-check before",
+    "swapping one in."
   ],
   "groups": [
     {
@@ -64,6 +87,18 @@
           "noteZh": "单个状态读取 — 编排器自己处理，不委派",
           "noteEn": "Single state read: the orchestrator handles this itself"
         }
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state",
+        "control_device"
+      ],
+      "usesSkills": [
+        "led-control",
+        "fan-control",
+        "oven-control",
+        "rice-cooker-control",
+        "all-devices-on"
       ]
     },
     {
@@ -87,7 +122,11 @@
           "en": "What do the fan's error codes mean?",
           "tier": "light"
         }
-      ]
+      ],
+      "usesTools": [
+        "query_knowledge_base"
+      ],
+      "usesSkills": []
     },
     {
       "id": "weather",
@@ -105,6 +144,12 @@
           "en": "What's the weather in Beijing right now?",
           "tier": "light"
         }
+      ],
+      "usesTools": [
+        "http_request"
+      ],
+      "usesSkills": [
+        "weather-lookup"
       ]
     },
     {
@@ -140,6 +185,13 @@
           "en": "Give me some party lighting.",
           "tier": "light"
         }
+      ],
+      "usesTools": [
+        "discover_devices",
+        "control_device"
+      ],
+      "usesSkills": [
+        "led-control"
       ]
     },
     {
@@ -170,6 +222,13 @@
           "en": "Start music feast mode.",
           "tier": "light"
         }
+      ],
+      "usesTools": [
+        "discover_devices",
+        "control_device"
+      ],
+      "usesSkills": [
+        "led-control"
       ]
     },
     {
@@ -220,7 +279,13 @@
           "noteZh": "只给建议，不直接创建",
           "noteEn": "Advises on a routine rather than creating one"
         }
-      ]
+      ],
+      "usesTools": [
+        "discover_devices",
+        "control_device",
+        "navigate_to_page"
+      ],
+      "usesSkills": []
     },
     {
       "id": "energy",
@@ -228,7 +293,8 @@
       "titleEn": "Energy",
       "covers": [
         "energy-optimization.estimate_savings",
-        "energy-optimization.tariff_analysis"
+        "energy-optimization.tariff_analysis",
+        "energy-optimization.usage_audit"
       ],
       "examples": [
         {
@@ -245,8 +311,28 @@
           "zh": "把灯的亮度降到 60% 一个月能省多少钱？",
           "en": "What would dimming the lights to 60% save me over a month?",
           "tier": "light"
+        },
+        {
+          "zh": "我这个月电费比上个月高了不少，把我家所有设备都盘一遍，按省钱潜力排序告诉我前三项该改什么，并说明每一项的度数和金额是怎么算出来的。",
+          "en": "My power bill jumped this month. Audit every device I own, rank the top three savings opportunities, and show the kWh and dollar basis for each line.",
+          "tier": "light",
+          "noteZh": "全屋审计：枚举设备→读实时状态→拉一周历史→按额定功率计价→排序。单次工具调用无法完成",
+          "noteEn": "Whole-home audit: enumerate, read live state, pull a week of history, price against rated draw, rank. No single call answers it"
+        },
+        {
+          "zh": "客厅那个智能插座这个月耗了多少电？",
+          "en": "How much power did the living room smart plug use this month?",
+          "tier": "light",
+          "noteZh": "插座负载系统无法得知，专家会反问而不是编一个数字",
+          "noteEn": "A plug load is genuinely unknowable here, so the specialist asks rather than inventing a wattage"
         }
-      ]
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state",
+        "query_sensor_history"
+      ],
+      "usesSkills": []
     },
     {
       "id": "security",
@@ -254,7 +340,8 @@
       "titleEn": "Security",
       "covers": [
         "home-security.risk_assessment",
-        "home-security.incident_response"
+        "home-security.incident_response",
+        "home-security.advisory_review"
       ],
       "examples": [
         {
@@ -273,8 +360,29 @@
           "zh": "我的设备都用默认密码，风险大吗？",
           "en": "All my devices still use default passwords. How bad is that?",
           "tier": "light"
+        },
+        {
+          "zh": "把我实际拥有的设备和协议，对照今年公开披露的安全公告查一遍，只报真正适用于我的，并给出来源链接和发布日期。",
+          "en": "Cross-check the devices and protocols I actually own against advisories published this year. Report only what applies to me, with source URLs and publication dates.",
+          "tier": "light",
+          "noteZh": "需要先枚举真实设备，再按设备类别检索受限域名的公告，最后按暴露面排序——网页会变，无法预先写成文档",
+          "noteEn": "Enumerate the real fleet, search domain-restricted advisories per device class, rank by exposure. The web changes, so it cannot be precomputed"
+        },
+        {
+          "zh": "我出门在外，刚收到客厅传感器的异常报警。先判断这是偶发事件还是每天都这样，再告诉我现在该做什么。",
+          "en": "I'm away from home and just got an anomaly alert from the living room sensor. Tell me whether this is a one-off or a nightly pattern, then what to do right now.",
+          "tier": "light",
+          "noteZh": "先用历史区分事件与基线，避免把每晚都发生的读数当成入侵",
+          "noteEn": "History separates an event from a baseline first, so a nightly reading is not escalated as an intrusion"
         }
-      ]
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state",
+        "query_sensor_history",
+        "WebSearch"
+      ],
+      "usesSkills": []
     },
     {
       "id": "maintenance",
@@ -282,7 +390,8 @@
       "titleEn": "Appliance maintenance",
       "covers": [
         "appliance-maintenance.maintenance_schedule",
-        "appliance-maintenance.troubleshoot"
+        "appliance-maintenance.troubleshoot",
+        "appliance-maintenance.service_forecast"
       ],
       "examples": [
         {
@@ -299,8 +408,22 @@
           "zh": "烤箱加热不均匀，帮我排查一下。",
           "en": "My oven heats unevenly. Help me diagnose it.",
           "tier": "light"
+        },
+        {
+          "zh": "根据我实际的使用情况，算出每台家电下一次真正需要保养的日期，按最紧急的排前面，并说明是按哪个测量值和说明书里的哪个阈值算的。",
+          "en": "From how I actually use them, work out the date each appliance genuinely needs servicing. Put the most urgent first, and say which measured value and which documented threshold you used.",
+          "tier": "light",
+          "noteZh": "两个来源交叉引用：历史给出损耗斜率，知识库给出说明书阈值。斜率定日期，文档定阈值",
+          "noteEn": "Two sources cross-referenced: history gives the wear slope, the knowledge base gives the documented threshold. The slope sets the date, the document sets the threshold"
         }
-      ]
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state",
+        "query_sensor_history",
+        "query_knowledge_base"
+      ],
+      "usesSkills": []
     },
     {
       "id": "orchestration",
@@ -336,6 +459,15 @@
           "en": "Set up the kitchen and living room for cooking.",
           "tier": "light"
         }
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state",
+        "query_sensor_history",
+        "control_device"
+      ],
+      "usesSkills": [
+        "all-devices-on"
       ]
     },
     {
@@ -364,7 +496,11 @@
           "en": "What are the documented steps when Bluetooth pairing fails?",
           "tier": "light"
         }
-      ]
+      ],
+      "usesTools": [
+        "query_knowledge_base"
+      ],
+      "usesSkills": []
     },
     {
       "id": "multidomain",
@@ -385,8 +521,23 @@
           "tier": "light",
           "noteZh": "两个专家一轮问完，耗时约等于问一个",
           "noteEn": "Two specialists in one turn costs about as long as one"
+        },
+        {
+          "zh": "给我做一次季度居家复盘：能耗上哪里最浪费、哪台家电快要保养、以及对照公开公告我有没有安全隐患。三份结论各自给出依据。",
+          "en": "Run a quarterly home review: where energy is being wasted, which appliance is closest to needing service, and whether any published advisory applies to me. Give the basis for each of the three.",
+          "tier": "light",
+          "noteZh": "三个专家并发，各自跑自己的工具链（能耗计价 / 损耗斜率+说明书 / 实时状态+公告检索）",
+          "noteEn": "Three specialists concurrently, each running its own tool chain: energy pricing, wear slope against the manual, live state against advisories"
         }
-      ]
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state",
+        "query_sensor_history",
+        "control_device",
+        "WebSearch"
+      ],
+      "usesSkills": []
     },
     {
       "id": "memory",
@@ -415,6 +566,15 @@
           "noteZh": "第 3 步：兑现 — 需要同时召回上面两条，且子 Agent 也能读到",
           "noteEn": "Step 3: the payoff, recalling both, readable by the specialists too"
         }
+      ],
+      "usesTools": [
+        "discover_devices",
+        "control_device"
+      ],
+      "usesSkills": [
+        "fan-control",
+        "led-control",
+        "user-feedback"
       ]
     },
     {
@@ -424,25 +584,42 @@
       "covers": [],
       "examples": [
         {
-          "zh": "打开 example.com 看看首页写了什么。",
-          "en": "Open example.com and tell me what the homepage says.",
+          "zh": "打开 books.toscrape.com，找出评分最高的那一类书，告诉我前三本的书名和价格。",
+          "en": "Open books.toscrape.com, find the highest-rated category, and give me the top three titles with prices.",
+          "tier": "heavy",
+          "noteZh": "该站专为抓取练习而建，不做真人校验",
+          "noteEn": "Built expressly for scraping practice, so it never challenges a bot"
+        },
+        {
+          "zh": "去 csa-iot.org 查 Matter 最新版本引入了哪些新设备类型，用中文总结。",
+          "en": "Go to csa-iot.org and summarise which new device types the latest Matter release introduced.",
+          "tier": "heavy",
+          "noteZh": "标准组织站点，与本项目的智能家居主题直接相关",
+          "noteEn": "A standards-body site, and directly on-topic for this project"
+        },
+        {
+          "zh": "在 en.wikipedia.org 上查 Zigbee 和 Thread 的区别，列成三条对比。",
+          "en": "Look up the difference between Zigbee and Thread on en.wikipedia.org and give me three points of comparison.",
           "tier": "heavy"
         },
         {
-          "zh": "去 amazon.com 搜一下智能灯泡，看看价格区间。",
-          "en": "Search amazon.com for smart bulbs and tell me the price range.",
-          "tier": "heavy"
+          "zh": "访问 httpbin.org/headers，把浏览器实际发出的请求头念给我听。",
+          "en": "Visit httpbin.org/headers and read back the request headers the browser actually sent.",
+          "tier": "heavy",
+          "noteZh": "可直接看到 web-bot-auth 签名头，适合讲解浏览器身份",
+          "noteEn": "Shows the web-bot-auth signature headers directly, which is the point worth narrating"
         },
         {
-          "zh": "查一下维基百科上的 Zigbee 条目，总结协议要点。",
-          "en": "Look up Zigbee on Wikipedia and summarise the protocol.",
-          "tier": "heavy"
-        },
-        {
-          "zh": "访问 httpbin.org/get 把返回内容告诉我。",
-          "en": "Visit httpbin.org/get and show me what comes back.",
+          "zh": "打开 news.ycombinator.com，找出头版上跟智能家居或物联网有关的条目。",
+          "en": "Open news.ycombinator.com and find any front-page items about smart home or IoT.",
           "tier": "heavy"
         }
+      ],
+      "usesTools": [
+        "browse_web"
+      ],
+      "usesSkills": [
+        "browser-use"
       ]
     },
     {
@@ -471,6 +648,12 @@
           "en": "Use Monte Carlo to estimate the distribution of my bill under usage variance.",
           "tier": "heavy"
         }
+      ],
+      "usesTools": [
+        "execute_python"
+      ],
+      "usesSkills": [
+        "code-interpreter"
       ]
     },
     {
@@ -484,7 +667,9 @@
           "en": "What's in this image? (attach one first)",
           "tier": "light"
         }
-      ]
+      ],
+      "usesTools": [],
+      "usesSkills": []
     },
     {
       "id": "structured",
@@ -498,6 +683,59 @@
           "tier": "light",
           "noteZh": "需要在请求里开启 JSON 模式（responseFormat: json）",
           "noteEn": "Requires JSON mode on the request (responseFormat: json)"
+        }
+      ],
+      "usesTools": [
+        "discover_devices",
+        "query_device_state"
+      ],
+      "usesSkills": []
+    },
+    {
+      "id": "navigation",
+      "titleZh": "应用内跳转",
+      "titleEn": "In-app navigation",
+      "covers": [],
+      "usesTools": [
+        "navigate_to_page"
+      ],
+      "usesSkills": [],
+      "examples": [
+        {
+          "zh": "帮我打开设备模拟器页面。",
+          "en": "Take me to the device simulator page.",
+          "tier": "light",
+          "noteZh": "返回 superapp:// 深链，对每个用户都相同，因此不注入身份",
+          "noteEn": "Returns a superapp:// deep link, identical for every user, so no identity is injected"
+        },
+        {
+          "zh": "我想去管理控制台看一下技能配置。",
+          "en": "I want to go to the admin console to look at skill configuration.",
+          "tier": "light"
+        }
+      ]
+    },
+    {
+      "id": "feedback",
+      "titleZh": "用户反馈",
+      "titleEn": "User feedback",
+      "covers": [],
+      "usesTools": [],
+      "usesSkills": [
+        "user-feedback"
+      ],
+      "examples": [
+        {
+          "zh": "刚才那个回答很有用，帮我记下来。",
+          "en": "That last answer was useful — record that as feedback.",
+          "tier": "light",
+          "noteZh": "反馈技能把标记写进会话记忆，管理控制台的反馈页会统计",
+          "noteEn": "The feedback skill writes a marker into session memory, which the console tallies"
+        },
+        {
+          "zh": "这个灯光效果不是我要的，太刺眼了，记下我的意见。",
+          "en": "That lighting effect wasn't what I wanted — too harsh. Log my complaint.",
+          "tier": "light"
         }
       ]
     }

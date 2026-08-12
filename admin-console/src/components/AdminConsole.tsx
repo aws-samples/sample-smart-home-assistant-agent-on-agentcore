@@ -4376,6 +4376,18 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   },
                   { id: 'version', header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
                   {
+                    // Every row here is APPROVED today, because that is what the
+                    // endpoint filters on. Shown anyway: if the filter is ever
+                    // widened, a DRAFT record must be distinguishable from a live
+                    // one, and a record that is present but unapproved is exactly
+                    // the thing an admin is looking for when a skill "is missing".
+                    id: 'status',
+                    header: t('integrations.skills.col.status'),
+                    cell: (r) => (r.status === 'APPROVED'
+                      ? <StatusIndicator type="success">{r.status}</StatusIndicator>
+                      : <StatusIndicator type="pending">{r.status || '—'}</StatusIndicator>),
+                  },
+                  {
                     id: 'publishedBy',
                     header: t('integrations.skills.col.publishedBy'),
                     cell: (r) => r.publishedBy || '—',

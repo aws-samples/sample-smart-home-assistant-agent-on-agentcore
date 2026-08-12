@@ -598,6 +598,16 @@
   display: block;
 }
 
+/* Which specialists, tools and skills a group exercises. Wraps rather than
+   scrolls: the multi-domain group names five tools and two sub-agents, and a
+   horizontally clipped list is the same as no list during a demo. */
+.example-covers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 4px 6px;
+}
+
 .welcome-chips {
   display: flex;
   flex-wrap: wrap;

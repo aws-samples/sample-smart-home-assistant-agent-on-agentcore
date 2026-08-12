@@ -26,7 +26,7 @@
 
 | 组件 | 本方案中的作用 | Admin Console 对应入口 |
 |------|---------------|----------------------|
-| **Runtime** | 承载 Agent 代码。共 **11 个 Runtime**:`smarthome`(文本主 Agent)、`smarthomevoice`(语音)、`smarthome_bundles`(A/B 变体)、以及 8 个 A2A 专家子 Agent | **Agents** / Sessions / Remote Shell / Prompt |
+| **Runtime** | 承载 Agent 代码。共 **11 个 Runtime**:`smarthome`(文本主 Agent)、`smarthomevoice`(语音)、`smarthome_bundles`(**仅** `ab-bundles` 模式的提示词变体,见下方注意)、以及 8 个 A2A 专家子 Agent | **Agents** / Sessions / Remote Shell / Prompt |
 | **Runtime (A2A)** | 8 个独立子 Agent:设备控制、灯效、问答、任务管理(task-management)、实时场景联动(scene-sync)、安防、能耗、家电保养。走标准 A2A 协议(9000 端口、挂载 `/`),**携带调用者身份**访问同一个 Gateway;并**只读**共享同一份用户记忆(§9.6.9)| **Agents**(详情页可改各自 prompt) |
 | **Gateway** | MCP Server,聚合设备控制、发现、KB 检索等 Lambda 工具;执行 Cedar 策略 | Tool Policy / Integration Registry |
 | **Memory** | 短期会话 + 长期事实/偏好/摘要/情景 (**四种**内置策略全开) | Memories |
@@ -521,7 +521,19 @@ prompt 和 optimization 两个页面里 `text | voice` 的二选一。现在有 
 | `Orchestrator` | 主 Agent,用户直接对话的入口 |
 | `Specialist` | 通过 A2A 委派到的子 Agent |
 | `Voice` | 语音 Runtime |
-| `A/B variant` | `smarthome_bundles` —— 主 Agent 的同一镜像 + `ENABLE_BUNDLE_HOOK=1`,只在 `ab-bundles` 模式下被访问。列成第二个主 Agent 会夸大机队规模,隐藏则它的 token 花费无法归因 |
+| `A/B variant` | `smarthome_bundles` —— 主 Agent 的同一镜像 + `ENABLE_BUNDLE_HOOK=1`,**只**在 `ab-bundles` 模式下被访问。列成第二个主 Agent 会夸大机队规模,隐藏则它的 token 花费无法归因 |
+
+> **`smarthome_bundles` 这个名字容易读反。** 它属于 `ab-bundles`(提示词变体),
+> 和 **target-based A/B 无关**。target-based(`ab-targets`)走的是优化网关下的两个
+> **endpoint**,而这两个 endpoint 都挂在**主** runtime 上 —— 已在线上核对:两个
+> target 都指向 `runtime/smarthome_smarthome-{id}`,qualifier 分别是 `control` 和
+> `treatment`,整条链路完全不碰 `smarthome_bundles`。
+>
+> 为什么不改名:`agentRuntimeName` 不可变,改名等于先建后删,会产生新的 `runtimeId`,
+> 需要重新指向所有存了 `bundlesRuntimeArn` 的地方(`config.js`、admin Lambda 环境变量),
+> 而且 span 日志组是按 runtime 分的,历史链路和 token 归因会在切换点断成两段。
+> 准确的名字应该叫 `smarthome_promptbundle`,但为一个名字付这个代价不值得,所以这里用
+> 文档来纠正。
 | `Tool` | 导航 DeepLink —— 是 Gateway Lambda target 而非 agent,但它是客户架构里七个实体之一,管理员找它时应该在这里找到 |
 
 ### 9.5.1 "No runtime" 告警是真信号,不是噪音
@@ -888,7 +900,7 @@ python3 scripts/simulate-users.py run --days-back 45
 | 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
 | 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
 | `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
-| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Tool Policy → Manage Permissions** 里给(Integration Registry 只读)。8 个专家全部有已批准记录、共 18 个 skill 可授权;目录为空时的排查见 [§11.11](#1111--a2a-目录为空两个-namespace-各有一套-registry) |
+| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Tool Policy → Manage Permissions** 里给(Integration Registry 只读)。8 个专家全部有已批准记录、共 21 个 skill 可授权;目录为空时的排查见 [§11.11](#1111--a2a-目录为空两个-namespace-各有一套-registry) |
 | 满意度卡片显示「尚无反馈」 | 该时间范围内没有投票。跑 `run`(会自动投票)或在 Chatbot 里点几下赞/踩。**空表不会显示成 CSAT 0** —— 那会把「没数据」画成「评分极低」 |
 | 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 这三个环境变量推导出的 Runtime。修复:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),A2A 则重跑 `python a2a-agent-registry/deploy.py --only patch-text-agent`。**注意**:2026-08-05 之前部署的环境没有 `DASHBOARD_EXTRA_RUNTIME_ARNS`,升级后必须重跑一次才会生效 |
 
@@ -1146,7 +1158,9 @@ patch 回去。**注意 `REGISTRY_ID` 是在模块导入时读取的**,改完环
 > 「读失败了」**。现在读失败会随响应返回 `catalogError`,控制台渲染成告警而不是中性的
 > 「暂无已审批的 A2A 智能体」,并禁用保存按钮。
 
-> **当前状态(2026-08-11,已修)**:8 个专家全部可授权(共 18 个 skill)。
+> **当前状态(2026-08-12)**:8 个专家全部可授权(共 21 个 skill —— 2026-08-12 为能耗/安全/维护
+> 三个专家各新增一个需要完整工具链的 skill:`usage_audit` / `advisory_review` / `service_forecast`,
+> 新 skill 需要单独勾选授权)。
 > `check-registry-wiring.py` 通过;`probe-routing.py` 读 span 确认 4 个专家 skill 被真实
 > 调用,其中 `knowledge-qa` 与 `light-effect` 在旧 registry 里根本没有记录 —— 也就是说这
 > 两个此前无法授权。

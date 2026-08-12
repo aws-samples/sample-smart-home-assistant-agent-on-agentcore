@@ -290,6 +290,29 @@ def _text_agent_gateway_env(state: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _websearch_gateway_env(state: dict[str, Any]) -> dict[str, str]:
+    """The web-search gateway URL, read off the main text runtime.
+
+    Deliberately NOT covered by the AGENTCORE_GATEWAY_* copy above. That prefix is
+    what `common.gateway_tools.gateway_url()` scans to find the TOOLS gateway, and
+    that scan returns whichever key it iterates over last — so naming this one to
+    match would intermittently point every sub-agent's device tools at a gateway
+    that serves only web search.
+    """
+    runtime_id = state.get("text_agent_runtime_id", "")
+    if not runtime_id:
+        return {}
+    try:
+        ac = boto3.client("bedrock-agentcore-control", region_name=state["region"])
+        env = ac.get_agent_runtime(
+            agentRuntimeId=runtime_id).get("environmentVariables") or {}
+    except Exception as exc:  # noqa: BLE001
+        log(f"  warn: could not read the main runtime's env: {exc}")
+        return {}
+    url = env.get("WEBSEARCH_GATEWAY_URL", "")
+    return {"WEBSEARCH_GATEWAY_URL": url} if url else {}
+
+
 def _text_agent_memory_env(state: dict[str, Any]) -> dict[str, str]:
     """Read the shared Memory id off the main text runtime.
 
@@ -635,7 +658,8 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
     # is the end user's forwarded token, not this runtime's role. That is the
     # point — the runtime holds no device permissions of its own, so every command
     # is evaluated against the real user by Cedar.
-    if (HERE / agent / "tools.py").exists():
+    tools_py = HERE / agent / "tools.py"
+    if tools_py.exists():
         gateway_env = _text_agent_gateway_env(state)
         if gateway_env:
             env.update(gateway_env)
@@ -643,6 +667,21 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         else:
             log(f"  [{agent}] WARNING: could not find AGENTCORE_GATEWAY_*_URL on "
                 f"the main runtime — this agent will have no device tools")
+
+        # Web search is a SECOND gateway in another region, and only the agents
+        # that ask for it are told where it is — same reasoning as the scenarios
+        # table above. Detected from the tools module declaring WEB_SEARCH rather
+        # than from a hardcoded agent name, so the roster and the wiring cannot
+        # drift apart.
+        if "WEB_SEARCH" in tools_py.read_text():
+            ws_env = _websearch_gateway_env(state)
+            if ws_env:
+                env.update(ws_env)
+                log(f"  [{agent}] web-search gateway env applied")
+            else:
+                log(f"  [{agent}] note: tools.py wants WEB_SEARCH but the main "
+                    f"runtime has no WEBSEARCH_GATEWAY_URL — this agent will "
+                    f"assess without live-web advisories")
 
     # The shared Memory, for EVERY agent including the prompt-only advisors: a
     # security or energy recommendation is better for knowing the user prefers

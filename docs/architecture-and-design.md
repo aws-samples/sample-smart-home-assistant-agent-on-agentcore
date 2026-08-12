@@ -1691,6 +1691,22 @@ Missing row resolves to `default`.
 | `ab-bundles` | runtime SigV4 (bundles runtime) | `BeforeModelCallEvent` hook reads bundle from baggage, bypasses DDB | ✗ (masked — UI confirms) | Global prompt text |
 | `ab-targets` | optimization gateway → control/treatment endpoints | DDB additive on each endpoint | ✓ | Runtime version (model + code + prompt) |
 
+**`smarthome_bundles` belongs to `ab-bundles`, not to `ab-targets`.** Worth
+stating explicitly because the name invites the opposite reading, and it has been
+misread: the runtime named after "bundles" is the one **target-based** A/B never
+touches. Target-based A/B routes through the optimization gateway to two
+*endpoints* on the **primary** runtime — verified live, both targets carry
+`arn:...runtime/smarthome_smarthome-{id}` with qualifiers `control` and
+`treatment`. Nothing in that path names the bundles runtime.
+
+Renaming it was considered and declined. `agentRuntimeName` is immutable, so a
+rename is create-plus-delete: a new `runtimeId`, every stored
+`bundlesRuntimeArn` re-pointed (`config.js`, the admin Lambda env), and — because
+spans moved to per-runtime log groups (§9.x) — historical traces and token
+attribution split across the old and new names at the cutover. The accurate name
+would be `smarthome_promptbundle`; the cost of getting there is not worth paying
+for a name, so the documentation carries the correction instead.
+
 **Two runtimes, one image.** Primary runtime (`smarthome_smarthome-{id}`)
 and bundles runtime (`smarthome_bundles-{id}`) share an ECR image. The
 underscore in `smarthome_bundles` is mandatory — AgentCore's
@@ -2137,6 +2153,85 @@ Two sources of tools are listed side-by-side, each tagged with a Cloudscape `Bad
 - **Gateway** — tools discovered from AgentCore Gateway targets (`control_device`, `discover_devices`, `query_knowledge_base`, etc.). Opt-in per user.
 
 `GET /tools` returns both sets in one response, each item tagged with `source: "builtin" | "gateway"`. The UI renders a Badge per tool so admins can distinguish runtime-local surface from gateway-routed surface.
+
+#### 9.5.0 Two gateways, two regions, one Tool Policy page
+
+Since 2026-08-12 the gateway tools come from **two** gateways, and the second one
+is in a different region. AWS offers the managed `web-search` connector in
+**us-east-1 only**, so `WebSearch` cannot be a target on the us-west-2 tools
+gateway even though every other tool is. It lives on `smarthome-websearch-gw` in
+us-east-1, reusing the tools gateway's IAM role (IAM is global) and its Cognito
+`CUSTOM_JWT` authorizer — the discovery URL names a us-west-2 user pool and works
+cross-region, verified live, because it is just an HTTPS URL.
+
+The error when you try it in the home region is misleading and cost time:
+
+```
+ValidationException: Connector integration web-search is not available for this account.
+```
+
+That reads as an entitlement problem. It is regional; the identical call in
+us-east-1 succeeds with connector version `1.2.0`.
+
+**Four things had to change for one tool.**
+
+*Target parsing.* `list_gateway_tools` and `_get_tool_action_map` each walked the
+targets separately, and both read only `mcp.lambda.toolSchema`. A `mcp.connector`
+target contributed nothing, so `WebSearch` would have been simultaneously invisible
+on the Tool Policy page and unnameable by Cedar — an ungovernable tool that looks
+like a tool nobody granted. Both now read one catalog,
+`cdk/lambda/admin-api/gateway_catalog.py`. A connector's tool name is its
+*configuration* name, so target `SmartHomeWebSearch` with configuration `WebSearch`
+yields the action `SmartHomeWebSearch___WebSearch` — confirmed against a live
+`tools/list`, not inferred.
+
+*Policy engines are regional.* A policy for `WebSearch` written to the us-west-2
+engine would be ACTIVE, well-formed and completely inert. `ensure_policy_engine`
+now takes a region and stores one engine per region (`__policy_engine__` keeps its
+original key for the home region so existing deployments are untouched;
+`__policy_engine_us-east-1__` is new). `build_cedar_statement` returns the tool's
+catalog entry alongside the statement so the caller writes to the right engine —
+two independent lookups could disagree, and the failure mode is a valid policy in
+the wrong region.
+
+*`principal.id` is the Cognito `sub`, not the email.* Measured, because both
+variants are ACTIVE and only one works:
+
+| Statement | Policy status | Granted user's `tools/list` |
+|---|---|---|
+| guard + `principal.id == "<sub>"` | ACTIVE | `['SmartHomeWebSearch___WebSearch']` |
+| guard + `principal.id == "<email>"` | ACTIVE | `[]` |
+| no guard + `principal.id == "<sub>"` | **UPDATE_FAILED** | `[]` |
+
+The Admin Console already keys these rows on `user.sub` (`getActorId`), so this is
+a constraint to preserve rather than a bug that was live. The `principal is
+AgentCore::OAuthUser || principal is AgentCore::IamEntity` guard is load-bearing:
+without it the policy does not fail to *match*, it fails to *attach*, with
+`attribute 'id' on entity type 'AgentCore::UnauthenticatedUser' not found` — while
+CreatePolicy/UpdatePolicy still returned 200.
+
+*No policy means allow-all.* The tools gateway runs in `ENFORCE` mode with **zero**
+policies and serves all six tools. Default-deny only begins for a tool once a
+permit exists for it. That makes `affected_tools` on a permission save dangerous as
+a union: 14 of 40 users hold a `__permissions__` row, so granting one new tool to
+one user would have materialised permits for the six device tools and revoked them
+from the other 26 — reported as a successful save of an unrelated grant. It is now
+the symmetric difference, i.e. only tools whose membership actually changed.
+
+**Provisioning and teardown.** `setup-agentcore.py:_ensure_websearch_gateway` is
+idempotent and runs before the runtime env patch, because both the runtime
+(`WEBSEARCH_GATEWAY_URL`) and the admin Lambda (`WEBSEARCH_GATEWAY_ID`,
+`WEBSEARCH_GATEWAY_REGION`) need its ids. A missing connector degrades to "no web
+search" rather than a failed deploy — `gateway_catalog.gateways()` simply returns
+one gateway. `teardown-agentcore.py` deletes it with a client for **its** region and
+falls back to a name lookup, because a gateway left behind in a region this project
+otherwise never touches is the kind of thing found on a bill.
+
+The gateway service role additionally needs
+`bedrock-agentcore:InvokeWebSearch` on the service-owned
+`arn:aws:bedrock-agentcore:<region>:aws:tool/web-search.v1`. Granted for both
+regions, since the role is shared and granting only one leaves a target that is
+READY and fails at call time.
 
 **Each Gateway tool also names its consumers.** A flat checkbox list was right
 when one agent existed; with an orchestrator and eight specialists it hid the thing
@@ -3217,6 +3312,43 @@ The Admin Console's **Integration Registry** tab (renamed from
 | MCP Servers | Disabled placeholder ("Coming soon"). |
 | API Gateway | Disabled placeholder ("Coming soon"). |
 
+**The Skills tab was correct and almost empty, which is a worse failure than being
+wrong.** It lists every APPROVED `SKILL` record and marks the unimported ones, and
+the registry held exactly **one** (`nightly-air-check`, published through the Skill
+ERP) while nine built-in skills were live. `scripts/seed-skills.py` writes
+`agent/skills/*/SKILL.md` straight to DynamoDB and never published anything, so the
+page answered "what does this registry hold" truthfully and looked broken.
+
+The two stores answer different questions and both are wanted:
+
+| Store | Question it answers |
+|---|---|
+| DynamoDB `smarthome-skills` | what the agent **loads** at invocation time |
+| Agent Registry `SKILL` records | what a curator can **see**, review and approve |
+
+`scripts/publish-builtin-skills.py` fills the second from the same files and the
+same parse as the first, and `scripts/07-seed-skills.sh` now runs both. It is
+idempotent by dedup name (`builtin-<dir>`) and **updates in place**, because
+`recordId` is what `importedFromRegistry` rows point at — churning ids would orphan
+every import. Records are approved after publishing, since an unapproved record does
+not appear on the page at all and a script whose output is invisible reads as one
+that did not run. Result: 10 approved SKILL records, 9 of them built-in.
+
+`UpdateRegistryRecord` is where the idempotent re-run first failed. It wraps **every
+level** in `optionalValue`, not just the outer one; wrapping only the outer level is
+a fix that looks right and is rejected naming the inner fields. `deploy.py` already
+carried that logic with a hard-won comment, so rather than copy it — copying is
+exactly how the two drifted last time — it moved to
+`shared/agent_registry.as_update_descriptors`, and
+`shared/tests/test_update_descriptor_shape.py` holds the two implementations
+identical and validates both against the live botocore service model.
+
+A **Status** column was added. Every row is APPROVED today because that is what the
+endpoint filters on, but a record that is present and unapproved is precisely what an
+admin is looking for when a skill "is missing", and it was previously indistinguishable
+from absent. Built-in records report `publishedBy: publish-builtin-skills.py` from
+their `_meta`, because "the deploy did" is a more useful answer than a blank cell.
+
 **A2A records live in the same registry as skills.** `SmartHomeSkillsRegistry`
 accepts both `AGENT_SKILLS` and `A2A` descriptor types. Skill ERP gains a
 second tab "A2A Agents" for end-user publishing, and the Admin Console reads
@@ -3311,6 +3443,67 @@ specialist are independent AgentCore Runtimes.
 Since 2026-08-12 the call carries **one token — the end user's own idToken** — and
 each specialist's Runtime authorizes it directly. It goes straight to the
 specialist's Runtime, not through the Gateway.
+
+#### Why each of these is an agent and not a skill
+
+Three of the eight — `energy-optimization`, `home-security`,
+`appliance-maintenance` — were prompt-only until 2026-08-12. They shipped a
+`system_prompt.md` and no `tools.py`, so they read nothing. That made them the
+weakest part of the design, and the criticism is exact: an agent that reads nothing
+returns the same answer to every user, so a reviewable skill document would have
+been cheaper *and* better. The energy agent's prompt even said "state the
+assumptions you used", which is an instruction to invent the numbers — two runs of
+the same question gave two different figures and neither could be checked.
+
+All eight now ship a `tools.py`, and each of the three runs a chain that no single
+tool call collapses:
+
+| Agent | Chain | Why a tool or skill cannot do it |
+|---|---|---|
+| `energy-optimization` | `discover_devices` → `query_device_state` → `query_sensor_history` (a week) → `power_reference` → per-device arithmetic → rank | The ranking depends on the *user's* fleet and its measured state; the arithmetic needs a rated-draw table and an intermediate result per device |
+| `home-security` | `discover_devices` → `query_device_state` → `query_sensor_history` → `search_advisories` (domain-filtered) → correlate → rank by exposure | Correlating a live fleet against *currently published* advisories changes as the web changes, so it cannot be precomputed into a document |
+| `appliance-maintenance` | `discover_devices` → `query_sensor_history` (slope) → `query_device_state` → `query_knowledge_base` (documented threshold) → date per appliance | Two sources cross-referenced per appliance: the measurement sets the date, the manual sets the threshold |
+
+Each also gained one skill that names the whole chain — `usage_audit`,
+`advisory_review`, `service_forecast` — so 18 published skills became **21**.
+
+`common/power_profile.py` holds rated watts per device type plus the rates, because
+`shared/device-catalog.json` carries capabilities and not watts: nothing else in the
+system needed them. They are labelled rated representative values rather than
+measurements, and the agent is required to say so — a fabricated precise answer and
+a labelled estimate are different things to a user deciding whether to rewire a
+room. A smart plug reports `unknown_load`, so the agent asks what is plugged in
+instead of assuming a wattage.
+
+**Only the security agent reaches web search.** `deploy.py` hands out
+`WEBSEARCH_GATEWAY_URL` to whichever `tools.py` names `WEB_SEARCH`, so the roster
+and the wiring cannot drift; `GatewaySession` opens a second MCP client only when
+asked, and an unreachable us-east-1 degrades to a fleet-only assessment rather than
+failing the request. Advisory searches are restricted server-side to standards
+bodies, national CERTs and protocol vendors, because a security finding sourced from
+a content farm reads exactly as authoritative in a summary.
+
+**Two things this cost, both worth recording.**
+
+*Model tier.* Both agents ran on Nova Lite. The new chains are long enough that Nova
+Lite emitted a `<thinking>` block and stopped without concluding — the tools had
+been called and the answer never arrived. Both moved to Claude Haiku 4.5, matching
+`home-security`. Making a task harder means re-checking the model that has to do it.
+
+*Output hygiene.* The same runs leaked `<thinking>` tags into the reply and emitted
+the marker token twice. All three prompts now forbid both explicitly and say that a
+reply which is only a status update about what the agent is *about to do* is a
+failed turn.
+
+**Verified live after the change.** `advisory_review` named real device ids
+(`living-sensor-1`, `living-plug-1`, `living-purifier-1`), searched the restricted
+domains, cited URLs with dates, and correctly reported that no advisory on those
+sources is **not** the same as safe. `usage_audit` priced the real fleet using the
+profile table's own figures (oven 2400 W × 0.35 duty at $0.16/kWh), labelled them as
+estimates, and reported the closed simulator as unknown rather than as zero.
+`service_forecast` reported "no readings recorded in the past week" instead of
+inventing a slope — which is the honest answer while the simulator is closed, and is
+the reason a service-date demo needs the device simulator running.
 
 **A Gateway HTTP passthrough hop was designed in and then dropped.** The reason for
 it was to unify authentication: A2A ran its own Cognito m2m flow in parallel with the

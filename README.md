@@ -132,8 +132,10 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 3. **文字模式**：输入即发，Claude Sonnet 4.6（或管理员在 Build → Models 指定的模型）回复
 4. **语音模式**：浏览器弹出麦克风授权 → 听到预渲染欢迎语"欢迎使用智能家居设备助手" → 开始语音对话，Nova Sonic 双向流式处理
 5. 语音模式下说"把风扇打开到中档"等指令，Agent 会通过 MCP 网关真实触发 IoT 设备命令
-6. **浏览器实时预览**（右侧默认折叠的 rail，点击展开）：问 Agent 任何需要查实时网页的问题（"example.com 现在显示什么"、"去淘宝上搜 iPhone 16"、"Amazon 上 100 美元以下耳机排名"），无需手动说"use browse_web"—— skill 描述会让模型自行调用。右侧 DCV 实时流按 1280×800 渲染（窗口更小时自动出现滚动条），每步截图保存到 Agent 的 `/mnt/workspace/<session>/browser/`，"文件"标签页可下载。任务完成后 AgentCore 会话保持 **15 分钟** 不关，点 **"接管控制"** 就能自己继续浏览/验证码/点筛选，不需要重新触发一次工具。详见 [架构文档 §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation)
-7. **示例提示词库**：输入框左侧图标打开右侧抽屉 —— **56 条示例、17 个能力分组**、可按中英文搜索，覆盖八个专家 Agent 的全部 18 个 skill（灯效、场景联动、日出日落定时、能耗、安全、维护、文档问答、多域并发）。点一条只填入输入框、不自动发送。抽屉**任何时候都能打开**；欢迎屏的快捷 chips 依然保留，但那些只在还没说过话时显示。示例正文来自 `shared/prompt-examples.json`，模拟用户脚本读的是**同一份文件**，且有覆盖率测试断言每个已发布 skill 都被覆盖 —— 详见[架构文档 §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library)
+6. **浏览器实时预览**（右侧默认折叠的 rail，点击展开）：问 Agent 任何需要查实时网页的问题("books.toscrape.com 上评分最高的那类书前三本是什么"、"去 csa-iot.org 看 Matter 最新版加了哪些设备类型"、"httpbin.org/headers 显示浏览器发了什么请求头"),无需手动说"use browse_web"—— skill 描述会让模型自行调用。右侧 DCV 实时流按 1280×800 渲染（窗口更小时自动出现滚动条），每步截图保存到 Agent 的 `/mnt/workspace/<session>/browser/`，"文件"标签页可下载。任务完成后 AgentCore 会话保持 **15 分钟** 不关，点 **"接管控制"** 就能自己继续浏览/验证码/点筛选，不需要重新触发一次工具。详见 [架构文档 §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation)
+
+> **演示网站要挑不做真人校验的。** AgentCore 浏览器带 `enableWebBotAuth=true`,但这只在**参与 web-bot-auth 的站点**上有用;Google、Amazon、淘宝都不参与,会直接弹验证码,演示当场卡死。示例库里现在用的是 `books.toscrape.com`(专为抓取练习而建)、`httpbin.org`(回显请求)、`csa-iot.org` / `en.wikipedia.org` / `news.ycombinator.com`(正常对待爬虫)。**换站点之前先自己跑一遍。**
+7. **示例提示词库**：输入框左侧图标打开右侧抽屉 —— **67 条示例、19 个能力分组**、可按中英文搜索,覆盖八个专家 Agent 的全部 21 个 skill(灯效、场景联动、日出日落定时、能耗审计、安全公告核对、维护预测、文档问答、多域并发),并标注每组会调用到的专家/工具/技能。点一条只填入输入框、不自动发送。抽屉**任何时候都能打开**；欢迎屏的快捷 chips 依然保留，但那些只在还没说过话时显示。示例正文来自 `shared/prompt-examples.json`，模拟用户脚本读的是**同一份文件**，且有覆盖率测试断言每个已发布 skill 都被覆盖 —— 详见[架构文档 §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library)
 8. **逐轮反馈**：每条回复下有 👍/👎，点 👎 可补一句原因。投票携带该轮的委派 trace，写入 `smarthome-feedback` 表，直接驱动 Overview 的「用户满意度」卡片
 
 ### 管理控制台 —— Agent Harness Control Center
@@ -196,7 +198,7 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 
 ### A2A 专家 Agent（可选，演示用）
 
-`a2a-agent-registry/` 下有 **7 个**独立部署的 A2A (Agent-to-Agent) 专家 agent，演示主 Agent 如何通过标准 A2A 协议委派给专家：
+`a2a-agent-registry/` 下有 **8 个**独立部署的 A2A (Agent-to-Agent) 专家 agent，演示主 Agent 如何通过标准 A2A 协议委派给专家：
 
 | Agent | Skill | 模型 | 触达设备？ |
 |-------|-------|------|-----------|
@@ -275,9 +277,11 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 
 ### 发现能力：示例提示词库
 
-Chatbot 输入框左侧的图标打开右侧抽屉：**56 条示例、17 个能力分组**、中英文可搜，覆盖八个专家 Agent 的全部 18 个 skill。点一条只填入输入框、不自动发送 —— 演示时讲解者需要先说明这条要演什么。抽屉任何时候都能开；欢迎屏 chips 只在还没说过话时显示。
+Chatbot 输入框左侧的图标打开右侧抽屉：**67 条示例、19 个能力分组**、中英文可搜,覆盖八个专家 Agent 的全部 **21 个 skill**、全部 7 个 Gateway 工具和全部 9 个内置技能。点一条只填入输入框、不自动发送 —— 演示时讲解者需要先说明这条要演什么。抽屉任何时候都能开；欢迎屏 chips 只在还没说过话时显示。
 
-这份清单**只有一处来源**（`shared/prompt-examples.json`）：Chatbot 渲染它，模拟用户脚本也读它。此前两边各写一份（TS 的 i18n key 和 Python 的场景列表），而两份清单不一致**不会报错** —— 症状是演示当天才发现没人演过安全 Agent。现在有覆盖率测试：18 个已发布 skill 每个都必须被某条示例覆盖，反向也断言示例没指向已删除的 skill。
+**每个分组现在带徽章,标出这条提示词会调用到什么**:蓝色是 A2A 专家、绿色是工具、灰色是内置技能。这些数据以前就在文件里、但一处都没渲染,于是讲解者只能凭记忆说「这条会走安全 Agent」—— 而演示当天要记的恰好就是这个。
+
+这份清单**只有一处来源**（`shared/prompt-examples.json`）：Chatbot 渲染它，模拟用户脚本也读它。此前两边各写一份（TS 的 i18n key 和 Python 的场景列表），而两份清单不一致**不会报错** —— 症状是演示当天才发现没人演过安全 Agent。现在有覆盖率测试:21 个已发布 skill 每个都必须被某条示例覆盖,反向也断言示例没指向已删除的 skill。**2026-08-12 起这个断言扩到了工具和技能**:此前只查 A2A,而工具分组的 `covers` 全是空的 —— 也就是「示例覆盖了全部功能」这句话其实只对子 Agent 验证过。工具清单取自 `cdk/lambda/admin-api/tool_consumers.py`(它本身由各 agent 的声明生成),技能清单取自 `agent/skills/` 的目录,所以两边都不用手写第二份。
 
 ### 面向开发者的四件事
 
@@ -581,7 +585,7 @@ cd cdk && npx cdk destroy --all --force
 
 ## 演示注意事项（Demo 前必读）
 
-三块功能各有一个「看起来正常但其实没生效」的失败模式。**每一条都是实测踩过的**，不是理论风险。
+下面每一块都有一个「看起来正常但其实没生效」的失败模式。**每一条都是实测踩过的**，不是理论风险。
 
 ### 一、模型清单（实时拉取）
 
@@ -648,6 +652,57 @@ cd cdk && npx cdk destroy --all --force
 ### 三、Integration Registry
 
 A2A Agents 与 Skills 两个子页都是从 AgentCore Registry 读 **APPROVED** 记录。空列表和「查询失败」在页面上是**两种不同的显示**：查询失败会显示原因（warning），空就是空。看到空列表先确认是哪一种，再去 Bedrock 控制台找。
+
+**Skills 页少记录 ≠ 页面坏了。** 内置技能由 `scripts/seed-skills.py` 直接写进 DynamoDB,
+**不会**自动出现在 Registry 里 —— 2026-08-12 之前这个 registry 只有 1 条 SKILL 记录,而线上跑着 9 个技能。
+两个存储回答的是不同问题:DynamoDB 是 **agent 运行时加载**的,Registry 是 **策展人能看见并审批**的。
+现在 `scripts/07-seed-skills.sh` 会两件都做;单独补跑:
+
+```bash
+./venv/bin/python scripts/publish-builtin-skills.py --dry-run   # 先看会改什么
+./venv/bin/python scripts/publish-builtin-skills.py             # 幂等,按 dedup 名原地更新
+```
+
+幂等很重要:`recordId` 是 `importedFromRegistry` 指向的东西,重建记录会把所有已导入关系变成孤儿。
+
+### 四、Web Search（AgentCore Gateway 连接器）
+
+**这个工具在 us-east-1,其他所有东西在 us-west-2。** AWS 只在 us-east-1 提供托管的
+`web-search` 连接器,所以它挂在单独的 `smarthome-websearch-gw` 上(复用同一个 IAM 角色和同一个
+Cognito authorizer,discovery URL 跨区可用,已实测)。在 us-west-2 建这个 target 会报:
+
+```
+ValidationException: Connector integration web-search is not available for this account.
+```
+
+**这条报错会把人带偏** —— 它看起来像账号权限问题,其实是区域问题;同样的调用在 us-east-1 直接成功。
+
+演示前检查:
+
+| 检查 | 怎么看 | 出问题的样子 |
+|---|---|---|
+| 工具出现在 Tool Policy | Build → Tool Policy,应看到 `WebSearch`(标注 region us-east-1) | 看不到 = 连接器没建成,或 `WEBSEARCH_GATEWAY_ID` 没进 admin Lambda |
+| 已授权用户能用 | 勾上 `WebSearch` → **重新登录** → 问一个需要时事的问题 | 策略是按 `sub` 匹配的,勾了不重新登录看不到变化 |
+| 主 runtime 拿到了 URL | 运行时环境变量里有 `WEBSEARCH_GATEWAY_URL` | 没有 = agent 不会搜网,而且**没有任何报错** |
+
+两个坑,都是实测:
+
+1. **`principal.id` 是 Cognito `sub`,不是邮箱。** 用邮箱写出来的策略状态是 **ACTIVE**、谁都匹配不上,
+   于是工具从 `tools/list` 里消失 —— 授权保存成功、实际全拒。控制台本来就是按 `user.sub` 存的,别改。
+2. **没有策略 = 全放开。** tools gateway 在 `ENFORCE` 模式下、策略数为 0,却照样给出全部 6 个工具;
+   只有某个工具存在 permit 之后,它才开始默认拒绝。所以保存权限时只重建**真正变化**的工具
+   (对称差),否则给一个人加一个新工具,会顺手给 6 个设备工具建出 permit,把没有权限行的
+   26 个用户全部挡掉 —— 而返回的是「保存成功」。
+
+### 五、A2A 专家 Agent 的能力边界
+
+三个原本「只有提示词」的专家(能耗/安全/家电维护)现在都有自己的工具链了,演示时有两点要知道:
+
+1. **服务日期类的演示需要设备模拟器开着。** `service_forecast` 是按**实测斜率**推日期的,
+   模拟器关着就没有历史数据,agent 会诚实地说「过去一周没有读数」而不是编一个日期 —— 这是对的行为,
+   但演示效果取决于有没有数据。先跑 `scripts/simulate-users.py` 或把模拟器开一会儿。
+2. **新增的 3 个 skill 需要单独授权。** `usage_audit` / `advisory_review` / `service_forecast`
+   是新发布的,重新部署**不会**自动授权。去 Build → SubAgent Policy 勾上(全局或按用户),然后**重新登录**。
 
 ### 部署顺序（改了 A2A 鉴权之后不能乱）
 
@@ -851,7 +906,7 @@ After deployment, `deploy.sh` prints URLs for all four frontends (device simulat
 4. **Voice mode**: browser prompts for mic access → you hear the pre-rendered welcome clip "欢迎使用智能家居设备助手" → start talking, Nova Sonic does bi-directional streaming
 5. Voice-mode commands like "打开风扇到中档" trigger actual MQTT device commands via the MCP gateway
 6. **Live browser preview** (right-side rail, collapsed by default — click a label to expand): ask the agent any live-web question ("what does example.com say right now?", "find top 3 wireless earbuds under $100 on Amazon", "summarize the Python Wikipedia page") without saying `browse_web` — the skill description auto-routes it to the tool. The right panel streams the real Chrome via DCV at 1280×800 (scrollbars appear when the panel is narrower); each step is screenshotted into the agent's `/mnt/workspace/<session>/browser/` which the Files tab can browse and download. After the tool returns, the AgentCore session stays alive for **15 minutes** — click **Take control** to drive the browser manually (fill captchas, click filters, etc.) without a new tool call. See [architecture §9.11](docs/architecture-and-design.md#911-browser-use--live-agent-web-automation).
-7. **Example prompt library**: an icon beside the input opens a right-hand drawer — **56 examples in 17 capability groups**, searchable in both languages, covering all 18 skills across the eight specialist agents (lighting moods, live scene sync, sunrise/sunset schedules, energy, security, maintenance, docs Q&A, concurrent delegation). Clicking one stages it in the input rather than sending it. The drawer opens at **any** point in a conversation; the welcome-screen chips remain but only show before the first message. The text comes from `shared/prompt-examples.json`, which the simulated-users script reads too — and a coverage test asserts every published skill is covered. See [architecture §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library).
+7. **Example prompt library**: an icon beside the input opens a right-hand drawer — **67 examples in 19 capability groups**, searchable in both languages, covering all 21 skills across the eight specialist agents (lighting moods, live scene sync, sunrise/sunset schedules, energy audit, advisory review, service forecasting, docs Q&A, concurrent delegation), with badges naming the specialists, tools and skills each group calls. Clicking one stages it in the input rather than sending it. The drawer opens at **any** point in a conversation; the welcome-screen chips remain but only show before the first message. The text comes from `shared/prompt-examples.json`, which the simulated-users script reads too — and a coverage test asserts every published skill is covered. See [architecture §9.20.1](docs/architecture-and-design.md#9201-the-shared-example-library).
 8. **Per-turn feedback**: 👍/👎 under every reply, with an optional reason after a 👎. Each vote carries that turn's delegation trace and lands in the `smarthome-feedback` table, driving the Overview **User satisfaction** card directly.
 
 ### Admin Console — Agent Harness Control Center
@@ -996,9 +1051,11 @@ The cost of guessing is asymmetric: reading `pairing` as failure tells the user 
 
 ### Discovery: the example prompt library
 
-An icon beside the chatbot's input opens a right-hand drawer: **56 examples in 17 capability groups**, searchable in both languages, covering all 18 skills across the eight specialist agents. Clicking one stages it in the input rather than sending it — a presenter needs a beat to say what the example is about to demonstrate. The drawer opens at any point in a conversation; the welcome-screen chips only show before the first message.
+An icon beside the chatbot's input opens a right-hand drawer: **67 examples in 19 capability groups**, searchable in both languages, covering all **21** skills across the eight specialist agents, all 7 Gateway tools and all 9 built-in skills. Clicking one stages it in the input rather than sending it — a presenter needs a beat to say what the example is about to demonstrate. The drawer opens at any point in a conversation; the welcome-screen chips only show before the first message.
 
-The list has **exactly one source** (`shared/prompt-examples.json`): the chatbot renders it and the simulated-users script reads it. The two used to be maintained separately — TypeScript i18n keys and Python scenario lists — and two copies of one list do not fail loudly. The symptom is discovering mid-demo that nothing ever exercised the security agent. A coverage test now asserts every one of the 18 published skills is covered, and that no example points at a skill that no longer exists.
+**Each group now carries badges naming what a prompt will actually call**: blue for A2A specialists, green for tools, grey for built-in skills. The data was already in the file and rendered nowhere, so a presenter had to know from memory which prompt hits which specialist — and that is exactly what nobody remembers during a demo.
+
+The list has **exactly one source** (`shared/prompt-examples.json`): the chatbot renders it and the simulated-users script reads it. The two used to be maintained separately — TypeScript i18n keys and Python scenario lists — and two copies of one list do not fail loudly. The symptom is discovering mid-demo that nothing ever exercised the security agent. A coverage test now asserts every one of the 21 published skills is covered, and that no example points at a skill that no longer exists. **Since 2026-08-12 that assertion extends to tools and skills too**: it previously checked only A2A, and the tool groups carried an empty `covers`, so "the examples cover every feature" had only ever been verified for the sub-agents. The tool list comes from `cdk/lambda/admin-api/tool_consumers.py` (itself generated from the agents' declarations) and the skill list from the directories under `agent/skills/`, so neither is hand-maintained twice.
 
 ### Four things for developers
 

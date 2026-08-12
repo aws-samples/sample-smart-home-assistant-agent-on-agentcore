@@ -95,13 +95,94 @@ def test_covers_names_only_skills_that_exist():
     )
 
 
-def test_all_eighteen_skills_are_accounted_for():
+def test_all_twenty_one_skills_are_accounted_for():
     """Guards the count itself, so a card that stops loading is noticed.
 
     If a card.json became unreadable, `_deployed_skills` would quietly return
     a smaller set and the coverage test above would still pass.
+
+    Was 18 until 2026-08-12, when the three prompt-only advisors each gained a
+    skill that needs their new tools: `usage_audit`, `advisory_review`,
+    `service_forecast`.
     """
-    assert len(_deployed_skills()) == 18, sorted(_deployed_skills())
+    assert len(_deployed_skills()) == 21, sorted(_deployed_skills())
+
+
+# ---------------------------------------------------------------------------
+# Tool and skill coverage — the same argument as A2A coverage above
+# ---------------------------------------------------------------------------
+
+def _gateway_tools():
+    """Every Gateway tool some agent declares, from the generated consumer map.
+
+    Read from `tool_consumers.py` rather than listed here, because that file is
+    itself generated from the agents' own declarations and held to them by
+    cdk/lambda/admin-api/tests/test_tool_consumers.py. Naming the tools twice is
+    how the two lists drift.
+    """
+    path = os.path.join(REPO, "cdk", "lambda", "admin-api", "tool_consumers.py")
+    with open(path, encoding="utf-8") as fh:
+        body = fh.read()
+    block = body.split("TOOL_CONSUMERS", 1)[1]
+    return set(re.findall(r"^\s*'([A-Za-z_]+)':", block, re.M))
+
+
+def _builtin_skills():
+    """The built-in skills, from the directories that define them."""
+    skills_dir = os.path.join(REPO, "agent", "skills")
+    return {name for name in os.listdir(skills_dir)
+            if os.path.isdir(os.path.join(skills_dir, name))}
+
+
+def test_every_gateway_tool_is_demonstrated():
+    """A tool nothing demonstrates is a tool nobody notices breaking.
+
+    The A2A coverage test above has existed for a while; the tool groups carried
+    an EMPTY `covers` and no tool annotation at all, so "the examples cover every
+    feature" was only ever checked for the sub-agents.
+    """
+    data = _load()
+    used = {t for g in data["groups"] for t in g.get("usesTools", [])}
+    missing = _gateway_tools() - used
+    assert not missing, (
+        "these Gateway tools are demonstrated by no example:\n  "
+        + "\n  ".join(sorted(missing))
+        + "\n\nAdd one to a group's `examples` and list the tool in its `usesTools`."
+    )
+
+
+def test_every_builtin_skill_is_demonstrated():
+    data = _load()
+    used = {s for g in data["groups"] for s in g.get("usesSkills", [])}
+    missing = _builtin_skills() - used
+    assert not missing, (
+        "these built-in skills are demonstrated by no example:\n  "
+        + "\n  ".join(sorted(missing))
+    )
+
+
+def test_annotations_name_only_things_that_exist():
+    """A stale annotation is silent: the example still runs and still looks fine,
+    while the badge claims a tool the system no longer has."""
+    data = _load()
+    known_tools = _gateway_tools() | {
+        # Agent-side tools, registered in agent.py rather than on a Gateway, so
+        # they are absent from the consumer map by construction.
+        "browse_web", "execute_python", "http_request", "file_write",
+    }
+    used_tools = {t for g in data["groups"] for t in g.get("usesTools", [])}
+    assert not (used_tools - known_tools), sorted(used_tools - known_tools)
+
+    used_skills = {s for g in data["groups"] for s in g.get("usesSkills", [])}
+    assert not (used_skills - _builtin_skills()), sorted(used_skills - _builtin_skills())
+
+
+def test_every_group_carries_both_annotation_keys():
+    """Absent and empty must be distinguishable: an empty list is "this group
+    calls no tool", a missing key is an author who did not consider it."""
+    for group in _load()["groups"]:
+        for key in ("usesTools", "usesSkills"):
+            assert isinstance(group.get(key), list), f"{group['id']}: missing {key}"
 
 
 # ---------------------------------------------------------------------------
