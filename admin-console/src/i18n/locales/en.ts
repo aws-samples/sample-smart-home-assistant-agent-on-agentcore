@@ -753,7 +753,7 @@ const en: Record<string, string> = {
   'dashboard.fleet.latencyP95': 'Invocation latency P95',
 
   'dashboard.token.trendTitle': 'Token cost trend',
-  'dashboard.token.trendDesc': 'Daily stacked input/output token consumption. Measured input:output is roughly 28:1, so the output segment renders as a thin sliver — that is the real shape of the data; switch to the table view for exact numbers.',
+  'dashboard.token.trendDesc': 'Daily input and output token consumption, one bar each. Measured input:output is roughly 28:1, so the output bar is genuinely short — that is the real shape of the data, and each series has its own baseline so you can still follow it day to day. Switch to the table view for exact numbers and the totals.',
   'dashboard.token.attributionTitle': 'Token cost attribution',
   'dashboard.token.attributionDesc.user': 'Attributed to Cognito users by joining session.id against the runtime-sessions table.',
   'dashboard.token.attributionDesc.tenant': 'Attributed to entry environment (default / ab-bundles / ab-targets) from the tenant_env configuration. This compares cost across A/B routing groups, not per-customer billing — the project has no separate tenant entity.',

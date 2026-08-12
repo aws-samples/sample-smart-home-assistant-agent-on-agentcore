@@ -433,6 +433,29 @@ Browser
 - **Auto-power-on**: Setting a mode, speed, temperature, or color via MQTT automatically powers on the device (e.g., `setMode` on LED Matrix also sets `power: true`), so the agent doesn't need to send a separate `setPower` command.
 - **Layout**: LED Matrix occupies the left column; Rice Cooker, Fan, and Oven stack compactly on the right.
 
+#### Theming: never reference Cloudscape's own CSS variables from app CSS
+
+Cloudscape emits component-scoped custom properties with a **build-time hash
+suffix**, so `var(--color-background-container-content, #fff)` in app CSS never
+resolves and the **fallback silently wins**. Both the simulator and the chatbot
+therefore sample the resolved light/dark values and push them onto `document.body`
+as stable aliases (`--sim-*`, `--chat-*`) in `src/theme/applyTheme.ts`; app CSS
+must use only those.
+
+This failed exactly as designed to fail. The Virtual Clock and Screen-and-speaker
+panels still referenced the raw `--color-*` names, so both stayed **white in dark
+mode** while every device card beside them flipped correctly — and because a
+fallback is a legitimate-looking colour, it read as a deliberate light surface
+rather than a broken reference. Nothing warned: an unresolvable `var()` is not an
+error in CSS, it is a fallback.
+
+The lesson generalises past this repo: **a defaulted lookup and a correct lookup
+are indistinguishable in the output.** The fix is mechanical (use the aliases), but
+the guard is a grep — `var(--color-` appearing anywhere in a `*.css` under an app
+is a bug by construction. The chatbot's `App.css` still opens with a `:root` block
+built this way; five of its six aliases turned out to be unused, and the survivor
+resolves to its fallback, so it is dead code rather than a live defect.
+
 #### Security model & known limitation
 
 Per-user isolation has two layers:
@@ -4173,6 +4196,26 @@ series** — a fourth cannot clear the floors, so the tail folds into "Other" or
 facets. Status colours (good/warning/serious/critical) are reserved and always
 ship with an icon and text label, never colour alone. See
 `admin-console/src/components/Dashboard/palette.ts`.
+
+**Token trend is GROUPED, not stacked.** Stacking is the textbook choice for
+part-to-whole over time and it fails on this data. Measured input:output runs
+~28:1 (live: 3,490,727 vs 154,739 on 2026-08-11), so the output segment rendered
+as a ~3px cap on top of the input bar — present, unreadable as a trend, and easy
+to mistake for an artefact. Stacking also denies output its own baseline, so its
+day-to-day movement cannot be compared by eye at all: it floats on whatever input
+did that day.
+
+Grouping gives each series a baseline of its own. Output is still short beside
+input — that IS the data — but it is now a bar you can follow across days. What
+stacking bought was the daily total, which was never this panel's job and is a
+column in the table twin.
+
+The change immediately surfaced something stacking had hidden: on 2026-08-12,
+output (3,466) *exceeded* input (16). Under stacking that inversion is invisible,
+because output is always drawn as a thin cap above input regardless of which is
+larger. On low-traffic days the output bar is sub-pixel and does not paint at all;
+that is honest for a chart at this scale, and the exact figures are one click away
+in the table view.
 
 #### 9.15.1 Why the spans query is NOT chunked
 

@@ -749,7 +749,7 @@ const zh: Record<string, string> = {
   'dashboard.fleet.latencyP95': '整次调用延迟 P95',
 
   'dashboard.token.trendTitle': 'Token 成本趋势',
-  'dashboard.token.trendDesc': '按天堆叠的输入/输出 Token 消耗。实测输入与输出比例约 28:1，因此输出段会很薄——这是数据的真实形态，精确数值可切换表格视图查看。',
+  'dashboard.token.trendDesc': '按天分列的输入/输出 Token 消耗，各占一根柱子。实测输入与输出比例约 28:1，所以输出那根确实矮——这是数据的真实形态；两个序列各有自己的基线，因此输出的逐日变化仍然看得出来。精确数值与合计可切换表格视图查看。',
   'dashboard.token.attributionTitle': 'Token 成本归因',
   'dashboard.token.attributionDesc.user': '按 Cognito 用户归因（通过 session.id 关联 runtime-sessions 表）。',
   'dashboard.token.attributionDesc.tenant': '按入口环境（entryEnvironment）归因：default / ab-bundles / ab-targets，来自 tenant_env 配置。这是 A/B 分流组的成本对比，不是按客户计费——本项目没有独立的租户实体。',

@@ -172,8 +172,8 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 | 指标组 | 数据来源 | 是否真实 |
 |--------|---------|---------|
-| 实时健康（活跃会话、TTFT P95/P99、错误率、QPS） | `AWS/Bedrock-AgentCore` 指标 + `aws/spans`，跨全部已登记 Runtime 汇总并附每个 Runtime 的分解 | ✅ |
-| Token 成本趋势与归因（输入/输出拆分） | `aws/spans` 里的 Strands `chat` span | ✅ Token；❌ 美元成本 |
+| 实时健康（活跃会话、TTFT P95/P99、错误率、QPS） | `AWS/Bedrock-AgentCore` 指标 + span 日志组，跨全部已登记 Runtime 汇总并附每个 Runtime 的分解 | ✅ |
+| Token 成本趋势与归因（输入/输出各一根柱子） | Strands `chat` span。自 2026-08-05 起写在**每个 runtime 自己的** `/aws/bedrock-agentcore/runtimes/{id}-DEFAULT` 里；账号级 `aws/spans` 仍一并查询以保留切换前的历史 | ✅ Token；❌ 美元成本 |
 | 成本预算消耗 | — | ❌ 模拟数据 |
 | 评估通过率与漂移 | `Bedrock-AgentCore/Evaluations` | ✅ 单变体；❌ A/B 对比 |
 | 活跃版本与发布状态 | Runtime Endpoint/Version + CloudTrail | ✅ 版本；⚠️ 灰度阶段为推导值 |
@@ -785,8 +785,8 @@ A monitoring-wall view for the administrator of a unified consumer entry point: 
 
 | Metric group | Source | Real? |
 |---|---|---|
-| Live health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + `aws/spans`, summed across every registered runtime with a per-runtime breakdown | ✅ |
-| Token cost trend + attribution (input/output split, and per-agent on Sessions) | Strands `chat` spans in `aws/spans` | ✅ tokens; ❌ dollar cost |
+| Live health (active sessions, TTFT P95/P99, error rate, QPS) | `AWS/Bedrock-AgentCore` metrics + the span log groups, summed across every registered runtime with a per-runtime breakdown | ✅ |
+| Token cost trend + attribution (input and output get a bar each; per-agent on Sessions) | Strands `chat` spans. Since 2026-08-05 these land in **each runtime's own** `/aws/bedrock-agentcore/runtimes/{id}-DEFAULT`; the account-wide `aws/spans` is still queried alongside so pre-cutover history survives | ✅ tokens; ❌ dollar cost |
 | Budget consumption | — | ❌ simulated |
 | Evaluation scores & drift | `Bedrock-AgentCore/Evaluations` | ✅ single-variant; ❌ A/B |
 | Active version & release state | Runtime Endpoint/Version + CloudTrail | ✅ versions; ⚠️ rollout stage derived |

@@ -951,12 +951,20 @@ body {
   margin-bottom: 16px;
 }
 
+/* These two panels must use the `--sim-*` aliases, not Cloudscape's own
+   `--color-*` names. Cloudscape hashes its component variables at build time, so
+   a raw `var(--color-background-container-content, #fff)` never resolves and the
+   FALLBACK wins — which meant both panels stayed white in dark mode while every
+   device card beside them (already on the aliases) switched correctly. The
+   fallback made it look like a deliberate light surface rather than a broken
+   reference. See `src/theme/applyTheme.ts`, which sets these per mode. */
 .sim-clock,
 .sim-media {
-  background: var(--color-background-container-content, #fff);
-  border: 1px solid var(--color-border-divider-default, #e9ebed);
+  background: var(--sim-card-bg, #fff);
+  border: 1px solid var(--sim-card-border, #e9ebed);
   border-radius: 12px;
   padding: 16px;
+  color: var(--sim-text-default, #0f141a);
 }
 
 .sim-clock {
@@ -978,7 +986,7 @@ body {
 .sim-clock-zone {
   font-size: 13px;
   font-weight: 400;
-  color: var(--color-text-body-secondary, #5f6b7a);
+  color: var(--sim-text-secondary, #5f6b7a);
 }
 
 .sim-media {
@@ -1009,20 +1017,20 @@ body {
   flex: 1 1 0;
   height: 14px;
   border-radius: 3px;
-  border: 1px solid var(--color-border-divider-default, #e9ebed);
+  border: 1px solid var(--sim-card-border, #e9ebed);
 }
 
 .sim-beat-meter {
   width: 70px;
   height: 8px;
   border-radius: 4px;
-  background: var(--color-background-layout-main, #f2f3f3);
+  background: var(--sim-panel-bg, #f2f3f3);
   overflow: hidden;
 }
 
 .sim-beat-fill {
   height: 100%;
-  background: var(--color-text-status-error, #d91515);
+  background: var(--sim-error, #d91515);
   /* No transition: the envelope IS the animation, and easing it would smear the
      attack that makes the pulse read as a beat. */
 }

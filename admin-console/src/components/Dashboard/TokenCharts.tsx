@@ -20,11 +20,18 @@ interface AttributionProps extends Props {
 }
 
 /**
- * #2 Token trend — stacked columns (part-to-whole over time).
+ * #2 Token trend — GROUPED columns: input and output get a bar each, side by side.
  *
- * Output tokens are genuinely tiny beside input (measured ~28:1), so the output
- * segment renders as a thin sliver. That is the real shape of the data, not a
- * defect; the tooltip and the table twin carry the exact numbers.
+ * Stacked was the obvious choice (part-to-whole over time) and it failed on this
+ * data. Measured input:output is ~28:1, so the output segment was a 3px sliver on
+ * top of the input bar — present, but impossible to read a trend from, and easy to
+ * mistake for a rendering artefact. Stacking also puts output's baseline on top of
+ * input, so its own day-to-day movement is not comparable by eye at all.
+ *
+ * Grouping gives each series its own baseline. Output is still short beside input
+ * — that IS the data — but it is a bar you can follow across days rather than a
+ * line on top of another bar. The total is what stacking bought and it is the one
+ * thing lost; it was never the point of this panel, and the table twin has it.
  */
 export function TokenTrend({ spans, loading, theme, chartHeight }: Props) {
   const { t } = useI18n();
@@ -54,7 +61,6 @@ export function TokenTrend({ spans, loading, theme, chartHeight }: Props) {
       }
       chart={
         <BarChart
-          stackedBars
           height={chartHeight}
           hideFilter
           statusType={loading && !spans ? 'loading' : 'finished'}

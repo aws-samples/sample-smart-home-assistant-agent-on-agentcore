@@ -203,8 +203,9 @@ Nearly every bug in this system's history reported success:
 | feedback sort key led with `ts` | one 👎 plus its reason wrote two rows and counted as two negatives |
 | A2A catalog read failure | 200 with `availableAgents: []` — identical to a registry with nothing in it |
 | registry wait polled for `ACTIVE` | a status no registry returns, so the wait could only time out and fall through |
+| CSS read Cloudscape's hashed vars | the `var()` fallback won, so two panels stayed white in dark mode and looked deliberate |
 
-The two new rows are the same shape as the rest. The vote split used `i % 100`
+Every row is the same shape. Take the vote split: it used `i % 100`
 against a threshold of `rate * 100` while a persona has 6-8 turns, so `i` never
 reached it; the run reported complete success and produced a plausible number
 containing none of the per-persona variation that was supposed to produce it. The
