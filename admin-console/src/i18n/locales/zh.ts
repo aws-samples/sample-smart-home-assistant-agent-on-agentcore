@@ -812,7 +812,7 @@ const zh: Record<string, string> = {
   'dashboard.satisfaction.downRate': '负评率',
   'dashboard.satisfaction.empty': '当前时间范围内还没有反馈。用户在 Chatbot 里点赞/踩之后，这里会立刻出现数据。',
   'dashboard.satisfaction.simulated': '其中 {pct}% 的投票来自用户模拟器（scripts/simulate-users.py），不是真实用户。',
-  'dashboard.satisfaction.byAgent': '按被委派的专家 Agent 统计',
+  'dashboard.satisfaction.byAgent': '按本轮用到的专家 Agent / 工具统计',
   'dashboard.satisfaction.reasons': '最近的反馈原因',
 
   'dashboard.strip.tokens': 'Token 消耗合计',

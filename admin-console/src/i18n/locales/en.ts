@@ -816,7 +816,7 @@ const en: Record<string, string> = {
   'dashboard.satisfaction.downRate': 'Negative rate',
   'dashboard.satisfaction.empty': 'No feedback in this window yet. Votes appear here as soon as someone uses the thumbs up/down control in the chatbot.',
   'dashboard.satisfaction.simulated': '{pct}% of these votes were filed by the user simulator (scripts/simulate-users.py), not by real users.',
-  'dashboard.satisfaction.byAgent': 'By specialist consulted',
+  'dashboard.satisfaction.byAgent': 'By specialist or tool used',
   'dashboard.satisfaction.reasons': 'Recent comments',
 
   'dashboard.strip.tokens': 'Total tokens',

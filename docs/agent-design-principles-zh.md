@@ -183,6 +183,8 @@ tool。runner Lambda 到点后**以 owner 身份、经由 Gateway** 执行。所
 | A2A 目录读取失败 | 200 且 `availableAgents: []` —— 和「registry 里本来就没有」完全一样 |
 | registry 等待轮询 `ACTIVE` | 没有任何 registry 会返回这个状态，于是这个等待只能超时后放行 |
 | CSS 引用了 Cloudscape 带哈希的变量 | `var()` 的兜底值生效，两个面板在深色模式下保持白色，看起来像是故意的 |
+| episodic memory 用了按用户组织的 namespace | API 接受了；记录照抽取、照计费，写到没人读的地方 |
+| 聊天记录没有被限高的祖先 | `overflow-y: auto` 从未生效，于是整个页面变长，而不是消息列表内滚 |
 
 每一行都是同一个形状。就拿投票分布来说：它用 `i % 100` 对比 `rate * 100`，而一个 persona
 只有 6-8 轮，`i` 永远到不了那个阈值；这次运行报告完全成功，产出一个看起来很合理的数字，

@@ -9,6 +9,9 @@ leaves the runtime looking healthy and quietly broken:
   - the A2A_* vars go, so no `a2a_*` tool is ever registered and every delegation
     silently becomes the orchestrator answering from its own knowledge
   - REGISTRY_ID goes, so the A2A feature gate stays half-armed
+  - MEMORY_STRATEGY_EPISODIC_ID goes, so episodic recall silently stops being
+    retrieved (episodes are stored under `/strategy/{id}/...`, so without the id
+    the namespace cannot be built and the entry is skipped)
   - SKILLS_TABLE_NAME goes, so per-user prompts, models and grants stop being read
   - the requestHeaderAllowlist goes, so the Runtime edge DROPS the chatbot's
     forwarded idToken and every Gateway call loses the end user's identity
@@ -84,6 +87,33 @@ def main() -> int:
     }
     if ac_state.get("registryId"):
         env_wanted["REGISTRY_ID"] = ac_state["registryId"]
+
+    # The EPISODIC strategy id, resolved from the live memory rather than stored,
+    # because `agentcore.json` does not carry it and the id is minted with the
+    # strategy. Without it `agent/memory/session.py` skips episodic retrieval
+    # entirely — which is the quiet failure this whole script exists to prevent, and
+    # it happened once: a deploy + restore left the var off and episodic recall was
+    # simply inactive while everything reported success.
+    memory_id = ""
+    try:
+        ac_probe = boto3.client("bedrock-agentcore-control", region_name=region)
+        rt_probe = ac_probe.get_agent_runtime(agentRuntimeId=runtime_id)
+        for k, v in (rt_probe.get("environmentVariables") or {}).items():
+            if (k.startswith("MEMORY_") and k.endswith("_ID")
+                    and k != "MEMORY_STRATEGY_EPISODIC_ID" and v):
+                memory_id = v
+                break
+        if memory_id:
+            info = ac_probe.get_memory(memoryId=memory_id)["memory"]
+            for s in info.get("strategies", []):
+                if s.get("type") == "EPISODIC":
+                    env_wanted["MEMORY_STRATEGY_EPISODIC_ID"] = s.get("strategyId", "")
+                    break
+    except Exception as e:  # noqa: BLE001
+        print(f"  Warning: could not resolve the EPISODIC strategy id: {e}")
+    if not env_wanted.get("MEMORY_STRATEGY_EPISODIC_ID"):
+        print("  Warning: MEMORY_STRATEGY_EPISODIC_ID unresolved — episodic recall "
+              "will be inactive (the other three memory strategies still work)")
     # Composed from the gateway ID, because that is what the state file records —
     # there is no gatewayArn in it. Composing beats omitting: the A2A sub-agents
     # read this var off the main runtime to find the Gateway, so a missing value

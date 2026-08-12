@@ -204,6 +204,8 @@ Nearly every bug in this system's history reported success:
 | A2A catalog read failure | 200 with `availableAgents: []` — identical to a registry with nothing in it |
 | registry wait polled for `ACTIVE` | a status no registry returns, so the wait could only time out and fall through |
 | CSS read Cloudscape's hashed vars | the `var()` fallback won, so two panels stayed white in dark mode and looked deliberate |
+| episodic memory on a user-scoped namespace | the API accepted it; records were extracted, billed, and written somewhere nothing read |
+| chat transcript with no bounded ancestor | `overflow-y: auto` never engaged, so the page grew instead of the message list scrolling |
 
 Every row is the same shape. Take the vote split: it used `i % 100`
 against a threshold of `rate * 100` while a persona has 6-8 turns, so `i` never

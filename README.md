@@ -153,7 +153,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AWS Agent Registry 导入已批准技能** |
 | Build | **Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时叠加拼接 |
 | Build | **Tool Policy** | 按用户配置可调用的工具（Cedar 策略）；内置工具与 Gateway 工具并列并用 Badge 区分；ENFORCE / LOG_ONLY 切换。每个 Gateway 工具旁列出**谁在用它** —— 撤掉 `control_device` 会同时停掉聊天指令、定时场景和两个子 Agent |
-| Build | **Memories** | 查看每个用户的长期记忆（事实 + 偏好，来自 AgentCore Memory） |
+| Build | **Memories** | 查看每个用户的长期记忆（事实 + 偏好 + 情景，来自 AgentCore Memory 的四种内置策略） |
 | Build | **Knowledge Base** | 上传文档到企业知识库（PDF、TXT、MD、DOCX、CSV 等）；一键触发 Bedrock KB 向量化同步；按用户隔离 |
 | Build | **Identity** | 已注册用户表，**以及全部用户管理**：新增用户、提权/降权、删除（原先在 Overview，已统一收敛到此处；不能对自己降权或删除） |
 | **Deploy** | **Instance Type** | 计算实例类型（当前 MicroVM，EC2 规划中） |
@@ -766,7 +766,7 @@ The side navigation groups 17 pages by agent lifecycle stage:
 | Build | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides; **import approved records from AWS Agent Registry** |
 | Build | **Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
 | Build | **Tool Policy** | Configure per-user tool permissions (Cedar policies); built-in and gateway tools listed side-by-side with source badges; toggle ENFORCE / LOG_ONLY. Each gateway tool also names **who calls it** — revoking `control_device` stops chat commands, scheduled scenes and two specialists |
-| Build | **Memories** | View each user's long-term memory (facts + preferences, from AgentCore Memory) |
+| Build | **Memories** | View each user's long-term memory (facts + preferences + episodes, from AgentCore Memory's four built-in strategies) |
 | Build | **Knowledge Base** | Upload documents to the enterprise KB (PDF, TXT, MD, DOCX, CSV, ...); one-click Bedrock KB vectorization sync; per-user isolation |
 | Build | **Identity** | Registered-users table **and all user management**: create, promote/demote admin, delete. (These lived on Overview previously; consolidated here. Self-demotion and self-deletion stay disabled.) |
 | **Deploy** | **Instance Type** | Compute class configuration (MicroVM today, EC2 planned) |

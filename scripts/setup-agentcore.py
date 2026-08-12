@@ -246,6 +246,41 @@ def _seed_demo_a2a_records(registry_control, registry_id, admin_sub, admin_email
 # Provisioned at deploy time — see docs/superpowers/specs/
 # 2026-05-17-agentcore-optimization-target-based-design.md.
 
+def _episodic_strategy_id(runtime_env: dict) -> str:
+    """The EPISODIC strategy's id on this deployment's memory, or "".
+
+    Needed because episodes are stored under
+    `/strategy/{memoryStrategyId}/actor/{actorId}/`, so the retrieving code cannot
+    construct the namespace from the actor alone (unlike facts / preferences /
+    summaries, which are user-scoped).
+
+    The memory id is read from the runtime env, where the agentcore CLI puts it as
+    `MEMORY_<NAME>_ID`. NOTE the naming hazard: the var this function's caller sets
+    is `MEMORY_STRATEGY_EPISODIC_ID`, which ALSO matches `MEMORY_*_ID`. The
+    memory-id scan elsewhere in this script takes the first such match, so on a
+    re-run it could pick up the strategy id and use it as a memory id. Hence the
+    explicit exclusion below rather than a bare prefix test.
+    """
+    memory_id = ""
+    for k, v in (runtime_env or {}).items():
+        if (k.startswith("MEMORY_") and k.endswith("_ID")
+                and k != "MEMORY_STRATEGY_EPISODIC_ID" and v):
+            memory_id = v
+            break
+    if not memory_id:
+        return ""
+    try:
+        ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
+        info = ac.get_memory(memoryId=memory_id)["memory"]
+    except Exception as e:  # noqa: BLE001
+        print(f"  Warning: get_memory({memory_id}) failed: {e}")
+        return ""
+    for s in info.get("strategies", []):
+        if s.get("type") == "EPISODIC":
+            return s.get("strategyId", "")
+    return ""
+
+
 def _runtime_short(runtime_id: str) -> str:
     """smarthome_smarthome-ee97ToCthI → smarthome_smarthome (drop the suffix)."""
     if "-" not in runtime_id:
@@ -1360,10 +1395,28 @@ def main():
     # --------------------------------------------------------
     # Step 3: Add AgentCore Memory (managed by agentcore CLI)
     # --------------------------------------------------------
+    # All four built-in strategies. EPISODIC extracts "what happened in this
+    # session, in order" — distinct from SUMMARIZATION, which compresses a session
+    # into prose, and from SEMANTIC, which stores standalone facts with no
+    # sequence. For a home assistant the ordering is the useful part ("turned the
+    # fan on, then said it got cold"), so it earns its own namespace.
+    #
+    # Adding a strategy is only half the job: a namespace nothing retrieves from
+    # still extracts, stores and bills, and contributes nothing to an answer. The
+    # matching retrieval entry is in `agent/memory/session.py`, and
+    # `agent/tests/test_memory_namespaces.py` fails if the two sides drift.
+    #
+    # NOTE on adding EPISODIC to an EXISTING memory: the CLI provisions it at
+    # create time, but a memory that already exists needs
+    # `UpdateMemory(memoryStrategies={"addMemoryStrategies": [...]})`. That call
+    # rejects an episodic namespace which is not at or under the strategy's
+    # reflection namespace ("must be the same as or a hierarchical prefix of"), so
+    # pass `reflectionConfiguration.namespaces` set to the same value. Recreating
+    # the memory instead would discard every stored record.
     print("\n[3/8] Adding AgentCore Memory...")
     r = run(
         "agentcore add memory --name SmartHomeMemory "
-        "--strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE",
+        "--strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC",
         cwd=project_dir,
     )
     if r.returncode != 0:
@@ -1815,6 +1868,20 @@ def main():
         # rewrites the event names and breaks evaluation.
         if gateway_arn:
             existing_env["AGENTCORE_GATEWAY_ARN"] = gateway_arn
+        # The EPISODIC strategy's id. Episodes are stored under
+        # `/strategy/{memoryStrategyId}/actor/{actorId}/` — a path that cannot be
+        # built from the actor alone — and the id is minted with the strategy, so it
+        # has to be resolved here and patched in. `agent/memory/session.py` omits the
+        # episodic retrieval entry when this is unset rather than guessing a
+        # namespace: a wrong namespace retrieves nothing, forever, and looks exactly
+        # like a strategy that has not produced records yet.
+        episodic_id = _episodic_strategy_id(existing_env)
+        if episodic_id:
+            existing_env["MEMORY_STRATEGY_EPISODIC_ID"] = episodic_id
+            print(f"  Episodic memory strategy: {episodic_id}")
+        else:
+            print("  Warning: no EPISODIC strategy found on the memory — episodic "
+                  "recall will be inactive (the other three strategies still work)")
         # Runtime auth mode: AWS_IAM (SigV4). The CUSTOM_JWT path on the
         # runtime's /ws endpoint is broken upstream — the edge rejects WebSocket
         # upgrades with HTTP 424. SigV4 works, so the browser signs with
@@ -2350,10 +2417,16 @@ def main():
     if runtime_arn:
         try:
             lambda_client = boto3.client("lambda", region_name=REGION)
-            # Get memory ID from runtime env vars (auto-set by agentcore CLI)
+            # Get memory ID from runtime env vars (auto-set by agentcore CLI).
+            # MEMORY_STRATEGY_EPISODIC_ID is excluded explicitly: it matches this
+            # prefix/suffix pattern too, and dict order is insertion order, so once
+            # this script has patched it in, a re-run could take the STRATEGY id and
+            # hand it to the admin Lambda as MEMORY_ID. That fails as "memory not
+            # found" from a component that never touched memory.
             memory_id = ""
             for k, v in existing_env.items():
-                if k.startswith("MEMORY_") and k.endswith("_ID"):
+                if (k.startswith("MEMORY_") and k.endswith("_ID")
+                        and k != "MEMORY_STRATEGY_EPISODIC_ID" and v):
                     memory_id = v
                     break
             # Start from the Lambda's CURRENT env and merge our patched values
@@ -2399,6 +2472,9 @@ def main():
                 "COGNITO_USER_POOL_ID": outputs.get("UserPoolId", ""),
                 "GATEWAY_ID": gateway_id,
                 "MEMORY_ID": memory_id,
+                # So the Memories page can list episodes too. Episodes are
+                # strategy-scoped, so the id is required to build the namespace.
+                "MEMORY_STRATEGY_EPISODIC_ID": _episodic_strategy_id(existing_env),
                 "BROWSER_SESSIONS_TABLE_NAME": "smarthome-browser-sessions",
                 "RUNTIME_SESSIONS_TABLE_NAME": outputs.get(
                     "RuntimeSessionsTableName", "smarthome-runtime-sessions"

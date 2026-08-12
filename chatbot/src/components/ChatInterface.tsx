@@ -230,6 +230,7 @@ const ChatInterface: React.FC = () => {
   const { t, language } = useI18n();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const voiceClientRef = useRef<VoiceClient | null>(null);
@@ -261,6 +262,62 @@ const ChatInterface: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isTyping, scrollToBottom]);
+
+  // Bound the chat shell to the viewport, so `.messages-area` scrolls INSIDE it
+  // instead of the whole page growing.
+  //
+  // The CSS alone could not do this. `.messages-area { flex: 1; overflow-y: auto }`
+  // only scrolls if some ancestor has a definite height, and the nearest ones are
+  // Cloudscape's AppLayout grid — which sets `min-height` and no height, so
+  // `flex: 1` resolved against CONTENT. Measured before the fix: viewport 493px,
+  // messages-area 740px, document 935px, and `scrollHeight === clientHeight` on the
+  // scroller — i.e. the inner scrollbar never engaged and the transcript simply
+  // extended the page. `scrollIntoView` then scrolled the document, moving the
+  // header off-screen rather than advancing the list.
+  //
+  // Done in JS rather than `calc(100vh - 49px)` because the top nav's height is not
+  // a constant: TopNavigation collapses utilities into an overflow menu at narrow
+  // widths, and a hardcoded offset is wrong the moment it re-flows. Cloudscape does
+  // publish its own offset custom properties, but they carry a build-time hash
+  // (`--awsui-offset-top-6b9ypa`), so app code cannot reference them by name — the
+  // same constraint documented for the simulator's theme tokens.
+  useEffect(() => {
+    const fit = () => {
+      const shell = shellRef.current;
+      if (!shell) return;
+      // Measure the shell's OWN distance from the top of the viewport rather than
+      // subtracting the nav height. They are not the same number: AppLayout puts
+      // the content inside a container with 40px of bottom padding and a few px of
+      // offset above, so `innerHeight - navHeight` overshot by 52px and the page
+      // still scrolled ~50px. Reading `getBoundingClientRect().top` accounts for
+      // every bit of that chrome without naming any of it — which matters because
+      // those paddings live in hashed Cloudscape classes we cannot reference.
+      //
+      // Height is cleared first so the measurement is not taken against the value
+      // this function set last time (that feeds back and the shell creeps).
+      shell.style.height = '';
+      const top = shell.getBoundingClientRect().top;
+      // Padding BELOW the shell is read, not hardcoded, for the same reason the
+      // nav height is: 40px today is a Cloudscape implementation detail, and a
+      // literal here would silently mis-size the moment it changes.
+      const parent = shell.parentElement;
+      const below = parent
+        ? parseFloat(getComputedStyle(parent).paddingBottom) || 0
+        : 0;
+      shell.style.height = `${Math.max(240, window.innerHeight - top - below)}px`;
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    // The nav re-flows on its own (utilities collapsing, language switch changing
+    // label widths) without a window resize, so observe it too.
+    const nav = document.querySelector('#top-nav');
+    const ro = nav ? new ResizeObserver(fit) : null;
+    if (nav && ro) ro.observe(nav);
+    return () => {
+      window.removeEventListener('resize', fit);
+      ro?.disconnect();
+    };
+  }, []);
 
   // Prefetch the AudioWorklet JS so the first tap on the voice button doesn't
   // block on a CloudFront round-trip. We don't call getUserMedia here because
@@ -889,9 +946,13 @@ const ChatInterface: React.FC = () => {
   // specialists, so the welcome screen advertised a fraction of the system.
   const chips = welcomeChips(language === 'zh');
 
+  // The shell's height is set imperatively by the fit() effect above — see it for
+  // why CSS alone cannot bound it. `minHeight: 0` on every link of the chain is
+  // what lets the inner scroller shrink below its content instead of pushing the
+  // page taller: a flex item's default `min-height: auto` refuses to.
   return (
-    <div style={{ display: 'flex', flexDirection: 'row', height: '100%' }}>
-    <div className="chat-container" style={{ flex: 1, minWidth: 0 }}>
+    <div ref={shellRef} style={{ display: 'flex', flexDirection: 'row', height: '100%', minHeight: 0 }}>
+    <div className="chat-container" style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
       {error && (
         <Box padding="s">
           <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>

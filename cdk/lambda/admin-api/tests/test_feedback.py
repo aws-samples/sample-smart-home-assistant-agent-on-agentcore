@@ -343,8 +343,29 @@ def test_by_agent_counts_a_multi_agent_turn_under_each(monkeypatch):
 
 
 def test_turns_with_no_delegation_are_bucketed_explicitly(monkeypatch):
+    """Named from the module constant, not a literal.
+
+    The label is user-facing wording and has already changed once — it read
+    "(no delegation)", which looked like a null marker rather than a statement
+    about the turn. Asserting the constant keeps this test about the BEHAVIOUR
+    (undelegated turns get their own bucket) instead of about the phrasing.
+    """
+    import dashboard
+
     out = _agg(monkeypatch, [_row("up")])
-    assert out["byAgent"][0]["agent"] == "(no delegation)"
+    assert out["byAgent"][0]["agent"] == dashboard.NO_DELEGATION_LABEL
+
+
+def test_the_no_delegation_label_is_not_a_null_marker(monkeypatch):
+    """It is rendered verbatim in the console beside real agent names, so it must
+    read as a category. Parenthesised or empty-looking values get mistaken for
+    missing data and investigated as bugs."""
+    import dashboard
+
+    label = dashboard.NO_DELEGATION_LABEL
+    assert label and label.strip() == label
+    assert not label.startswith("("), label
+    assert label.lower() not in ("none", "null", "n/a", "-", "unknown"), label
 
 
 def test_recent_reasons_are_newest_first_and_capped(monkeypatch):

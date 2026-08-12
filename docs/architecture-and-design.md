@@ -705,18 +705,48 @@ The agent is a Strands Agent deployed to Amazon Bedrock AgentCore Runtime via Co
 
 The agent uses AgentCore Memory for short-term conversation persistence and long-term knowledge extraction. Memory is created and deployed via the `agentcore` CLI as a first-class project resource (`agentcore add memory`), which manages its lifecycle through the same CloudFormation stack as the runtime and gateway.
 
-**Three configured strategies:**
+**All four built-in strategies:**
 
 | Strategy | Type | Namespace |
 |----------|------|-----------|
 | **Semantic** | `SEMANTIC` | `/users/{actorId}/facts` |
 | **Summarization** | `SUMMARIZATION` | `/summaries/{actorId}/{sessionId}` |
 | **User Preference** | `USER_PREFERENCE` | `/users/{actorId}/preferences` |
+| **Episodic** | `EPISODIC` | `/strategy/{memoryStrategyId}/actor/{actorId}/` |
+
+Episodic is the ordered account of an interaction ("started dinner, set the cooker,
+then turned everything off"), which summarization's prose and semantic's standalone
+facts both discard. Two things about it differ from the other three, both documented
+AWS behaviour and both discovered the hard way:
+
+- **Its namespace is strategy-scoped, not user-scoped.** Episodes live under
+  `/strategy/{memoryStrategyId}/...`; the actor-level variant above keeps one user's
+  episodes out of another's. A `/users/{actorId}/episodes` namespace is **accepted**
+  by the API and then never populated — measured: from the same six events, semantic
+  and user-preference produced records in ~50s while the mis-namespaced episodic
+  produced none in six minutes. Because the id is minted with the strategy, it is
+  resolved at deploy time into `MEMORY_STRATEGY_EPISODIC_ID`, and
+  `agent/memory/session.py` **omits** the entry when that is unset rather than
+  guessing a path that would silently retrieve nothing forever.
+- **Records appear only when an episode is judged complete.** Per the docs, "if an
+  episode is not complete, it will take longer to generate because the system waits
+  to see if the conversation is continued." An empty episodic namespace mid-session
+  is therefore expected and is *not* evidence of a misconfiguration — which is why
+  `agent/tests/test_memory_namespaces.py` asserts the wiring statically instead of
+  querying the service.
+
+Adding EPISODIC to an **existing** memory needs
+`UpdateMemory(memoryStrategies={"addMemoryStrategies": [...]})`; the API rejects an
+episodic namespace that is not at or under the strategy's reflection namespace
+("must be the same as or a hierarchical prefix of"), so pass
+`reflectionConfiguration.namespaces` with the same value. Recreating the memory
+instead would discard every stored record.
 
 **CLI-managed lifecycle:**
 ```bash
 # Memory is added to the agentcore project alongside gateway and runtime
-agentcore add memory --name SmartHomeMemory --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
+agentcore add memory --name SmartHomeMemory \
+  --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC
 agentcore deploy -y --verbose
 # CLI auto-sets MEMORY_SMARTHOMEMEMORY_ID env var on the runtime
 ```
@@ -735,6 +765,10 @@ def get_memory_session_manager(session_id, actor_id):
         f"/summaries/{actor_id}/{session_id}": RetrievalConfig(top_k=3, relevance_score=0.5),
         f"/users/{actor_id}/preferences": RetrievalConfig(top_k=3, relevance_score=0.5),
     }
+    # Strategy-scoped, and skipped rather than guessed when the id is unknown.
+    if EPISODIC_STRATEGY_ID:
+        retrieval_config[f"/strategy/{EPISODIC_STRATEGY_ID}/actor/{actor_id}/"] = \
+            RetrievalConfig(top_k=3, relevance_score=0.5)
     return AgentCoreMemorySessionManager(
         AgentCoreMemoryConfig(memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id,
                               retrieval_config=retrieval_config),
@@ -743,7 +777,7 @@ def get_memory_session_manager(session_id, actor_id):
 ```
 
 - **Short-term**: Conversation messages stored automatically per session via `AgentCoreMemorySessionManager`
-- **Long-term**: Strategies extract facts, preferences, and summaries asynchronously and make them available as context in future sessions
+- **Long-term**: Strategies extract facts, preferences, summaries and completed episodes asynchronously and make them available as context in future sessions
 - **Retrieval**: Each namespace has configurable `top_k` and `relevance_score` thresholds for context injection
 - **Session/Actor IDs**: Derived from AgentCore Runtime request context (`session_id`, `x-amzn-bedrock-agentcore-runtime-user-id` header)
 - **Actor ID sanitization**: AgentCore Memory requires actor IDs matching `[a-zA-Z0-9][a-zA-Z0-9-_/]*`. Since Cognito emails contain `@` and `.`, `_sanitize_actor_id()` replaces invalid characters with `_` (e.g., `user@example.com` → `user_example_com`).
@@ -1730,7 +1764,7 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
 - `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
 - **`requestHeaderConfiguration` round-trip pitfall.** `get_agent_runtime` returns the allowlist as the top-level field `requestHeaderAllowlist`, but `update_agent_runtime` expects it nested under `requestHeaderConfiguration={"requestHeaderAllowlist": [...]}`. A naïve round-trip that re-passes the top-level value **silently drops the allowlist**, which strips the custom auth header at the edge proxy → the agent sees `context.request_headers = None` → MCP gateway returns 401. Any helper that calls `UpdateAgentRuntime` (latency-probe nonce bumper, `enable-welcome.py`, session redeploy helpers) must read from either location and always wrap back into the nested form. See `voice-latency-test/force-cold.py` + `enable-welcome.py` for the correct pattern.
-- `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
+- `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
 - ⚠️ **`.agentcore-project/smarthome/app/smarthome/` is a COPY of `agent/`, not a
   link, and `agentcore deploy` packages whatever is sitting in it.** Only
   `setup-agentcore.py` refreshes that copy (`shutil.copytree`, as one step of a
@@ -1813,7 +1847,7 @@ deploy.sh (one-click wrapper)
     |           |     Patch agentcore.json (entrypoint, JWT auth, env vars)
     |           |     Seed aws-targets.json (required for CLI deploy)
     |           +---> agentcore add memory --name SmartHomeMemory
-    |           |     --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE
+    |           |     --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC
     |           +---> agentcore add gateway (CUSTOM_JWT auth, Cognito)
     |           +---> agentcore add gateway-target SmartHomeDeviceControl
     |           |     (iot-control Lambda + control_device tool schema)

@@ -99,6 +99,13 @@ SPANS_QUERY_BUDGET_SECONDS = 22
 RANGES = {"24h": 1, "7d": 7, "30d": 30, "60d": 60, "90d": 90}
 DIMS = ("user", "tenant", "agent")
 
+# The satisfaction card's bucket for votes on turns that consulted nothing: the
+# orchestrator answered from its own model, with no A2A specialist and no tool.
+# Phrased as a statement about the turn, not as a null marker — the previous
+# "(no delegation)" read like a missing field, and a label that looks like a data
+# problem gets investigated as one.
+NO_DELEGATION_LABEL = "No Sub-Agent Delegation"
+
 # The 11 online evaluators actually emitting for this project. Each is its
 # own metric name in the `Bedrock-AgentCore/Evaluations` namespace.
 # `smarthome_SmartHomeQuality` uses a Numerical rating scale (observed mean
@@ -1038,12 +1045,18 @@ def _fetch_satisfaction(days):
         bucket = per_day.setdefault(day, {"up": 0, "down": 0})
         bucket["up" if r.get("vote") == "up" else "down"] += 1
 
-    # Which specialist drew the vote. A turn that consulted several agents counts
-    # once for each, because the question being answered is "does this agent
-    # correlate with dissatisfaction", not "who is to blame".
+    # Which specialist or tool drew the vote. A turn that consulted several counts
+    # once for each, because the question being answered is "does this correlate
+    # with dissatisfaction", not "who is to blame".
+    #
+    # The empty bucket is named for what it MEANS rather than for the absent field.
+    # `agentDim` is the turn's tool trace, so an empty list is a turn the
+    # orchestrator answered with no specialist and no tool — "(no delegation)" read
+    # as a missing value or a data problem, which is exactly the ambiguity that
+    # sends someone looking for a bug that is not there.
     per_agent = {}
     for r in rows:
-        for agent in (r.get("agentDim") or ["(no delegation)"]):
+        for agent in (r.get("agentDim") or [NO_DELEGATION_LABEL]):
             bucket = per_agent.setdefault(str(agent), {"up": 0, "down": 0})
             bucket["up" if r.get("vote") == "up" else "down"] += 1
 

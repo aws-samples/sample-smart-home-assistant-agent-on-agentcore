@@ -109,13 +109,22 @@ def memory_actor_for(caller) -> str:
 def namespaces_for(actor_id: str) -> list[str]:
     """The namespaces a sub-agent reads, for `actor_id`.
 
-    Facts and preferences only. The third strategy's namespace,
-    `/summaries/{actor}/{sessionId}`, is deliberately NOT read: AgentCore assigns
-    a runtimeSessionId per runtime and the A2A hop does not propagate the
-    orchestrator's, so a sub-agent cannot name the session whose summary it would
-    want. It would be reading its own empty namespace and paying a call for it.
-    (The same gap is documented for token attribution in
+    Facts and preferences only, out of the memory's four strategies.
+
+    `/summaries/{actor}/{sessionId}` is unreadable here for a structural reason:
+    AgentCore assigns a runtimeSessionId per runtime and the A2A hop does not
+    propagate the orchestrator's, so a sub-agent cannot name the session whose
+    summary it would want. It would be reading its own empty namespace and paying a
+    call for it. (The same gap is documented for token attribution in
     cdk/lambda/admin-api/index.py.)
+
+    `/users/{actor}/episodes` (EPISODIC) is different: it IS actor-partitioned, so
+    a sub-agent could read it. It is left out on cost, not correctness. The loop
+    below is sequential, so each namespace adds a serial RetrieveMemoryRecords to
+    the critical path of every delegated turn, and a specialist is handed a
+    self-contained instruction — the ordered account of how the user got here is
+    context the orchestrator already used to compose that instruction. Add it here
+    only with a measurement showing a delegated answer improves.
     """
     if not actor_id:
         return []

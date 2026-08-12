@@ -2,19 +2,19 @@
    Smart Home Assistant - Chat UI Styles
    ========================================= */
 
-/* Tie signature chat-surface colors to Cloudscape tokens so they flip
-   when the user toggles light/dark. Bubble gradients stay branded. */
-:root {
-  --chat-surface: var(--color-background-container-content, #0a0a0f);
-  --chat-text: var(--color-text-body-default, #e0e0e0);
-  --chat-text-muted: var(--color-text-body-secondary, #8888aa);
-  --chat-bubble-agent: var(--color-background-container-content, rgba(30, 30, 50, 0.8));
-  --chat-bubble-border: var(--color-border-divider-default, rgba(255, 255, 255, 0.06));
-  --chat-accent: var(--color-text-link-default, #4a9eff);
-}
+/* This file must NOT reference Cloudscape's own `--color-*` variables: they carry
+   a build-time hash, so the name never resolves from app CSS and the var()
+   FALLBACK silently wins — in both themes. The themed values arrive as `--chat-*`
+   aliases pushed onto document.body by src/theme/applyTheme.ts; use only those.
+   (Same failure fixed in the device simulator, where two panels stayed white in
+   dark mode for exactly this reason.)
 
+   A `:root` block here previously defined six aliases this way. Five were never
+   referenced; the sixth, `--chat-text`, resolved to its hardcoded dark fallback
+   (#e0e0e0) and was applied to `.chat-container` — so chat text did not follow the
+   theme at all. Removed in favour of the real alias below. */
 .chat-container {
-  color: var(--chat-text);
+  color: var(--chat-text-default, #0f141a);
 }
 
 /* --- Loading Screen --- */
@@ -135,6 +135,7 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;   /* see .messages-area — the chain must be able to shrink */
   max-width: 860px;
   margin: 0 auto;
   width: 100%;
@@ -152,8 +153,16 @@
 }
 
 /* --- Messages Area --- */
+/* `min-height: 0` is load-bearing, not tidying. A flex item defaults to
+   `min-height: auto`, which refuses to shrink below its content — so with a long
+   transcript this box grew past its parent and the `overflow-y: auto` scroller
+   never engaged, pushing the whole page taller instead. Measured before the fix:
+   clientHeight 740px inside a 493px viewport, with scrollHeight == clientHeight.
+   The parent chain's definite height comes from the fit() effect in
+   ChatInterface.tsx. */
 .messages-area {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 24px 20px;
   scroll-behavior: smooth;
@@ -343,13 +352,13 @@
 .message-markdown code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.88em;
-  background: var(--color-background-layout-panel-content, rgba(0,0,0,.06));
+  background: var(--chat-panel, rgba(0,0,0,.06));
   padding: 1px 5px;
   border-radius: 4px;
 }
 .message-markdown pre {
-  background: var(--color-background-layout-panel-content, rgba(0,0,0,.06));
-  border: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
+  background: var(--chat-panel, rgba(0,0,0,.06));
+  border: 1px solid var(--chat-border, rgba(0,0,0,.15));
   border-radius: 6px;
   padding: 10px 12px;
   margin: 0.5em 0;
@@ -361,7 +370,7 @@
   border-radius: 0;
 }
 .message-markdown a {
-  color: var(--color-text-link-default, #0972d3);
+  color: var(--chat-link, #0972d3);
   text-decoration: underline;
   word-break: break-all;
 }
@@ -373,8 +382,8 @@
 .message-markdown blockquote {
   margin: 0.5em 0;
   padding: 0.25em 0.75em;
-  border-left: 3px solid var(--color-border-divider-default, rgba(0,0,0,.15));
-  color: var(--color-text-body-secondary, #5f6b7a);
+  border-left: 3px solid var(--chat-border, rgba(0,0,0,.15));
+  color: var(--chat-text-secondary, #5f6b7a);
 }
 .message-markdown table {
   border-collapse: collapse;
@@ -383,13 +392,13 @@
 }
 .message-markdown th,
 .message-markdown td {
-  border: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
+  border: 1px solid var(--chat-border, rgba(0,0,0,.15));
   padding: 4px 8px;
   text-align: left;
 }
 .message-markdown hr {
   border: none;
-  border-top: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
+  border-top: 1px solid var(--chat-border, rgba(0,0,0,.15));
   margin: 0.75em 0;
 }
 
@@ -454,7 +463,7 @@
   height: 48px;
   border-radius: 8px;
   overflow: hidden;
-  background: var(--color-background-layout-panel-content, rgba(0,0,0,.06));
+  background: var(--chat-panel, rgba(0,0,0,.06));
 }
 
 .image-strip-item img {
@@ -471,9 +480,9 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--color-background-container-content, #ffffff);
-  color: var(--color-text-body-default, #000716);
-  border: 1px solid var(--color-border-divider-default, rgba(0,0,0,.15));
+  background: var(--chat-container-bg, #ffffff);
+  color: var(--chat-text-default, #000716);
+  border: 1px solid var(--chat-border, rgba(0,0,0,.15));
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
@@ -573,7 +582,7 @@
 .examples-panel {
   width: 380px;
   flex: 0 0 380px;
-  border-left: 1px solid var(--color-border-divider-default, #e9ebed);
+  border-left: 1px solid var(--chat-border, #e9ebed);
   overflow-y: auto;
   height: 100%;
 }

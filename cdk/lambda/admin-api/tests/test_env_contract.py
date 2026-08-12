@@ -1,14 +1,14 @@
 """The admin Lambda's env vars come from two places, and CDK silently wins.
 
 CDK declares 15 variables (8 in the inline `environment:` map, 7 via
-`addEnvironment`). Twelve more are patched in afterwards by
-`scripts/setup-agentcore.py` — GATEWAY_ID, MEMORY_ID, VOICE_AGENT_RUNTIME_ARN,
-DASHBOARD_EXTRA_RUNTIME_ARNS, KB_ID/KB_DATA_SOURCE_ID, the OPTIMIZATION_* /
-*_ONLINE_EVAL_ARN / AB_TEST_ROLE_ARN set — because they name resources that do not
-exist at synth time. 27 in total on the current deployment.
+`addEnvironment`). The rest are patched in afterwards by
+`scripts/setup-agentcore.py` — GATEWAY_ID, MEMORY_ID, MEMORY_STRATEGY_EPISODIC_ID,
+VOICE_AGENT_RUNTIME_ARN, DASHBOARD_EXTRA_RUNTIME_ARNS, KB_ID/KB_DATA_SOURCE_ID, the
+OPTIMIZATION_* / *_ONLINE_EVAL_ARN / AB_TEST_ROLE_ARN set — because they name
+resources that do not exist at synth time.
 
 `environment:` on a CfnFunction is the WHOLE map, so any `cdk deploy` resets the
-function to CDK's 15 and drops the other 12. Nothing errors. The symptoms are
+function to CDK's 15 and drops every patched one. Nothing errors. The symptoms are
 remote from the cause: `/tools` quietly returns built-ins only (so the Tool Policy
 modal shows no gateway tools and an admin cannot grant `control_device` at all),
 and `/optimization/*` answers ConfigurationError.
@@ -61,6 +61,10 @@ PATCHED_BY_SETUP = {
     "REGISTRY_ID",
     "VOICE_AGENT_RUNTIME_ARN",
     "DASHBOARD_EXTRA_RUNTIME_ARNS",
+    # Episodes are stored under `/strategy/{id}/actor/{actor}/`, so listing them on
+    # the Memories page needs the strategy id — which is minted with the strategy
+    # and therefore cannot exist at synth time.
+    "MEMORY_STRATEGY_EPISODIC_ID",
 }
 
 # Variables the admin Lambda's code reads. Anything here must be set by one side

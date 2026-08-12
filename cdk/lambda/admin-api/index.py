@@ -32,6 +32,10 @@ SKILL_FILES_BUCKET = os.environ.get("SKILL_FILES_BUCKET", "")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 VOICE_RUNTIME_ARN = os.environ.get("VOICE_AGENT_RUNTIME_ARN", "")
 MEMORY_ID = os.environ.get("MEMORY_ID", "")
+# The EPISODIC strategy's id. Episodes live under `/strategy/{id}/actor/{actor}/`
+# rather than a user-scoped path, so listing them needs the id, which is minted with
+# the strategy and patched in post-deploy alongside MEMORY_ID.
+EPISODIC_STRATEGY_ID = os.environ.get("MEMORY_STRATEGY_EPISODIC_ID", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
@@ -1571,9 +1575,18 @@ def get_memory_records(event):
     if not actor_id:
         return response(400, {"error": "actorId is required"})
 
+    # facts / preferences are user-scoped; episodes are STRATEGY-scoped, so the
+    # third namespace cannot be built from the actor alone and is skipped when the
+    # strategy id is unknown rather than guessed (a wrong namespace lists nothing,
+    # forever, and looks the same as a strategy with no records yet).
+    namespaces = [("facts", f"/users/{actor_id}/facts"),
+                  ("preferences", f"/users/{actor_id}/preferences")]
+    if EPISODIC_STRATEGY_ID:
+        namespaces.append(
+            ("episodes", f"/strategy/{EPISODIC_STRATEGY_ID}/actor/{actor_id}/"))
+
     records = []
-    for ns_type in ["facts", "preferences"]:
-        namespace = f"/users/{actor_id}/{ns_type}"
+    for ns_type, namespace in namespaces:
         try:
             params = {"memoryId": MEMORY_ID, "namespace": namespace, "maxResults": 50}
             while True:

@@ -29,7 +29,7 @@
 | **Runtime** | 承载 Agent 代码。共 **11 个 Runtime**:`smarthome`(文本主 Agent)、`smarthomevoice`(语音)、`smarthome_bundles`(A/B 变体)、以及 8 个 A2A 专家子 Agent | **Agents** / Sessions / Remote Shell / Prompt |
 | **Runtime (A2A)** | 8 个独立子 Agent:设备控制、灯效、问答、任务管理(task-management)、实时场景联动(scene-sync)、安防、能耗、家电保养。走标准 A2A 协议(9000 端口、挂载 `/`),**携带调用者身份**访问同一个 Gateway;并**只读**共享同一份用户记忆(§9.6.9)| **Agents**(详情页可改各自 prompt) |
 | **Gateway** | MCP Server,聚合设备控制、发现、KB 检索等 Lambda 工具;执行 Cedar 策略 | Tool Policy / Integration Registry |
-| **Memory** | 短期会话 + 长期事实/偏好/摘要 (三种策略) | Memories |
+| **Memory** | 短期会话 + 长期事实/偏好/摘要/情景 (**四种**内置策略全开) | Memories |
 | **Registry** | Skill/A2A 描述符托管 + 审批工作流。**审批已搬进 Admin Console**(§8.6) | Skills → "Add approved skill from AWS Agent Registry" |
 | **Policy Engine** | Cedar 策略评估 (per-user tool permit + default-deny)。**定时场景也走这条链** | Tool Policy |
 | **Identity** (Cognito) | 用户认证、`principal.id` 来源 | Identity / Models / Tool Policy 的用户列表 |
@@ -60,7 +60,7 @@ agentcore configure --entrypoint agent.py --name smarthome \
   --deployment-type direct_code_deploy --runtime PYTHON_3_13 \
   --non-interactive                                      # 配置
 agentcore add memory --name SmartHomeMemory \
-  --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE    # 声明 Memory 资源
+  --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC  # 声明 Memory 资源
 agentcore add gateway                                    # 创建 Gateway
 agentcore add gateway-target SmartHomeDeviceControl ...  # 注册 Lambda 工具
 agentcore deploy -y --verbose                            # 构建 CFN stack 并发布
@@ -922,7 +922,26 @@ python3 scripts/simulate-users.py run --days-back 45
 
 ### 11.4 Memory 策略可选项
 
-AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERENCE` / `EPISODIC` / `CUSTOM`),本方案启用前三种。`EPISODIC` 适合对话场景多、需反思的长程任务(如家庭日程规划),后续可按需追加。长期策略为异步抽取(可能数十秒才落地),勿依赖同 session 内立即生效。
+AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERENCE` /
+`EPISODIC` / `CUSTOM`),本方案把**四种内置策略全部启用**(`CUSTOM` 需要自带 prompt,
+未用)。长期策略为异步抽取(可能数十秒才落地),勿依赖同 session 内立即生效。
+
+**`EPISODIC` 有两点和其余三种不同,排查时先确认这两条,否则很容易误判成配置错误:**
+
+1. **它的 namespace 是按 strategy 组织的,不是按用户。** 文档规定 episode 存在
+   `/strategy/{memoryStrategyId}/...` 下,本方案用 actor 一级
+   (`/strategy/{id}/actor/{actorId}/`)以隔离用户。**写成 `/users/{actorId}/episodes`
+   API 会接受,然后永远是空的** —— 实测:同样 6 条 event,semantic 与 user_preference
+   约 50s 就落地,而 namespace 写错的 episodic 六分钟一条都没有。strategyId 是创建策略
+   时才生成的,所以由部署脚本解析后写进 `MEMORY_STRATEGY_EPISODIC_ID`;这个变量缺失时
+   agent **跳过**该 namespace 而不是猜一个(猜错就是永久静默无结果)。
+2. **只有当 AgentCore 判定一段 episode「已完成」才会产出记录。** 文档原文:对话还没结束时
+   「系统会等着看对话是否继续」,所以生成更慢。**会话进行中查到空是正常的**,不代表配置有问题。
+
+给已存在的 memory 追加 EPISODIC 要用
+`UpdateMemory(memoryStrategies={"addMemoryStrategies":[...]})`;该接口会拒绝
+「不在 reflection namespace 之下」的 episodic namespace,所以要把
+`reflectionConfiguration.namespaces` 设成同一个值。重建 memory 会丢掉已有全部记录。
 
 ### 11.5 成本与规模
 
