@@ -395,3 +395,57 @@ def test_existing_grants_survive_a_catalog_failure():
     assert body["staleGrants"] == []
     assert body["catalogError"]
     _mock_ac.list_registry_records.side_effect = None
+
+
+# ---------------------------------------------------------------------------
+# A global save must not discard per-user overrides (found live 2026-08-13)
+# ---------------------------------------------------------------------------
+
+def test_a_global_save_honours_an_email_keyed_per_user_override():
+    """The bug an admin actually hit: a revoke that came back.
+
+    This pool has `UsernameAttributes: ['email']`, so a user has a generated UUID
+    `Username` AND an email, and Cognito's admin APIs accept either. Grant intent,
+    though, is stored under the EMAIL (`_resolve_ddb_user_key` normalises to it,
+    because that is the key the agent reads per-user rows by at runtime).
+
+    `list_users` returns the UUID. So a change to `__global__` used to read each
+    user's override under the UUID, find nothing, fall back to global, and re-grant
+    everything — discarding every per-user narrowing while reporting success.
+    Observed live: `advisory_review` was removed from one user, the page saved it,
+    and a later global save put the group back, so the specialist kept answering.
+    """
+    import index
+
+    users = {"Username": "78d153c0-uuid",
+             "Attributes": [{"Name": "email", "Value": "zihangh@amazon.com"},
+                            {"Name": "sub", "Value": "78d153c0-uuid"}]}
+    with patch.object(index, "COGNITO_USER_POOL_ID", "pool"), \
+         patch.object(index, "cognito_client") as cog:
+        cog.list_users.return_value = {"Users": [users]}
+        affected = index._affected_users("__global__")
+
+    assert affected == [("78d153c0-uuid", "zihangh@amazon.com")], (
+        "the Cognito username and the DynamoDB intent key must be carried "
+        "separately; one string means a global save cannot see an override")
+
+
+def test_a_per_user_save_resolves_to_the_key_the_write_path_used():
+    import index
+
+    with patch.object(index, "_resolve_ddb_user_key",
+                      side_effect=lambda v: "zihangh@amazon.com"):
+        assert index._affected_users("78d153c0-uuid") == [
+            ("78d153c0-uuid", "zihangh@amazon.com")]
+
+
+def test_a_user_with_no_email_falls_back_to_the_username():
+    """An override written under the literal username must still be honoured."""
+    import index
+
+    with patch.object(index, "COGNITO_USER_POOL_ID", "pool"), \
+         patch.object(index, "cognito_client") as cog:
+        cog.list_users.return_value = {"Users": [{"Username": "no-email-user",
+                                                  "Attributes": []}]}
+        assert index._affected_users("__global__") == [
+            ("no-email-user", "no-email-user")]

@@ -1558,25 +1558,50 @@ def _record_card_names(catalog: dict) -> dict[str, str]:
     return {rid: (card.get("name") or "") for rid, card in catalog.items()}
 
 
-def _affected_usernames(user_id: str) -> list[str]:
-    """The Cognito usernames whose membership a change to `user_id` affects.
+def _affected_users(user_id: str) -> list[tuple[str, str]]:
+    """(cognito_username, intent_key) for every user a change to `user_id` affects.
 
     A per-user change affects one user. A change to `__global__` affects **every**
     user, because global grants are inherited by anyone without an override — which
     is also why narrowing the global default can sign everyone out.
+
+    **Two identifiers, and they are not interchangeable.** This pool has
+    `UsernameAttributes: ['email']`, so a user has a generated UUID `Username` AND
+    an email, and Cognito's admin APIs accept either. But grant INTENT is stored
+    under the email (`_resolve_ddb_user_key` normalises to it, because that is the
+    key the agent reads per-user rows by at runtime). So the two have to be carried
+    separately: the UUID for the Cognito calls, the email for the DynamoDB read.
+
+    Returning one string was a silent authorization bug. `list_users` yields the
+    UUID `Username`, so a change to `__global__` read each user's override under the
+    UUID, found nothing, fell back to global and re-granted everything — discarding
+    every per-user narrowing while reporting a successful save. Observed live: an
+    admin removed `advisory_review` from one user, the page saved it, and a later
+    global save silently put the group back. The reconcile could not see it either,
+    because it computed `wanted` the same wrong way — so the safety net shared the
+    blind spot with the thing it was meant to catch.
     """
     if user_id != "__global__":
-        return [user_id]
-    usernames = []
+        # The caller's identifier may be an email or a sub; Cognito accepts both
+        # here, while the intent row is keyed the way the write path keyed it.
+        return [(user_id, _resolve_ddb_user_key(user_id))]
+    users: list[tuple[str, str]] = []
     params = {"UserPoolId": COGNITO_USER_POOL_ID, "Limit": 60}
     while True:
         resp = cognito_client.list_users(**params)
         for user in resp.get("Users", []):
-            if user.get("Username"):
-                usernames.append(user["Username"])
+            username = user.get("Username")
+            if not username:
+                continue
+            email = next(
+                (a["Value"] for a in user.get("Attributes", [])
+                 if a["Name"] == "email"), "")
+            # Falls back to the username when a user somehow has no email, so an
+            # override written under that literal value is still honoured.
+            users.append((username, email or username))
         token = resp.get("PaginationToken")
         if not token:
-            return usernames
+            return users
         params["PaginationToken"] = token
 
 
@@ -1594,9 +1619,12 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
     names = _record_card_names(catalog)
     results, signed_out, errors = [], [], []
 
-    def _one(username: str) -> dict:
-        per_user = ({} if username == "__global__"
-                    else subagent_policy.read_intent(table, username))
+    def _one(username: str, intent_key: str) -> dict:
+        # `intent_key` (the email) reads the override; `username` (the UUID) is what
+        # Cognito is called with. Using one for both re-grants what an admin just
+        # revoked — see `_affected_users`.
+        per_user = ({} if intent_key == "__global__"
+                    else subagent_policy.read_intent(table, intent_key))
         effective = subagent_policy.effective_grants(global_intent, per_user)
         wanted = subagent_policy.wanted_groups(effective, names)
         res = subagent_policy.materialise_user(
@@ -1609,16 +1637,16 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
 
     try:
         global_intent = subagent_policy.read_intent(table, "__global__")
-        usernames = _affected_usernames(user_id)
+        affected = _affected_users(user_id)
 
         # Create every group ONCE before touching memberships. Groups are shared, so
         # doing this per user was pure waste and it throttled: measured on 39 users
         # and 17 groups, Cognito rejected most CreateGroup calls with
         # TooManyRequestsException and only 6 users ended up with any membership.
         wanted_any: set = set()
-        for username in usernames:
-            per_user = ({} if username == "__global__"
-                        else subagent_policy.read_intent(table, username))
+        for _username, intent_key in affected:
+            per_user = ({} if intent_key == "__global__"
+                        else subagent_policy.read_intent(table, intent_key))
             wanted_any |= subagent_policy.wanted_groups(
                 subagent_policy.effective_grants(global_intent, per_user), names)
         errors.extend(subagent_policy.ensure_groups(
@@ -1633,7 +1661,7 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
         # Eight workers, not more: these are Cognito admin APIs on one user pool, and
         # the point is to fit the request budget, not to saturate the service.
         with futures.ThreadPoolExecutor(max_workers=8) as pool:
-            pending = {pool.submit(_one, u): u for u in usernames}
+            pending = {pool.submit(_one, u, k): u for u, k in affected}
             for future in futures.as_completed(pending):
                 username = pending[future]
                 try:
@@ -1680,9 +1708,13 @@ def reconcile_a2a_grants(event):
     names = _record_card_names(catalog)
     global_intent = subagent_policy.read_intent(table, "__global__")
     out = []
-    for username in _affected_usernames(user_id):
-        per_user = ({} if username == "__global__"
-                    else subagent_policy.read_intent(table, username))
+    # Same two identifiers as the write path, for the same reason. When this read
+    # the override under the Cognito UUID it reported every user as in sync while
+    # their saved intent said otherwise — a reconcile that cannot see the drift the
+    # sync creates is worse than no reconcile, because it certifies the drift.
+    for username, intent_key in _affected_users(user_id):
+        per_user = ({} if intent_key == "__global__"
+                    else subagent_policy.read_intent(table, intent_key))
         effective = subagent_policy.effective_grants(global_intent, per_user)
         wanted = subagent_policy.wanted_groups(effective, names)
         try:
