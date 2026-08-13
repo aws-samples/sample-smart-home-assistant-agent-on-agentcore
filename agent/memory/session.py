@@ -41,13 +41,55 @@ except ImportError:  # pragma: no cover - pre-build / test path
     from memory_actor import sanitize_actor_id as _sanitize_actor_id  # noqa: F401
 
 
+def memory_session_id(actor_id: str) -> str:
+    """The Memory session id for one user's conversation — STABLE across logins.
+
+    Deliberately NOT the runtime session id. That one is
+    `user-session-{sub}-{epoch_ms}`, minted fresh on every login because the
+    Sessions tab and the dashboard's per-runtime attribution are built on "one
+    login, one session". AgentCore Memory's SHORT-TERM memory, though, is scoped
+    to `(memoryId, actorId, sessionId)` — so keying it on the per-login id means
+    every login starts with an empty transcript, and the model cannot see what
+    the user said ten minutes ago before they refreshed the page.
+
+    Splitting the two ids is what lets both hold: per-login tracking stays
+    per-login, and the conversation is one continuous thread per user.
+
+    Derived from the actor rather than passed in, for two reasons. It cannot be
+    forged into another user's thread by a client sending someone else's session
+    id. And it is computed identically by the three places that write events —
+    the Strands session manager (text turns), `agent.py:_persist_vision_turn`
+    (the vision bypass writes events directly) and
+    `voice_session.py:persist_voice_transcript`. Those three splitting apart is
+    silent: each half of the conversation lands in a different session and the
+    transcript simply has holes, which is the failure the voice writer's own
+    docstring exists to prevent ("so the follow-up text chat sees the user's
+    voice history as prior turns").
+
+    One consequence worth stating: the SUMMARIZATION namespace is
+    `/summaries/{actor}/{session_id}`, so it becomes one running summary per user
+    instead of one per login. That is the intended trade — a per-login summary of
+    a conversation that spans logins was summarising an arbitrary slice.
+    """
+    return f"mem-{_sanitize_actor_id(actor_id)}"
+
+
 def get_memory_session_manager(
     session_id: str, actor_id: str
 ) -> Optional[AgentCoreMemorySessionManager]:
-    """Create AgentCore Memory session manager for conversation persistence."""
+    """Create AgentCore Memory session manager for conversation persistence.
+
+    `session_id` is accepted and IGNORED for the memory scope: the memory session
+    is derived from the actor (see `memory_session_id`) so short-term memory
+    survives a re-login. The parameter is kept so callers can keep passing the
+    runtime session id, which is still what identifies the request everywhere
+    else, and so a caller reading this line is told the two are different rather
+    than assuming they are the same.
+    """
     if not MEMORY_ID:
         return None
     try:
+        session_id = memory_session_id(actor_id)
         actor_id = _sanitize_actor_id(actor_id)
         # One entry per built-in Memory strategy. All four are enabled on the memory
         # resource (SEMANTIC / SUMMARIZATION / USER_PREFERENCE / EPISODIC), and each

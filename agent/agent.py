@@ -19,7 +19,11 @@ from strands.models.bedrock import CacheConfig
 from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client
 from bedrock_agentcore import BedrockAgentCoreApp
-from memory.session import get_memory_session_manager, _sanitize_actor_id
+from memory.session import (
+    get_memory_session_manager,
+    memory_session_id,
+    _sanitize_actor_id,
+)
 
 # Which of the two Bedrock endpoints serves a given model, and the Strands
 # provider that reaches it. The default model is Mantle-only, so this is not
@@ -1233,7 +1237,11 @@ def _persist_vision_turn(session_id, actor_id, user_prompt, description, images,
         client.create_event(
             memory_id=memory_id,
             actor_id=_sanitize_actor_id(actor_id),
-            session_id=session_id,
+            # The STABLE memory session, not the runtime session this request
+            # arrived on. Writing vision turns under the per-login id would put
+            # them in a different session from the text turns, and the transcript
+            # would have holes exactly where the user attached an image.
+            session_id=memory_session_id(actor_id),
             messages=messages,
             metadata=metadata or None,
         )

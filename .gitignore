@@ -97,6 +97,11 @@ cdk/lambda/*/scenarios.py
 cdk/lambda/*/solar.py
 cdk/lambda/*/scenario_schedules_shared.py
 cdk/lambda/*/user_settings.py
+# The Memory actor-id rule also reaches the admin API, which reads a user's
+# short-term transcript back for the chatbot's login history and therefore has
+# to name the actor the exact same way the agent wrote it under. Source of truth
+# is shared/memory_actor.py.
+cdk/lambda/*/memory_actor.py
 # And for the Memory actor-id rule, which the orchestrator's container needs a
 # copy of because it is built from agent/ alone while the A2A sub-agents get all
 # of shared/. Source of truth is shared/memory_actor.py.

@@ -23,7 +23,13 @@ import dashboard  # Overview ops-dashboard aggregation; see dashboard.py
 # packages each Lambda with Code.fromAsset(<dir>), so shared/ is not deployed.
 import agent_registry as registry_ns
 import model_catalog  # live Bedrock model catalog; see model_catalog.py
+import chat_history  # Memory events -> a renderable transcript; see chat_history.py
 import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.py
+# Copied from shared/ by scripts/01-install-deps.sh. The actor id is a Memory
+# namespace component, so reading a transcript back requires naming the actor
+# exactly as the agent named it when writing — a second sanitizer that differs by
+# one character returns an empty transcript, not an error.
+import memory_actor
 import subagent_policy  # A2A grant intent -> Cognito groups; see subagent_policy.py
 
 logger = logging.getLogger()
@@ -3475,6 +3481,56 @@ def _feedback_table():
     return dynamodb.Table(FEEDBACK_TABLE_NAME)
 
 
+def handle_chat_history(event):
+    """GET /sessions?action=history&limit=20 — the CALLER's recent transcript.
+
+    Reached before the check_admin gate: every user needs their own history, and
+    behind the gate this would 403 for everyone but the admin.
+
+    The actor is taken from the verified JWT claims, never from a query parameter.
+    A `userId` parameter here would be an authorization bug wearing a convenience
+    parameter's clothes — any signed-in user could read any other user's
+    conversation, and it would look like a feature.
+
+    Always 200 with whatever it could assemble. An empty transcript is the normal
+    state for a new user, and a 500 on the login path would block the chat window
+    over an optional convenience.
+    """
+    claims = (event.get("requestContext", {}).get("authorizer", {})
+              .get("claims", {}) or {})
+    actor = claims.get("email") or claims.get("cognito:username") or claims.get("sub")
+    if not actor:
+        return response(401, {"error": "no verified identity on the request"})
+    if not MEMORY_ID:
+        return response(200, {"turns": [], "sessionsRead": 0,
+                              "note": "MEMORY_ID is not configured"})
+
+    try:
+        limit = int((event.get("queryStringParameters") or {}).get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    # Bounded: this renders into a chat window and is fetched on every login.
+    limit = max(1, min(limit, 100))
+
+    actor_id = memory_actor.sanitize_actor_id(actor)
+    try:
+        session_ids = chat_history.sessions_newest_first(
+            agentcore_client, MEMORY_ID, actor_id)
+        turns, read = chat_history.recent_turns(
+            agentcore_client, MEMORY_ID, actor_id, limit, session_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("chat history unavailable for %s: %s", actor_id, exc)
+        return response(200, {"turns": [], "sessionsRead": 0, "error": str(exc)})
+
+    return response(200, {
+        "turns": turns,
+        # How many logins this had to reach back through. A transcript stitched
+        # from four sessions is not one conversation, and the UI says so.
+        "sessionsRead": len(read),
+        "actorId": actor_id,
+    })
+
+
 def handle_submit_feedback(event):
     """POST /sessions?action=feedback — record one thumbs up/down.
 
@@ -3659,6 +3715,13 @@ def _dispatch(event, context):
             return handle_browser_sessions_active(event)
         if action == "code-active":
             return handle_code_sessions_active(event)
+        # The caller's own recent transcript, for the chatbot to render on login.
+        # Before the admin gate for the same reason as feedback: the people who
+        # need it are ordinary users. Scoped to the CALLER's identity from the
+        # verified JWT claims, never to a userId in the query string — that is the
+        # difference between "show me my history" and "show me anyone's".
+        if action == "history":
+            return handle_chat_history(event)
         # Fall through to the admin-gated list_sessions below if no action=.
 
     # User feedback (thumbs up/down). Also before the gate, and for the same

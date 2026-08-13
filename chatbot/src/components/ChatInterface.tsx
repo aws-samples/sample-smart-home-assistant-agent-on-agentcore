@@ -21,10 +21,15 @@ import { fetchActiveCodeSession, CodeSessionInfo } from '../api/codeSessions';
 import { getTenantMode } from '../api/tenantEnv';
 import { submitFeedback } from '../api/feedback';
 import PromptExamples, { welcomeChips } from './PromptExamples';
+import { fetchChatHistory } from '../api/chatHistory';
 
 const CUSTOM_AUTH_HEADER = 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken';
 
 const IMAGE_MIME_ALLOWLIST = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+// How many prior turns to restore on login. 20 is the requirement; it is also
+// about where a chat window stops being scannable, and every turn restored is a
+// turn the model carries in context.
+const HISTORY_TURNS = 20;
 const MAX_IMAGES_PER_MESSAGE = 3;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
@@ -179,6 +184,12 @@ async function readAgentStream(
 
 const ChatInterface: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // How many leading messages came from AgentCore Memory rather than from this
+  // login. Drives the "earlier conversation" divider, and is a count rather than a
+  // flag on each message so the divider can sit BETWEEN the history and the first
+  // new turn without every bubble carrying presentation state.
+  const [historyCount, setHistoryCount] = useState(0);
+  const [historyNote, setHistoryNote] = useState('');
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   // The tool the agent is currently waiting on, as a label. Replaces the static
@@ -404,6 +415,44 @@ const ChatInterface: React.FC = () => {
         // Warmup is best-effort; ignore failures.
       }
     })();
+  }, []);
+
+  // Restore the user's recent conversation from AgentCore Memory.
+  //
+  // Runs once on mount, and only prepends when the transcript is still empty — a
+  // StrictMode double-invoke would otherwise render the history twice, and a slow
+  // response arriving after the user has already typed must not push their first
+  // message down the page.
+  //
+  // The model sees this same history: `memory_session_id` keys short-term memory on
+  // the actor rather than on the per-login runtime session, so what is displayed
+  // here IS the agent's context. That equivalence is the point — displaying a
+  // transcript the model cannot see produces the worst kind of demo failure, where
+  // the user asks about something visibly on screen and the agent does not know it.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { turns, sessionsRead } = await fetchChatHistory(HISTORY_TURNS);
+        if (cancelled || turns.length === 0) return;
+        setMessages((prev) => {
+          if (prev.length > 0) return prev;
+          setHistoryCount(turns.length);
+          // Only worth saying when it spans logins; "restored from 1 session" is
+          // noise about an implementation detail.
+          setHistoryNote(sessionsRead > 1 ? String(sessionsRead) : '');
+          return turns.map((turn, i) => ({
+            id: `history-${i}-${turn.timestamp}`,
+            role: turn.role === 'assistant' ? ('agent' as const) : ('user' as const),
+            content: turn.text,
+            timestamp: new Date(turn.timestamp || Date.now()),
+          }));
+        });
+      } catch {
+        // Best-effort: an empty chat window is a working chat window.
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Capture the logged-in user's id + sessionId on mount. We retry a few
@@ -994,9 +1043,30 @@ const ChatInterface: React.FC = () => {
           </Box>
         )}
 
-        {messages.map((msg) => (
+        {messages.map((msg, idx) => (
+          <React.Fragment key={msg.id}>
+            {/* The boundary between restored history and this login's turns.
+                Without it the user cannot tell which of these they just said —
+                and a transcript that silently mixes the two invites "I never
+                asked that". Sits BETWEEN the two blocks rather than marking every
+                restored bubble, which would tint half the window. */}
+            {historyCount > 0 && idx === historyCount && (
+              <div className="history-divider">
+                <span>{t('chat.historyBoundary')}</span>
+              </div>
+            )}
+            {historyCount > 0 && idx === 0 && (
+              <div className="history-divider history-divider-top">
+                <span>
+                  {historyNote
+                    ? t('chat.historyRestoredMulti')
+                        .replace('{turns}', String(historyCount))
+                        .replace('{sessions}', historyNote)
+                    : t('chat.historyRestored').replace('{turns}', String(historyCount))}
+                </span>
+              </div>
+            )}
           <div
-            key={msg.id}
             className={`message-row ${msg.role === 'user' ? 'message-row-user' : 'message-row-agent'}`}
           >
             <div className={`message-bubble ${msg.role === 'user' ? 'bubble-user' : 'bubble-agent'}`}>
@@ -1104,6 +1174,7 @@ const ChatInterface: React.FC = () => {
               <div className="message-time">{formatTime(msg.timestamp)}</div>
             </div>
           </div>
+          </React.Fragment>
         ))}
 
         {isTyping && (

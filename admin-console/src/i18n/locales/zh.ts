@@ -402,6 +402,8 @@ const zh: Record<string, string> = {
   'users.colUserId': '用户 ID (sub)',
   'users.colStatus': '状态',
   'users.colGroups': '分组',
+  'users.a2aGrantsSummary': 'A2A：{agents} 个专家 / {skills} 项技能',
+  'users.a2aGrantsHeader': '子 Agent 技能授权',
   'users.colDemo': '演示入口',
   'users.colActions': '操作',
   'users.openChatbot': '打开聊天机器人',

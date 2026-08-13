@@ -638,3 +638,34 @@
   gap: 6px;
   max-width: 420px;
 }
+
+/* The boundary between conversation restored from AgentCore Memory and the turns
+   from this login. A rule with a centred label rather than tinting the restored
+   bubbles: half a tinted window reads as an error state, and what the user needs
+   is one line telling them where "now" starts. */
+.history-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 4px 10px;
+  /* --chat-* aliases only. Cloudscape's own --color-* names carry a build-time
+     hash, so from app CSS they never resolve and the fallback silently wins in
+     BOTH themes — see this file's header. */
+  color: var(--chat-text-secondary, #656871);
+  font-size: 12px;
+}
+.history-divider::before,
+.history-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--chat-border, #c6c6cd);
+}
+.history-divider > span {
+  white-space: nowrap;
+}
+/* The top label explains where the transcript came from, so it reads as a note
+   rather than as a section heading for the history above it. */
+.history-divider-top {
+  margin-top: 4px;
+  font-style: italic;
+}

@@ -402,6 +402,8 @@ const en: Record<string, string> = {
   'users.colUserId': 'User ID (sub)',
   'users.colStatus': 'Status',
   'users.colGroups': 'Groups',
+  'users.a2aGrantsSummary': 'A2A: {agents} agents / {skills} skills',
+  'users.a2aGrantsHeader': 'Sub-agent skill grants',
   'users.colDemo': 'Demo',
   'users.colActions': 'Actions',
   'users.openChatbot': 'Open Chatbot',

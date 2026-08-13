@@ -36,6 +36,9 @@ const en: Record<string, string> = {
   // Chat
   'chat.placeholder': 'Type a message...',
   'chat.welcome': 'Welcome to Smart Home Assistant',
+  'chat.historyRestored': 'Restored the last {turns} turns from memory — the agent has these in context too',
+  'chat.historyRestoredMulti': 'Restored the last {turns} turns from memory, across {sessions} earlier logins',
+  'chat.historyBoundary': 'This session',
   'chat.subtitle': 'Control your smart home devices with natural language.',
   // Example library. The example TEXT lives in shared/prompt-examples.json, not
   // here: scripts/sim/personas.py reads the same file to generate demo traffic,

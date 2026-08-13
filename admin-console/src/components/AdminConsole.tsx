@@ -94,6 +94,7 @@ import Container from '@cloudscape-design/components/container';
 import FormField from '@cloudscape-design/components/form-field';
 import CloudscapeHeader from '@cloudscape-design/components/header';
 import Input from '@cloudscape-design/components/input';
+import Popover from '@cloudscape-design/components/popover';
 import Select from '@cloudscape-design/components/select';
 import SegmentedControl from '@cloudscape-design/components/segmented-control';
 import SpaceBetween from '@cloudscape-design/components/space-between';
@@ -230,6 +231,100 @@ const emptyForm: SkillFormData = {
   license: '',
   compatibility: '',
   metadata: [],
+};
+
+// ---------------------------------------------------------------------------
+// Cognito group cell — shared by the Identity and Tool Policy tables
+// ---------------------------------------------------------------------------
+
+/** Prefix identifying a group that is an A2A sub-agent skill grant. Mirrors
+ *  `shared/a2a_groups.GROUP_PREFIX`; a mismatch here only affects presentation. */
+const A2A_GROUP_PREFIX = 'a2a-';
+
+/** Split `a2a-<agent>.<skill>` into its two halves, or null for other groups. */
+function parseA2aGroup(name: string): { agent: string; skill: string } | null {
+  if (!name.startsWith(A2A_GROUP_PREFIX)) return null;
+  const rest = name.slice(A2A_GROUP_PREFIX.length);
+  const dot = rest.lastIndexOf('.');
+  if (dot <= 0) return null;
+  return { agent: rest.slice(0, dot), skill: rest.slice(dot + 1) };
+}
+
+interface GroupsCellProps {
+  groups: string[];
+  t: (key: string) => string;
+}
+
+/**
+ * A user's Cognito groups, in one line.
+ *
+ * Rendered as a flat badge list until 2026-08-13, which was fine at two or three
+ * groups. Granting the full A2A catalogue puts **21** on a user, and the column is
+ * narrow enough that each badge wrapped onto its own line — a single row grew past
+ * 900px and one user filled the viewport, so the table stopped being a table.
+ *
+ * Two changes, both about what an admin is actually scanning for:
+ *
+ *   - Role groups (`admin`, anything without the `a2a-` prefix) stay visible. They
+ *     are few, and "is this person an admin" is the question the column exists to
+ *     answer at a glance.
+ *   - Skill grants collapse to one badge per SUB-AGENT with a count, because 21
+ *     rows of `a2a-<agent>.<skill>` is the same information as "8 agents, 21
+ *     skills" plus detail nobody reads in a table cell. The full list is one hover
+ *     away in a popover, grouped by agent — which is more legible than the flat
+ *     list ever was, since the flat list was not sorted.
+ */
+const GroupsCell: React.FC<GroupsCellProps> = ({ groups, t }) => {
+  if (!groups || groups.length === 0) return <>-</>;
+
+  const roleGroups: string[] = [];
+  const byAgent = new Map<string, string[]>();
+  for (const g of groups) {
+    const parsed = parseA2aGroup(g);
+    if (!parsed) {
+      roleGroups.push(g);
+      continue;
+    }
+    const list = byAgent.get(parsed.agent) || [];
+    list.push(parsed.skill);
+    byAgent.set(parsed.agent, list);
+  }
+
+  const agents = [...byAgent.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const totalSkills = agents.reduce((n, [, skills]) => n + skills.length, 0);
+
+  return (
+    <SpaceBetween direction="horizontal" size="xxs">
+      {roleGroups.sort().map((g) => (
+        <Badge key={g} color={g === 'admin' ? 'red' : 'grey'}>{g}</Badge>
+      ))}
+      {agents.length > 0 && (
+        <Popover
+          dismissButton={false}
+          position="top"
+          size="large"
+          triggerType="text"
+          header={t('users.a2aGrantsHeader')}
+          content={
+            <SpaceBetween size="xs">
+              {agents.map(([agent, skills]) => (
+                <div key={agent}>
+                  <Badge color="blue">{agent}</Badge>{' '}
+                  <span style={{ fontSize: '12px' }}>{skills.sort().join(', ')}</span>
+                </div>
+              ))}
+            </SpaceBetween>
+          }
+        >
+          <Badge color="blue">
+            {t('users.a2aGrantsSummary')
+              .replace('{agents}', String(agents.length))
+              .replace('{skills}', String(totalSkills))}
+          </Badge>
+        </Popover>
+      )}
+    </SpaceBetween>
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -3138,14 +3233,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
             {
               id: 'groups',
               header: t('users.colGroups'),
-              cell: (u) =>
-                u.groups.length > 0 ? (
-                  <SpaceBetween direction="horizontal" size="xxs">
-                    {u.groups.map((g) => (
-                      <Badge key={g} color={g === 'admin' ? 'red' : 'blue'}>{g}</Badge>
-                    ))}
-                  </SpaceBetween>
-                ) : '-',
+              cell: (u) => <GroupsCell groups={u.groups} t={t} />,
             },
             {
               id: 'created',
@@ -4228,18 +4316,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 {
                   id: 'groups',
                   header: t('users.colGroups'),
-                  cell: (u) =>
-                    u.groups.length > 0 ? (
-                      <SpaceBetween direction="horizontal" size="xxs">
-                        {u.groups.map((g) => (
-                          <Badge key={g} color={g === 'admin' ? 'red' : 'blue'}>
-                            {g}
-                          </Badge>
-                        ))}
-                      </SpaceBetween>
-                    ) : (
-                      '-'
-                    ),
+                  cell: (u) => <GroupsCell groups={u.groups} t={t} />,
                 },
                 {
                   id: 'demo',

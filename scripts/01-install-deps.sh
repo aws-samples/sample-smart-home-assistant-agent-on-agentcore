@@ -125,6 +125,18 @@ for lambda_dir in scenario-runner admin-api; do
 done
 
 # ------------------------------------------------------------------------------
+# The Memory actor-id rule, for the admin API. It reads a user's short-term
+# transcript back so the chatbot can show it on login, which means it has to name
+# the actor the EXACT same way the agent named it when writing — an actor id is a
+# namespace path component, so a second sanitizer that differs by one character
+# returns an empty transcript rather than an error. Same reasoning as the copy into
+# agent/ below; see shared/memory_actor.py.
+# ------------------------------------------------------------------------------
+echo "==> Copying the Memory actor rule into the admin API..."
+cp "$SCRIPT_DIR/shared/memory_actor.py" "$SCRIPT_DIR/cdk/lambda/admin-api/memory_actor.py"
+echo "    -> admin-api"
+
+# ------------------------------------------------------------------------------
 # The Memory actor-id rule, for the orchestrator. Its container is built from
 # agent/ alone, while the A2A sub-agents get all of shared/ from deploy.py — and
 # both read the same Memory namespaces. Two containers that sanitize the same user

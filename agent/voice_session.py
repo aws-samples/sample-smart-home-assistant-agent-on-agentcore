@@ -245,13 +245,16 @@ def _get_memory_client():
 
 # Import the same sanitizer text agent uses so both modalities land under
 # the same Memory actor namespace for the same Cognito identity.
-from memory.session import MEMORY_ID as _TEXT_MEMORY_ID, _sanitize_actor_id  # noqa: E402
+from memory.session import (  # noqa: E402
+    MEMORY_ID as _TEXT_MEMORY_ID,
+    memory_session_id as _memory_session_id,
+    _sanitize_actor_id,
+)
 
 
 def persist_voice_transcript(
     *,
     actor_id: str,
-    session_id: str,
     role: str,
     text: str,
 ) -> None:
@@ -273,7 +276,12 @@ def persist_voice_transcript(
         _get_memory_client().create_event(
             memoryId=_TEXT_MEMORY_ID,
             actorId=_sanitize_actor_id(actor_id),
-            sessionId=session_id,
+            # The STABLE memory session, which is what makes the promise in this
+            # function's docstring actually hold. `session_id` here is the voice
+            # WebSocket's own session; writing under it put voice turns in a
+            # session the text agent never reads, so "the follow-up text chat
+            # sees the user's voice history" was true only within one login.
+            sessionId=_memory_session_id(actor_id),
             eventTimestamp=datetime.now(timezone.utc),
             payload=[{
                 "conversational": {
@@ -792,7 +800,6 @@ async def handle_voice_session(
                     if event.get("is_final"):
                         persist_voice_transcript(
                             actor_id=actor_id,
-                            session_id=session_id,
                             role=event.get("role") or "user",
                             text=event.get("text") or "",
                         )

@@ -867,6 +867,12 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock-agentcore:StopRuntimeSession",
         "bedrock-agentcore:ListActors",
         "bedrock-agentcore:ListMemoryRecords",
+        // Short-term memory, for the chatbot's "your recent conversation" on
+        // login (GET /sessions?action=history). ListMemoryRecords above reads the
+        // LONG-term extractions (facts, preferences, summaries); the raw
+        // transcript is events, which is a different pair of APIs.
+        "bedrock-agentcore:ListSessions",
+        "bedrock-agentcore:ListEvents",
       ],
       resources: ["*"],
     }));

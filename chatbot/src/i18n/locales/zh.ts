@@ -36,6 +36,9 @@ const zh: Record<string, string> = {
   // Chat
   'chat.placeholder': '输入消息...',
   'chat.welcome': '欢迎使用智能家居助手',
+  'chat.historyRestored': '已从记忆中恢复最近 {turns} 轮对话 —— Agent 也带着这些上下文',
+  'chat.historyRestoredMulti': '已从记忆中恢复最近 {turns} 轮对话，跨 {sessions} 次早前登录',
+  'chat.historyBoundary': '本次会话',
   'chat.subtitle': '用自然语言控制您的智能家居设备。',
   // 示例库。示例正文在 shared/prompt-examples.json，不在这里 —— sim 侧的
   // personas.py 要读同一份文件生成演示流量，而 Python 读不了 .ts。

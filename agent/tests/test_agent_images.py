@@ -154,7 +154,13 @@ def test_memory_event_written_with_fingerprint(agent_mod, tiny_png_b64):
     fake_memory.create_event.assert_called_once()
     kwargs = fake_memory.create_event.call_args.kwargs
     assert kwargs["memory_id"] == "mem-id-123"
-    assert kwargs["session_id"] == "sess-1"
+    # The STABLE memory session, NOT the runtime session ("sess-1") this request
+    # arrived on. Three places write events — the Strands session manager, this
+    # vision bypass, and voice_session.persist_voice_transcript — and they have to
+    # agree, or the transcript gets holes exactly where the user attached an image.
+    from memory.session import memory_session_id
+    assert kwargs["session_id"] == memory_session_id("u@x")
+    assert kwargs["session_id"] != "sess-1"
     # actor_id is sanitized (@/. replaced with _ — see memory/session.py)
     assert "u_x" in kwargs["actor_id"] or kwargs["actor_id"] == "u@x"
     messages = kwargs["messages"]
