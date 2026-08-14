@@ -290,19 +290,39 @@ def _create_record_with_collision_fallback(
     raise ValueError("record name collision after retries")
 
 
-def _poll_until_out_of_creating(record_id, timeout_seconds=10):
-    """Poll GetRegistryRecord until status leaves CREATING or timeout. Best-effort."""
+# The two statuses the record moves out of on its own. Anything else is settled
+# and can accept the next call.
+_TRANSIENT_STATUSES = ("CREATING", "UPDATING")
+
+
+def _poll_until_settled(record_id, timeout_seconds=20):
+    """Poll GetRegistryRecord until the record can be modified again.
+
+    Returns the status reached, or "" if it never settled. Best-effort by design —
+    the caller's next call reports the real failure if this timed out.
+
+    This used to wait only for CREATING to clear, which is not the same thing:
+    a record also sits in **UPDATING**, and the old check treated UPDATING as
+    "ready" and returned immediately. Measured against the live service: both the
+    create and the update paths then called SubmitRegistryRecordForApproval on an
+    UPDATING record and got `ConflictException: Registry record cannot be modified
+    while in UPDATING state`. Since the submit failure is swallowed into a
+    `submitWarning`, the visible result was a 200/201 with the record parked in
+    DRAFT — never queued for review, which is the one thing the submit exists to do.
+    """
     deadline = time.time() + timeout_seconds
+    status = ""
     while time.time() < deadline:
         try:
-            rec = agentcore_control.get_registry_record(
+            status = agentcore_control.get_registry_record(
                 registryId=REGISTRY_ID, recordId=record_id
-            )
-            if rec.get("status") != "CREATING":
-                return
+            ).get("status", "")
+            if status not in _TRANSIENT_STATUSES:
+                return status
         except Exception as e:
             logger.info("GetRegistryRecord during wait returned: %s", e)
         time.sleep(0.5)
+    return status
 
 
 def _submit_for_approval(record_id):
@@ -316,15 +336,27 @@ def _submit_for_approval(record_id):
     201 body — silently swallowing it left the record parked in DRAFT while the
     UI claimed success, so the user waited for an approval that was never
     coming. Returns None on success, or the error string to surface.
+
+    Waits for the record to settle first, and retries once if the service still
+    says it is being modified: a create or update leaves the record transient for a
+    moment, and this call is the very next thing every handler does.
     """
-    try:
-        agentcore_control.submit_registry_record_for_approval(
-            registryId=REGISTRY_ID, recordId=record_id
-        )
-        return None
-    except Exception as e:
-        logger.warning("Submit-for-approval failed for %s: %s", record_id, e)
-        return str(e)
+    for attempt in (1, 2):
+        _poll_until_settled(record_id)
+        try:
+            agentcore_control.submit_registry_record_for_approval(
+                registryId=REGISTRY_ID, recordId=record_id
+            )
+            return None
+        except Exception as e:
+            if attempt == 1 and "while in" in str(e):
+                # Still transient — the status flipped between the poll and the
+                # call. Waiting again is the whole fix; anything else is a real
+                # error and is reported on the second pass.
+                logger.info("submit raced the record's state, retrying: %s", e)
+                continue
+            logger.warning("Submit-for-approval failed for %s: %s", record_id, e)
+            return str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +489,6 @@ def create_my_record(event):
     # Auto-submit for approval so the admin sees it in the pending queue.
     # Poll GetRegistryRecord until the record leaves CREATING (usually <1s)
     # before submitting, otherwise SubmitRegistryRecordForApproval fails silently.
-    _poll_until_out_of_creating(record_id)
     submit_error = _submit_for_approval(record_id)
 
     body = {
@@ -515,16 +546,27 @@ def update_my_record(event):
     skill_md = _build_skill_md(name, description, instructions, allowed_tools, merged_metadata)
     skill_def = _build_skill_definition(license_name, compatibility)
 
-    # No `optionalValue` wrapper. The two update call sites in this repo disagreed
-    # about it — this one wrapped, a2a-agent-registry/deploy.py did not — so the
-    # shape was settled by reading the GA service model: `description` is a plain
-    # string and `descriptors` a plain structure, with no wrapper anywhere.
+    # `optionalValue` on BOTH, because Create and Update do not take the same
+    # shapes: on Update, `description` / `displayName` / every level of
+    # `descriptors` are wrapped, while `name` and `recordVersion` stay bare. The
+    # comment that used to sit here claimed the opposite ("plain string, no wrapper
+    # anywhere") and cited the service model; the model says
+    #
+    #     UpdateRegistryRecord.input_shape.members["description"]  -> optionalValue
+    #     ...members["descriptors"]                                -> optionalValue
+    #
+    # so this call raised ParamValidationError before the request ever left the
+    # Lambda — i.e. editing a published skill was a guaranteed 500. Nothing caught
+    # it because the route tests mock boto3 with a MagicMock, which accepts any
+    # keyword shape. tests/test_registry_update_payload.py now validates the kwargs
+    # these handlers build against the real botocore shape.
     agentcore_control.update_registry_record(
         registryId=REGISTRY_ID,
         recordId=record_id,
-        description=description,
-        descriptors=registry_ns.skill_record_descriptors(
-            skill_def, skill_md=skill_md, name=name, description=description),
+        description={"optionalValue": description},
+        descriptors=registry_ns.as_update_descriptors(
+            registry_ns.skill_record_descriptors(
+                skill_def, skill_md=skill_md, name=name, description=description)),
     )
 
     # Re-submit for approval (any edit resets the curator flow)
@@ -669,7 +711,6 @@ def create_my_a2a(event):
         "updatedAt": now_iso(),
     })
 
-    _poll_until_out_of_creating(record_id)
     submit_error = _submit_for_approval(record_id)
 
     body = {
@@ -714,14 +755,16 @@ def update_my_a2a(event):
     # allow renaming records, and the UI disables the name field on edit.
     form["name"] = existing.get("name", form.get("name", ""))
 
-    # Plain values, no `optionalValue` wrapper — see the note on the skill update
-    # above for why that wrapper is gone.
+    # Update's wrapped shapes — see the note on the skill update above. The AGENT
+    # descriptor is one level shallower than the SKILL one, which is how a wrap that
+    # was right for agents could still be wrong for skills; `as_update_descriptors`
+    # walks whatever depth it is given rather than assuming either.
     agentcore_control.update_registry_record(
         registryId=REGISTRY_ID,
         recordId=record_id,
-        description=form["description"],
-        descriptors=registry_ns.agent_record_descriptors(
-            build_card_definition(form)),
+        description={"optionalValue": form["description"]},
+        descriptors=registry_ns.as_update_descriptors(
+            registry_ns.agent_record_descriptors(build_card_definition(form))),
     )
     table.update_item(
         Key=_a2a_owner_key(record_id),
