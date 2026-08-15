@@ -1373,6 +1373,12 @@ def _fetch_a2a_records(status_values: list[str] | None = None) -> list[dict]:
                 "name": r.get("name", ""),
                 "description": r.get("description", ""),
                 "status": r.get("status", ""),
+                # From the GET, not the list page: `statusReason` is the only place
+                # the Registry keeps WHY a record is where it is, and an admin
+                # looking at a REJECTED agent has no other source for it. The detail
+                # call already happened above for the card, so this is free.
+                "statusReason": detail.get("statusReason", ""),
+                "recordVersion": r.get("recordVersion", ""),
                 "updatedAt": r.get("updatedAt"),
                 "createdAt": r.get("createdAt"),
                 "card": card,
@@ -3647,6 +3653,11 @@ def list_a2a_agents(_event):
             "name": r["name"],
             "description": r["description"],
             "status": r["status"],
+            # Both surfaced so the page can offer a status change and say why the
+            # last one happened. Without `recordVersion` a version bump is invisible
+            # here — the row's only visible change is `updatedAt`.
+            "statusReason": r.get("statusReason", ""),
+            "recordVersion": r.get("recordVersion", ""),
             "createdAt": _a2a_iso(r.get("createdAt")),
             "updatedAt": _a2a_iso(r.get("updatedAt")),
             "card": r["card"],
@@ -3671,6 +3682,49 @@ def list_a2a_agents(_event):
 # the 20 KB cap, and a new resource would push it over. Same reason the a2a-list
 # and a2a-grants actions live there.
 # ---------------------------------------------------------------------------
+
+def _attach_runtime_arns(records: list[dict]) -> None:
+    """Resolve each record's card URL back to a runtime ARN, in place.
+
+    ONE ListGatewayTargets per gateway, not one `resolve_arn` per record: that helper
+    pages the whole target list and then reads one target, so calling it eight times
+    is eight paginations for one gateway's worth of answers.
+
+    Best effort by design. A record left without a `runtimeArn` falls back to the URL
+    parse in `agents.runtime_name_for_record` and, failing that, appears as a row with
+    no runtime — which is the honest rendering of "we could not tell where this runs",
+    and is exactly the state a third party's out-of-account runtime is in.
+    """
+    pending_by_gateway: dict[str, list[dict]] = {}
+    for rec in records:
+        url = (rec.get("card") or {}).get("url") or ""
+        direct = a2a_runtimes.runtime_arn_from_url(url)
+        if direct:
+            rec["runtimeArn"] = direct
+            continue
+        gateway_id, target_name = a2a_runtimes.gateway_target_from_url(url)
+        if gateway_id and target_name:
+            pending_by_gateway.setdefault(gateway_id, []).append(rec)
+
+    for gateway_id, pending in pending_by_gateway.items():
+        try:
+            endpoints = {t["name"]: t["endpoint"]
+                         for t in a2a_runtimes.list_targets(
+                             agentcore_control, gateway_id)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fleet: could not list targets on gateway %s: %s",
+                           gateway_id, exc)
+            continue
+        for rec in pending:
+            _gw, target_name = a2a_runtimes.gateway_target_from_url(
+                (rec.get("card") or {}).get("url") or "")
+            arn = a2a_runtimes.runtime_arn_from_url(endpoints.get(target_name, ""))
+            if arn:
+                rec["runtimeArn"] = arn
+            else:
+                logger.warning("fleet: gateway %s has no runtime target named %s",
+                               gateway_id, target_name)
+
 
 def list_agent_fleet(event):
     """Every agent in the fleet, derived from runtimes + Registry + metadata.
@@ -3716,6 +3770,9 @@ def list_agent_fleet(event):
                 })
         except Exception as e:  # noqa: BLE001
             logger.warning("fleet: Registry listing failed: %s", e)
+
+    # The join key the fleet needs, which a card URL alone no longer yields.
+    _attach_runtime_arns(registry_records)
 
     metadata = fleet_model.load_metadata(table)
 

@@ -1354,6 +1354,14 @@ export class SmartHomeStack extends cdk.Stack {
         "agent-registry:GetRegistryRecord",
         "agent-registry:ListRegistryRecords",
         "agent-registry:UpdateRegistryRecordStatus",
+        // Approving a DRAFT record takes TWO calls, and this is the first of them:
+        // DRAFT's only transition to APPROVED goes through PENDING_APPROVAL, so
+        // `approve_record` submits and then sets the status. Without this action the
+        // console could approve a PENDING_APPROVAL record and 500 on a DRAFT one —
+        // which stayed invisible because the Skill ERP submits on publish, so the
+        // review queue never held a DRAFT. Every AGENT record starts as one, and so
+        // does every APPROVED record knocked back by a version bump.
+        "agent-registry:SubmitRegistryRecordForApproval",
       ],
       resources: ["*"],
     }));

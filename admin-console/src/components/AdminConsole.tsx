@@ -40,6 +40,9 @@ import {
   importRegistryRecords,
   listA2aAgents,
   A2AAgentRecord,
+  cardAuthSchemes,
+  A2AConformanceBlocked,
+  A2AConformanceGate,
   checkA2aConformance,
   A2AConformanceRow,
   listA2aGrantsForRecord,
@@ -2580,6 +2583,23 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   // Read-only "Access" section in the Integration Registry A2A drawer.
   const [a2aDrawerGrants, setA2aDrawerGrants] = useState<A2AGrantSummary[] | null>(null);
   const [a2aDrawerGrantsLoading, setA2aDrawerGrantsLoading] = useState(false);
+  // Status changes on AGENT records. Until now this console could only review SKILL
+  // records — `list_registry_records` filters on recordType=SKILL — so the one status
+  // transition that decides whether the orchestrator can delegate at all had to be
+  // done in the AWS console or over the API.
+  const [a2aReviewing, setA2aReviewing] = useState('');
+  // A blocked approval, held so the admin can read the findings and decide. Not a
+  // window.confirm: overriding an authorization check is a decision that needs the
+  // findings visible, and `open` versus `closed` changes what overriding costs.
+  const [a2aGateBlock, setA2aGateBlock] = useState<{
+    record: A2AAgentRecord; conformance: A2AConformanceGate; hint: string;
+  } | null>(null);
+  // A rejection in progress, waiting on its reason. The API refuses a rejection with
+  // no reason and it is right to: `statusReason` is the only feedback the agent's team
+  // ever sees, so an unexplained rejection is indistinguishable from the platform
+  // losing their agent.
+  const [a2aRejecting, setA2aRejecting] = useState<
+    { record: A2AAgentRecord; reason: string } | null>(null);
 
   // Users tab
   const [cognitoUsers, setCognitoUsers] = useState<CognitoUserInfo[]>([]);
@@ -2936,6 +2956,34 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     };
   }, [a2aDrawer]);
 
+  /** The A2A inventory and its conformance verdicts, as one refresh.
+   *
+   *  Two calls rather than one because they answer different questions and fail
+   *  independently: the Registry says what we OFFER, and the conformance sweep reads
+   *  each agent's own Runtime authorizer to say who could actually reach it. A
+   *  throttled control plane must cost the Authorizer column, not the page.
+   *
+   *  Declared above the effect that depends on it: a `const` in a dependency array is
+   *  read during render, so a later declaration is a TDZ ReferenceError, not a hoist.
+   */
+  const loadA2aInventory = useCallback(async () => {
+    setA2aLoading(true);
+    setA2aError('');
+    checkA2aConformance()
+      .then((rows) => {
+        setA2aConformanceError('');
+        setA2aConformance(Object.fromEntries(rows.map((r) => [r.recordId, r])));
+      })
+      .catch((err) => setA2aConformanceError(err.message));
+    try {
+      setA2aAgents(await listA2aAgents());
+    } catch (err: any) {
+      setA2aError(err.message);
+    } finally {
+      setA2aLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'integrations' && integrationsSubTab === 'skills') {
       setRegistrySkillsLoading(true);
@@ -2949,24 +2997,52 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         .finally(() => setRegistrySkillsLoading(false));
     }
     if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
-      setA2aLoading(true);
-      setA2aError('');
-      checkA2aConformance()
-        .then((rows) => {
-          setA2aConformanceError('');
-          setA2aConformance(Object.fromEntries(rows.map((r) => [r.recordId, r])));
-        })
-        .catch((err) => setA2aConformanceError(err.message));
-      listA2aAgents()
-        .then(setA2aAgents)
-        .catch((err: any) => setA2aError(err.message))
-        .finally(() => setA2aLoading(false));
+      void loadA2aInventory();
     }
-  }, [activeTab, integrationsSubTab]);
+  }, [activeTab, integrationsSubTab, loadA2aInventory]);
 
   const clearMessages = () => {
     setError('');
     setSuccess('');
+  };
+
+  /** Approve or reject one AGENT record.
+   *
+   *  `force` only ever arrives from the gate modal, never from the table: an override
+   *  of an authorization check should cost a second, deliberate click on a screen that
+   *  shows what is being overridden.
+   *
+   *  `deprecate` is deliberately not offered, though the API supports it. It is
+   *  TERMINAL — the record then vanishes from the Registry API entirely, recovery means
+   *  a new record with a NEW recordId, and grants are keyed on recordId, so every
+   *  user's grant on that agent is silently voided. `reject` takes an agent out of
+   *  service reversibly, which is what this page needs. */
+  const handleA2aReview = async (
+    record: A2AAgentRecord,
+    decision: 'approve' | 'reject',
+    force = false,
+    reason = '',
+  ) => {
+    clearMessages();
+    setA2aReviewing(record.recordId);
+    try {
+      const out = await reviewRegistryRecord(record.recordId, decision, reason, force);
+      setA2aGateBlock(null);
+      setA2aRejecting(null);
+      setSuccess(t('integrations.a2a.review.done')
+        .replace('{name}', record.name)
+        .replace('{status}', out.status));
+      await loadA2aInventory();
+    } catch (err: any) {
+      if (err instanceof A2AConformanceBlocked) {
+        // Not an error message — a decision to put in front of the admin.
+        setA2aGateBlock({ record, conformance: err.conformance, hint: err.hint });
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setA2aReviewing('');
+    }
   };
 
   const handleCreate = () => {
@@ -4634,21 +4710,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       </Button>
                       <Button
                         iconName="refresh"
-                        onClick={() => {
-                          setA2aLoading(true);
-                          setA2aError('');
-                          checkA2aConformance()
-                            .then((rows) => {
-                              setA2aConformanceError('');
-                              setA2aConformance(
-                                Object.fromEntries(rows.map((r) => [r.recordId, r])));
-                            })
-                            .catch((err) => setA2aConformanceError(err.message));
-                          listA2aAgents()
-                            .then(setA2aAgents)
-                            .catch((err: any) => setA2aError(err.message))
-                            .finally(() => setA2aLoading(false));
-                        }}
+                        loading={a2aLoading}
+                        onClick={() => void loadA2aInventory()}
                       >
                         {t('integrations.a2a.refresh')}
                       </Button>
@@ -4675,9 +4738,58 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     ),
                   },
                   {
+                    // What the CARD says a caller must send. Read from A2A 0.3.0's
+                    // `security` / `securitySchemes`, falling back to 0.2.x's
+                    // `authentication.schemes` — reading only the latter is why this
+                    // column said `none` for all eight agents: every card here is
+                    // 0.3.0, where that field does not exist.
+                    //
+                    // Declarative, and deliberately NOT the same question as the
+                    // Authorizer column. This is the agent's own claim about how to
+                    // authenticate to it; the door is its Runtime authorizer.
                     id: 'auth',
                     header: t('integrations.a2a.col.auth'),
-                    cell: (r) => (r.card.authentication?.schemes || ['none'])[0],
+                    cell: (r) => {
+                      const schemes = cardAuthSchemes(r.card);
+                      if (schemes.length === 0) {
+                        return (
+                          <span title={t('integrations.a2a.auth.noneHint')}>
+                            <StatusIndicator type="warning">
+                              {t('integrations.a2a.auth.noneDeclared')}
+                            </StatusIndicator>
+                          </span>
+                        );
+                      }
+                      const detail = schemes
+                        .map((s) => {
+                          const scheme = r.card.securitySchemes?.[s];
+                          const flow = Object.keys(scheme?.flows || {})[0];
+                          return flow ? `${s} (${flow})` : s;
+                        })
+                        .join(', ');
+                      return <span title={detail}>{schemes.join(', ')}</span>;
+                    },
+                  },
+                  {
+                    // Registry status, which is what decides whether the orchestrator
+                    // resolves this agent at all — it lists APPROVED records only. The
+                    // column did not exist, so a record knocked back to DRAFT by a
+                    // version bump was indistinguishable from a healthy one here, and
+                    // the only hint was the Access column's expiry badge.
+                    id: 'status',
+                    header: t('integrations.a2a.col.status'),
+                    cell: (r) => (
+                      <SpaceBetween direction="horizontal" size="xxs">
+                        <StatusIndicator
+                          type={r.status === 'APPROVED' ? 'success'
+                            : r.status === 'REJECTED' ? 'error'
+                              : r.status === 'PENDING_APPROVAL' ? 'pending' : 'info'}
+                        >
+                          {r.status || '—'}
+                        </StatusIndicator>
+                        {r.recordVersion && <Badge>v{r.recordVersion}</Badge>}
+                      </SpaceBetween>
+                    ),
                   },
                   {
                     id: 'tags',
@@ -4774,9 +4886,37 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   {
                     id: 'actions',
                     header: t('integrations.a2a.col.actions'),
-                    minWidth: 110,
+                    minWidth: 240,
                     cell: (r) => (
-                      <Button onClick={() => setA2aDrawer(r)}>{t('integrations.a2a.view')}</Button>
+                      <SpaceBetween direction="horizontal" size="xxs">
+                        <Button onClick={() => setA2aDrawer(r)}>
+                          {t('integrations.a2a.view')}
+                        </Button>
+                        {/* DRAFT, PENDING_APPROVAL and REJECTED can all reach
+                            APPROVED (a DRAFT is submitted first, server-side). An
+                            already-approved record gets no Approve button — the call
+                            would be a no-op that reads as an action. */}
+                        {r.status !== 'APPROVED' && (
+                          <Button
+                            variant="primary"
+                            loading={a2aReviewing === r.recordId}
+                            onClick={() => void handleA2aReview(r, 'approve')}
+                          >
+                            {t('integrations.a2a.review.approve')}
+                          </Button>
+                        )}
+                        {/* A DRAFT cannot be rejected — it was never submitted for
+                            review, and the API answers 409. Offering the button would
+                            be offering a guaranteed error. */}
+                        {r.status !== 'DRAFT' && r.status !== 'REJECTED' && (
+                          <Button
+                            loading={a2aReviewing === r.recordId}
+                            onClick={() => setA2aRejecting({ record: r, reason: '' })}
+                          >
+                            {t('integrations.a2a.review.reject')}
+                          </Button>
+                        )}
+                      </SpaceBetween>
                     ),
                   },
                 ]}
@@ -4796,6 +4936,113 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   values are public — the same discovery URL and app client id every
                   browser app already ships — so the risk here is an INCOMPLETE copy,
                   not an exposed one. */}
+              {/* The approval gate refused. Shown as its own decision screen rather
+                  than as an error toast, because the admin has a real choice here and
+                  it is not a symmetric one: `open` means approving publishes an agent
+                  that anyone in the pool can call, `closed` means it publishes one
+                  nobody can. Neither raises an alarm in production — the first looks
+                  like everything works — so the findings have to be readable at the
+                  moment of the decision, and the override goes into the record's own
+                  statusReason server-side. */}
+              {/* Rejecting needs a reason, and it is worth a modal rather than a
+                  prompt: it is the ONLY channel back to the agent's team, and it takes
+                  the agent out of service the moment it lands — a rejected record is
+                  refused immediately, with no re-approval window, and the inline sweep
+                  revokes its grants on the way out. */}
+              {a2aRejecting && (
+                <Modal
+                  visible
+                  onDismiss={() => setA2aRejecting(null)}
+                  header={t('integrations.a2a.review.rejectTitle')
+                    .replace('{name}', a2aRejecting.record.name)}
+                  footer={
+                    <CloudscapeBox float="right">
+                      <SpaceBetween size="xs" direction="horizontal">
+                        <Button onClick={() => setA2aRejecting(null)}>
+                          {t('integrations.a2a.review.cancel')}
+                        </Button>
+                        <Button
+                          variant="primary"
+                          disabled={!a2aRejecting.reason.trim()}
+                          loading={a2aReviewing === a2aRejecting.record.recordId}
+                          onClick={() => void handleA2aReview(
+                            a2aRejecting.record, 'reject', false,
+                            a2aRejecting.reason.trim())}
+                        >
+                          {t('integrations.a2a.review.reject')}
+                        </Button>
+                      </SpaceBetween>
+                    </CloudscapeBox>
+                  }
+                >
+                  <SpaceBetween size="s">
+                    <CloudscapeBox variant="p">
+                      {t('integrations.a2a.review.rejectHint')}
+                    </CloudscapeBox>
+                    <Input
+                      value={a2aRejecting.reason}
+                      placeholder={t('integrations.a2a.review.rejectPlaceholder')}
+                      onChange={({ detail }) => setA2aRejecting(
+                        { ...a2aRejecting, reason: detail.value })}
+                    />
+                  </SpaceBetween>
+                </Modal>
+              )}
+
+              {a2aGateBlock && (
+                <Modal
+                  visible
+                  onDismiss={() => setA2aGateBlock(null)}
+                  header={t('integrations.a2a.review.blockedTitle')
+                    .replace('{name}', a2aGateBlock.record.name)}
+                  size="large"
+                  footer={
+                    <CloudscapeBox float="right">
+                      <SpaceBetween size="xs" direction="horizontal">
+                        <Button onClick={() => setA2aGateBlock(null)}>
+                          {t('integrations.a2a.review.cancel')}
+                        </Button>
+                        <Button
+                          loading={a2aReviewing === a2aGateBlock.record.recordId}
+                          onClick={() => void handleA2aReview(
+                            a2aGateBlock.record, 'approve', true)}
+                        >
+                          {t('integrations.a2a.review.forceApprove')}
+                        </Button>
+                      </SpaceBetween>
+                    </CloudscapeBox>
+                  }
+                >
+                  <SpaceBetween size="m">
+                    <Alert
+                      type={a2aGateBlock.conformance.severity === 'open'
+                        ? 'error' : 'warning'}
+                      header={a2aGateBlock.conformance.severity === 'open'
+                        ? t('integrations.a2a.auth.openHeader')
+                        : t('integrations.a2a.auth.closedHeader')}
+                    >
+                      <ul>
+                        {a2aGateBlock.conformance.findings.map((f) => (
+                          <li key={f.code}>
+                            <strong>{f.code}</strong> — {f.detail}
+                          </li>
+                        ))}
+                      </ul>
+                    </Alert>
+                    <CloudscapeBox variant="p">
+                      {a2aGateBlock.hint || t('integrations.a2a.auth.fixHint')}
+                    </CloudscapeBox>
+                    <CloudscapeBox variant="code">
+                      {'./venv/bin/python scripts/a2a-authorizer-contract.py '
+                        + `--record-id ${a2aGateBlock.record.recordId}`}
+                    </CloudscapeBox>
+                    <CloudscapeBox variant="p" color="text-status-warning">
+                      {t('integrations.a2a.review.forceWarning')}
+                    </CloudscapeBox>
+                  </SpaceBetween>
+                </Modal>
+              )}
+
               {a2aManifestOpen && (
                 <Modal
                   visible
@@ -4906,14 +5153,48 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       );
                     })()}
                     <dl className="drawer-fields">
+                      {/* Record-level first, card second. The record is what the
+                          platform acts on — status is what decides whether the
+                          orchestrator resolves this agent at all — and it used to be
+                          absent here entirely, so this panel could not answer the
+                          question that brings an admin to it. */}
+                      <dt>{t('integrations.a2a.drawer.status')}</dt>
+                      <dd>
+                        {a2aDrawer.status}
+                        {a2aDrawer.recordVersion ? ` · v${a2aDrawer.recordVersion}` : ''}
+                      </dd>
+                      {a2aDrawer.statusReason && (
+                        <>
+                          <dt>{t('integrations.a2a.drawer.statusReason')}</dt>
+                          <dd>{a2aDrawer.statusReason}</dd>
+                        </>
+                      )}
+                      <dt>{t('integrations.a2a.drawer.grantable')}</dt>
+                      <dd>
+                        {a2aDrawer.grantable
+                          ? t('integrations.a2a.access.grantable')
+                          : t('integrations.a2a.access.revoked')}
+                        {a2aDrawer.grantableReason ? ` — ${a2aDrawer.grantableReason}` : ''}
+                      </dd>
                       <dt>{t('integrations.a2a.drawer.endpoint')}</dt>
                       <dd>{a2aDrawer.card.url}</dd>
                       <dt>{t('integrations.a2a.drawer.version')}</dt>
-                      <dd>{a2aDrawer.card.version}</dd>
+                      <dd>
+                        {a2aDrawer.card.version}
+                        {a2aDrawer.card.protocolVersion
+                          ? ` · A2A ${a2aDrawer.card.protocolVersion}`
+                          : ''}
+                      </dd>
                       <dt>{t('integrations.a2a.drawer.provider')}</dt>
                       <dd>{a2aDrawer.card.provider?.organization || '—'}</dd>
                       <dt>{t('integrations.a2a.drawer.auth')}</dt>
-                      <dd>{(a2aDrawer.card.authentication?.schemes || []).join(', ') || 'none'}</dd>
+                      <dd>
+                        {cardAuthSchemes(a2aDrawer.card).join(', ')
+                          || t('integrations.a2a.auth.noneDeclared')}
+                        <CloudscapeBox variant="small" color="text-body-secondary">
+                          {t('integrations.a2a.drawer.authNote')}
+                        </CloudscapeBox>
+                      </dd>
                       <dt>{t('integrations.a2a.drawer.capabilities')}</dt>
                       <dd>
                         {(['streaming', 'pushNotifications', 'stateTransitionHistory'] as const)
@@ -4944,6 +5225,39 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       <dt>{t('integrations.a2a.drawer.updatedAt')}</dt>
                       <dd>{a2aDrawer.updatedAt ? new Date(a2aDrawer.updatedAt).toLocaleString() : '-'}</dd>
                     </dl>
+
+                    {/* The record verbatim. The fields above are a reading of it, and a
+                        reading always lags: `securitySchemes` was rendered from a field
+                        the A2A spec renamed two versions ago and quietly showed "none"
+                        for every agent. Whatever this panel forgets to interpret is
+                        still here, which is what makes it answerable rather than
+                        merely tidy. */}
+                    <ExpandableSection headerText={t('integrations.a2a.drawer.rawTitle')}>
+                      <CloudscapeBox variant="p" color="text-body-secondary">
+                        {t('integrations.a2a.drawer.rawHint')}
+                      </CloudscapeBox>
+                      <pre className="a2a-raw-record">
+                        {JSON.stringify(
+                          {
+                            recordId: a2aDrawer.recordId,
+                            name: a2aDrawer.name,
+                            status: a2aDrawer.status,
+                            statusReason: a2aDrawer.statusReason || '',
+                            recordVersion: a2aDrawer.recordVersion || '',
+                            description: a2aDrawer.description,
+                            publishedBy: a2aDrawer.publishedBy,
+                            grantable: a2aDrawer.grantable,
+                            grantableReason: a2aDrawer.grantableReason,
+                            graceRemainingSeconds: a2aDrawer.graceRemainingSeconds,
+                            createdAt: a2aDrawer.createdAt,
+                            updatedAt: a2aDrawer.updatedAt,
+                            agentCard: a2aDrawer.card,
+                          },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                    </ExpandableSection>
 
                     {/* Read-only Access section: shows who has been granted
                         which skills on this A2A agent. All writes go through

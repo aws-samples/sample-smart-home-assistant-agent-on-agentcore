@@ -820,19 +820,53 @@ export async function listRegistryRecords(status: string = 'APPROVED'): Promise<
  * Registry keeps *why* — and therefore the only feedback the skill's author gets.
  * The backend requires it for a rejection.
  */
+/** A conformance verdict on one agent, as the approval gate returns it. */
+export interface A2AConformanceGate {
+  blocking: boolean;
+  severity: string;
+  conformant?: boolean;
+  resolvedVia?: string;
+  findings: Array<{ code: string; detail: string; severity?: string }>;
+}
+
+/** Thrown when the approval gate refuses an AGENT record.
+ *
+ *  Carries the findings rather than flattening them into a message, because the
+ *  admin's next move depends on WHICH way the authorizer is wrong: `open` means the
+ *  agent is unprotected and approving it publishes an open door, `closed` means
+ *  nobody can call it. Both are silent in production, which is why this is a gate and
+ *  not a warning. */
+export class A2AConformanceBlocked extends Error {
+  constructor(
+    message: string,
+    readonly conformance: A2AConformanceGate,
+    readonly hint = '',
+  ) {
+    super(message);
+    this.name = 'A2AConformanceBlocked';
+  }
+}
+
 export async function reviewRegistryRecord(
   recordId: string,
   decision: 'approve' | 'reject' | 'deprecate',
-  reason = ''
+  reason = '',
+  /** Approve despite a blocking conformance verdict. The override is written into the
+   *  record's own `statusReason` server-side, so it survives the Lambda log. */
+  force = false,
 ): Promise<{ status: string; previousStatus: string; reviewedBy: string }> {
   const headers = await authHeaders();
-  const res = await fetch(`${getBaseUrl()}/registry/records`, {
+  const res = await fetch(`${getBaseUrl()}/registry/records${force ? '?force=true' : ''}`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ recordId, decision, reason }),
   });
   const body = await res.json().catch(() => ({} as any));
   if (!res.ok) {
+    if (res.status === 409 && body.conformance) {
+      throw new A2AConformanceBlocked(
+        body.error || 'blocked by the conformance gate', body.conformance, body.hint);
+    }
     throw new Error(body.error || `Failed to review record (${res.status})`);
   }
   return body;
@@ -890,20 +924,60 @@ export async function stopSession(sessionId: string, kind?: 'text' | 'voice'): P
 // A2A Agents (Integration Registry)
 // ---------------------------------------------------------------------------
 
+/** One entry in an AgentCard's `securitySchemes` (A2A 0.3.0), loosely typed.
+ *
+ *  Only `type` is read, and only to label the row. Anything more would be this
+ *  console re-implementing an OpenAPI security object it has no decision to make
+ *  from — the decision belongs to the sub-agent's Runtime authorizer. */
+export interface A2ASecurityScheme {
+  type?: string;
+  scheme?: string;
+  description?: string;
+  flows?: Record<string, { tokenUrl?: string; scopes?: Record<string, string> }>;
+  [key: string]: unknown;
+}
+
 export interface A2AAgentCard {
   name: string;
   description: string;
   url: string;
   version: string;
+  /** `0.3.0` for anything this deployment registers. Worth showing: it is what
+   *  decides whether `securitySchemes` or the 0.2.x `authentication` is populated. */
+  protocolVersion?: string;
   provider?: { organization?: string };
   capabilities: {
     streaming?: boolean;
     pushNotifications?: boolean;
     stateTransitionHistory?: boolean;
   };
-  authentication: { schemes: string[] };
+  /** A2A 0.3.0: named schemes, plus `security` naming which ones apply and with
+   *  what scopes. */
+  securitySchemes?: Record<string, A2ASecurityScheme>;
+  security?: Array<Record<string, string[]>>;
+  /** A2A 0.2.x, renamed to the two fields above in 0.3.0. Kept because a card
+   *  registered before the rename still carries it, and reading ONLY this is why
+   *  the Auth column showed `none` for every agent — every card here is 0.3.0. */
+  authentication?: { schemes: string[] };
   skills: Array<{ id: string; name: string; description: string; examples: string[] }>;
-  tags: string[];
+  tags?: string[];
+}
+
+/** The auth scheme names an AgentCard declares, across both A2A spec versions.
+ *
+ *  Declarative only. This is what a caller should SEND; it is not what the agent
+ *  enforces, which lives in its Runtime authorizer and is what the Authorizer column
+ *  reports. A card claiming `oauth2` proves nothing about the door. */
+export function cardAuthSchemes(card: A2AAgentCard | undefined): string[] {
+  if (!card) return [];
+  const declared = Object.keys(card.securitySchemes || {});
+  if (declared.length > 0) {
+    // `security` is the subset actually required. Prefer it when present, so a card
+    // that DEFINES a scheme without requiring it does not read as protected.
+    const required = (card.security || []).flatMap((entry) => Object.keys(entry));
+    return required.length > 0 ? [...new Set(required)] : declared;
+  }
+  return card.authentication?.schemes || [];
 }
 
 export interface A2AAgentRecord {
@@ -911,6 +985,12 @@ export interface A2AAgentRecord {
   name: string;
   description: string;
   status: string;
+  /** Why the record is at that status — the Registry's `statusReason`, which is the
+   *  only place a rejection's explanation is kept. */
+  statusReason?: string;
+  /** The Registry's own version for this record, bumped in place on an upgrade.
+   *  Without it a version bump is invisible on this page. */
+  recordVersion?: string;
   createdAt: string;
   updatedAt: string;
   card: A2AAgentCard;

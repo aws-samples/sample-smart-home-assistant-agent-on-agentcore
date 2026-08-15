@@ -211,10 +211,16 @@ export function AgentsPage() {
               },
               {
                 id: 'runtime',
+                // The runtime ID, not the runtime name. The name
+                // (`sha2aenergy_sha2aenergy`) is only the id with its suffix cut off,
+                // and the suffix is what identifies the deployment — it is what every
+                // CloudWatch log group, span and `aws bedrock-agentcore-control` call
+                // is keyed on. The agent's identity is the Agent column's job, and
+                // that comes from the Registry record.
                 header: t('agents.col.runtime'),
                 cell: (a) => (
                   <Box variant="small" color="text-body-secondary">
-                    {a.runtimeName || '--'}
+                    {a.runtimeId || '--'}
                   </Box>
                 ),
               },

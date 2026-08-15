@@ -26,10 +26,17 @@ scripts, and would be wrong in exactly the situation it matters — right after
 someone adds an agent.
 
 The three sources are joined on the runtime NAME, because that is the only
-identifier they share: a Registry AgentCard's `url` embeds the runtime ARN, and a
-runtime ARN yields `sha2alight_sha2alight`. Records whose runtime is not in the
-ARN list still appear, flagged, since an approved record with no live runtime is
-worth seeing rather than hiding.
+identifier they share. Getting from a Registry record to that name is the fragile
+part and it lives in `runtime_name_for_record`: a card's `url` is only sometimes a
+runtime ARN, and since the A2A gateway cutover it usually is not. Records whose
+runtime is not in the ARN list still appear, flagged, since an approved record with
+no live runtime is worth seeing rather than hiding.
+
+Identity comes from the RECORD, never from the runtime. A joined row's label is the
+Registry record name (`energy-optimization-agent`), not the runtime name it happens
+to run on (`sha2aenergy_sha2aenergy`) — the runtime name is a deploy-time artifact of
+an 18-character CLI slug limit, and for a third-party agent the runtime may not even
+be in this account. The runtime contributes liveness and metrics; that is all.
 """
 
 from __future__ import annotations
@@ -107,10 +114,11 @@ def _runtime_name(arn: str) -> str:
 
 
 def _runtime_name_from_card_url(url: str) -> str:
-    """Pull the runtime name out of an AgentCard's invocation URL.
+    """Pull the runtime name out of an AgentCard's DIRECT invocation URL.
 
-    The URL is the percent-encoded runtime ARN inside a /runtimes/<arn>/invocations
-    path, which is the only thing tying a Registry record to a live runtime.
+    Only the `/runtimes/<percent-encoded arn>/invocations` shape. A gateway target
+    URL carries no ARN at all and returns "" here — `runtime_name_for_record` is what
+    handles that, from an ARN its caller resolved with an AWS call.
     """
     if not url:
         return ""
@@ -123,6 +131,25 @@ def _runtime_name_from_card_url(url: str) -> str:
     tail = decoded.split(marker, 1)[1]
     arn = tail.split("/invocations", 1)[0]
     return _runtime_name(arn)
+
+
+def runtime_name_for_record(rec: dict) -> str:
+    """The join key for one Registry record: the runtime name behind its card.
+
+    Prefers `rec["runtimeArn"]`, which the caller resolved — and that preference is
+    the whole point. A card's `url` used to BE the runtime ARN, so this module read
+    the key straight out of it. On 2026-08-15 all eight of our cards moved behind the
+    A2A gateway, where the URL is `https://<gw>.gateway.../<targetName>` and contains
+    no ARN, so the key silently became "" and every specialist split into two rows:
+    one runtime row with no identity, and one record row falsely flagged as having no
+    live runtime. Resolving a gateway target to its runtime needs an AWS call, which
+    is why the ARN arrives from the caller instead of being parsed here.
+
+    The URL fallback still matters: a third party registering their own runtime URL
+    directly is a fully supported shape, and it needs no resolution.
+    """
+    return (_runtime_name(rec.get("runtimeArn") or "")
+            or _runtime_name_from_card_url((rec.get("card") or {}).get("url", "")))
 
 
 def _kind_for(runtime_name: str, agent_id: str, is_registry_record: bool) -> str:
@@ -195,7 +222,7 @@ def build_fleet(runtime_arns: list[str], registry_records: list[dict],
 
     for rec in registry_records or []:
         card = rec.get("card") or {}
-        name = _runtime_name_from_card_url(card.get("url", ""))
+        name = runtime_name_for_record(rec)
         entry = by_runtime.get(name)
         if entry is None:
             # Approved record with no runtime in the ARN allowlist. Surfaced rather
