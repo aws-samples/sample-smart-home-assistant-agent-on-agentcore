@@ -139,13 +139,23 @@ def namespaces_for(actor_id: str) -> list[str]:
     """
     if not actor_id:
         return []
-    return [
-        f"/users/{actor_id}/facts",
-        f"/users/{actor_id}/preferences",
+    out = [f"/users/{actor_id}/facts", f"/users/{actor_id}/preferences"]
+    try:
         # Sanitising is idempotent, so passing the already-sanitised actor id
         # yields the same string the orchestrator computed from the raw email.
-        f"/summaries/{actor_id}/{_memory_actor_module().memory_session_id(actor_id)}",
-    ]
+        session = _memory_actor_module().memory_session_id(actor_id)
+    except Exception as exc:  # noqa: BLE001
+        # Soft, like everything else here. This module reaches `shared/` through a
+        # path lookup, so an older rendered container — or a standalone copy of this
+        # code that did not ship `memory_actor.py` — resolves nothing. Losing the
+        # session summary degrades an answer; raising would cost the whole
+        # delegation, and the two facts namespaces above still work.
+        logger.info("no memory session id for %s (%s); skipping the summary "
+                    "namespace", actor_id, exc)
+        return out
+    if session:
+        out.append(f"/summaries/{actor_id}/{session}")
+    return out
 
 
 def _record_text(record: dict) -> str:

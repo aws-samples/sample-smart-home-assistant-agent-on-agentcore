@@ -117,6 +117,31 @@ def test_the_memory_session_matches_what_the_orchestrator_computes():
     assert f"/summaries/{actor}/{orchestrator_side}" in _load().namespaces_for(actor)
 
 
+def test_an_unresolvable_memory_session_degrades_to_the_two_actor_namespaces():
+    """A standalone copy of this code without `memory_actor.py` must still answer.
+
+    `common/memory.py` reaches `shared/` through a path lookup, so a rendered
+    container built without it — or the self-contained demo bundle — resolves
+    nothing. Found by extracting logs/agentcore-deploy-demo.tar.gz and importing it:
+    `namespaces_for` raised ModuleNotFoundError, which would have cost the whole
+    delegation rather than just the session summary.
+    """
+    mod = _load()
+
+    def _boom():
+        raise ModuleNotFoundError("No module named 'memory_actor'")
+
+    original = mod._memory_actor_module
+    mod._memory_actor_module = _boom
+    try:
+        assert mod.namespaces_for("admin_smarthome_local") == [
+            "/users/admin_smarthome_local/facts",
+            "/users/admin_smarthome_local/preferences",
+        ]
+    finally:
+        mod._memory_actor_module = original
+
+
 def test_no_actor_means_no_namespaces():
     assert _load().namespaces_for("") == []
 
