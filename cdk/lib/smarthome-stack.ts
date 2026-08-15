@@ -594,6 +594,10 @@ export class SmartHomeStack extends cdk.Stack {
         SKILL_FILES_BUCKET: skillFilesBucket.bucketName,
         AGENT_RUNTIME_ARN: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
         COGNITO_USER_POOL_ID: userPool.userPoolId,
+        // The app client a sub-agent's authorizer must name in `allowedAudience`.
+        // The conformance check reports a runtime pointed at a different one, which
+        // refuses a fully granted user with a message about `client_id`.
+        COGNITO_APP_CLIENT_ID: userPoolClient.userPoolClientId,
         BROWSER_SESSIONS_TABLE_NAME: browserSessionsTable.tableName,
         CODE_SESSIONS_TABLE_NAME: codeSessionsTable.tableName,
         RUNTIME_SESSIONS_TABLE_NAME: runtimeSessionsTable.tableName,
@@ -1064,6 +1068,11 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock-agentcore:UpdateGateway",
         "bedrock-agentcore:ListGatewayTargets",
         "bedrock-agentcore:GetGatewayTarget",
+        // Reads each sub-agent runtime's `authorizerConfiguration` for the
+        // conformance check: registering a card makes an agent discoverable, but
+        // whether it is callable — and by whom — is decided by that config, which
+        // lives with whoever deployed the runtime. Read-only.
+        "bedrock-agentcore:GetAgentRuntime",
         // See the userInitLambda grant above — CreatePolicy/UpdatePolicy fail
         // silently (policy → UPDATE_FAILED, gateway serves 0 tools, API still
         // 200) without InvokeGateway. This is why only 5 of 30 users had

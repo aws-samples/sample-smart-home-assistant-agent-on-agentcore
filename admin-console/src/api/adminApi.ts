@@ -1116,6 +1116,48 @@ export async function importScenes(
   return body;
 }
 
+/** One authorizer-conformance finding for a registered sub-agent. */
+export interface A2AConformanceFinding {
+  code: string;
+  /** `open` = someone can reach the agent who should not (worse).
+   *  `closed` = granted users are refused. `info` = neither. */
+  severity: 'open' | 'closed' | 'info';
+  detail: string;
+}
+
+export interface A2AConformanceRow {
+  recordId: string;
+  name: string;
+  status: string;
+  runtimeId: string;
+  resolvedVia: string;
+  conformant: boolean;
+  severity: '' | 'open' | 'closed' | 'info';
+  findings: A2AConformanceFinding[];
+}
+
+/** Is each registered agent actually callable, and by whom?
+ *
+ *  Registering a card makes an agent DISCOVERABLE — this console lists it and the
+ *  orchestrator offers it as a tool. Whether it is CALLABLE is decided by the
+ *  sub-agent's own Runtime authorizer, which lives with whoever deployed it. Both
+ *  ways of getting that wrong are silent, and the Integration Registry page shows
+ *  `approved` either way, so it is fetched and rendered separately.
+ *
+ *  A separate call from `listA2aAgents` on purpose: this reads a runtime per record
+ *  and the inventory should not get slower waiting for it. */
+export async function checkA2aConformance(): Promise<A2AConformanceRow[]> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?action=a2a-conformance`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to check A2A conformance (${res.status})`);
+  }
+  const data = await res.json();
+  return data.records || [];
+}
+
 export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
   const headers = await authHeaders();
   // Reuses /registry/records?action=a2a-list — consolidated on a single API

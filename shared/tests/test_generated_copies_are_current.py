@@ -21,6 +21,7 @@ GENERATED = [
     ("agent_registry.py", ["admin-api", "skill-erp-api", "pre-token"]),
     ("subagent_policy.py", ["admin-api", "pre-token"]),
     ("memory_actor.py", ["admin-api"]),
+    ("a2a_conformance.py", ["admin-api"]),
 ]
 
 CASES = [(module, d) for module, dirs in GENERATED for d in dirs]

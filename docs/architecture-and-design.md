@@ -3462,9 +3462,40 @@ claim only changes when a token does. Verified: the forbidden agent answers `403
 [Policy evaluation denied due to Forbid_energy_optimization]` while every other
 target still answers 200.
 
-What it does **not** add is guardrails — see §9.13.1.
+What it does **not** add is guardrails — see §9.13.2.
 
-#### 9.13.1 Why the gateway cannot carry guardrails, and where Cedar stops
+#### 9.13.1 Registered is discoverable; the authorizer decides callable
+
+Registering an APPROVED card is the **only** integration step for discovery: the
+console lists the agent, the orchestrator registers `a2a_*` tools for it, the
+delegation prompt names it, and its system prompt becomes governable — all derived
+from the Registry, with no code change or redeploy anywhere upstream. Someone who
+knows nothing about this deployment can get that far.
+
+They cannot get further without two of its values. Authorization happens at the
+sub-agent's OWN Runtime authorizer: `discoveryUrl` must be this pool, `allowedAudience`
+must carry this app client, and `customClaims` must enumerate the card's grant groups
+under `CONTAINS_ANY` (no wildcard — adding a skill needs the runtime updated). That
+configuration lives with whoever deployed the runtime, and until 2026-08-15 nothing
+checked it.
+
+Both ways of getting it wrong are silent and they fail in opposite directions: no
+`customClaims` and every authenticated user of the pool reaches every skill; a wrong
+pool or audience and granted users get 401 while the orchestrator still offers the
+tool, so the model apologises. The Integration Registry page reads Registry STATUS, so
+it shows `approved` either way.
+
+Closed by two things that share one rule (`shared/a2a_conformance.py`):
+
+- `GET /registry/records?action=a2a-conformance` resolves each card's URL back to its
+  runtime — through the gateway target when the card points at the gateway — reads the
+  authorizer and reports findings by direction. The A2A Agents page renders it as an
+  **Authorizer** column: *Too permissive* (red) / *Callers refused* (amber).
+- `scripts/a2a-authorizer-contract.py` prints the config an agent SHOULD be deployed
+  with, from the same function, so what is checked and what is handed out cannot
+  drift. The contract for third parties is `docs/a2a-agent-onboarding.md`.
+
+#### 9.13.2 Why the gateway cannot carry guardrails, and where Cedar stops
 
 Two limits, both measured, both worth stating because each looks like a
 configuration problem and is not:

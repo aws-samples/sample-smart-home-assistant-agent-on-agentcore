@@ -40,6 +40,8 @@ import {
   importRegistryRecords,
   listA2aAgents,
   A2AAgentRecord,
+  checkA2aConformance,
+  A2AConformanceRow,
   listA2aGrantsForRecord,
   A2AGrantSummary,
   getAgentPrompts,
@@ -2556,6 +2558,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [registrySkillsError, setRegistrySkillsError] = useState('');
   const [skillDrawer, setSkillDrawer] = useState<RegistrySkill | null>(null);
   const [a2aAgents, setA2aAgents] = useState<A2AAgentRecord[]>([]);
+  // Keyed by recordId and fetched separately from the list: the check reads a
+  // runtime per record, and the inventory should render without waiting for it.
+  const [a2aConformance, setA2aConformance] =
+    useState<Record<string, A2AConformanceRow>>({});
+  const [a2aConformanceError, setA2aConformanceError] = useState('');
   const [a2aLoading, setA2aLoading] = useState(false);
   const [a2aError, setA2aError] = useState<string>('');
   const [a2aDrawer, setA2aDrawer] = useState<A2AAgentRecord | null>(null);
@@ -2933,6 +2940,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
       setA2aLoading(true);
       setA2aError('');
+      checkA2aConformance()
+        .then((rows) => {
+          setA2aConformanceError('');
+          setA2aConformance(Object.fromEntries(rows.map((r) => [r.recordId, r])));
+        })
+        .catch((err) => setA2aConformanceError(err.message));
       listA2aAgents()
         .then(setA2aAgents)
         .catch((err: any) => setA2aError(err.message))
@@ -4596,6 +4609,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                         onClick={() => {
                           setA2aLoading(true);
                           setA2aError('');
+                          checkA2aConformance()
+                            .then((rows) => {
+                              setA2aConformanceError('');
+                              setA2aConformance(
+                                Object.fromEntries(rows.map((r) => [r.recordId, r])));
+                            })
+                            .catch((err) => setA2aConformanceError(err.message));
                           listA2aAgents()
                             .then(setA2aAgents)
                             .catch((err: any) => setA2aError(err.message))
@@ -4682,6 +4702,42 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     cell: (r) => r.grantableReason || '—',
                   },
                   {
+                    // Registry status says whether we OFFER the agent; this says
+                    // whether the agent's own Runtime authorizer will accept the
+                    // people we offer it to. They are independent, and a record can
+                    // read `approved` while nobody can call it — or while everybody
+                    // can, which is the worse case and why `open` is red.
+                    id: 'authorizer',
+                    header: t('integrations.a2a.col.authorizer'),
+                    cell: (r) => {
+                      const row = a2aConformance[r.recordId];
+                      if (!row) {
+                        return (
+                          <StatusIndicator type="pending">
+                            {t('integrations.a2a.auth.checking')}
+                          </StatusIndicator>
+                        );
+                      }
+                      if (row.conformant) {
+                        return (
+                          <StatusIndicator type="success">
+                            {t('integrations.a2a.auth.ok')}
+                          </StatusIndicator>
+                        );
+                      }
+                      const type = row.severity === 'open' ? 'error'
+                        : row.severity === 'closed' ? 'warning' : 'info';
+                      const label = row.severity === 'open'
+                        ? t('integrations.a2a.auth.open')
+                        : row.severity === 'closed'
+                          ? t('integrations.a2a.auth.closed')
+                          : t('integrations.a2a.auth.unknown');
+                      return (
+                        <StatusIndicator type={type}>{label}</StatusIndicator>
+                      );
+                    },
+                  },
+                  {
                     id: 'lastUpdated',
                     header: t('integrations.a2a.col.lastUpdated'),
                     cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'),
@@ -4719,6 +4775,41 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 >
                   <SpaceBetween size="s">
                     <p>{a2aDrawer.description}</p>
+                    {/* The authorizer findings, above the card details, because a
+                        non-conformant agent is the reason someone opened this drawer:
+                        the card itself looks fine in every one of these cases. */}
+                    {(() => {
+                      const row = a2aConformance[a2aDrawer.recordId];
+                      if (!row || row.conformant) return null;
+                      return (
+                        <Alert
+                          type={row.severity === 'open' ? 'error' : 'warning'}
+                          header={row.severity === 'open'
+                            ? t('integrations.a2a.auth.openHeader')
+                            : t('integrations.a2a.auth.closedHeader')}
+                        >
+                          <ul>
+                            {row.findings.map((f) => (
+                              <li key={f.code}>
+                                <strong>{f.code}</strong> — {f.detail}
+                              </li>
+                            ))}
+                          </ul>
+                          <CloudscapeBox variant="p" padding={{ top: 'xs' }}>
+                            {t('integrations.a2a.auth.fixHint')}
+                          </CloudscapeBox>
+                          <CloudscapeBox variant="code">
+                            {`./venv/bin/python scripts/a2a-authorizer-contract.py --record-id ${a2aDrawer.recordId}`}
+                          </CloudscapeBox>
+                          {row.resolvedVia && (
+                            <CloudscapeBox variant="p" color="text-body-secondary"
+                              padding={{ top: 'xs' }}>
+                              {t('integrations.a2a.auth.resolvedVia')}: {row.resolvedVia}
+                            </CloudscapeBox>
+                          )}
+                        </Alert>
+                      );
+                    })()}
                     <dl className="drawer-fields">
                       <dt>{t('integrations.a2a.drawer.endpoint')}</dt>
                       <dd>{a2aDrawer.card.url}</dd>

@@ -103,6 +103,9 @@ cdk/lambda/*/agent_registry.py
 # revocation sweep) and the pre-token trigger (global grants injected into the
 # claim) must both apply IDENTICALLY. Source of truth is shared/subagent_policy.py.
 cdk/lambda/*/subagent_policy.py
+# And for the authorizer-conformance rule, shared by the admin API's check route and
+# the contract generator. Source of truth is shared/a2a_conformance.py.
+cdk/lambda/*/a2a_conformance.py
 # And for the scenario model plus the solar maths and the shared schedule payload,
 # which the scenario runner and the admin API both need. Source of truth is
 # shared/.

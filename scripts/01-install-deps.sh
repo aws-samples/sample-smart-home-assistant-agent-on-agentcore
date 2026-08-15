@@ -222,6 +222,14 @@ for lambda_dir in admin-api pre-token; do
     echo "    -> $lambda_dir"
 done
 
+# The authorizer-conformance rule, for the admin API's check route. Same file backs
+# scripts/a2a-authorizer-contract.py, which prints the config an agent's author
+# should deploy — so "what we check" and "what we tell people to do" cannot drift.
+echo "==> Copying the A2A conformance rule into the admin API..."
+cp "$SCRIPT_DIR/shared/a2a_conformance.py" \
+   "$SCRIPT_DIR/cdk/lambda/admin-api/a2a_conformance.py"
+echo "    -> admin-api"
+
 # ------------------------------------------------------------------------------
 # Fetch the Amazon DCV Web Client SDK into chatbot/public/dcvjs/.
 # Required for the BrowserPanel live-view feature: the chatbot's DcvViewer

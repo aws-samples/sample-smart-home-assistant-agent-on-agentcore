@@ -31,6 +31,7 @@ import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.
 # one character returns an empty transcript, not an error.
 import memory_actor
 import subagent_policy  # A2A grant intent -> Cognito groups; see subagent_policy.py
+import a2a_conformance  # does a sub-agent's authorizer match its card? see that module
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -49,6 +50,11 @@ MEMORY_ID = os.environ.get("MEMORY_ID", "")
 EPISODIC_STRATEGY_ID = os.environ.get("MEMORY_STRATEGY_EPISODIC_ID", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
+# The app client whose id a sub-agent's authorizer must carry in `allowedAudience`.
+# Needed to tell an author what right looks like, and to spot a runtime pointed at a
+# different client — which refuses a fully granted user with a message about
+# `client_id`. See shared/a2a_conformance.py.
+COGNITO_APP_CLIENT_ID = os.environ.get("COGNITO_APP_CLIENT_ID", "")
 GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
 REGISTRY_ID = os.environ.get("REGISTRY_ID", "")
 KB_DOCS_BUCKET = os.environ.get("KB_DOCS_BUCKET", "")
@@ -1769,6 +1775,129 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict,
         "signedOut": signed_out,
         "errors": errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# Authorizer conformance: is a registered agent actually callable, and by whom?
+#
+# Registering an APPROVED card is enough to be DISCOVERED — this Lambda lists it,
+# the orchestrator registers tools for it, the delegation prompt names it. It is not
+# enough to be CALLABLE: that is decided by the sub-agent's own Runtime authorizer,
+# which lives with whoever deployed that runtime. Nothing connected the two, so a
+# record could read `Reachable / approved` on the Integration Registry page while
+# nobody could call the agent — or while everybody could.
+#
+# The rule itself is `shared/a2a_conformance.py`, pure and tested. What lives here is
+# the part that needs AWS: getting from a card's URL to the runtime behind it.
+# ---------------------------------------------------------------------------
+
+_RUNTIME_URL_MARKER = "/runtimes/"
+_GATEWAY_HOST_MARKER = ".gateway.bedrock-agentcore."
+
+
+def _runtime_id_from_url(url: str) -> str:
+    """The agentRuntimeId inside a Runtime data-plane URL, or "".
+
+    Shape: `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{url-encoded
+    ARN}/invocations`. The ARN's own last segment is the id.
+    """
+    if _RUNTIME_URL_MARKER not in url:
+        return ""
+    tail = url.split(_RUNTIME_URL_MARKER, 1)[1]
+    arn = unquote(tail.split("/invocations", 1)[0])
+    return arn.rsplit("/", 1)[-1] if "/" in arn else ""
+
+
+def _resolve_runtime(url: str) -> tuple[str, str]:
+    """(agentRuntimeId, how it was resolved) for a card's URL.
+
+    Two shapes, because a card may point straight at a runtime or at the A2A
+    gateway. The gateway case needs one extra hop: the target's name is the URL's
+    last path segment, and its `passthrough.endpoint` is the runtime URL. Handling
+    both is not future-proofing — our own cards moved from the first to the second on
+    2026-08-15, and a third party registering their own agent would use the first.
+    """
+    if _GATEWAY_HOST_MARKER in url:
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        gateway_id = host.split(".", 1)[0]
+        target_name = url.rstrip("/").rsplit("/", 1)[-1]
+        try:
+            for page in agentcore_control.get_paginator(
+                    "list_gateway_targets").paginate(gatewayIdentifier=gateway_id):
+                for tgt in page.get("items", []):
+                    if tgt.get("name") != target_name:
+                        continue
+                    full = agentcore_control.get_gateway_target(
+                        gatewayIdentifier=gateway_id, targetId=tgt["targetId"])
+                    endpoint = (((full.get("targetConfiguration") or {}).get("http")
+                                 or {}).get("passthrough") or {}).get("endpoint", "")
+                    rid = _runtime_id_from_url(endpoint)
+                    if rid:
+                        return rid, f"gateway {gateway_id} target {target_name}"
+                    return "", f"gateway target {target_name} is not a runtime passthrough"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not resolve gateway target for %s: %s", url, exc)
+            return "", f"gateway target lookup failed: {exc}"
+        return "", f"no target named {target_name} on {gateway_id}"
+    rid = _runtime_id_from_url(url)
+    return (rid, "direct runtime url") if rid else ("", "url is neither a runtime nor a known gateway")
+
+
+def check_a2a_conformance(_event=None):
+    """GET /registry/records?action=a2a-conformance — is each registered agent callable?
+
+    Read-only. Returns one row per AGENT record with the findings from
+    `a2a_conformance.check`, so the console can mark a record whose authorizer does
+    not match the card it published.
+
+    Separate from `a2a-list` rather than folded into it: this costs a
+    GetAgentRuntime per record plus a gateway-target lookup, and the inventory page
+    should not get slower for a check that can be rendered as it arrives.
+    """
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    discovery_url = (f"https://cognito-idp.{REGION}.amazonaws.com/"
+                     f"{COGNITO_USER_POOL_ID}/.well-known/openid-configuration")
+    app_client = COGNITO_APP_CLIENT_ID
+
+    try:
+        records = _fetch_a2a_records()
+    except Exception as exc:  # noqa: BLE001
+        return response(502, {"error": f"cannot read the registry: {exc}"})
+
+    rows = []
+    for record in records:
+        card = record.get("card") or {}
+        url = card.get("url") or ""
+        runtime_id, via = _resolve_runtime(url)
+        authorizer = None
+        if runtime_id:
+            try:
+                authorizer = agentcore_control.get_agent_runtime(
+                    agentRuntimeId=runtime_id).get("authorizerConfiguration") or {}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not read runtime %s: %s", runtime_id, exc)
+                via = f"{via}; GetAgentRuntime failed: {exc}"
+
+        findings = a2a_conformance.check(card, authorizer, discovery_url, app_client)
+        rows.append({
+            "recordId": record["recordId"],
+            "name": record["name"],
+            "status": record["status"],
+            "runtimeId": runtime_id,
+            "resolvedVia": via,
+            "conformant": not findings,
+            "severity": a2a_conformance.worst_severity(findings),
+            "findings": findings,
+        })
+
+    return response(200, {
+        "records": rows,
+        # Echoed so a row that says "wrong pool" can be read against what this
+        # deployment actually expects, without going to look it up.
+        "expected": {"discoveryUrl": discovery_url, "appClientId": app_client},
+    })
 
 
 def sweep_a2a_revocations(_event=None):
@@ -4091,6 +4220,8 @@ def _dispatch(event, context):
         action = (event.get("queryStringParameters") or {}).get("action", "")
         if action == "a2a-list":
             return list_a2a_agents(event)
+        if action == "a2a-conformance":
+            return check_a2a_conformance(event)
         if action == "a2a-grants":
             return list_a2a_grants_for_record(event)
         if action == "skill-list":
