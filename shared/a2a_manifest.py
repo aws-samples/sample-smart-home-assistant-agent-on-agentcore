@@ -54,11 +54,13 @@ DOCS = {
     "onboarding": "docs/a2a-agent-onboarding.md",
     "runbook": "docs/agentcore-deploy-runbook.md",
     "contractGenerator": "scripts/a2a-authorizer-contract.py",
-    # Both the offline pre-flight and the live two-direction check; `--offline` does the
-    # card and naming checks without sending anything. Deliberately ONE entry: a
-    # separate `preflight` key pointed at a script that was never written, and a
-    # dangling path in a document we publish as the contract is worse than no entry —
-    # a third party cannot tell "not built" from "you gave me the wrong path".
+    # Offline, and the only one of these an agent team can run without access to this
+    # account: it takes THIS DOCUMENT plus their card and answers before anything is
+    # deployed. `shared/tests/test_manifest_docs_paths_exist.py` exists because this key
+    # once pointed at a script that had not been written, and a dangling path in the
+    # contract is worse than an absent entry — the reader cannot tell "not built yet"
+    # from "you gave me the wrong path".
+    "preflight": "scripts/a2a-preflight.py",
     "smokeTest": "scripts/a2a-delegation-smoke.py",
 }
 

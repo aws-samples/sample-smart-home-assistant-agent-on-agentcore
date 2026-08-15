@@ -186,11 +186,48 @@ finding。哪些拦、哪些不拦:
 
 ## 7. 自己验证,不需要我们在场
 
+### 7.1 部署之前:离线 pre-flight(可以放进你自己的 CI)
+
+**这一步不需要我们账号的任何权限。** 把 §1 的 manifest 存成文件,和你的 card 一起喂给它:
+
 ```bash
-# 只做离线检查:卡名/skill id 能否编成 group、卡是否完整、url 形状
+python scripts/a2a-preflight.py --card card.json --manifest manifest.json
+python scripts/a2a-preflight.py --card card.json --manifest manifest.json \
+    --authorizer authorizer.json          # 顺便把要部署的 authorizer 一起核
+python scripts/a2a-preflight.py --card card.json --manifest manifest.json \
+    --print-authorizer > authorizer.json  # 直接生成应该部署的那份
+python scripts/a2a-preflight.py --card c.json --manifest m.json --json  # 给 CI 解析
+```
+
+**只要两个文件**:`scripts/a2a-preflight.py` 和 `shared/a2a_preflight.py`,并排放在
+任意目录,`python3` 就能跑 —— 纯标准库、不碰 AWS、不读我们的仓库。把这两个文件拷进你的
+CI 即可,`block`/`risk` 时 exit 1。
+
+**它的规则是从 manifest 里读的,不是从我们代码里读的。** 两个后果:你能自己跑;而且
+manifest 里没有的规则它会报 `manifest-incomplete` 而**不是**回落到某个默认值 —— 否则
+"公布的契约"就会悄悄不再是真正的契约。
+
+它拦住的每一条,都是**不拦就会在很靠后、而且以误导性面目出现**的问题:
+
+| 它报什么 | 不拦的话你会看到 |
+|---|---|
+| `card-incomplete` | Registry 拒绝并说 "does not match any supported version" —— 听起来是版本问题 |
+| `card-name-unencodable` / `skill-id-unencodable` | 授权被**静默跳过**:管理员看到"已授权",用户在门口被拒 |
+| `group-name-too-long` | 卡完全合法,但那个 skill **永远授不出去**,而且只有真去授权时才发现 |
+| `url-unresolvable` | 我们没法从 url 回溯到 runtime,于是合规检查和路由都做不了 |
+| `uses-allowedClients` | 每一个已完整授权的用户都被拒,报的是 `client_id` 不匹配 |
+| `no-claim-check` | **池子里谁都能调你的全部 skill,而且一切看起来都正常** |
+
+`no-claim-check` 是 `risk` 而不是 `note`,并且**会让 exit 1** —— 它的生产症状就是"能用"。
+
+pre-flight 通过 ≈ 审批门(§5)会通过:两边的 authorizer 判定有测试双向钉住,所以我们不会
+在 pre-flight 说行、在审批时说不行。
+
+### 7.2 部署之后:真的打两次
+
+```bash
 ./venv/bin/python scripts/a2a-delegation-smoke.py --record-id <recordId> --offline
 
-# 真的打两次:一个被授权的用户 + 一个没被授权的用户
 ./venv/bin/python scripts/a2a-delegation-smoke.py --record-id <recordId> \
     --granted-user alice@example.com --ungranted-user bob@example.com
 ```
@@ -205,16 +242,18 @@ group,它报 FAIL 而不是 PASS;5xx 或传输错误也算 FAIL,因为那不能�
 
 ## 8. 最小检查清单
 
-1. 从 Admin Console 复制 **平台契约(manifest)**,钉住 `manifestVersion`
-2. 卡名和 skill id 通过 `groups.namePattern`
-3. Runtime 部署完成,`protocolConfiguration.serverProtocol = A2A`
-4. 跑 `scripts/a2a-authorizer-contract.py`,把输出配到 `authorizerConfiguration`
-5. 容器里自己做 skill 层判断(空集合 → 拒绝)
+1. 从 Admin Console 复制 **平台契约(manifest)**,存成文件,钉住 `manifestVersion`
+2. `scripts/a2a-preflight.py --card ... --manifest ... --print-authorizer` 生成 authorizer
+3. `scripts/a2a-preflight.py --card ... --manifest ... --authorizer ...` **exit 0**
+   —— 第 4–6 步的错这里全都会先被拦下来
+4. 容器里自己做 skill 层判断(空集合 → 拒绝)
+5. Runtime 部署完成,`protocolConfiguration.serverProtocol = A2A`,authorizer 配好
 6. 卡的 `url` 指向你的 runtime invocations 地址
-7. `scripts/a2a-delegation-smoke.py --offline` 全绿
-8. 提交记录到 Registry 并等审批 → `APPROVED`(不合规会 409 并告诉你哪里)
-9. 让管理员授权(全局或按用户),然后跑一次带两个用户的 smoke test
-10. 需要的话:`action=a2a-gateway-reconcile&apply=true` 进 gateway
+7. 提交记录到 Registry 并等审批 → `APPROVED`(不合规会 409 并告诉你哪里)
+8. 让管理员授权(全局或按用户),然后跑一次带两个用户的 smoke test
+9. 需要的话:`action=a2a-gateway-reconcile&apply=true` 进 gateway
+
+把第 3 步放进你的 CI。它不需要我们账号的任何权限,所以从此我们不在你的排错回路里。
 
 ## 9. 我们不会下放的两件事
 
