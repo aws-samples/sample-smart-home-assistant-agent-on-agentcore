@@ -83,11 +83,11 @@ def test_skills_for_agent_is_empty_for_an_unmentioned_agent():
     assert g.skills_for_agent([], "knowledge-qa-agent") == frozenset()
 
 
-def test_all_groups_for_agent_is_sorted_and_deduped():
-    """The authorizer's CONTAINS_ANY list must be stable, or every deploy diffs."""
-    assert g.all_groups_for_agent("home-security-agent",
-                                  ["risk_assessment", "incident_response",
-                                   "risk_assessment"]) == [
+def test_skill_groups_for_agent_is_sorted_and_deduped():
+    """These reach the container, so a reordering would be a prompt-cache miss."""
+    assert g.skill_groups_for_agent("home-security-agent",
+                                    ["risk_assessment", "incident_response",
+                                     "risk_assessment"]) == [
         "a2a-home-security-agent.incident_response",
         "a2a-home-security-agent.risk_assessment",
     ]
@@ -95,5 +95,62 @@ def test_all_groups_for_agent_is_sorted_and_deduped():
 
 def test_one_agents_group_never_grants_another():
     """The cross-agent case the smoke test also covers, pinned cheaply here."""
-    claim = g.all_groups_for_agent("home-security-agent", ["risk_assessment"])
+    claim = g.skill_groups_for_agent("home-security-agent", ["risk_assessment"])
     assert g.skills_for_agent(claim, "device-control-agent") == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# The agent-level group: the door key
+# ---------------------------------------------------------------------------
+
+def test_the_door_list_does_not_move_when_skills_change():
+    """The whole reason `authorizer_groups` exists.
+
+    `CONTAINS_ANY` has no wildcard, so a list derived from the skills made "add a
+    skill to the card" into "redeploy the runtime, or its grantees are refused at the
+    door with nothing explaining why". One stable entry removes that with no loss of
+    door strength — the door only ever asked "any grant on this agent".
+    """
+    assert g.authorizer_groups("home-security-agent", ["risk_assessment"]) == \
+        ["a2a-home-security-agent"]
+    assert g.authorizer_groups("home-security-agent",
+                               ["risk_assessment", "incident_response", "new"]) == \
+        ["a2a-home-security-agent"]
+    assert g.authorizer_groups("home-security-agent") == ["a2a-home-security-agent"]
+
+
+def test_the_old_name_is_gone_rather_than_aliased():
+    """Five deployment units carry a COPY of this module.
+
+    An alias would let a stale copy keep emitting the per-skill list while every
+    reader assumed the stable one — silent, and in the direction that locks users out.
+    An AttributeError on the first call is the failure we want.
+    """
+    assert not hasattr(g, "all_groups_for_agent")
+
+
+def test_the_agent_group_contributes_no_skills():
+    """It must not decode as a grant, or the orchestrator would offer a tool for `""`."""
+    door = g.agent_group_name("home-security-agent")
+    assert g.parse_group(door) is None
+    assert g.grants_from_claim([door]) == {}
+    assert g.skills_for_agent([door], "home-security-agent") == frozenset()
+
+
+def test_agent_of_group_decodes_both_shapes():
+    """What the revocation sweep runs on. `parse_group` cannot answer for the door
+    key, and a sweep blind to it would strip the skill groups that gate nothing and
+    leave the one that opens the door."""
+    assert g.agent_of_group("a2a-home-security-agent") == "home-security-agent"
+    assert g.agent_of_group("a2a-home-security-agent.risk_assessment") == \
+        "home-security-agent"
+    assert g.agent_of_group("admin") is None
+    assert g.agent_of_group("") is None
+    assert g.agent_of_group("a2a-") is None
+
+
+def test_an_unsafe_agent_name_raises_rather_than_being_sanitised():
+    with pytest.raises(g.GroupNameError):
+        g.agent_group_name("home security agent")
+    with pytest.raises(g.GroupNameError):
+        g.agent_group_name("")

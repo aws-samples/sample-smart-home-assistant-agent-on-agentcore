@@ -26,10 +26,37 @@ granted user (group written one way, matched another) or silently offers the mod
 tool the platform will refuse. Hence one definition here and a parity test over the
 copies, the same arrangement as `agent_registry.REGISTRY_CLIENT`.
 
-Group names encode `(agent, skill)` rather than just the agent, so the same claim
-answers both questions the two enforcement points ask: the Runtime authorizer asks
-"any grant on me at all" (CONTAINS_ANY over all of this agent's skill groups) and
-the server asks "which skills" (the subset present in the claim).
+Two shapes, because the two enforcement points ask different questions
+----------------------------------------------------------------------
+    a2a-<agent>            "may this caller reach this agent at all"  -> the DOOR
+    a2a-<agent>.<skill>    "which of its skills were granted"         -> the CONTAINER
+
+A granted user holds BOTH: the agent group once, and one skill group per granted
+skill. The two are not redundant, and which one each enforcement point reads is the
+whole reason this file changed on 2026-08-15.
+
+The Runtime authorizer used to be handed the full per-skill list
+(`CONTAINS_ANY [a2a-X.s1, a2a-X.s2, ...]`). Measured against what it actually
+decides: `CONTAINS_ANY` passes on ANY one of them, and the container then derives the
+skill subset from the same signed claim and refuses only when that subset is empty
+(`server.enforce_allowed_skills`). So the door and the container were asking the
+identical question, and enumerating skills at the door bought **no** additional
+authorization. What it did buy was a coupling: `CONTAINS_ANY` has no wildcard, so
+adding a skill to a card meant an `UpdateAgentRuntime` before anyone granted the new
+skill could get in — silently refused at the door until someone redeployed.
+
+`authorizer_groups` therefore returns the ONE stable agent group. It is constant for
+an agent's whole lifetime, so a card may grow skills with no redeploy and no
+cross-team step, at identical door strength. Per-skill groups keep doing the job only
+they can do: telling the container which skills a caller holds.
+
+The migration has an order, and reversing it locks users out
+-----------------------------------------------------------
+The grant side must emit `a2a-<agent>` BEFORE any authorizer starts requiring it.
+Flip the authorizer first and every already-granted user is refused until the next
+materialisation reaches them. `check` in `shared/a2a_conformance.py` accepts a
+skill-group-only authorizer as INFO rather than CLOSED for exactly this window: such
+a runtime is not broken, it is merely still coupled.
 """
 
 from __future__ import annotations
@@ -80,12 +107,40 @@ def group_name(agent_name: str, skill_id: str) -> str:
     return name
 
 
-def parse_group(name: str) -> tuple[str, str] | None:
-    """`(agent, skill)` for one of our groups, or None for anything else.
+def agent_group_name(agent_name: str) -> str:
+    """The group granting access to `agent_name` at all, with no skill component.
 
-    None for `admin`, for a group with our prefix but no separator, and for an
+    >>> agent_group_name("knowledge-qa-agent")
+    'a2a-knowledge-qa-agent'
+
+    This is what a sub-agent's Runtime authorizer matches. Stable for the agent's
+    whole lifetime: adding, renaming or removing a skill does not change it, which
+    is what removes the "add a skill -> UpdateAgentRuntime" coupling. Renaming the
+    CARD does change it, and that is correct — a renamed card is a different agent
+    to every one of the five deployment units in the module docstring.
+    """
+    agent = (agent_name or "").strip()
+    if not _SAFE.match(agent):
+        raise GroupNameError(f"agent name {agent_name!r} is not group-name safe")
+    name = f"{GROUP_PREFIX}{agent}"
+    if len(name) > MAX_GROUP_NAME:
+        raise GroupNameError(
+            f"group name {name!r} exceeds Cognito's {MAX_GROUP_NAME} characters")
+    return name
+
+
+def parse_group(name: str) -> tuple[str, str] | None:
+    """`(agent, skill)` for one of our SKILL groups, or None for anything else.
+
+    None for `admin`, for the agent-level `a2a-<agent>` (no separator), and for an
     empty half — a malformed group must not decode to a grant on `""`, which
     would match nothing and read as a real entry in the UI.
+
+    Deliberately still skill-only. `grants_from_claim` is built on it and answers
+    "which skills", so an agent-level group must contribute no skills: counting it
+    as one would invent a skill named "" and offer the orchestrator a tool for it.
+    Use `agent_of_group` when the question is "which agent does this group belong
+    to", which is what a revocation sweep asks.
     """
     if not name or not name.startswith(GROUP_PREFIX):
         return None
@@ -94,6 +149,27 @@ def parse_group(name: str) -> tuple[str, str] | None:
     if not sep or not agent or not skill:
         return None
     return agent, skill
+
+
+def agent_of_group(name: str) -> str | None:
+    """The agent a group of EITHER shape belongs to, or None if it is not ours.
+
+    >>> agent_of_group("a2a-light-effect-agent")
+    'light-effect-agent'
+    >>> agent_of_group("a2a-light-effect-agent.compose_effect")
+    'light-effect-agent'
+    >>> agent_of_group("admin") is None
+    True
+
+    The revocation sweep scans from the group side and needs this rather than
+    `parse_group`: the agent-level group is the one that actually opens the door, so
+    a sweep that could not decode it would leave the door open on a deprecated
+    record while dutifully removing the skill groups that gate nothing.
+    """
+    if not name or not name.startswith(GROUP_PREFIX):
+        return None
+    agent = name[len(GROUP_PREFIX):].partition(SEPARATOR)[0]
+    return agent or None
 
 
 def grants_from_claim(groups: list[str] | tuple[str, ...] | None) -> dict[str, list[str]]:
@@ -119,11 +195,22 @@ def skills_for_agent(groups: list[str] | tuple[str, ...] | None,
     return frozenset(grants_from_claim(groups).get(agent_name, ()))
 
 
-def all_groups_for_agent(agent_name: str, skill_ids) -> list[str]:
-    """Every group name for one agent, for the authorizer's CONTAINS_ANY list.
-
-    `CONTAINS_ANY` takes an exact list with no wildcard, so the authorizer has to
-    enumerate the agent's skills. That is why adding a skill is an
-    `UpdateAgentRuntime` and not just a group write.
-    """
+def skill_groups_for_agent(agent_name: str, skill_ids) -> list[str]:
+    """One group per skill — what an admin hands out, and what the container reads."""
     return [group_name(agent_name, s) for s in sorted(set(skill_ids))]
+
+
+def authorizer_groups(agent_name: str, skill_ids=()) -> list[str]:
+    """The CONTAINS_ANY list a sub-agent's Runtime authorizer should be given.
+
+    One entry: the agent-level group. `skill_ids` is accepted and ignored so the
+    signature still reads like a question about this card, and so a caller that
+    still passes them is not silently doing something different from what it looks
+    like — see `agent_group_name` for why enumerating them bought nothing.
+
+    Renamed from `all_groups_for_agent` on purpose. The old name is gone rather than
+    aliased: five deployment units carry a COPY of this module, and an alias would
+    let a stale copy keep emitting the per-skill list while every reader assumed the
+    stable one. An `AttributeError` on the first call is the failure we want.
+    """
+    return [agent_group_name(agent_name)]

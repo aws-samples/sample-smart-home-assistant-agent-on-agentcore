@@ -72,19 +72,44 @@ def test_enforce_refuses_a_caller_with_no_overlap():
     srv.enforce_allowed_skills(frozenset({"risk_assessment"}), srv._SKILL_IDS)
 
 
-def test_the_authorizer_match_list_covers_every_published_skill():
-    """The runtime authorizer enumerates skills, so a new skill needs a redeploy.
+def test_the_door_and_the_container_read_different_groups_of_the_same_claim():
+    """Why the authorizer stopped enumerating skills, pinned from the container side.
 
-    If this list were built from anything narrower than the card's skills, a user
-    granted only the missing skill would be refused at the door with no clue why.
+    The door is handed one stable `a2a-<agent>`; the container derives the skill
+    subset from the per-skill groups in the same signed claim. So a granted user's
+    claim satisfies both, and a card that grows a skill changes only what the
+    container sees — no `UpdateAgentRuntime`, no window where a grantee is refused at
+    the door with nothing explaining why.
     """
     skills = ["risk_assessment", "incident_response"]
-    groups = ag.all_groups_for_agent("home-security-agent", skills)
+    door = ag.authorizer_groups("home-security-agent", skills)
+    assert door == ["a2a-home-security-agent"]
+
     for skill in skills:
-        claim_with_only_this = [ag.group_name("home-security-agent", skill)]
-        assert claim_with_only_this[0] in groups
+        claim = door + [ag.group_name("home-security-agent", skill)]
+        # The door: CONTAINS_ANY over `door` matches, because the user holds it.
+        assert set(door) & set(claim)
+        # The container: exactly the granted skill, and the door key adds none.
         assert srv.skills_from_claims(
-            _claims(claim_with_only_this), "home-security-agent") == {skill}
+            _claims(claim), "home-security-agent") == {skill}
+
+    # Adding a skill does not move the door list — the whole point.
+    assert ag.authorizer_groups("home-security-agent", skills + ["new_skill"]) == door
+
+
+def test_the_door_key_alone_grants_no_skill_so_the_container_still_refuses():
+    """Defence in depth, and the reason narrowing to zero skills must not emit it.
+
+    A caller holding only `a2a-<agent>` passes the door and is refused inside. That
+    keeps the door's coarseness honest: it authorizes reaching the agent, never a
+    skill.
+    """
+    srv._SKILL_IDS = frozenset({"risk_assessment"})
+    allowed = srv.skills_from_claims(
+        _claims(["a2a-home-security-agent"]), "home-security-agent")
+    assert allowed == frozenset()
+    with pytest.raises(PermissionError):
+        srv.enforce_allowed_skills(allowed, srv._SKILL_IDS)
 
 
 def test_strip_bearer_handles_both_shapes():

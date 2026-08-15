@@ -855,8 +855,20 @@ def _authorizer_config(agent: str, discovery_url: str, cognito: dict[str, Any],
             f"every request would be refused. Re-run with --legacy-m2m-auth to "
             f"deploy the pre-migration auth model instead.")
 
-    groups = a2a_groups.all_groups_for_agent(card_name, skill_ids)
-    log(f"  [{agent}] grant groups ({len(groups)}): {groups}")
+    # ONE stable agent-level group, not the per-skill list this used to enumerate.
+    # `CONTAINS_ANY` has no wildcard, so the old list made "add a skill to the card"
+    # into "redeploy this runtime or its grantees are refused at the door with nothing
+    # explaining why". It bought no authorization to pay for that: the door passed on
+    # ANY one of the skill groups, and the container derives the skill subset from the
+    # same signed claim anyway (`common/server.enforce_allowed_skills`). See
+    # `shared/a2a_groups.authorizer_groups`.
+    #
+    # ORDER MATTERS on the way in: the admin API and the pre-token trigger have to be
+    # emitting `a2a-<agent>` before this runs, or every already-granted user is refused
+    # until the next materialisation reaches them.
+    groups = a2a_groups.authorizer_groups(card_name, skill_ids)
+    log(f"  [{agent}] door group: {groups} "
+        f"(skills gated in-container: {sorted(skill_ids)})")
     return {
         "discoveryUrl": discovery_url,
         "allowedAudience": [app_client],

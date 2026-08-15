@@ -23,9 +23,16 @@ group list comes from `shared/a2a_conformance.authorizer_for`, the same function
 console's conformance check compares against — so what we hand out and what we check
 cannot drift.
 
-`CONTAINS_ANY` takes an exact list with no wildcard, which means **adding a skill to
-the card later requires re-running this and updating the runtime**. Until then a user
-granted the new skill is refused at the door with nothing explaining why.
+**The authorizer list is ONE group and never changes** (`a2a-<cardName>`). Adding,
+renaming or removing a skill does not require touching the runtime. It used to: the
+list was the full per-skill enumeration, and `CONTAINS_ANY` has no wildcard, so a new
+skill left its grantees refused at the door until someone redeployed. That
+enumeration bought no authorization to pay for the coupling — the door passed on ANY
+one of the groups, and the container derives the skill subset from the same signed
+claim regardless. See `shared/a2a_groups.authorizer_groups`.
+
+What DOES change the authorizer: renaming the card. The group name is keyed on the
+card name, so a rename is a new agent as far as every enforcement point is concerned.
 """
 
 from __future__ import annotations
@@ -81,10 +88,11 @@ def main(argv=None) -> int:
             if args.card else _card_from_record(args.record_id))
     discovery_url, app_client = _deployment_identity()
 
-    groups, findings = conf.expected_groups(card)
+    door, findings = conf.expected_groups(card)
+    grantable, _ = conf.grantable_groups(card)
     for f in findings:
         print(f"WARNING [{f['code']}] {f['detail']}", file=sys.stderr)
-    if not groups:
+    if not door:
         return 1
 
     authorizer = conf.authorizer_for(card, discovery_url, app_client)
@@ -92,12 +100,21 @@ def main(argv=None) -> int:
 
     print(f"# agent      : {card.get('name')}")
     print(f"# skills     : {[s.get('id') for s in card.get('skills') or []]}")
-    print(f"# grant groups an admin can hand out ({len(groups)}):")
-    for g in groups:
-        print(f"#   {g}")
     print("#")
-    print("# Adding a skill later means re-running this and updating the runtime:")
-    print("# CONTAINS_ANY has no wildcard, so an unlisted group is refused at the door.")
+    print(f"# DOOR — the only group your authorizer needs to match ({len(door)}):")
+    for g in door:
+        print(f"#   {g}")
+    print("#   Stable for this agent's lifetime. Add or remove skills freely; this")
+    print("#   list does not move, so a card edit is not also a runtime redeploy.")
+    print("#")
+    print(f"# GRANTS — what an admin hands out per skill ({len(grantable)}):")
+    for g in grantable:
+        print(f"#   {g}")
+    print("#   You do NOT list these in the authorizer. Your container reads them")
+    print("#   from the same signed claim to decide which skills a caller holds.")
+    print("#")
+    print("# Renaming the card DOES change the door group — that is a new agent to")
+    print("# every enforcement point, and existing grants will not follow it.")
     print()
 
     if args.format == "json":

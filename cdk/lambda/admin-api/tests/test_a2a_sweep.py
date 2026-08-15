@@ -51,9 +51,29 @@ def test_an_unparseable_group_with_our_prefix_is_left_alone():
     """Deleting memberships on a guess is worse than an orphan group.
 
     The prefix is ours, but a name that does not decode means something upstream
-    changed shape — and this function's output is fed straight into removals.
+    changed shape — and this function's output is fed straight into removals. Only a
+    truly empty agent half is undecodable now: a bare `a2a-<agent>` is the DOOR KEY,
+    a legitimate shape, and is swept like any other.
     """
-    assert sp.groups_to_revoke(["a2a-no-separator-here"], set()) == []
+    assert sp.groups_to_revoke(["a2a-", "a2a-."], set()) == []
+
+
+def test_the_door_key_of_a_doomed_agent_is_revoked():
+    """The bug this function would have had if it kept using `parse_group`.
+
+    `parse_group` decodes only the skill shape, so it answers None for `a2a-<agent>` —
+    the ONE group the Runtime authorizer actually matches. A sweep built on it would
+    strip every skill group off a deprecated agent's holders, leave the door key, and
+    report success: the record gone from the API, its users still getting in.
+    """
+    groups = ["a2a-energy-optimization-agent",
+              "a2a-energy-optimization-agent.estimate_savings"]
+    assert sp.groups_to_revoke(groups, set()) == sorted(groups)
+
+
+def test_a_grantable_agents_door_key_survives():
+    assert sp.groups_to_revoke(["a2a-knowledge-qa-agent"],
+                               {"knowledge-qa-agent"}) == []
 
 
 def test_a_hand_made_group_for_an_unregistered_agent_is_revoked():

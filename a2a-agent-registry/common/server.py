@@ -32,14 +32,22 @@ millisecond, so this costs nothing next to an LLM call.
 
 Authorization comes from a signed claim
 --------------------------------------
-A grant is a Cognito group (``a2a-<agent>.<skill>``, see ``common/a2a_groups.py``)
-on the end user's own token. Two checks, in this order:
+A grant is a Cognito group on the end user's own token, in two shapes (see
+``common/a2a_groups.py``). Two checks read different shapes of the same claim:
 
-  1. This Runtime's ``customJWTAuthorizer.customClaims`` matches ``cognito:groups``
-     with ``CONTAINS_ANY`` over every group of this agent, so AgentCore refuses a
-     caller with no grant on this agent *before* the container is reached.
-  2. This module derives the skill subset from the same claim, after verifying the
-     token itself.
+  1. **The door.** This Runtime's ``customJWTAuthorizer.customClaims`` matches
+     ``cognito:groups`` with ``CONTAINS_ANY`` over the single stable
+     ``a2a-<agent>``, so AgentCore refuses a caller with no grant on this agent
+     *before* the container is reached.
+  2. **Here.** This module derives the skill subset from the ``a2a-<agent>.<skill>``
+     groups in the same claim, after verifying the token itself.
+
+The door used to be handed the full per-skill list. It was dropped because both
+checks were then asking the identical question — ``CONTAINS_ANY`` passes on any one
+group, and ``enforce_allowed_skills`` below refuses only an EMPTY subset — while the
+enumeration coupled every card edit to an ``UpdateAgentRuntime``. Holding a door key
+and no skill group still gets refused here, which is what keeps the coarse door
+honest: it authorizes reaching this agent, never a skill.
 
 The previous design read ``X-A2A-Allowed-Skills``, a header the *client* set. That
 made the grant client-asserted: the server could only refuse a skill the caller had

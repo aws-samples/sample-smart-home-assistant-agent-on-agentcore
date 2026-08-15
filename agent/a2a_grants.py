@@ -9,6 +9,11 @@ orchestrator reads the claim to decide which `a2a_*` tools to offer the model; e
 sub-agent's Runtime authorizer independently validates the same token and matches the
 same claim to decide whether to admit the call. One signed source, so what the model
 is offered and what the platform permits cannot drift.
+
+The claim also carries a bare `a2a-<agent>` per granted agent — the group the
+sub-agent's authorizer matches. This module ignores it, and must: `grants_from_claim`
+answers "which skills", and counting a group with no skill component would invent a
+skill named `""` and offer the model a tool for it.
 """
 
 from __future__ import annotations

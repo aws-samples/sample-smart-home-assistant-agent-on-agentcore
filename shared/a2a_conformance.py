@@ -50,8 +50,11 @@ def _finding(code: str, severity: str, detail: str) -> dict:
     return {"code": code, "severity": severity, "detail": detail}
 
 
-def expected_groups(card: dict) -> tuple[list[str], list[dict]]:
-    """The grant groups this card implies, plus findings about the card itself.
+def grantable_groups(card: dict) -> tuple[list[str], list[dict]]:
+    """The per-skill groups an admin can hand out, plus findings about the card.
+
+    These are what the CONTAINER reads to decide which skills a caller holds. They
+    are NOT what the authorizer matches — see `expected_groups`.
 
     A card whose name or skill id is not group-name-encodable cannot be granted at
     all: `wanted_groups` skips it with a warning and the user ends up "granted" in
@@ -78,6 +81,30 @@ def expected_groups(card: dict) -> tuple[list[str], list[dict]]:
                 f"skill {skill!r} cannot be encoded as a group name ({exc}); a grant "
                 "on it is silently skipped"))
     return sorted(groups), findings
+
+
+def expected_groups(card: dict) -> tuple[list[str], list[dict]]:
+    """The CONTAINS_ANY list this card's Runtime authorizer should carry.
+
+    One entry — `a2a-<cardName>` — and that is the point: it never changes as the
+    card gains skills, so a card edit is not also a runtime redeploy. The findings
+    still come from walking the skills, because a card that cannot be granted at all
+    is worth reporting even though the door list does not name its skills.
+
+    Kept as the name `check` and `authorizer_for` both use, so "what we hand out" and
+    "what we check" cannot drift. Use `grantable_groups` for the admin-facing list.
+    """
+    skill_groups, findings = grantable_groups(card)
+    if not skill_groups:
+        return [], findings
+    try:
+        return [a2a_groups.agent_group_name(card.get("name") or "")], findings
+    except a2a_groups.GroupNameError as exc:
+        findings.append(_finding(
+            "card-unencodable", CLOSED,
+            f"the card name cannot be encoded as a group name ({exc}), so no "
+            "authorizer can be configured for it"))
+        return [], findings
 
 
 def check(card: dict, authorizer: dict | None, discovery_url: str,
@@ -156,21 +183,48 @@ def check(card: dict, authorizer: dict | None, discovery_url: str,
     configured = sorted(
         (match.get("claimMatchValue") or {}).get("matchValueStringList") or [])
 
-    # CONTAINS_ANY takes an exact list with no wildcard, so the two sets have to be
-    # compared both ways and each direction means something different.
+    # Three buckets rather than a set difference, because "names a group this card
+    # does not declare" splits into a harmless case and a dangerous one, and a plain
+    # diff reports them identically.
+    #
+    #   wanted            the stable agent group — what this should name
+    #   legacy            this card's own per-skill groups — works, but couples a
+    #                     card edit to an UpdateAgentRuntime
+    #   foreign           a group belonging to some OTHER agent — a real door for
+    #                     someone this card never declared
+    card_name = card.get("name") or ""
+    legacy, foreign = [], []
+    for g in configured:
+        if g in wanted:
+            continue
+        owner = a2a_groups.agent_of_group(g)
+        (legacy if owner and owner == card_name else foreign).append(g)
+
     missing = [g for g in wanted if g not in configured]
-    extra = [g for g in configured if g not in wanted]
-    if missing:
+    if missing and not legacy:
         findings.append(_finding(
             "claim-missing-groups", CLOSED,
-            f"the authorizer does not name {missing} — a user granted those skills "
-            "is refused at the door, usually after a skill was added to the card "
-            "without redeploying the agent"))
-    if extra:
+            f"the authorizer does not name {missing}, and names no group of this "
+            "card's either — every caller is refused at the door"))
+    elif missing and legacy:
+        # NOT closed: this runtime works today. Every granted user holds these
+        # per-skill groups, CONTAINS_ANY passes on any one of them, and the container
+        # applies the same check afterwards. What it is, is still coupled — adding a
+        # skill to the card will refuse the users granted it until someone redeploys.
+        # Reported so the fix is discoverable, at the severity the facts support.
+        findings.append(_finding(
+            "claim-skill-groups-only", INFO,
+            f"the authorizer enumerates this card's per-skill groups ({len(legacy)}) "
+            f"instead of the stable {missing[0]!r}. Callers are authorized correctly, "
+            "but ADDING A SKILL will refuse its grantees until this runtime is "
+            "redeployed. Re-run scripts/a2a-authorizer-contract.py to drop the "
+            "coupling; no grant changes are needed"))
+    if foreign:
         findings.append(_finding(
             "claim-extra-groups", OPEN,
-            f"the authorizer still names {extra}, which this card no longer "
-            "declares — holders of those groups keep getting in"))
+            f"the authorizer names {foreign}, which belong to a different agent than "
+            f"{card_name!r} — holders of those groups reach this agent without ever "
+            "being granted it"))
     return findings
 
 

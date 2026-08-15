@@ -116,11 +116,18 @@ def _claim(event):
 # ---------------------------------------------------------------------------
 
 def test_a_global_grant_is_injected_without_any_membership(_load_module):
+    """Both shapes, because the claim has to satisfy both enforcement points.
+
+    `a2a-<agent>` is what the sub-agent's Runtime authorizer matches; the per-skill
+    group is what its container reads to derive the granted skills. Injecting only
+    one of them gives a globally granted user either a door they cannot pass or a
+    door that opens onto a refusal.
+    """
     _intent(global_grants={"rec-energy": ["estimate_savings"]})
     _registry([("rec-energy", ENERGY, "APPROVED", timedelta(days=1))])
 
     out = _load_module.handler(_event(groups=[]))
-    assert _claim(out) == [f"a2a-{ENERGY}.estimate_savings"]
+    assert _claim(out) == [f"a2a-{ENERGY}", f"a2a-{ENERGY}.estimate_savings"]
 
 
 def test_non_a2a_groups_are_carried_back_verbatim(_load_module):
@@ -191,7 +198,7 @@ def test_a_fresh_draft_is_still_injected(_load_module):
     _registry([("rec-energy", ENERGY, "DRAFT", timedelta(minutes=5))])
 
     assert _claim(_load_module.handler(_event())) == \
-        [f"a2a-{ENERGY}.estimate_savings"]
+        [f"a2a-{ENERGY}", f"a2a-{ENERGY}.estimate_savings"]
 
 
 def test_a_stale_draft_is_not_injected(_load_module):

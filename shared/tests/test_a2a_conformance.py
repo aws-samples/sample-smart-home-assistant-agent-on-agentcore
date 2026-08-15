@@ -25,8 +25,12 @@ CARD = {
     "name": "energy-optimization-agent",
     "skills": [{"id": "estimate_savings"}, {"id": "tariff_analysis"}],
 }
-GROUPS = ["a2a-energy-optimization-agent.estimate_savings",
-          "a2a-energy-optimization-agent.tariff_analysis"]
+# The DOOR list: one stable agent-level group, unchanged as the card gains skills.
+DOOR = ["a2a-energy-optimization-agent"]
+# The per-skill groups an admin hands out and the container reads. These are what the
+# authorizer used to enumerate, which is what coupled a card edit to a redeploy.
+SKILL_GROUPS = ["a2a-energy-optimization-agent.estimate_savings",
+                "a2a-energy-optimization-agent.tariff_analysis"]
 
 
 def _authorizer(groups=None, discovery=DISCOVERY, audience=None, claims=True,
@@ -39,7 +43,7 @@ def _authorizer(groups=None, discovery=DISCOVERY, audience=None, claims=True,
             "inboundTokenClaimValueType": conf.CLAIM_VALUE_TYPE,
             "authorizingClaimMatchValue": {
                 "claimMatchValue": {
-                    "matchValueStringList": GROUPS if groups is None else groups},
+                    "matchValueStringList": DOOR if groups is None else groups},
                 "claimMatchOperator": operator,
             },
         }]
@@ -58,9 +62,24 @@ def test_a_correctly_deployed_agent_has_no_findings():
     assert conf.check(CARD, _authorizer(), DISCOVERY, CLIENT) == []
 
 
-def test_the_expected_groups_come_from_the_card():
+def test_the_door_list_is_one_stable_group_not_the_skill_list():
+    """The change that removes the "add a skill -> redeploy" coupling.
+
+    Whether the card has two skills or twenty, the authorizer's CONTAINS_ANY list is
+    the same one entry — so a card edit is no longer also a runtime change.
+    """
     groups, findings = conf.expected_groups(CARD)
-    assert groups == GROUPS and findings == []
+    assert groups == DOOR and findings == []
+
+    wider = {"name": CARD["name"],
+             "skills": CARD["skills"] + [{"id": "peak_shift"}, {"id": "forecast"}]}
+    assert conf.expected_groups(wider)[0] == DOOR
+
+
+def test_the_grantable_groups_are_still_per_skill():
+    """The container still needs them: they are how it knows WHICH skills were granted."""
+    groups, findings = conf.grantable_groups(CARD)
+    assert groups == SKILL_GROUPS and findings == []
 
 
 def test_the_generator_output_passes_its_own_check():
@@ -99,12 +118,19 @@ def test_checking_the_wrong_claim_is_open():
     assert conf.worst_severity(findings) == conf.OPEN
 
 
-def test_a_group_the_card_no_longer_declares_is_open():
-    """A skill removed from the card leaves its holders still getting in."""
-    findings = conf.check(CARD, _authorizer(groups=GROUPS + [
-        "a2a-energy-optimization-agent.retired_skill"]), DISCOVERY, CLIENT)
+def test_a_group_belonging_to_ANOTHER_agent_is_open():
+    """The real door someone was never granted: a foreign agent's group listed here.
+
+    Note the narrowing against the old rule. A leftover group of this card's OWN
+    agent is no longer OPEN — its holders were granted this agent, so they are not
+    reaching anything they were not given. A group naming a DIFFERENT agent is, and
+    that is the case that was previously buried in the same finding.
+    """
+    findings = conf.check(CARD, _authorizer(groups=DOOR + [
+        "a2a-home-security-agent.arm_system"]), DISCOVERY, CLIENT)
     assert _codes(findings) == {"claim-extra-groups"}
     assert conf.worst_severity(findings) == conf.OPEN
+    assert "a2a-home-security-agent.arm_system" in findings[0]["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +153,51 @@ def test_a_missing_audience_is_closed():
     assert "wrong-audience" in _codes(findings)
 
 
-def test_a_skill_added_without_a_redeploy_is_closed():
-    """CONTAINS_ANY has no wildcard, so a new skill has to be enumerated."""
-    findings = conf.check(CARD, _authorizer(groups=[GROUPS[0]]), DISCOVERY, CLIENT)
+def test_an_authorizer_naming_nothing_of_this_card_is_closed():
+    findings = conf.check(CARD, _authorizer(groups=["a2a-home-security-agent"]),
+                          DISCOVERY, CLIENT)
+    assert "claim-missing-groups" in _codes(findings)
+    assert conf.worst_severity(findings) == conf.OPEN  # the foreign group outranks it
+
+
+def test_an_empty_match_list_is_closed():
+    findings = conf.check(CARD, _authorizer(groups=[]), DISCOVERY, CLIENT)
     assert _codes(findings) == {"claim-missing-groups"}
     assert conf.worst_severity(findings) == conf.CLOSED
-    assert "tariff_analysis" in findings[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# The migration window: still coupled, but NOT broken
+# ---------------------------------------------------------------------------
+
+def test_a_pre_migration_authorizer_is_info_not_closed():
+    """The 8 built-ins look like this until their next deploy, and they WORK.
+
+    Every granted user holds these per-skill groups, CONTAINS_ANY passes on any one
+    of them, and the container applies the same check afterwards. Reporting CLOSED
+    ("granted users are refused") would be false, and a red row an operator cannot
+    reproduce is how a check earns being ignored. The finding it does raise names the
+    real cost: the next skill added to this card will refuse its grantees.
+    """
+    findings = conf.check(CARD, _authorizer(groups=SKILL_GROUPS), DISCOVERY, CLIENT)
+    assert _codes(findings) == {"claim-skill-groups-only"}
+    assert conf.worst_severity(findings) == conf.INFO
+    assert "ADDING A SKILL" in findings[0]["detail"]
+
+
+def test_a_partial_pre_migration_list_is_still_only_info():
+    """One skill group is enough for the door, which is exactly why the old
+    per-skill enumeration bought no authorization."""
+    findings = conf.check(CARD, _authorizer(groups=[SKILL_GROUPS[0]]),
+                          DISCOVERY, CLIENT)
+    assert _codes(findings) == {"claim-skill-groups-only"}
+    assert conf.worst_severity(findings) == conf.INFO
+
+
+def test_naming_both_shapes_is_fully_conformant():
+    """The state a cautious operator lands in mid-migration. Nothing to report."""
+    assert conf.check(CARD, _authorizer(groups=DOOR + SKILL_GROUPS),
+                      DISCOVERY, CLIENT) == []
 
 
 def test_a_card_whose_names_cannot_be_encoded_is_closed():
@@ -155,7 +220,7 @@ def test_a_card_with_no_name_or_no_skills_is_closed():
 def test_open_outranks_closed_when_both_are_present():
     """Too much access is worse than too little; a list sorted the other way buries it."""
     findings = conf.check(
-        CARD, _authorizer(groups=["a2a-energy-optimization-agent.retired"],
+        CARD, _authorizer(groups=["a2a-home-security-agent.arm_system"],
                           discovery="https://example.invalid/oidc"),
         DISCOVERY, CLIENT)
     assert {"wrong-pool", "claim-missing-groups", "claim-extra-groups"} <= _codes(findings)

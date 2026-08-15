@@ -103,6 +103,24 @@ def wanted_groups(effective: dict[str, list[str]],
     card name (what the sub-agent knows itself as). A recordId with no known name is
     skipped and logged: emitting a group for a guessed name would create a grant no
     authorizer matches.
+
+    Two shapes per granted agent, and both are needed
+    -------------------------------------------------
+    One `a2a-<agent>` (what the Runtime authorizer matches) plus one
+    `a2a-<agent>.<skill>` per granted skill (what the container reads to decide
+    which skills the caller holds). See `shared/a2a_groups` for why the door stopped
+    enumerating skills.
+
+    The agent group is emitted only when at least one skill group was, and that
+    condition is load-bearing in both directions:
+
+      - An admin who narrows a user to zero skills on an agent stores an EMPTY list,
+        which is a real entry meaning "nothing here" (see `effective_grants`). Adding
+        the agent group anyway would let that user through the door for the container
+        to refuse — a 200-shaped delegation failure and an apology from the model,
+        where a clean 401 at the door is correct.
+      - A card whose skills cannot be encoded produces no skill groups at all. Giving
+        it a door key would be worse than the current silent skip, not better.
     """
     out: set[str] = set()
     for record_id, skills in effective.items():
@@ -112,12 +130,25 @@ def wanted_groups(effective: dict[str, list[str]],
                 "grant references recordId %s with no known AgentCard name; "
                 "skipped rather than guessing a group name", record_id)
             continue
+        emitted = 0
         for skill in skills:
             try:
                 out.add(a2a_groups.group_name(agent_name, skill))
+                emitted += 1
             except a2a_groups.GroupNameError as exc:
                 logger.warning("cannot encode grant %s/%s: %s",
                                agent_name, skill, exc)
+        if not emitted:
+            continue
+        try:
+            out.add(a2a_groups.agent_group_name(agent_name))
+        except a2a_groups.GroupNameError as exc:
+            # Unreachable while `group_name` above succeeded — it validates the same
+            # agent name against the same pattern — but left explicit rather than
+            # assumed: silently omitting the door key is the one failure here that
+            # looks exactly like "the admin granted nothing".
+            logger.warning("cannot encode the agent-level group for %s: %s",
+                           agent_name, exc)
     return out
 
 
@@ -314,15 +345,22 @@ def groups_to_revoke(group_names, grantable_agents: set[str]) -> list[str]:
     parse is left ALONE rather than revoked: the prefix is ours, but an unparseable
     name means something upstream changed shape, and deleting memberships on a
     guess is worse than leaving a group nobody's tools reference.
+
+    Resolved with `agent_of_group`, NOT `parse_group`, and the difference is the
+    whole point of this function. `parse_group` decodes only the skill shape, so it
+    answers None for the agent-level `a2a-<agent>` — the group the Runtime authorizer
+    actually matches. A sweep built on it would strip every skill group off a
+    deprecated agent's holders, leave the one group that opens the door, and report
+    success: the record would be gone from the API and its users would still be
+    getting in.
     """
     doomed = []
     for name in group_names:
-        parsed = a2a_groups.parse_group(name)
-        if parsed is None:
+        agent_name = a2a_groups.agent_of_group(name)
+        if agent_name is None:
             logger.warning("group %s carries our prefix but does not parse; "
                            "left alone rather than revoked", name)
             continue
-        agent_name, _skill = parsed
         if agent_name not in grantable_agents:
             doomed.append(name)
     return sorted(doomed)
