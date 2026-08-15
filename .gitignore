@@ -106,6 +106,12 @@ cdk/lambda/*/subagent_policy.py
 # And for the authorizer-conformance rule, shared by the admin API's check route and
 # the contract generator. Source of truth is shared/a2a_conformance.py.
 cdk/lambda/*/a2a_conformance.py
+# And for the platform manifest we publish to third-party A2A agent teams, plus the
+# session-propagation module it reads the metadata key from. The manifest is GENERATED
+# from the modules that enforce each rule, so a stale copy would have us publishing a
+# contract we no longer honour. Source of truth is shared/a2a_manifest.py.
+cdk/lambda/*/a2a_manifest.py
+cdk/lambda/*/a2a_session.py
 # And for the scenario model plus the solar maths and the shared schedule payload,
 # which the scenario runner and the admin API both need. Source of truth is
 # shared/.

@@ -708,6 +708,12 @@ const zh: Record<string, string> = {
 
   'integrations.a2a.title': '已批准 A2A 代理',
   'integrations.a2a.refresh': '刷新',
+  'integrations.a2a.manifest.button': '平台契约',
+  'integrations.a2a.manifest.title': '平台契约 —— A2A 团队需要从我们这里知道的全部信息',
+  'integrations.a2a.manifest.intro': '直接交给开发 A2A Agent 的团队。里面有本部署的 Cognito discovery URL 与 app client、双方各自独立推导的 group 命名规则、要部署的 authorizer 模板, 以及决定他们的 Agent 能否被调用的生命周期规则。它由执行这些规则的同一份代码生成, 所以不可能和我们实际检查的内容脱节。其中没有任何秘密 —— 这些标识符每个前端应用本来就带着。',
+  'integrations.a2a.manifest.copy': '复制 JSON',
+  'integrations.a2a.manifest.copied': '已复制',
+  'integrations.a2a.manifest.copyFailed': '无法写入剪贴板 —— 请直接选中上面的文本。',
   'integrations.a2a.view': '查看',
   'integrations.a2a.empty': '尚无已批准的 A2A 代理。',
   'integrations.a2a.emptyHint': '用户可通过 Skill ERP → A2A 代理 标签页发布，管理员在 AgentCore Registry 控制台中审批。',

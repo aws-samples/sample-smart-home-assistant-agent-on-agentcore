@@ -22,6 +22,12 @@ GENERATED = [
     ("subagent_policy.py", ["admin-api", "pre-token"]),
     ("memory_actor.py", ["admin-api"]),
     ("a2a_conformance.py", ["admin-api"]),
+    # The published contract, and the session module it reads the metadata key from.
+    # A stale manifest is the worst kind of drift here: we would keep publishing a rule
+    # we no longer enforce, and a third party would configure exactly what we told them
+    # to and still be refused.
+    ("a2a_manifest.py", ["admin-api"]),
+    ("a2a_session.py", ["admin-api"]),
 ]
 
 CASES = [(module, d) for module, dirs in GENERATED for d in dirs]

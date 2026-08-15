@@ -230,6 +230,16 @@ cp "$SCRIPT_DIR/shared/a2a_conformance.py" \
    "$SCRIPT_DIR/cdk/lambda/admin-api/a2a_conformance.py"
 echo "    -> admin-api"
 
+# The published platform contract, served at ?action=a2a-manifest. It is GENERATED from
+# a2a_conformance / a2a_groups / a2a_session rather than written out, so all three have
+# to travel with it — a manifest that disagreed with the check would have a third party
+# configure exactly what we published and still be refused.
+echo "==> Copying the A2A platform manifest into the admin API..."
+for f in a2a_manifest.py a2a_session.py; do
+    cp "$SCRIPT_DIR/shared/$f" "$SCRIPT_DIR/cdk/lambda/admin-api/$f"
+    echo "    -> admin-api/$f"
+done
+
 # ------------------------------------------------------------------------------
 # Fetch the Amazon DCV Web Client SDK into chatbot/public/dcvjs/.
 # Required for the BrowserPanel live-view feature: the chatbot's DcvViewer

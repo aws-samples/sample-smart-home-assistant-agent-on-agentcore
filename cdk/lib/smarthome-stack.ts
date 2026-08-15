@@ -1068,10 +1068,19 @@ export class SmartHomeStack extends cdk.Stack {
         "bedrock-agentcore:UpdateGateway",
         "bedrock-agentcore:ListGatewayTargets",
         "bedrock-agentcore:GetGatewayTarget",
+        // Creates a passthrough target for a newly APPROVED agent, so a third-party
+        // team does not need a platform engineer to front them on the A2A gateway
+        // (`?action=a2a-gateway-reconcile&apply=true`). No Delete counterpart on
+        // purpose: an orphaned target is dead weight, not an open door — the
+        // revocation sweep is what closes access — and deleting one would break any
+        // card still pointing at it.
+        "bedrock-agentcore:CreateGatewayTarget",
         // Reads each sub-agent runtime's `authorizerConfiguration` for the
         // conformance check: registering a card makes an agent discoverable, but
         // whether it is callable — and by whom — is decided by that config, which
-        // lives with whoever deployed the runtime. Read-only.
+        // lives with whoever deployed the runtime. Read-only. Also the approval
+        // GATE now, so a non-conformant agent cannot be published by clicking
+        // Approve.
         "bedrock-agentcore:GetAgentRuntime",
         // See the userInitLambda grant above — CreatePolicy/UpdatePolicy fail
         // silently (policy → UPDATE_FAILED, gateway serves 0 tools, API still

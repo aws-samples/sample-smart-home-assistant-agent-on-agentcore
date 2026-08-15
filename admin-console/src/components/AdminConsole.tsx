@@ -44,6 +44,8 @@ import {
   A2AConformanceRow,
   listA2aGrantsForRecord,
   A2AGrantSummary,
+  getA2aManifest,
+  A2aManifest,
   getAgentPrompts,
   saveAgentPrompt,
   deleteAgentPrompt,
@@ -2565,6 +2567,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [a2aConformanceError, setA2aConformanceError] = useState('');
   const [a2aLoading, setA2aLoading] = useState(false);
   const [a2aError, setA2aError] = useState<string>('');
+  // The platform manifest an A2A team needs. Loaded on demand rather than with the
+  // page: it is a copy-once artefact, and paying a Registry round trip on every visit
+  // to the inventory for something almost nobody opens is the wrong trade.
+  const [a2aManifest, setA2aManifest] = useState<A2aManifest | null>(null);
+  const [a2aManifestOpen, setA2aManifestOpen] = useState(false);
+  const [a2aManifestLoading, setA2aManifestLoading] = useState(false);
+  const [a2aManifestError, setA2aManifestError] = useState('');
+  const [a2aManifestCopied, setA2aManifestCopied] = useState(false);
+
   const [a2aDrawer, setA2aDrawer] = useState<A2AAgentRecord | null>(null);
   // Read-only "Access" section in the Integration Registry A2A drawer.
   const [a2aDrawerGrants, setA2aDrawerGrants] = useState<A2AGrantSummary[] | null>(null);
@@ -4604,6 +4615,23 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     variant="h2"
                     counter={`(${a2aAgents.length})`}
                     actions={
+                      <SpaceBetween size="xs" direction="horizontal">
+                      <Button
+                        iconName="external"
+                        onClick={() => {
+                          setA2aManifestOpen(true);
+                          setA2aManifestCopied(false);
+                          if (a2aManifest) return;   // cached for the session
+                          setA2aManifestLoading(true);
+                          setA2aManifestError('');
+                          getA2aManifest()
+                            .then(setA2aManifest)
+                            .catch((err: any) => setA2aManifestError(err.message))
+                            .finally(() => setA2aManifestLoading(false));
+                        }}
+                      >
+                        {t('integrations.a2a.manifest.button')}
+                      </Button>
                       <Button
                         iconName="refresh"
                         onClick={() => {
@@ -4624,6 +4652,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       >
                         {t('integrations.a2a.refresh')}
                       </Button>
+                      </SpaceBetween>
                     }
                   >
                     {t('integrations.a2a.title')}
@@ -4760,6 +4789,72 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   </CloudscapeBox>
                 }
               />
+
+              {/* The platform manifest. Rendered as ONE raw JSON block with a single
+                  copy button, on purpose: an A2A team's CI consumes the whole document,
+                  and a prettified field-by-field view invites copying half of it. The
+                  values are public — the same discovery URL and app client id every
+                  browser app already ships — so the risk here is an INCOMPLETE copy,
+                  not an exposed one. */}
+              {a2aManifestOpen && (
+                <Modal
+                  visible
+                  onDismiss={() => setA2aManifestOpen(false)}
+                  header={t('integrations.a2a.manifest.title')}
+                  size="large"
+                  footer={
+                    <CloudscapeBox float="right">
+                      <SpaceBetween size="xs" direction="horizontal">
+                        <Button
+                          variant="primary"
+                          iconName={a2aManifestCopied ? 'status-positive' : 'copy'}
+                          disabled={!a2aManifest}
+                          onClick={() => {
+                            if (!a2aManifest) return;
+                            navigator.clipboard
+                              .writeText(JSON.stringify(a2aManifest, null, 2))
+                              .then(() => setA2aManifestCopied(true))
+                              .catch(() => setA2aManifestError(
+                                t('integrations.a2a.manifest.copyFailed')));
+                          }}
+                        >
+                          {a2aManifestCopied
+                            ? t('integrations.a2a.manifest.copied')
+                            : t('integrations.a2a.manifest.copy')}
+                        </Button>
+                        <Button onClick={() => setA2aManifestOpen(false)}>
+                          {t('form.close')}
+                        </Button>
+                      </SpaceBetween>
+                    </CloudscapeBox>
+                  }
+                >
+                  <SpaceBetween size="m">
+                    <CloudscapeBox variant="p" color="text-body-secondary">
+                      {t('integrations.a2a.manifest.intro')}
+                    </CloudscapeBox>
+                    {a2aManifestError && (
+                      <Alert type="error">{a2aManifestError}</Alert>
+                    )}
+                    {a2aManifestLoading && (
+                      <StatusIndicator type="loading">
+                        {t('common.loading')}
+                      </StatusIndicator>
+                    )}
+                    {a2aManifest && (
+                      <CloudscapeBox variant="code">
+                        <pre style={{
+                          margin: 0, maxHeight: '48vh', overflow: 'auto',
+                          fontSize: '12px', whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-all',
+                        }}>
+                          {JSON.stringify(a2aManifest, null, 2)}
+                        </pre>
+                      </CloudscapeBox>
+                    )}
+                  </SpaceBetween>
+                </Modal>
+              )}
 
               {a2aDrawer && (
                 <Modal

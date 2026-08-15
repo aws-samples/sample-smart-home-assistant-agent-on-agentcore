@@ -32,6 +32,8 @@ import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.
 import memory_actor
 import subagent_policy  # A2A grant intent -> Cognito groups; see subagent_policy.py
 import a2a_conformance  # does a sub-agent's authorizer match its card? see that module
+import a2a_manifest  # the contract we publish to third-party agent teams
+import a2a_runtimes  # a card's url -> the AgentCore Runtime behind it
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1791,56 +1793,16 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict,
 # the part that needs AWS: getting from a card's URL to the runtime behind it.
 # ---------------------------------------------------------------------------
 
-_RUNTIME_URL_MARKER = "/runtimes/"
-_GATEWAY_HOST_MARKER = ".gateway.bedrock-agentcore."
-
-
+# The card-URL -> runtime hop moved to `a2a_runtimes.py`: the conformance check, the
+# gateway-target reconcile and the ops dashboard all need it, and three copies of a
+# URL-encoding rule is three chances for them to disagree about which runtime a record
+# refers to.
 def _runtime_id_from_url(url: str) -> str:
-    """The agentRuntimeId inside a Runtime data-plane URL, or "".
-
-    Shape: `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{url-encoded
-    ARN}/invocations`. The ARN's own last segment is the id.
-    """
-    if _RUNTIME_URL_MARKER not in url:
-        return ""
-    tail = url.split(_RUNTIME_URL_MARKER, 1)[1]
-    arn = unquote(tail.split("/invocations", 1)[0])
-    return arn.rsplit("/", 1)[-1] if "/" in arn else ""
+    return a2a_runtimes.runtime_id_from_url(url)
 
 
 def _resolve_runtime(url: str) -> tuple[str, str]:
-    """(agentRuntimeId, how it was resolved) for a card's URL.
-
-    Two shapes, because a card may point straight at a runtime or at the A2A
-    gateway. The gateway case needs one extra hop: the target's name is the URL's
-    last path segment, and its `passthrough.endpoint` is the runtime URL. Handling
-    both is not future-proofing — our own cards moved from the first to the second on
-    2026-08-15, and a third party registering their own agent would use the first.
-    """
-    if _GATEWAY_HOST_MARKER in url:
-        host = url.split("://", 1)[-1].split("/", 1)[0]
-        gateway_id = host.split(".", 1)[0]
-        target_name = url.rstrip("/").rsplit("/", 1)[-1]
-        try:
-            for page in agentcore_control.get_paginator(
-                    "list_gateway_targets").paginate(gatewayIdentifier=gateway_id):
-                for tgt in page.get("items", []):
-                    if tgt.get("name") != target_name:
-                        continue
-                    full = agentcore_control.get_gateway_target(
-                        gatewayIdentifier=gateway_id, targetId=tgt["targetId"])
-                    endpoint = (((full.get("targetConfiguration") or {}).get("http")
-                                 or {}).get("passthrough") or {}).get("endpoint", "")
-                    rid = _runtime_id_from_url(endpoint)
-                    if rid:
-                        return rid, f"gateway {gateway_id} target {target_name}"
-                    return "", f"gateway target {target_name} is not a runtime passthrough"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("could not resolve gateway target for %s: %s", url, exc)
-            return "", f"gateway target lookup failed: {exc}"
-        return "", f"no target named {target_name} on {gateway_id}"
-    rid = _runtime_id_from_url(url)
-    return (rid, "direct runtime url") if rid else ("", "url is neither a runtime nor a known gateway")
+    return a2a_runtimes.resolve(url, agentcore_control)
 
 
 def check_a2a_conformance(_event=None):
@@ -1897,6 +1859,257 @@ def check_a2a_conformance(_event=None):
         # Echoed so a row that says "wrong pool" can be read against what this
         # deployment actually expects, without going to look it up.
         "expected": {"discoveryUrl": discovery_url, "appClientId": app_client},
+    })
+
+
+def _discovery_url() -> str:
+    return (f"https://cognito-idp.{REGION}.amazonaws.com/"
+            f"{COGNITO_USER_POOL_ID}/.well-known/openid-configuration")
+
+
+A2A_GATEWAY_NAME = "smarthome-a2a-gw"
+
+
+def _a2a_gateway_url(records: list[dict] | None = None) -> str:
+    """This deployment's A2A gateway base URL, or "" if it does not exist.
+
+    NOT read from an environment variable, deliberately. This Lambda's script-patched
+    env has been silently wiped by `cdk deploy` more than once (CloudFormation rewrites
+    the whole Environment map whenever the DECLARED map changes), and the failure mode
+    for a published manifest is the worst kind: we would hand a third party a blank or
+    stale gateway URL and they would configure against it.
+
+    Two sources, in this order:
+
+      1. A record whose card already routes through the gateway NAMES it exactly, and
+         costs nothing — the records are already in hand.
+      2. Otherwise, look it up by name. Needed because (1) is circular: on a deployment
+         where nothing is behind the gateway yet, deriving only from the records means
+         the reconcile can never front the first agent, and the manifest can never tell
+         anyone the gateway exists.
+    """
+    for record in records or []:
+        base = a2a_runtimes.gateway_base_url((record.get("card") or {}).get("url") or "")
+        if base:
+            return base
+    try:
+        for page in agentcore_control.get_paginator("list_gateways").paginate():
+            for gw in page.get("items", []):
+                if gw.get("name") != A2A_GATEWAY_NAME:
+                    continue
+                url = agentcore_control.get_gateway(
+                    gatewayIdentifier=gw["gatewayId"]).get("gatewayUrl") or ""
+                # GetGateway returns the MCP endpoint path on some shapes; the A2A
+                # passthrough targets hang off the host root, so keep the origin only.
+                return a2a_runtimes.gateway_base_url(url) or url.rstrip("/")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not look up the A2A gateway by name: %s", exc)
+    return ""
+
+
+def get_a2a_manifest(_event=None):
+    """GET /registry/records?action=a2a-manifest — the contract for an agent team.
+
+    Read-only, and the reason it exists at all: everything a third party needs to know
+    about this deployment used to travel by hand — a pool id pasted into a message, an
+    app client id copied off a wiki. A mistyped pool id is the silent 401 that has the
+    orchestrator still offering the tool while the model apologises.
+
+    The document itself is GENERATED from the modules that enforce each rule (see
+    `shared/a2a_manifest.py`), so "what we publish" cannot drift from "what we check".
+    """
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+    if not COGNITO_USER_POOL_ID or not COGNITO_APP_CLIENT_ID:
+        # Refuse rather than publish a manifest with a hole in it. A third party
+        # configuring an empty audience gets a 401 with no explanation, which is
+        # exactly what this route exists to prevent.
+        missing = [n for n, v in (("COGNITO_USER_POOL_ID", COGNITO_USER_POOL_ID),
+                                  ("COGNITO_APP_CLIENT_ID", COGNITO_APP_CLIENT_ID))
+                   if not v]
+        return response(500, {
+            "error": f"cannot publish a manifest without {', '.join(missing)}",
+            "hint": "the admin Lambda's env was probably reset by a cdk deploy; "
+                    "re-run scripts/setup-agentcore.py and check-registry-wiring.py",
+        })
+
+    # Best-effort: the gateway section is optional, so a registry read failure
+    # degrades the manifest rather than failing the route.
+    try:
+        records = _fetch_a2a_records()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("manifest: could not read the registry for the gateway "
+                       "URL: %s", exc)
+        records = []
+
+    manifest = a2a_manifest.build(
+        region=REGION,
+        registry_id=REGISTRY_ID,
+        user_pool_id=COGNITO_USER_POOL_ID,
+        app_client_id=COGNITO_APP_CLIENT_ID,
+        discovery_url=_discovery_url(),
+        gateway_url=_a2a_gateway_url(records),
+        grant_grace_seconds=registry_ns.grant_grace_seconds(),
+    )
+    return response(200, manifest)
+
+
+# ---------------------------------------------------------------------------
+# Gateway-target reconcile: an APPROVED record should not need a human to be fronted
+# ---------------------------------------------------------------------------
+
+def reconcile_a2a_gateway_targets(event=None):
+    """Converge the A2A gateway's passthrough targets on the grantable records.
+
+    GET (or `?apply=false`) reports; POST with `?apply=true` creates. Removing targets
+    is deliberately NOT automated — see below.
+
+    Why this is here rather than only in `scripts/setup-a2a-gateway.py`: that script
+    reads `a2a-agent-registry/deployed-state.json`, a file only the platform team has.
+    A third-party team that registers an approved agent then had to ask someone to add
+    a gateway target by hand, which is precisely the cross-team ticket this work exists
+    to delete. Driven from the Registry, "approved" is enough.
+
+    Matched by RUNTIME, named by CARD
+    ---------------------------------
+    An existing target is matched to a record by the runtime its endpoint resolves to,
+    never by its name. The eight built-in targets are named after internal short names
+    (`air-quality`, `device-control`) while their cards carry long names
+    (`air-quality-agent`) — matching on name would decide all eight were missing and
+    create eight duplicates pointing at the same runtimes.
+
+    Deletion is reported, not performed
+    -----------------------------------
+    A target whose record is gone is listed as `orphaned` and left alone. Deleting it
+    would break any card still pointing at it, and the sweep already closes the
+    authorization hole by revoking that agent's groups — so an orphaned target is dead
+    weight, not an open door. Dead weight does not justify an automated delete of
+    something another team's card may reference.
+    """
+    qs = (event or {}).get("queryStringParameters") or {}
+    apply = str(qs.get("apply", "")).lower() in ("1", "true", "yes")
+
+    try:
+        records = _fetch_a2a_records()
+    except Exception as exc:  # noqa: BLE001
+        # Same reasoning as the sweep: an unreadable registry must not be read as
+        # "nothing should be fronted".
+        return response(503, {"error": f"registry unavailable: {exc}",
+                              "reconciled": False})
+    if not records:
+        return response(503, {"error": "registry reported no AGENT records",
+                              "reconciled": False})
+
+    gateway_url = _a2a_gateway_url(records)
+    gateway_id = (a2a_runtimes.gateway_target_from_url(gateway_url + "/x")[0]
+                  if gateway_url else "")
+    if not gateway_id:
+        return response(200, {
+            "reconciled": False,
+            "reason": "no A2A gateway is in use by any record; nothing to converge",
+            "targets": [], "missing": [], "orphaned": [],
+        })
+
+    try:
+        targets = a2a_runtimes.list_targets(agentcore_control, gateway_id)
+    except Exception as exc:  # noqa: BLE001
+        return response(503, {"error": f"could not list gateway targets: {exc}",
+                              "reconciled": False})
+    by_runtime = {t["runtimeId"]: t for t in targets if t["runtimeId"]}
+
+    verdicts = _grantability(records)
+    missing, fronted, created, errors = [], [], [], []
+    # Every grantable record's RESOLVED runtime, gateway hop included. Built before the
+    # loop because the orphan check at the end needs it for all of them, and resolving
+    # only the ones that need a target got that wrong in the obvious way: our own cards
+    # point AT the gateway, so a raw URL parse yields no runtime id, `live_runtimes`
+    # collapsed to {""} and all eight live targets were reported orphaned.
+    live_runtimes: set[str] = set()
+    for record in records:
+        if not verdicts[record["recordId"]][0]:
+            continue
+        rid, _via = _resolve_runtime((record.get("card") or {}).get("url") or "")
+        if rid:
+            live_runtimes.add(rid)
+
+    for record in records:
+        ok, _reason = verdicts[record["recordId"]]
+        if not ok:
+            continue
+        card = record.get("card") or {}
+        url = card.get("url") or ""
+        card_name = card.get("name") or ""
+        # A card already pointing at the gateway needs no target created — either it
+        # has one, or it is broken in a way `check_a2a_conformance` reports properly.
+        if a2a_runtimes.GATEWAY_HOST_MARKER in url:
+            _gw, target_name = a2a_runtimes.gateway_target_from_url(url)
+            fronted.append({"recordId": record["recordId"], "name": card_name,
+                            "targetName": target_name,
+                            "targetUrl": url,
+                            "via": "card already points at the gateway"})
+            continue
+        runtime_id = a2a_runtimes.runtime_id_from_url(url)
+        if not runtime_id:
+            errors.append(f"{card_name or record['recordId']}: card url is not a "
+                          "runtime invocations URL, so no target can be created")
+            continue
+        existing = by_runtime.get(runtime_id)
+        if existing:
+            fronted.append({
+                "recordId": record["recordId"], "name": card_name,
+                "targetName": existing["name"],
+                "targetUrl": f"{gateway_url}/{existing['name']}",
+                "via": "matched by runtime id",
+            })
+            continue
+        entry = {
+            "recordId": record["recordId"], "name": card_name,
+            "runtimeId": runtime_id,
+            "targetName": card_name,
+            "targetUrl": f"{gateway_url}/{card_name}",
+            "endpoint": url,
+        }
+        missing.append(entry)
+        if not apply:
+            continue
+        try:
+            resp = agentcore_control.create_gateway_target(
+                gatewayIdentifier=gateway_id,
+                name=card_name,
+                description=f"A2A passthrough to {card_name} (Registry "
+                            f"{record['recordId']})",
+                targetConfiguration={"http": {"passthrough": {
+                    "endpoint": url, "protocolType": "A2A"}}},
+                # JWT_PASSTHROUGH so the END USER's idToken reaches the sub-agent
+                # unchanged — that token IS the authorization. A GATEWAY_IAM_ROLE
+                # credential would replace the caller's identity with the gateway's
+                # and the container would see no user at all.
+                credentialProviderConfigurations=[
+                    {"credentialProviderType": "JWT_PASSTHROUGH"}],
+            )
+            entry["targetId"] = resp["targetId"]
+            created.append(entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not create gateway target %s: %s", card_name, exc)
+            errors.append(f"{card_name}: {exc}")
+
+    orphaned = [t["name"] for t in targets
+                if t["runtimeId"] and t["runtimeId"] not in live_runtimes]
+
+    logger.info("A2A gateway reconcile on %s: %d target(s), %d fronted, %d missing, "
+                "%d created, %d orphaned", gateway_id, len(targets), len(fronted),
+                len(missing), len(created), len(orphaned))
+    return response(200, {
+        "reconciled": True,
+        "applied": apply,
+        "gatewayId": gateway_id,
+        "gatewayUrl": gateway_url,
+        "fronted": fronted,
+        "missing": missing,
+        "created": created,
+        # Left in place on purpose — see the docstring.
+        "orphaned": orphaned,
+        "errors": errors,
     })
 
 
@@ -2964,6 +3177,48 @@ def review_registry_record(event):
         return response(404, {"error": f"no such record: {e}"})
     status = current.get("status", "")
 
+    # ---- the approval gate -------------------------------------------------
+    # Approving an AGENT record is what makes it discoverable: the console lists it,
+    # the orchestrator registers tools for it, the delegation prompt names it. Until
+    # now the check that its own Runtime authorizer agrees with the card was a REPORT
+    # an admin might read, on a page they might not open. Making it a gate moves the
+    # correction loop entirely to the team that can act on it — the one that deployed
+    # the runtime — instead of routing it through whoever happens to click Approve.
+    #
+    # Both blocked directions are silent in production, and both are worse than an
+    # unapproved record:
+    #   OPEN   - authorization is not happening; anyone in the pool can reach it.
+    #   CLOSED - nobody can reach it; the model offers the tool and then apologises.
+    # INFO passes: an unreadable runtime (someone else's account) and the
+    # still-coupled-but-working pre-migration authorizer are both real states that a
+    # platform admin should be able to approve.
+    gate = None
+    if decision == "approve" and _is_agent_record(current):
+        gate = _conformance_gate(record_id, current)
+        forced = str((event.get("queryStringParameters") or {})
+                     .get("force", "")).lower() in ("1", "true", "yes")
+        if gate and gate["blocking"] and not forced:
+            logger.warning("approval of %s blocked by conformance: %s",
+                           record_id, gate["severity"])
+            return response(409, {
+                "error": "this agent's Runtime authorizer does not match the card it "
+                         "registered, so approving it would publish an agent that is "
+                         "either unreachable or unprotected",
+                "status": status,
+                "conformance": gate,
+                "hint": "the agent's own team fixes this by re-running "
+                        "scripts/a2a-authorizer-contract.py against their runtime. "
+                        "Add ?force=true to approve anyway and record the override.",
+            })
+        if gate and gate["blocking"] and forced:
+            # Loud, and in the record's own statusReason below, because an override of
+            # an authorization check must not be reconstructable only from a Lambda log
+            # that ages out.
+            logger.warning("CONFORMANCE OVERRIDE: %s approved by %s despite %s: %s",
+                           record_id, reviewer, gate["severity"], gate["findings"])
+            reason = (f"{reason} [conformance override: {gate['severity']}]"
+                      if reason else f"[conformance override: {gate['severity']}]")
+
     stamped = f"{reason or decision} (by {reviewer})" if reviewer else (reason or decision)
 
     try:
@@ -3026,7 +3281,65 @@ def review_registry_record(event):
                           "reviewedBy": reviewer, "reason": reason,
                           # Absent for an approval, which grants nothing by itself
                           # — the next sweep or save materialises it.
-                          "a2aSweep": sweep_summary})
+                          "a2aSweep": sweep_summary,
+                          # Present on an AGENT approval even when it passed, so the
+                          # console can surface an INFO (e.g. "still enumerates skill
+                          # groups") that did not block.
+                          "conformance": gate})
+
+
+def _is_agent_record(detail: dict) -> bool:
+    """Does this GetRegistryRecord response describe an AGENT (not a SKILL)?
+
+    Checked via the card rather than a type field, because that is what the gate needs
+    anyway and because a SKILL record has no runtime to check — running the gate on one
+    would report `runtime-unreadable` on every skill approval.
+    """
+    try:
+        return bool(registry_ns.read_agent_card(detail))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _conformance_gate(record_id: str, detail: dict) -> dict | None:
+    """Conformance findings for one record, shaped for the approval gate.
+
+    Returns None when the check could not be run at all, which does NOT block: being
+    unable to check is not evidence of a problem, and refusing every approval because
+    the control plane was throttled would make the gate the outage.
+    """
+    if not COGNITO_USER_POOL_ID or not COGNITO_APP_CLIENT_ID:
+        logger.warning("conformance gate skipped for %s: pool/app client not "
+                       "configured in this Lambda's env", record_id)
+        return None
+    try:
+        card = json.loads(registry_ns.read_agent_card(detail) or "{}")
+    except ValueError:
+        return None
+    url = (card or {}).get("url") or ""
+    runtime_id, via = a2a_runtimes.resolve(url, agentcore_control)
+    authorizer = None
+    if runtime_id:
+        try:
+            authorizer = agentcore_control.get_agent_runtime(
+                agentRuntimeId=runtime_id).get("authorizerConfiguration") or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("conformance gate could not read runtime %s: %s",
+                           runtime_id, exc)
+            via = f"{via}; GetAgentRuntime failed: {exc}"
+
+    findings = a2a_conformance.check(
+        card, authorizer, _discovery_url(), COGNITO_APP_CLIENT_ID)
+    severity = a2a_conformance.worst_severity(findings)
+    return {
+        "runtimeId": runtime_id,
+        "resolvedVia": via,
+        "conformant": not findings,
+        "severity": severity,
+        # INFO never blocks — see the call site.
+        "blocking": severity in (a2a_conformance.OPEN, a2a_conformance.CLOSED),
+        "findings": findings,
+    }
 
 
 def _caller_identity(event) -> str:
@@ -4222,6 +4535,12 @@ def _dispatch(event, context):
             return list_a2a_agents(event)
         if action == "a2a-conformance":
             return check_a2a_conformance(event)
+        if action == "a2a-manifest":
+            return get_a2a_manifest(event)
+        if action == "a2a-gateway-reconcile":
+            # GET reports; the POST branch below applies. Split so "show me what
+            # would change" cannot create anything by accident.
+            return reconcile_a2a_gateway_targets(event)
         if action == "a2a-grants":
             return list_a2a_grants_for_record(event)
         if action == "skill-list":
@@ -4254,6 +4573,10 @@ def _dispatch(event, context):
         # have to wait out a schedule interval, and so the e2e suite can drive it.
         if action == "a2a-sweep":
             return sweep_a2a_revocations(event)
+        # Also a mutation (it creates gateway targets), so POST. The GET route above
+        # reports the same diff without applying it.
+        if action == "a2a-gateway-reconcile":
+            return reconcile_a2a_gateway_targets(event)
         return review_registry_record(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

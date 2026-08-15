@@ -1158,6 +1158,26 @@ export async function checkA2aConformance(): Promise<A2AConformanceRow[]> {
   return data.records || [];
 }
 
+/** The machine-readable contract published to third-party A2A agent teams.
+ *
+ *  Deliberately typed loosely. The document is GENERATED server-side from the modules
+ *  that enforce each rule (`shared/a2a_manifest.py`), and the console's only job is to
+ *  show and copy it verbatim. A mirrored interface here would be a second definition
+ *  that could disagree with what is actually published — and it would tempt someone to
+ *  render selected fields, which is how a copied manifest ends up incomplete. */
+export type A2aManifest = Record<string, unknown> & { manifestVersion: string };
+
+export async function getA2aManifest(): Promise<A2aManifest> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/registry/records?action=a2a-manifest`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to load the platform manifest (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function listA2aAgents(): Promise<A2AAgentRecord[]> {
   const headers = await authHeaders();
   // Reuses /registry/records?action=a2a-list — consolidated on a single API

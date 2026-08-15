@@ -712,6 +712,12 @@ const en: Record<string, string> = {
 
   'integrations.a2a.title': 'Approved A2A Agents',
   'integrations.a2a.refresh': 'Refresh',
+  'integrations.a2a.manifest.button': 'Platform manifest',
+  'integrations.a2a.manifest.title': 'Platform manifest — everything an A2A team needs from us',
+  'integrations.a2a.manifest.intro': 'Hand this to a team building an A2A agent. It carries the Cognito discovery URL and app client for this deployment, the group naming both sides derive independently, the authorizer template to deploy, and the lifecycle rules that decide whether their agent is callable. It is generated from the same code that enforces those rules, so it cannot drift from what we check. None of it is secret — these are the identifiers every browser app already ships.',
+  'integrations.a2a.manifest.copy': 'Copy JSON',
+  'integrations.a2a.manifest.copied': 'Copied',
+  'integrations.a2a.manifest.copyFailed': 'Could not copy to the clipboard — select the text above instead.',
   'integrations.a2a.view': 'View',
   'integrations.a2a.empty': 'No approved A2A agents yet.',
   'integrations.a2a.emptyHint': 'Users can publish via Skill ERP → A2A Agents tab; admins approve in the AgentCore Registry console.',
