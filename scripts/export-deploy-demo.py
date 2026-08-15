@@ -20,12 +20,24 @@ bundle's `publish_skill.py`, the cards and prompts). This script refuses to writ
 bundle if those are missing rather than producing a broken one — recover them from
 the existing tarball first.
 
+Layout: one directory IS the payload
+------------------------------------
+`demo-agent-air-quality/air-quality/` is the container's code root, shipped verbatim;
+everything above it is deploy and test tooling that never ships. That split replaced
+an enumerated `CODE_PAYLOAD` list, and it earns its keep twice over — the list had
+already fallen behind, and the copies below now have exactly one correct destination.
+
 What it refreshes, every run:
-  - `common/` from a2a-agent-registry/common (tests and caches excluded)
-  - `agent_registry.py` in both bundles from shared/agent_registry.py
+  - `air-quality/common/` from a2a-agent-registry/common (tests and caches excluded)
+  - `air-quality/memory_actor.py` from shared/memory_actor.py
+  - `agent_registry.py` in both bundle ROOTS (deploy-time only) from shared/
   - `demo-config.json` in both bundles, from cdk-outputs.json + agentcore-state.json
   - the runbook and the index README
   - the tarball
+
+And it REFUSES to write any of it unless the payload can import itself with only its
+own directory on `sys.path` — see `_check_payload_is_self_contained`. Two shipped
+bundles were already broken in exactly that way and both looked perfectly fine.
 """
 
 from __future__ import annotations
@@ -45,13 +57,25 @@ TARBALL = REPO / "logs" / "agentcore-deploy-demo.tar.gz"
 AGENT_BUNDLE = OUT_DIR / "demo-agent-air-quality"
 SKILL_BUNDLE = OUT_DIR / "demo-skill-indoor-air-report"
 
+# The agent bundle has TWO zones, and the split is the bundle's main lesson:
+#
+#   demo-agent-air-quality/            deploy + test tooling. Never shipped.
+#   demo-agent-air-quality/air-quality/  the runtime payload, shipped VERBATIM as the
+#                                        container's code root.
+#
+# `deploy_runtime.py` copies that one directory and nothing else, replacing an
+# explicit CODE_PAYLOAD list that had already fallen behind (it omitted
+# `memory_actor.py`, so every deployed copy silently resolved no memory namespaces).
+AGENT = "air-quality"
+PAYLOAD = AGENT_BUNDLE / AGENT
+
 # Files that exist ONLY in the bundle. They are the demo itself; this script copies
 # repo code around them and never generates them.
 DEMO_ONLY = {
-    AGENT_BUNDLE: ["main.py", "invoke_local.py", "deploy_runtime.py",
-                   "register_record.py", "teardown.py", "requirements.txt",
-                   "README.md", "air-quality/card.json",
-                   "air-quality/system_prompt.md"],
+    AGENT_BUNDLE: ["invoke_local.py", "deploy_runtime.py", "register_record.py",
+                   "teardown.py", "requirements.txt", "README.md",
+                   f"{AGENT}/main.py", f"{AGENT}/card.json",
+                   f"{AGENT}/system_prompt.md"],
     SKILL_BUNDLE: ["publish_skill.py", "requirements.txt", "README.md",
                    "skill/SKILL.md"],
 }
@@ -59,6 +83,14 @@ DEMO_ONLY = {
 # Copied straight out of the repo. `common/` is copied wholesale rather than listed,
 # so a module added upstream (a2a_session.py was, and its absence would have been an
 # ImportError at container start) travels automatically.
+#
+# Wholesale has a cost that bit once and is now guarded: it OVERWRITES local edits.
+# The bundle used to carry a one-line addition to `common/agents.py` (an `air-quality`
+# entry in the platform's roster of its own built-ins) and this copy silently dropped
+# it, so all three deploy scripts died at import with `KeyError: 'air-quality'`. The
+# fix was not to preserve the edit — it was to stop the demo needing a roster entry at
+# all, which is what a real third party has to do. `_check_payload_is_self_contained`
+# below is what makes that stay true.
 COMMON_SRC = REPO / "a2a-agent-registry" / "common"
 COMMON_IGNORE = shutil.ignore_patterns("tests", "__pycache__", "*.pyc")
 
@@ -119,6 +151,48 @@ def _missing_demo_files() -> list[str]:
             if not (bundle / name).exists():
                 missing.append(str((bundle / name).relative_to(OUT_DIR)))
     return missing
+
+
+def _check_payload_is_self_contained() -> list[str]:
+    """Import the runtime payload the way the CONTAINER will, and report failures.
+
+    This is the guard the bundle was missing, and both of the bugs it now catches were
+    found by hand instead:
+
+      1. `a2a_session.py` was added to `common/` upstream, `common/server.py` imported
+         it, and the bundle did not carry it. Container dead at startup; tarball fine.
+      2. `memory_actor.py` sat at the bundle root, outside the shipped payload, so
+         `common/memory.py` silently resolved zero namespaces. Nothing errored at all —
+         the agent just answered as if the user had no history.
+
+    The check is the honest one: put ONLY the payload directory on `sys.path`, exactly
+    as the code root is the only thing importable in the image, and import what
+    `main.py` imports. Anything reachable only from the bundle root fails here.
+
+    Run in a subprocess because it mutates `sys.path` and imports strands; doing it
+    in-process would both pollute this interpreter and make a second run unreliable.
+    """
+    probe = (
+        "import sys, json, pathlib\n"
+        f"root = pathlib.Path({str(PAYLOAD)!r})\n"
+        "sys.path.insert(0, str(root))\n"
+        "from common.server import run_agent\n"
+        "from common import memory, a2a_groups\n"
+        "card = json.loads((root / 'card.json').read_text(encoding='utf-8'))\n"
+        "name = card['name']\n"
+        "ns = memory.namespaces_for('probe_actor')\n"
+        "assert len(ns) == 3, f'memory namespaces degraded to {ns!r} — is "
+        "memory_actor.py inside the payload?'\n"
+        "door = a2a_groups.authorizer_groups(name)\n"
+        f"assert door == ['a2a-' + name], f'unexpected door group {{door!r}}'\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], cwd=REPO,
+                            capture_output=True, text=True)
+    if result.returncode == 0:
+        return []
+    tail = (result.stderr or result.stdout or "").strip().splitlines()
+    return [f"payload not self-contained: {line}" for line in tail[-6:]]
 
 
 def _index_readme(env: dict, commit: str) -> str:
@@ -187,53 +261,65 @@ def main(argv=None) -> int:
     env = _read_env()
 
     if args.check:
-        # Only the interesting drift: the copied runtime code.
+        # The interesting drift: the copied runtime code, and whether the payload the
+        # container gets can still stand on its own.
         stale = []
         for src in sorted(COMMON_SRC.glob("*.py")):
-            dst = AGENT_BUNDLE / "common" / src.name
+            dst = PAYLOAD / "common" / src.name
             if not dst.exists():
-                stale.append(f"MISSING  common/{src.name}")
+                stale.append(f"MISSING  {AGENT}/common/{src.name}")
             elif dst.read_bytes() != src.read_bytes():
-                stale.append(f"STALE    common/{src.name}")
+                stale.append(f"STALE    {AGENT}/common/{src.name}")
         for bundle in (AGENT_BUNDLE, SKILL_BUNDLE):
             dst = bundle / "agent_registry.py"
             canonical = (REPO / "shared" / "agent_registry.py").read_bytes()
             if not dst.exists() or dst.read_bytes() != canonical:
                 stale.append(f"STALE    {bundle.name}/agent_registry.py")
-        actor_dst = AGENT_BUNDLE / "memory_actor.py"
+        actor_dst = PAYLOAD / "memory_actor.py"
         actor_src = (REPO / "shared" / "memory_actor.py").read_bytes()
         if not actor_dst.exists():
-            stale.append("MISSING  demo-agent-air-quality/memory_actor.py")
+            stale.append(f"MISSING  {AGENT}/memory_actor.py")
         elif actor_dst.read_bytes() != actor_src:
-            stale.append("STALE    demo-agent-air-quality/memory_actor.py")
+            stale.append(f"STALE    {AGENT}/memory_actor.py")
+        stale.extend(_check_payload_is_self_contained())
         print("\n".join(stale) if stale else "bundle is current")
         return 1 if stale else 0
 
-    # 1. common/ — wholesale, so a new module cannot be forgotten.
-    dst_common = AGENT_BUNDLE / "common"
+    # 1. common/ — wholesale, so a new module cannot be forgotten. INSIDE the payload,
+    #    because that is the only directory the container gets.
+    dst_common = PAYLOAD / "common"
     if dst_common.exists():
         shutil.rmtree(dst_common)
     shutil.copytree(COMMON_SRC, dst_common, ignore=COMMON_IGNORE)
     names = sorted(p.name for p in dst_common.glob("*.py"))
-    log(f"common/: {len(names)} module(s) -> {', '.join(names)}")
+    log(f"{AGENT}/common/: {len(names)} module(s) -> {', '.join(names)}")
 
-    # 2. The Registry helper, into both bundles.
+    # 2. The Registry helper, into both bundles' ROOTS. Deploy-time only — the
+    #    container never talks to the Registry, so shipping it would only grow the
+    #    image and blur what the payload is for.
     for bundle in (AGENT_BUNDLE, SKILL_BUNDLE):
         shutil.copy2(REPO / "shared" / "agent_registry.py",
                      bundle / "agent_registry.py")
-    log("agent_registry.py refreshed in both bundles")
+    log("agent_registry.py refreshed in both bundle roots (deploy-time only)")
 
-    # 3. The Memory actor rule. `common/memory.py` reaches for it by path — in a real
-    #    deployment `deploy.py` copies all of `shared/` next to the agent code, but a
-    #    bundle that claims to be self-contained has to carry it. Without it the demo
-    #    agent silently loses memory: `memory_actor_for` swallows the ImportError and
-    #    returns "", so every namespace resolves to nothing and it looks like the user
-    #    simply has no history. Found by extracting the tarball and importing it.
-    shutil.copy2(REPO / "shared" / "memory_actor.py",
-                 AGENT_BUNDLE / "memory_actor.py")
-    log("memory_actor.py copied next to common/ (self-contained memory)")
+    # 3. The Memory actor rule, INSIDE the payload. `common/memory.py` reaches for it
+    #    by path — in a real deployment `deploy.py` copies all of `shared/` next to the
+    #    agent code, but a bundle that claims to be self-contained has to carry it.
+    #    It used to sit at the bundle root, which is outside what ships, so the
+    #    deployed agent silently lost memory: `memory_actor_for` swallows the
+    #    ImportError and returns "", every namespace resolves to nothing, and it looks
+    #    exactly like a user with no history.
+    shutil.copy2(REPO / "shared" / "memory_actor.py", PAYLOAD / "memory_actor.py")
+    log(f"memory_actor.py -> {AGENT}/ (inside the shipped payload)")
 
-    # 4. Config, from the live outputs.
+    # 4. Prove the payload still stands alone, before writing a tarball that says so.
+    problems = _check_payload_is_self_contained()
+    if problems:
+        sys.exit("refusing to write a bundle whose payload cannot import itself:\n  "
+                 + "\n  ".join(problems))
+    log("payload imports with ONLY its own directory on sys.path")
+
+    # 5. Config, from the live outputs.
     for bundle in (AGENT_BUNDLE, SKILL_BUNDLE):
         keys = (env if bundle is AGENT_BUNDLE
                 else {k: env[k] for k in ("region", "registryId", "skillsTableName",
@@ -243,12 +329,12 @@ def main(argv=None) -> int:
                        indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     log(f"demo-config.json regenerated (registry {env['registryId']})")
 
-    # 5. Docs.
+    # 6. Docs.
     shutil.copy2(RUNBOOK_SRC, OUT_DIR / "agentcore-deploy-runbook.md")
     (OUT_DIR / "README.md").write_text(_index_readme(env, commit), encoding="utf-8")
     log("runbook + index README written")
 
-    # 6. Tarball. Rebuilt from scratch so a file removed upstream does not survive
+    # 7. Tarball. Rebuilt from scratch so a file removed upstream does not survive
     #    inside it, which is how a tarball and a directory drift apart.
     if TARBALL.exists():
         TARBALL.unlink()

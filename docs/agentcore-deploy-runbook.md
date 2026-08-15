@@ -15,7 +15,16 @@
 两个代码包各自有独立的 README(更细的分步说明), 本文是**串起来讲**的操作流程 +
 判断依据 + 排错表。
 
-> **2026-08-15 这一版新增/修改了四处, 演示时值得单独讲:**
+> **2026-08-15 第二版:接口面收窄到三样。** 一个 A2A 团队和平台之间现在只有三个接口 ——
+> 你的入站 endpoint、你的 AgentCard 记录、我们的审批+授权。其余全部从记录推导。
+> 这一版消除的耦合:
+> - **加 skill 不再需要重部署 runtime**(门口收成一个稳定的 agent 级 group,见 A2)
+> - **不用再手抄任何配置** —— Admin Console → 集成注册中心 → A2A 代理 → **「平台契约」**
+>   按钮给出机器可读的 manifest,由执行规则的同一份代码生成
+> - **合规检查变成审批门**(A5.5):不合规批不过去,纠错回路留在 agent 团队那边
+> - **gateway target 与 Dashboard 白名单从 Registry 收敛** —— 不用再找平台团队加配置
+>
+> **2026-08-15 第一版新增/修改了四处, 演示时值得单独讲:**
 > 1. **A5.5 authorizer 一致性检查** —— 注册让你被发现, 你自己的 authorizer 决定谁能调你。
 >    这是"任何人都能接进来"这句话唯一还需要知道本部署配置的地方, 现在有明文契约 +
 >    生成器 + 控制台标红。
@@ -137,15 +146,22 @@ python deploy_runtime.py
 授权模型(一句话讲完):
 
 ```
-授权 = 用户 token 里的 Cognito group  a2a-air-quality-agent.ventilation_plan
-       ├─ Runtime authorizer: CONTAINS_ANY 匹配该 agent 的全部 group → 没授权的连容器都进不去
-       └─ 容器内: 从同一个已验签的 claim 推出"授了哪几个 skill"
+门口 (Runtime authorizer)  CONTAINS_ANY ["a2a-air-quality-agent"]
+                           ← 一个 group, agent 生命周期内不变。没授权的连容器都进不去
+容器内 (common/server.py)  从同一个已验签 claim 读 a2a-air-quality-agent.<skill>
+                           ← 推出"授了哪几个 skill"
 ```
 
-由此得到一条运维规则: **`card.json` 里加 skill 必须重跑 `deploy_runtime.py`。**
-CONTAINS_ANY 是精确列表、没有通配符, authorizer 里那份 group 列表是部署时从
-`card.json` 枚举的。授了一个列表里没有的 group, 用户会在门口被拒, 而且没有任何
-日志解释原因。
+**2026-08-15 起: `card.json` 里加 skill 不再需要重跑 `deploy_runtime.py`。**
+以前需要,而且这是 day-2 最烦的一个耦合:门口那份列表把每个 skill 枚举进 `CONTAINS_ANY`,
+而它**没有通配符**,于是被授了新 skill 的用户在门口被拒、没有任何日志。
+
+那份枚举**换不来任何门禁强度** —— 门口只要命中任意一个就放行,而容器随后用同一个 claim
+做同样的"至少一个"判断(`enforce_allowed_skills`)。所以门口收成一个稳定的 agent 级 group,
+强度不变,耦合消失。
+
+**仍然需要重跑 `deploy_runtime.py` 的:改 `card.json` 的 `name`。** group 名按卡名编,
+改名对每个执行点都是一个新 agent,旧授权不会跟过去。
 
 ### A3. 注册到 Registry, 用新 version (1 分钟)
 
@@ -211,17 +227,37 @@ curl -s -H "Authorization: $ID_TOKEN" \
 ./venv/bin/python scripts/a2a-authorizer-contract.py --record-id <recordId> --format cli
 ```
 
-**加 skill 之后必须重跑这一步。** `CONTAINS_ANY` 没有通配符, 新 skill 的 group 名必须被显式
-列进 authorizer; 在那之前, 被授权了新 skill 的用户会被门口拒掉且没有任何提示。
-第三方接入的完整契约见 `docs/a2a-agent-onboarding.md`。
+**2026-08-15 起这不只是报告 —— 它是审批门。** 不合规的 AGENT 记录批不过去,审批返回
+409 并附上具体 finding 和要跑的命令。哪些拦:
+
+| 严重度 | 含义 | 审批 |
+| --- | --- | --- |
+| `open` | 有人能调到他不该调的 | **拦** |
+| `closed` | 已授权的人被拒 | **拦** |
+| `info` | Runtime 读不到(别的账号),或 authorizer 还在用旧的 per-skill 列表 | 放行, 报告 |
+
+`info` 不拦是刻意的:"读不到"不等于"配错了",而"还在用旧列表"的 runtime **今天能用**。
+把能用的东西报成红色,是让检查被忽略的最快方式。平台管理员可以 `?force=true` 强批,
+会写进记录的 `statusReason` 留痕。
+
+**加 skill 之后不再需要重跑这一步**(见 A2)。改卡名才需要。
+
+第三方接入的完整契约见 `docs/a2a-agent-onboarding.md`,里面第一步就是从 Admin Console
+的 **「平台契约」** 按钮复制 manifest,而不是手抄任何值。
 
 ### A6. 授权给用户 (2 分钟)
 
 **构建 → 工具策略** → 选用户 → **管理权限** → 滚到 **A2A 智能体** → 展开
 `air-quality-agent` → 勾 `ventilation_plan` → **保存权限**。
 
-后台做两件事: DynamoDB 里写 `a2aGrants`(按 recordId 存), 并落成 Cognito group
-`a2a-air-quality-agent.ventilation_plan`(group 不存在会自动建)。
+后台做两件事: DynamoDB 里写 `a2aGrants`(按 recordId 存), 并落成**两个** Cognito
+group(不存在会自动建):
+
+- `a2a-air-quality-agent` —— 门钥匙, Runtime authorizer 匹配的就是它
+- `a2a-air-quality-agent.ventilation_plan` —— 容器用它判断"授了哪几个 skill"
+
+取消所有勾选(而不是删掉整行)会存成一个**空 skill 列表**, 那是"这个 agent 上什么都没授"
+的显式表达 —— 此时**连门钥匙都不发**, 用户在门口就被 401, 而不是进门再被容器拒。
 
 ```bash
 aws cognito-idp admin-list-groups-for-user --region us-west-2 \
@@ -484,7 +520,8 @@ DRAFT ──submit──> PENDING_APPROVAL ──update status──> APPROVED
 | 记录建好了但控制台看不到 | 状态不是 `APPROVED` | 去 Registry 控制台 Approve |
 | 升版后专家突然不可用 | 更新已 APPROVED 的记录会打回 DRAFT, 而控制台和编排 agent 只认 APPROVED | 重新审批; 或用 `--new-record` 做蓝绿 |
 | 授权保存了但 agent 没有这个工具 | grant 在 token claim 里, 旧 token 没有 | 重新登录 / 开新会话 |
-| 用户在门口被拒, 无日志 | 授了 authorizer 的 CONTAINS_ANY 列表里没有的 group(通常是 card 加了 skill 没重新部署) | 重跑 `deploy_runtime.py` |
+| 用户在门口被拒, 无日志 | 用户的 token 里没有 `a2a-<cardName>` 门钥匙。要么授权没落地, 要么手里是**迁移前签发的旧 token** | 重新登录换新 token;或跑一次 `?action=a2a-reconcile` 的 PUT 回填 |
+| 迁移到门钥匙之后一批用户突然全被拒 | 授权侧还没发门钥匙就先翻了 authorizer —— 顺序反了 | `scripts/migrate-a2a-door-groups.py --rollback --apply` 回退, 回填后再翻 |
 | 部署后容器 401 / 拒绝一切请求 | 只跑了 `agentcore deploy`, 没做部署后 patch(env / authorizer / header allowlist) | 重跑 `deploy_runtime.py`(幂等) |
 | 导入的 skill 没有工具 | frontmatter 写了 `allowed-tools`(连字符) | 改成 `allowed_tools` |
 | registry 里改了但 agent 行为没变 | 两个存储解耦, DynamoDB 里还是导入时的旧内容 | 重新导入 |
