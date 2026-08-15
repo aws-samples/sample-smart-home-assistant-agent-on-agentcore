@@ -1,8 +1,9 @@
 """The Cognito group naming that authorizes A2A sub-agent access.
 
-COPY of shared/a2a_groups.py. Each sub-agent is packaged from
-`a2a-agent-registry/` alone and cannot import `shared/`, the same reason
-`REGISTRY_CLIENT` is duplicated in agent/tools/a2a.py.
+COPY of shared/a2a_groups.py, because the pre-token-generation trigger is
+packaged from its own Lambda directory. It is the fourth copy and the fifth
+place these names are derived — and the only one that writes them into a
+token claim rather than into a group membership.
 shared/tests/test_a2a_groups_parity.py holds the copies byte-identical
 below this header.
 

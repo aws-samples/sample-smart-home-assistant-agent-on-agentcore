@@ -1316,27 +1316,35 @@ def update_user_permissions(event):
 # ---------------------------------------------------------------------------
 
 _A2A_PERMS_SK = "__a2a_permissions__"
+# The scope key for grants that apply to everyone. Mirrors
+# `subagent_policy.GLOBAL_SCOPE`, which is where the merge rule reads it.
+GLOBAL_SCOPE = subagent_policy.GLOBAL_SCOPE
 
 
-def _fetch_approved_a2a_cards() -> list[dict]:
-    """Return [{recordId, name, description, skills:[{id,name,description}]}, ...]
-    for every APPROVED A2A record in the configured registry."""
+def _fetch_a2a_records(status_values: list[str] | None = None) -> list[dict]:
+    """Every AGENT record, with the fields grantability and the console both need.
+
+    Returns [{recordId, name, description, status, updatedAt, createdAt, card}, ...].
+    `updatedAt` stays as boto3 returned it (a datetime) because
+    `registry_ns.grantable` reads it; the console serialises it separately.
+
+    Unfiltered by default, deliberately. The catalog used to be fetched
+    APPROVED-only, which made a record that had just left APPROVED indistinguishable
+    from one that never existed — and `get_user_a2a_permissions` reports a grant on
+    an unknown record as STALE and drops it from the page. So a version bump made
+    every grant look deleted, and any save from that page would have written the
+    loss back. Fetch everything, then decide with one rule.
+    """
     if not REGISTRY_ID:
         return []
     out = []
     token = None
     while True:
-        # GA replaced the ad-hoc descriptorType / status parameters with a
-        # structured `filters` list, and descriptorType itself is gone —
-        # recordType=AGENT is the equivalent of the old A2A.
-        kwargs = {
-            "registryId": REGISTRY_ID,
-            "maxResults": 50,
-            "filters": [
-                {"name": "recordType", "values": [registry_ns.RECORD_TYPE_AGENT]},
-                {"name": "status", "values": [registry_ns.STATUS_APPROVED]},
-            ],
-        }
+        filters = [{"name": "recordType",
+                    "values": [registry_ns.RECORD_TYPE_AGENT]}]
+        if status_values:
+            filters.append({"name": "status", "values": status_values})
+        kwargs = {"registryId": REGISTRY_ID, "maxResults": 50, "filters": filters}
         if token:
             kwargs["nextToken"] = token
         resp = registry_control.list_registry_records(**kwargs)
@@ -1346,31 +1354,69 @@ def _fetch_approved_a2a_cards() -> list[dict]:
                 continue
             try:
                 detail = registry_control.get_registry_record(
-                    registryId=REGISTRY_ID, recordId=rid
-                )
+                    registryId=REGISTRY_ID, recordId=rid)
                 raw = registry_ns.read_agent_card(detail)
                 card = json.loads(raw) if raw else {}
             except Exception as e:
                 logger.warning("GetRegistryRecord failed for %s: %s", rid, e)
                 continue
-            skills = [
+            out.append({
+                "recordId": rid,
+                "name": r.get("name", ""),
+                "description": r.get("description", ""),
+                "status": r.get("status", ""),
+                "updatedAt": r.get("updatedAt"),
+                "createdAt": r.get("createdAt"),
+                "card": card,
+            })
+        token = resp.get("nextToken")
+        if not token:
+            return out
+
+
+def _grantability(records: list[dict]) -> dict[str, tuple[bool, str]]:
+    """{recordId: (grantable, reason)} under the shared rule.
+
+    `time.time()` is read once so every record in one sweep is judged against the
+    same instant; otherwise a long pagination could put two records on opposite
+    sides of the same window boundary.
+    """
+    now = time.time()
+    grace = registry_ns.grant_grace_seconds()
+    return {r["recordId"]: registry_ns.grantable(r, now, grace) for r in records}
+
+
+def _fetch_grantable_a2a_cards() -> list[dict]:
+    """Return [{recordId, name, description, skills:[{id,name,description}]}, ...]
+    for every A2A record whose skills may be granted right now.
+
+    APPROVED, plus a record still inside its re-approval window — see
+    `registry_ns.grantable`. Used by the grant page, by PUT validation and by the
+    sweep, so all three agree on what exists.
+    """
+    records = _fetch_a2a_records()
+    verdicts = _grantability(records)
+    out = []
+    for r in records:
+        ok, _reason = verdicts[r["recordId"]]
+        if not ok:
+            continue
+        card = r["card"]
+        out.append({
+            "recordId": r["recordId"],
+            "name": r["name"],
+            "description": r["description"],
+            "skills": [
                 {
                     "id": s.get("id", ""),
                     "name": s.get("name", s.get("id", "")),
                     "description": s.get("description", ""),
                 }
                 for s in card.get("skills") or []
-            ]
-            out.append({
-                "recordId": rid,
-                "name": r.get("name", ""),
-                "description": r.get("description", ""),
-                "skills": skills,
-            })
-        token = resp.get("nextToken")
-        if not token:
-            break
+            ],
+        })
     return out
+
 
 
 def _resolve_ddb_user_key(user_id: str) -> str:
@@ -1440,7 +1486,7 @@ def get_user_a2a_permissions(event):
     # with the response now.
     catalog_error = ""
     try:
-        available = _fetch_approved_a2a_cards()
+        available = _fetch_grantable_a2a_cards()
     except Exception as e:
         logger.warning("Failed to fetch A2A agent catalog: %s", e)
         available = []
@@ -1451,11 +1497,16 @@ def get_user_a2a_permissions(event):
     # behind — pointing at nothing, granting nothing.
     #
     # They cannot merely be ignored. The UI round-trips whatever this returns, and
-    # PUT validates every recordId against the approved catalog, so ONE dead entry
+    # PUT validates every recordId against the grantable catalog, so ONE dead entry
     # makes every future save fail with a 400 that names a record the admin has
     # never heard of and cannot remove from the page. Filtered only when the
     # catalog actually loaded: with `available` empty from a Registry error, every
     # grant would look dead and one bad fetch would appear to revoke everything.
+    #
+    # A record merely waiting to be re-approved is NOT stale — the catalog includes
+    # it for the length of its window (see `_fetch_grantable_a2a_cards`). Before it
+    # did, a version bump made every grant on that agent look deleted here, and a
+    # save from that page would have written the loss back.
     stale: list[str] = []
     if available:
         known = {c["recordId"] for c in available}
@@ -1510,7 +1561,7 @@ def update_user_a2a_permissions(event):
             grants[rid] = sorted(set(clean))
 
     # Validate each recordId against the approved catalog.
-    catalog = {c["recordId"]: c for c in _fetch_approved_a2a_cards()}
+    catalog = {c["recordId"]: c for c in _fetch_grantable_a2a_cards()}
     errors = []
     for rid, skills in grants.items():
         card = catalog.get(rid)
@@ -1611,7 +1662,8 @@ def _affected_users(user_id: str) -> list[tuple[str, str]]:
         params["PaginationToken"] = token
 
 
-def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
+def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict,
+                            fan_out_global: bool = False) -> dict:
     """Push grant intent into Cognito groups, signing out anyone who lost access.
 
     Never raises: the DDB write has already happened and returning 500 here would
@@ -1629,10 +1681,16 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
         # `intent_key` (the email) reads the override; `username` (the UUID) is what
         # Cognito is called with. Using one for both re-grants what an admin just
         # revoked — see `_affected_users`.
+        #
+        # PER-USER intent only. Global grants are no longer materialised: they are
+        # injected into the `cognito:groups` claim at token issue by
+        # cdk/lambda/pre-token, because one membership per user for a value that is
+        # the same for everybody hits a 25 RPS non-adjustable Cognito quota, a
+        # 100-groups-per-user cap and one billable MAU per write. Merging global in
+        # here would write back exactly what that change removed.
         per_user = ({} if intent_key == "__global__"
                     else subagent_policy.read_intent(table, intent_key))
-        effective = subagent_policy.effective_grants(global_intent, per_user)
-        wanted = subagent_policy.wanted_groups(effective, names)
+        wanted = subagent_policy.wanted_groups(per_user, names)
         res = subagent_policy.materialise_user(
             cognito_client, COGNITO_USER_POOL_ID, username, wanted)
         # A removal only takes effect on the next token, so close the window rather
@@ -1643,18 +1701,40 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
 
     try:
         global_intent = subagent_policy.read_intent(table, "__global__")
-        affected = _affected_users(user_id)
+
+        # A SAVE to `__global__` now touches NO user's memberships. Global grants
+        # reach a user through the `cognito:groups` claim the pre-token trigger
+        # builds, and per-user materialisation reads per-user intent only — so there
+        # is nothing per-user to rewrite. The groups themselves are still ensured
+        # below, because an authorizer matches a group NAME.
+        #
+        # This is the fan-out that used to make a global save iterate every user,
+        # sign out everyone it narrowed, and (measured, in this function's own
+        # history) exceed API Gateway's 29s ceiling at 39 users.
+        #
+        # `fan_out_global` re-enables the iteration for the REPAIR path only, which
+        # is what removes memberships the old behaviour left behind: with per-user
+        # intent as the target, a leftover global membership is `extra` and gets
+        # dropped. An admin action, not a migration script — and deliberately not
+        # something a routine save does.
+        affected = ([] if user_id == GLOBAL_SCOPE and not fan_out_global
+                    else _affected_users(user_id))
 
         # Create every group ONCE before touching memberships. Groups are shared, so
         # doing this per user was pure waste and it throttled: measured on 39 users
         # and 17 groups, Cognito rejected most CreateGroup calls with
         # TooManyRequestsException and only 6 users ended up with any membership.
-        wanted_any: set = set()
+        #
+        # Every group the CLAIM could name has to exist too, not just the ones a
+        # membership will reference: a sub-agent authorizer matches a group NAME, and
+        # `cognito:groups` carrying a name no group backs is a normal state now. So
+        # the union covers global intent as well, even though global is never
+        # materialised.
+        wanted_any: set = subagent_policy.wanted_groups(global_intent, names)
         for _username, intent_key in affected:
             per_user = ({} if intent_key == "__global__"
                         else subagent_policy.read_intent(table, intent_key))
-            wanted_any |= subagent_policy.wanted_groups(
-                subagent_policy.effective_grants(global_intent, per_user), names)
+            wanted_any |= subagent_policy.wanted_groups(per_user, names)
         errors.extend(subagent_policy.ensure_groups(
             cognito_client, COGNITO_USER_POOL_ID, wanted_any))
 
@@ -1691,6 +1771,98 @@ def _materialise_a2a_grants(user_id: str, ddb_key: str, catalog: dict) -> dict:
     }
 
 
+def sweep_a2a_revocations(_event=None):
+    """Revoke `a2a-` group memberships whose record may no longer be granted.
+
+    Driven two ways, deliberately. An EventBridge schedule calls it as the safety
+    net, because the approval flow itself happens in the AWS Console — the most
+    common change of all is one this Lambda never sees. Our own write paths call it
+    inline so an admin's action takes effect while they are still looking at it.
+
+    Idempotent and side-effect-free when nothing is wrong: with every record
+    approved, this is one ListGroups and no writes.
+
+    What it does NOT do is touch grant INTENT. `__a2a_permissions__` is left exactly
+    as it was, so re-approving a record and letting the next sweep or save run puts
+    the groups back. A revocation here is an outage, never a data loss — which is
+    what makes it safe to run on a timer.
+    """
+    if not COGNITO_USER_POOL_ID:
+        return response(500, {"error": "COGNITO_USER_POOL_ID not configured"})
+
+    try:
+        records = _fetch_a2a_records()
+    except Exception as exc:  # noqa: BLE001
+        # A Registry failure must not be read as "nothing is grantable". That
+        # inference would revoke every A2A group in the pool on one bad call, and
+        # the same mistake in `get_user_a2a_permissions` once looked like a mass
+        # revocation to an admin. Refuse to act instead.
+        logger.warning("A2A sweep skipped: could not read the registry: %s", exc)
+        return response(503, {"error": f"registry unavailable: {exc}",
+                              "swept": False})
+    if not records:
+        # Same reasoning: an empty answer with no error is indistinguishable from a
+        # registry that has not finished being provisioned.
+        logger.warning("A2A sweep skipped: the registry reported zero AGENT records")
+        return response(503, {"error": "registry reported no AGENT records",
+                              "swept": False})
+
+    verdicts = _grantability(records)
+    grantable_agents: set[str] = set()
+    for r in records:
+        ok, _reason = verdicts[r["recordId"]]
+        if not ok:
+            continue
+        # The CARD name, not the record name. Group names are keyed on what the
+        # sub-agent knows itself as, which is what its authorizer was configured
+        # with; the record name is free to differ and a rename must not orphan a
+        # membership. Same join as `_record_card_names`.
+        card_name = (r["card"] or {}).get("name") or ""
+        if card_name:
+            grantable_agents.add(card_name)
+        else:
+            logger.warning("record %s is grantable but its card has no name; "
+                           "no group can be derived for it", r["recordId"])
+
+    try:
+        present = subagent_policy.all_a2a_groups(cognito_client,
+                                                COGNITO_USER_POOL_ID)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("A2A sweep could not list groups: %s", exc)
+        return response(503, {"error": f"could not list groups: {exc}",
+                              "swept": False})
+
+    doomed = subagent_policy.groups_to_revoke(present, grantable_agents)
+    # Logged on every pass, including the clean one. This runs on a timer and its
+    # steady state is "one ListGroups, no writes" — which is indistinguishable in
+    # the logs from "did not run" unless it says so. An enforcement job that cannot
+    # be shown to have looked is not an enforcement job.
+    logger.info("A2A sweep: %d group(s) present, %d grantable agent(s), "
+                "%d group(s) to revoke", len(present), len(grantable_agents),
+                len(doomed))
+    if not doomed:
+        return response(200, {
+            "swept": True,
+            "groupsChecked": len(present),
+            "revokedGroups": [],
+            "affectedUsers": {},
+            "signedOut": [],
+            "errors": [],
+        })
+
+    logger.info("A2A sweep revoking %d group(s): %s", len(doomed), doomed)
+    result = subagent_policy.revoke_groups(
+        cognito_client, COGNITO_USER_POOL_ID, doomed)
+    result["swept"] = True
+    result["groupsChecked"] = len(present)
+    # Why each revoked group went, so the log answers "who took my access away".
+    result["reasons"] = {
+        r["recordId"]: verdicts[r["recordId"]][1]
+        for r in records if not verdicts[r["recordId"]][0]
+    }
+    return response(200, result)
+
+
 def reconcile_a2a_grants(event):
     """GET /users/{userId}/permissions?action=a2a-reconcile — intent vs reality.
 
@@ -1705,7 +1877,7 @@ def reconcile_a2a_grants(event):
     user_id = unquote(path_params.get("userId", "")) or "__global__"
 
     try:
-        catalog = {c["recordId"]: c for c in _fetch_approved_a2a_cards()}
+        catalog = {c["recordId"]: c for c in _fetch_grantable_a2a_cards()}
     except Exception as exc:  # noqa: BLE001
         # Without the catalog there are no card names, so every group would look
         # "extra" and the reconcile would advise stripping every grant.
@@ -1713,16 +1885,25 @@ def reconcile_a2a_grants(event):
 
     names = _record_card_names(catalog)
     global_intent = subagent_policy.read_intent(table, "__global__")
+    # What the CLAIM adds on top of memberships, reported so an admin can tell the
+    # two apart. A globally granted group appears in a user's token and in no
+    # membership, which is correct and is NOT drift — but `AdminListGroupsForUser`
+    # cannot show it, so a page that only rendered memberships would look like every
+    # user had lost their global grants.
+    claim_injected = sorted(subagent_policy.wanted_groups(global_intent, names))
     out = []
     # Same two identifiers as the write path, for the same reason. When this read
     # the override under the Cognito UUID it reported every user as in sync while
     # their saved intent said otherwise — a reconcile that cannot see the drift the
     # sync creates is worse than no reconcile, because it certifies the drift.
     for username, intent_key in _affected_users(user_id):
+        # PER-USER intent only, matching what materialisation now writes. Comparing
+        # against the merged set would report every user as missing every global
+        # group forever, and the repair would then write back the million
+        # memberships the pre-token trigger exists to avoid.
         per_user = ({} if intent_key == "__global__"
                     else subagent_policy.read_intent(table, intent_key))
-        effective = subagent_policy.effective_grants(global_intent, per_user)
-        wanted = subagent_policy.wanted_groups(effective, names)
+        wanted = subagent_policy.wanted_groups(per_user, names)
         try:
             out.append(subagent_policy.diff_user(
                 cognito_client, COGNITO_USER_POOL_ID, username, wanted))
@@ -1733,6 +1914,8 @@ def reconcile_a2a_grants(event):
         "ok": True,
         "users": out,
         "outOfSync": [u["username"] for u in out if not u.get("inSync")],
+        # Held by every user through the token, backed by no membership.
+        "claimInjectedGroups": claim_injected,
     })
 
 
@@ -1745,11 +1928,16 @@ def repair_a2a_grants(event):
     path_params = event.get("pathParameters") or {}
     user_id = unquote(path_params.get("userId", "")) or "__global__"
     try:
-        catalog = {c["recordId"]: c for c in _fetch_approved_a2a_cards()}
+        catalog = {c["recordId"]: c for c in _fetch_grantable_a2a_cards()}
     except Exception as exc:  # noqa: BLE001
         return response(502, {"error": f"cannot read the A2A catalog: {exc}"})
+    # `fan_out_global=True`: a repair on `__global__` is exactly the "walk every
+    # user and make reality match per-user intent" pass, which is also the one-time
+    # cleanup of global memberships written before the pre-token trigger existed.
+    # At a million users this is an hours-long job against a 25 RPS quota — see the
+    # scaling note in shared/subagent_policy.py — so it stays an explicit action.
     return response(200, _materialise_a2a_grants(
-        user_id, _resolve_ddb_user_key(user_id), catalog))
+        user_id, _resolve_ddb_user_key(user_id), catalog, fan_out_global=True))
 
 
 def list_a2a_grants_for_record(event):
@@ -2671,14 +2859,45 @@ def review_registry_record(event):
                 registry_control, REGISTRY_ID, record_id,
                 registry_ns.STATUS_REJECTED, reason=stamped)
             final = registry_ns.STATUS_REJECTED
+    except registry_ns.RecordNotApprovable as e:
+        # A transition the state machine does not have, not a server fault. Most
+        # often DEPRECATED, which is terminal: the record can only be recreated, and
+        # that mints a new recordId and voids every grant keyed on the old one.
+        # Reported as a conflict so the console can say so, rather than as a 200
+        # carrying an unchanged status — which is how this used to present.
+        logger.warning("review of %s could not be applied: %s", record_id, e)
+        return response(409, {"error": str(e), "status": status,
+                              "terminal": status == registry_ns.STATUS_DEPRECATED})
     except Exception as e:  # noqa: BLE001
         logger.exception("review failed for %s", record_id)
         return response(500, {"error": str(e), "status": status})
 
     logger.info("record %s: %s -> %s by %s", record_id, status, final, reviewer)
+
+    # A decision that removes an AGENT record from the grantable set takes effect
+    # NOW rather than at the next scheduled sweep. Inline because an admin who has
+    # just rejected an agent expects its access to be gone when they look, and a
+    # revocation that lands minutes later is indistinguishable from one that failed.
+    #
+    # Best-effort: the status change is the outcome this endpoint promises, so a
+    # sweep failure is reported alongside it, never instead of it. The schedule
+    # will pick it up regardless.
+    sweep_summary = None
+    if final in (registry_ns.STATUS_REJECTED, registry_ns.STATUS_DEPRECATED):
+        try:
+            swept = sweep_a2a_revocations(event)
+            sweep_summary = json.loads(swept.get("body") or "{}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("inline A2A sweep after reviewing %s failed: %s",
+                           record_id, exc)
+            sweep_summary = {"swept": False, "error": str(exc)}
+
     return response(200, {"recordId": record_id, "previousStatus": status,
                           "status": final, "decision": decision,
-                          "reviewedBy": reviewer, "reason": reason})
+                          "reviewedBy": reviewer, "reason": reason,
+                          # Absent for an approval, which grants nothing by itself
+                          # — the next sweep or save materialises it.
+                          "a2aSweep": sweep_summary})
 
 
 def _caller_identity(event) -> str:
@@ -2938,31 +3157,31 @@ def _scan_imported_skill_map():
 
 
 def list_a2a_agents(_event):
-    """GET /registry/a2a-agents — list approved A2A records with publishedBy enrichment."""
+    """GET /registry/records?action=a2a-list — the live A2A inventory.
+
+    Read straight from the Registry on every request, with no cache: registering a
+    record is the ONLY thing that makes an A2A agent visible to this system, so this
+    page must not be able to show a stale answer.
+
+    Lists records in EVERY status, not just APPROVED. An agent knocked back to DRAFT
+    by an edit, or REJECTED by a reviewer, used to vanish from here entirely — which
+    is precisely when an admin comes looking, and "access to the energy specialist
+    disappeared" has no answer on a page that only shows healthy records. Each row
+    carries whether its skills may be granted right now and why, plus the seconds
+    left if it is inside its re-approval window, so a revocation can be seen coming.
+
+    One status this cannot show, measured 2026-08-15: **DEPRECATED**. Deprecating
+    does not just make a record terminal, it removes it from the API — a
+    `GetRegistryRecord` on it answers `ResourceNotFoundException` and it lists under
+    no status at all. So a deprecated agent is absent here because it no longer
+    exists, not because of a filter. `grantable(record=None)` is what covers it, and
+    the sweep revokes its groups because no grantable agent carries that name.
+    """
     if not REGISTRY_ID:
         return response(500, {"error": "REGISTRY_ID not configured"})
 
-    records = []
-    token = None
     try:
-        while True:
-            kwargs = {
-                "registryId": REGISTRY_ID,
-                "maxResults": 50,
-                "filters": [
-                    {"name": "recordType",
-                     "values": [registry_ns.RECORD_TYPE_AGENT]},
-                    {"name": "status", "values": [registry_ns.STATUS_APPROVED]},
-                ],
-            }
-            if token:
-                kwargs["nextToken"] = token
-            resp = registry_control.list_registry_records(**kwargs)
-            for r in resp.get("registryRecords", []):
-                records.append(r)
-            token = resp.get("nextToken")
-            if not token:
-                break
+        records = _fetch_a2a_records()
     except Exception as e:
         return response(500, {"error": f"Failed to list A2A records: {str(e)}"})
 
@@ -2972,35 +3191,34 @@ def list_a2a_agents(_event):
     except Exception as e:
         logger.warning("Failed to build A2A ownership map: %s", e)
 
+    verdicts = _grantability(records)
+    now = time.time()
+    grace = registry_ns.grant_grace_seconds()
+
     result = []
     for r in records:
-        rid = r.get("recordId", "")
-        try:
-            detail = registry_control.get_registry_record(
-                registryId=REGISTRY_ID, recordId=rid
-            )
-            card_raw = registry_ns.read_agent_card(detail)
-            try:
-                card = json.loads(card_raw) if card_raw else {}
-            except Exception:
-                card = {}
-        except Exception as e:
-            logger.warning("GetRegistryRecord failed for %s: %s", rid, e)
-            continue  # skip unreadable records
-
+        rid = r["recordId"]
+        grantable, reason = verdicts[rid]
         owner = owner_map.get(rid, {})
         result.append({
             "recordId": rid,
-            "name": r.get("name", ""),
-            "description": r.get("description", ""),
-            "status": r.get("status", ""),
+            "name": r["name"],
+            "description": r["description"],
+            "status": r["status"],
             "createdAt": _a2a_iso(r.get("createdAt")),
             "updatedAt": _a2a_iso(r.get("updatedAt")),
-            "card": card,
+            "card": r["card"],
             "publishedBy": owner.get("email") or owner.get("sub") or "",
+            # Why a granted user can or cannot reach this agent at this moment.
+            # Separate from `status` because the two genuinely differ: a DRAFT
+            # record inside its window is not approved and is still grantable.
+            "grantable": grantable,
+            "grantableReason": reason,
+            "graceRemainingSeconds": registry_ns.grace_remaining_seconds(
+                r, now, grace),
         })
 
-    return response(200, {"records": result})
+    return response(200, {"records": result, "graceSeconds": grace})
 
 
 # ---------------------------------------------------------------------------
@@ -3699,6 +3917,13 @@ def handler(event, context):
 def _dispatch(event, context):
     logger.info("Event: %s", json.dumps(event, default=str))
 
+    # A scheduled invocation, which carries no HTTP envelope at all. Keyed on an
+    # explicit field in the rule's constant input rather than on `source ==
+    # "aws.events"`, so the trigger is greppable from here and a test can build the
+    # event by hand.
+    if event.get("task") == "a2a-sweep":
+        return sweep_a2a_revocations(event)
+
     method = event.get("httpMethod", "")
     resource = event.get("resource", "")
 
@@ -3893,6 +4118,11 @@ def _dispatch(event, context):
             return sync_scenario_schedules(event)
         if action == "import-scenes":
             return import_scenarios(event)
+        # A mutation — it removes group memberships — so POST, not the GET block
+        # where the other a2a- actions live. Exposed at all so an admin does not
+        # have to wait out a schedule interval, and so the e2e suite can drive it.
+        if action == "a2a-sweep":
+            return sweep_a2a_revocations(event)
         return review_registry_record(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)

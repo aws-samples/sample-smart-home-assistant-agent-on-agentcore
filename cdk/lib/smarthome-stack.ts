@@ -680,6 +680,50 @@ export class SmartHomeStack extends cdk.Stack {
     userPool.addTrigger(cognito.UserPoolOperation.POST_CONFIRMATION, userInitLambda);
 
     // ========================
+    // Lambda - pre token generation (GLOBAL A2A grants -> cognito:groups claim)
+    // ========================
+    //
+    // Global grants are not materialised as memberships. "Everyone may reach this
+    // sub-agent" written once per user is a constant written a million times, and
+    // Cognito's `UserUpdate` category caps the writes at 25 RPS account-wide and is
+    // NOT adjustable — plus 100 groups per user, plus one billable MAU per
+    // membership change. See cdk/lambda/pre-token/index.py.
+    //
+    // V1 (`PRE_TOKEN_GENERATION`), not V2: V1 is available on every user pool
+    // feature plan and can already override `cognito:groups` in the ID token, which
+    // is the token we send to a sub-agent. V2 would only add access-token
+    // customisation, which nothing here needs.
+    const preTokenLambda = new lambda.Function(this, "PreTokenLambda", {
+      functionName: "smarthome-pre-token",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/pre-token")),
+      // This runs on the sign-in path, so the timeout is a user-visible latency
+      // ceiling rather than a safety net. Two DynamoDB gets plus a per-minute
+      // cached Registry read; 10s leaves room for a cold start without letting a
+      // hung call hold up authentication.
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      environment: {
+        SKILLS_TABLE_NAME: skillsTable.tableName,
+        REGISTRY_ID: "PLACEHOLDER_SET_BY_SETUP_SCRIPT",
+      },
+    });
+    skillsTable.grantReadData(preTokenLambda);
+    // Registry left the `bedrock-agentcore` namespace at GA and the broad grant no
+    // longer covers it, so these are named explicitly. Read-only: this Lambda
+    // decides what a token may claim and must never be able to change a record.
+    preTokenLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "agent-registry:ListRegistryRecords",
+        "agent-registry:GetRegistryRecord",
+      ],
+      resources: ["*"],
+    }));
+    userPool.addTrigger(cognito.UserPoolOperation.PRE_TOKEN_GENERATION,
+                        preTokenLambda);
+
+    // ========================
     // API Gateway - Admin API
     // ========================
     const adminApi = new apigw.RestApi(this, "AdminApi", {
@@ -990,6 +1034,12 @@ export class SmartHomeStack extends cdk.Stack {
         "cognito-idp:CreateGroup",
         "cognito-idp:GetGroup",
         "cognito-idp:ListGroups",
+        // The revocation sweep works from the GROUP side — a deleted Registry
+        // record cannot be read, so its card name and skills are gone and no group
+        // name can be derived from it. It lists the pool's `a2a-` groups and then
+        // the holders of the ones whose agent may no longer be granted. Without
+        // this the sweep reports per-group errors instead of revoking anything.
+        "cognito-idp:ListUsersInGroup",
         // Revoking a grant otherwise does nothing until the user's token expires,
         // because group membership is baked in at issue time.
         "cognito-idp:AdminUserGlobalSignOut",
@@ -1685,6 +1735,41 @@ export class SmartHomeStack extends cdk.Stack {
         arn: scenarioRunner.functionArn,
         roleArn: schedulerRole.roleArn,
         input: JSON.stringify({ mode: "solar" }),
+      },
+    });
+
+    // The A2A revocation sweep. Registry status is enforced above the platform (the
+    // orchestrator's tool list, the console's catalog); the real door is a Cognito
+    // group matched by each sub-agent's own authorizer, which knows nothing about
+    // Registry status. This is what makes a rejected or deprecated record actually
+    // uncallable — see `sweep_a2a_revocations` in the admin API.
+    //
+    // On a schedule as well as inline on our own write paths, because the approval
+    // flow itself happens in the AgentCore Registry console: the most common status
+    // change of all is one the admin API never sees. Five minutes matches the
+    // scenario sweep, and the steady state costs one ListGroups and no writes.
+    const a2aSweepRole = new iam.Role(this, "A2ASweepSchedulerRole", {
+      roleName: "smarthome-a2a-sweep-scheduler",
+      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com", {
+        conditions: { StringEquals: { "aws:SourceAccount": this.account } },
+      }),
+      description: "Lets EventBridge Scheduler run the A2A grant revocation sweep",
+    });
+    a2aSweepRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["lambda:InvokeFunction"],
+      resources: [adminLambda.functionArn],
+    }));
+    new scheduler.CfnSchedule(this, "A2AGrantSweep", {
+      name: "smarthome-a2a-grant-sweep",
+      groupName: scheduleGroup.name,
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(5 minutes)",
+      target: {
+        arn: adminLambda.functionArn,
+        roleArn: a2aSweepRole.roleArn,
+        // No HTTP envelope. `_dispatch` keys on this field explicitly rather than
+        // on `source == "aws.events"`, so the trigger is greppable from the handler.
+        input: JSON.stringify({ task: "a2a-sweep" }),
       },
     });
 

@@ -1,4 +1,4 @@
-"""Holds the four copies of the A2A group convention byte-identical.
+"""Holds every copy of the A2A group convention byte-identical.
 
 They cannot import each other: the orchestrator, each sub-agent and the admin
 Lambda are each packaged from their own directory. The convention is an
@@ -17,6 +17,10 @@ COPIES = [
     os.path.join(REPO, "a2a-agent-registry", "common", "a2a_groups.py"),
     os.path.join(REPO, "agent", "a2a_groups.py"),
     os.path.join(REPO, "cdk", "lambda", "admin-api", "a2a_groups.py"),
+    # The pre-token-generation trigger writes these names into the `cognito:groups`
+    # CLAIM for globally granted sub-agents, rather than into a membership. Same
+    # strings, a fifth derivation of them.
+    os.path.join(REPO, "cdk", "lambda", "pre-token", "a2a_groups.py"),
 ]
 
 # Everything from this line on must match the canonical file exactly. Above it each

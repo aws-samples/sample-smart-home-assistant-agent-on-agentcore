@@ -925,10 +925,16 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
                             registry_id=os.environ["REGISTRY_ID"],
                             # The user's own token IS the credential now. The
                             # sub-agent's authorizer validates it and checks the
-                            # grant claim, so there is no separate service token and
-                            # no second header. Pinned in the tool closure, never a
-                            # parameter the LLM can set.
+                            # grant claim, so there is no separate service token.
+                            # Pinned in the tool closure, never a parameter the LLM
+                            # can set.
                             user_token=auth_header,
+                            # This turn's runtime session id, forwarded so the
+                            # specialist's logs join to this turn and it can read
+                            # the session summary. Not a credential, but pinned in
+                            # the closure for the same reason: a model that could
+                            # choose it could point a specialist at another turn.
+                            session_id=session_id,
                         )
                         logger.info(
                             f"A2A tools registered: {len(a2a_tools)} for actor={actor_id} "

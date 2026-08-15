@@ -10,13 +10,20 @@ matches it with `CONTAINS_ANY` over that agent's group names. So authorization i
 checked by AgentCore before any of our code runs, on a claim the client cannot
 forge or widen.
 
-That is the whole reason this convention has to be exact and shared. Four separate
+That is the whole reason this convention has to be exact and shared. Five separate
 deployment units derive these strings independently:
 
   - `a2a-agent-registry/deploy.py`      writes the authorizer's match list
   - `a2a-agent-registry/common/server.py`  derives the caller's skill set
   - `cdk/lambda/admin-api`             materialises DDB intent into memberships
+  - `cdk/lambda/pre-token`             injects GLOBAL grants into the claim itself,
+                                       with no membership behind them
   - `agent/`                           decides which `a2a_*` tools to register
+
+The trigger is worth calling out: it makes a group name that appears in the claim
+and in NO membership a normal, correct state. `AdminListGroupsForUser` is therefore
+no longer the whole answer to "what may this user reach" — see
+`shared/subagent_policy.py`.
 
 A disagreement between any two of them does not raise. It either silently denies a
 granted user (group written one way, matched another) or silently offers the model a

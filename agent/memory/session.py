@@ -30,6 +30,7 @@ EPISODIC_STRATEGY_ID = os.getenv("MEMORY_STRATEGY_EPISODIC_ID", "")
 # The fallback is a real one, not defensive noise: this module is imported by unit
 # tests that run from the repo without the build step having happened.
 try:
+    from memory_actor import memory_session_id as _memory_session_id  # noqa: F401
     from memory_actor import sanitize_actor_id as _sanitize_actor_id  # noqa: F401
 except ImportError:  # pragma: no cover - pre-build / test path
     import sys
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - pre-build / test path
     _shared = Path(__file__).resolve().parent.parent.parent / "shared"
     if _shared.is_dir() and str(_shared) not in sys.path:
         sys.path.insert(0, str(_shared))
+    from memory_actor import memory_session_id as _memory_session_id  # noqa: F401
     from memory_actor import sanitize_actor_id as _sanitize_actor_id  # noqa: F401
 
 
@@ -70,8 +72,14 @@ def memory_session_id(actor_id: str) -> str:
     `/summaries/{actor}/{session_id}`, so it becomes one running summary per user
     instead of one per login. That is the intended trade — a per-login summary of
     a conversation that spans logins was summarising an arbitrary slice.
+
+    The rule itself moved to shared/memory_actor.py, next to the actor rule, once a
+    FOURTH reader appeared: the A2A sub-agents retrieve that summary namespace, so
+    they need this exact string and are packaged from a different directory. This
+    function stays as the orchestrator's entry point — three writers call it — and
+    delegates.
     """
-    return f"mem-{_sanitize_actor_id(actor_id)}"
+    return _memory_session_id(actor_id)
 
 
 def get_memory_session_manager(

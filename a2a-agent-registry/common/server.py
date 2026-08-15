@@ -69,6 +69,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 # Import via the package so a stale copy on sys.path can't shadow these.
+from common import a2a_session
 from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER
 from common.governed_prompt import resolve_system_prompt
 
@@ -140,6 +141,43 @@ def _headers_from_context(a2a_context) -> dict[str, str]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("could not read request headers from A2A context: %s", exc)
         return {}
+
+
+def _message_metadata(a2a_context) -> dict:
+    """The inbound A2A message's metadata, lower-cased keys untouched.
+
+    `RequestContext.message.metadata` is where the orchestrator puts the session
+    id; `RequestContext.metadata` is the *params* metadata, a different slot, and
+    is read as a secondary in case a hop or a future client moves it. Returns {}
+    rather than raising — no metadata means no session id, which is a supported
+    state.
+    """
+    for source in ("message", None):
+        try:
+            if source is None:
+                found = getattr(a2a_context, "metadata", None)
+            else:
+                message = getattr(a2a_context, source, None)
+                found = getattr(message, "metadata", None)
+            if isinstance(found, dict) and found:
+                return found
+        except Exception as exc:  # noqa: BLE001
+            logger.info("could not read A2A message metadata: %s", exc)
+    return {}
+
+
+def _orchestrator_session_id(a2a_context, headers: dict[str, str]) -> str:
+    """The orchestrator's runtime session id for this request, or "".
+
+    In practice this reads the message metadata: AgentCore's request-header
+    allowlist cannot admit an `x-amzn-` header, so the platform's session header
+    reaches the platform but never this container. The shared module owns the
+    precedence and the validation and explains both channels.
+
+    "" is the pre-propagation behaviour and stays fully supported: every sub-agent
+    answered without this.
+    """
+    return a2a_session.session_id_from(headers, _message_metadata(a2a_context))
 
 
 def _parse_allowed_skills(headers: dict[str, str]) -> frozenset[str]:
@@ -450,6 +488,21 @@ def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
             # Retrieved with the request text as the query, so relevance ranking
             # has something to rank against; "" when there is nothing to add, in
             # which case the prompt is byte-for-byte what it was before.
+            # The orchestrator's session id, when it reached us. Logged, and that is
+            # ALL it is for here: this line is what joins a specialist's LOG group
+            # to the orchestrator turn that delegated to it. (The span-level join
+            # needs nothing from us — the client's session header makes AgentCore
+            # adopt the id, and this container never receives that header.)
+            #
+            # It is deliberately NOT passed to memory. The session summary's
+            # namespace is keyed on the MEMORY session id, which is derivable from
+            # the actor; see `common/memory.namespaces_for`, where believing
+            # otherwise is recorded as a measured mistake.
+            orchestrator_session = _orchestrator_session_id(
+                context, _headers_from_context(context))
+            logger.info("delegated turn: orchestrator session=%s",
+                        orchestrator_session or "<not propagated>")
+
             try:
                 from common.memory import memory_prompt_section
 

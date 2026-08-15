@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import sys
+from concurrent import futures
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -109,26 +110,42 @@ def memory_actor_for(caller) -> str:
 def namespaces_for(actor_id: str) -> list[str]:
     """The namespaces a sub-agent reads, for `actor_id`.
 
-    Facts and preferences only, out of the memory's four strategies.
+    Facts, preferences, and the running session summary.
 
-    `/summaries/{actor}/{sessionId}` is unreadable here for a structural reason:
-    AgentCore assigns a runtimeSessionId per runtime and the A2A hop does not
-    propagate the orchestrator's, so a sub-agent cannot name the session whose
-    summary it would want. It would be reading its own empty namespace and paying a
-    call for it. (The same gap is documented for token attribution in
-    cdk/lambda/admin-api/index.py.)
+    `/summaries/{actor}/{session}` was long documented here as unreadable, on the
+    reasoning that AgentCore assigns a runtimeSessionId per runtime and the A2A hop
+    propagates nothing, so a sub-agent could not name the session whose summary it
+    wanted. **That reasoning was wrong, and measuring it is what showed it.** The
+    session component of this namespace is not a runtime session id at all: the
+    orchestrator writes Memory under `memory_session_id(actor)` — `mem-{actor}`,
+    stable across logins, deliberately NOT per-login (see
+    `agent/memory/session.py`). It is derivable from the actor, which a sub-agent
+    already has, so this namespace has been addressable all along.
+
+    Verified against the live Memory before this changed: `mem-{actor}` holds the
+    running summary and the runtime-session variant is empty.
+
+    The orchestrator's runtime session id IS now propagated, and it remains worth
+    propagating — it joins a delegated turn to its parent in logs and spans, which
+    is what makes per-turn token attribution across a delegation possible. It is
+    just not what makes this namespace work.
 
     `/users/{actor}/episodes` (EPISODIC) is different: it IS actor-partitioned, so
-    a sub-agent could read it. It is left out on cost, not correctness. The loop
-    below is sequential, so each namespace adds a serial RetrieveMemoryRecords to
-    the critical path of every delegated turn, and a specialist is handed a
-    self-contained instruction — the ordered account of how the user got here is
-    context the orchestrator already used to compose that instruction. Add it here
-    only with a measurement showing a delegated answer improves.
+    a sub-agent could read it. It is left out on cost, not correctness — a
+    specialist is handed a self-contained instruction, and the ordered account of
+    how the user got here is context the orchestrator already used to compose that
+    instruction. Add it here only with a measurement showing a delegated answer
+    improves.
     """
     if not actor_id:
         return []
-    return [f"/users/{actor_id}/facts", f"/users/{actor_id}/preferences"]
+    return [
+        f"/users/{actor_id}/facts",
+        f"/users/{actor_id}/preferences",
+        # Sanitising is idempotent, so passing the already-sanitised actor id
+        # yields the same string the orchestrator computed from the raw email.
+        f"/summaries/{actor_id}/{_memory_actor_module().memory_session_id(actor_id)}",
+    ]
 
 
 def _record_text(record: dict) -> str:
@@ -171,6 +188,12 @@ def retrieve_memory(caller, query: str, client=None) -> str:
     passing the actual request is what makes three records useful rather than
     three arbitrary ones.
 
+    The namespaces are fetched CONCURRENTLY. They were sequential when there were
+    two, and adding the third would have put another serial RetrieveMemoryRecords
+    on the critical path of every delegated turn — a latency cost paid on each
+    delegation to read a namespace that is usually small. The calls are
+    independent, so the wall clock is now one round trip rather than three.
+
     Read-only by construction: this module calls RetrieveMemoryRecords and holds
     no session manager, so there is no code path that could write an event. See
     the module docstring for why.
@@ -188,8 +211,7 @@ def retrieve_memory(caller, query: str, client=None) -> str:
             region_name=os.environ.get("AWS_REGION", "us-west-2"),
         )
 
-    lines: list[str] = []
-    for namespace in namespaces:
+    def _one(namespace: str) -> list[dict]:
         try:
             resp = client.retrieve_memory_records(
                 memoryId=MEMORY_ID,
@@ -199,9 +221,21 @@ def retrieve_memory(caller, query: str, client=None) -> str:
             )
         except Exception as exc:  # noqa: BLE001
             # Per namespace, so one unavailable strategy does not cost the other.
+            # A summary namespace that does not exist yet lands here and is
+            # indistinguishable from "nothing to add", which is correct.
             logger.info("memory retrieve failed for %s: %s", namespace, exc)
-            continue
-        for record in resp.get("memoryRecordSummaries") or []:
+            return []
+        return resp.get("memoryRecordSummaries") or []
+
+    # Results are collected in the namespaces' own order, not completion order:
+    # facts before preferences before the session summary reads as intended, and
+    # a prompt whose lines reorder between turns is a prompt cache miss.
+    with futures.ThreadPoolExecutor(max_workers=len(namespaces)) as pool:
+        per_namespace = list(pool.map(_one, namespaces))
+
+    lines: list[str] = []
+    for records in per_namespace:
+        for record in records:
             text = _record_text(record)
             if text and text not in lines:
                 lines.append(text)

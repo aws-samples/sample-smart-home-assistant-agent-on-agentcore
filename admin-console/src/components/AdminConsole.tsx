@@ -3094,6 +3094,16 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       setError(t('registry.reviewReasonRequired'));
       return;
     }
+    // Deprecation is IRREVERSIBLE. Measured against the live Registry on
+    // 2026-08-15: DEPRECATED is a terminal status and every transition out of it,
+    // including back to APPROVED, fails with "Cannot update registry record in
+    // DEPRECATED status". Recovering means recreating the record, which mints a new
+    // recordId — and `__a2a_permissions__` keys grants by recordId, so every grant
+    // on that agent is void until an admin repoints them. Worth one confirmation.
+    if (decision === 'deprecate' &&
+        !window.confirm(t('registry.deprecateIrreversible'))) {
+      return;
+    }
     setReviewing(recordId);
     try {
       const out = await reviewRegistryRecord(recordId, decision, reason);
@@ -4636,6 +4646,41 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     },
                   },
                   { id: 'publishedBy', header: t('integrations.a2a.col.publishedBy'), cell: (r) => r.publishedBy || '—' },
+                  {
+                    // Registry status and "can it be reached" are different
+                    // questions and both belong here. A record edited back to DRAFT
+                    // is not approved and is still reachable for the length of its
+                    // re-approval window; a REJECTED one stops being reachable at
+                    // once. This column is what answers "why did access to the
+                    // energy specialist disappear", which is the question that
+                    // brings an admin to this page.
+                    id: 'access',
+                    header: t('integrations.a2a.col.access'),
+                    cell: (r) => {
+                      const remaining = r.graceRemainingSeconds;
+                      return (
+                        <SpaceBetween direction="horizontal" size="xxs">
+                          <StatusIndicator type={r.grantable ? 'success' : 'error'}>
+                            {r.grantable
+                              ? t('integrations.a2a.access.grantable')
+                              : t('integrations.a2a.access.revoked')}
+                          </StatusIndicator>
+                          {remaining !== null && remaining !== undefined && (
+                            <Badge color="severity-medium">
+                              {t('integrations.a2a.access.expiresIn', {
+                                minutes: Math.max(1, Math.round(remaining / 60)),
+                              })}
+                            </Badge>
+                          )}
+                        </SpaceBetween>
+                      );
+                    },
+                  },
+                  {
+                    id: 'accessReason',
+                    header: t('integrations.a2a.col.accessReason'),
+                    cell: (r) => r.grantableReason || '—',
+                  },
                   {
                     id: 'lastUpdated',
                     header: t('integrations.a2a.col.lastUpdated'),

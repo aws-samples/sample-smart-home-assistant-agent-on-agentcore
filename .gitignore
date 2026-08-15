@@ -52,6 +52,15 @@ cdk/lambda/skill-erp-api/dateutil/
 cdk/lambda/skill-erp-api/*.dist-info/
 cdk/lambda/skill-erp-api/bin/
 cdk/lambda/skill-erp-api/six.py
+cdk/lambda/pre-token/boto3/
+cdk/lambda/pre-token/botocore/
+cdk/lambda/pre-token/s3transfer/
+cdk/lambda/pre-token/jmespath/
+cdk/lambda/pre-token/urllib3/
+cdk/lambda/pre-token/dateutil/
+cdk/lambda/pre-token/*.dist-info/
+cdk/lambda/pre-token/bin/
+cdk/lambda/pre-token/six.py
 .venv/
 .DS_Store
 venv/
@@ -90,6 +99,10 @@ cdk/lambda/*/device_catalog.py
 # Same arrangement for the Agent Registry helper.
 # Source of truth is shared/agent_registry.py.
 cdk/lambda/*/agent_registry.py
+# And for the A2A grant policy, which the admin API (per-user memberships and the
+# revocation sweep) and the pre-token trigger (global grants injected into the
+# claim) must both apply IDENTICALLY. Source of truth is shared/subagent_policy.py.
+cdk/lambda/*/subagent_policy.py
 # And for the scenario model plus the solar maths and the shared schedule payload,
 # which the scenario runner and the admin API both need. Source of truth is
 # shared/.

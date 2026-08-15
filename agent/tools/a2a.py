@@ -1,6 +1,6 @@
 """A2A client tools for the smarthome text agent.
 
-``build_a2a_tools(grants, registry_id, user_token)`` resolves each granted agent's
+``build_a2a_tools(grants, registry_id, user_token, session_id)`` resolves each granted agent's
 AgentCard from AgentCore Registry, then returns one Strands tool per
 (agentCardName, grantedSkillId) pair.
 
@@ -14,8 +14,11 @@ Each tool:
   - Closure pins endpoint_url and the user's token so the LLM cannot forge either.
     The LLM-facing signature is ``_invoke(message: str)`` and nothing else —
     identity is never a parameter.
-  - Sends an A2A JSON-RPC ``message/send`` with a single header:
+  - Sends an A2A JSON-RPC ``message/send`` with one credential header:
       Authorization: Bearer <the end user's own idToken>
+    plus this turn's runtime session id, which is not a credential — see
+    shared/a2a_session.py for why it travels on a header AND in the message
+    metadata.
 
 One token, because the authorization now lives in that token's claims. Each
 sub-agent Runtime's ``customJWTAuthorizer.customClaims`` matches ``cognito:groups``
@@ -56,6 +59,7 @@ from typing import Any, Callable
 import boto3
 
 import a2a_prompt
+import a2a_session
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +249,7 @@ def build_a2a_tools(
     grants: dict[str, list[str]],
     registry_id: str,
     user_token: str | None = None,
+    session_id: str | None = None,
 ) -> list[Any]:
     """Return a list of Strands tools — one per granted (agent, skill) pair.
 
@@ -255,11 +260,28 @@ def build_a2a_tools(
     for a grant, so there is no separate service token. Without it no tool can be
     built, because there is nothing to authenticate with.
 
+    ``session_id`` is this turn's own runtime session id, forwarded so a delegated
+    turn can be joined to the turn that caused it and so the specialist can read
+    the session summary. Threaded through rather than read from the environment
+    because it is per-request state; see shared/a2a_session.py for both channels it
+    travels on. Omitted or unusable means the hop carries no session id, exactly as
+    before.
+
     Soft-fails per agent: logs a warning and skips one whose card cannot be
     resolved. Returns an empty list if ``grants`` is empty.
     """
     if not grants:
         return []
+
+    # Validated once here rather than per call. A warmup invocation's session id is
+    # the literal "default", which AgentCore would reject as too short — and a
+    # rejected delegation is a worse outcome than an unjoinable one.
+    usable_session = a2a_session.usable_session_id(session_id)
+    if session_id and not usable_session:
+        logger.info(
+            "session id %r cannot be forwarded (AgentCore requires >=%d safe "
+            "characters); this turn's delegations carry none",
+            session_id, a2a_session.MIN_SESSION_ID_LEN)
 
     # Import lazily so test code that patches strands works consistently.
     from strands import tool as strands_tool
@@ -307,6 +329,7 @@ def build_a2a_tools(
                 endpoint_url=endpoint_url,
                 skill=skill,
                 user_token=user_token,
+                session_id=usable_session,
                 # The card we already have. Passing it removes the per-call
                 # GET /.well-known/agent-card.json whose only used field was
                 # overwritten on the next line anyway.
@@ -324,6 +347,7 @@ def _make_skill_tool(
     skill: dict,
     user_token: str | None = None,
     card_dict: dict | None = None,
+    session_id: str = "",
 ):
     tool_name = a2a_prompt.tool_name(agent_name, skill.get("id", "x"))
     desc_parts = [skill.get("description", "").strip() or skill.get("name", "")]
@@ -335,10 +359,13 @@ def _make_skill_tool(
 
     # Bind loop-local copies so every tool closure captures its own values.
     # `_user_token` is pinned here for the same reason the MCP wrappers pin the
-    # sub: it must not be reachable from the LLM-facing signature.
+    # sub: it must not be reachable from the LLM-facing signature. `_session_id`
+    # is pinned for the same reason — a model that could choose the session id
+    # could point a specialist at another turn's summary.
     _endpoint = endpoint_url
     _user_token = user_token
     _card = dict(card_dict or {})
+    _session_id = session_id
 
     @strands_tool(name=tool_name, description=doc)
     def _invoke(message: str) -> str:
@@ -352,6 +379,7 @@ def _make_skill_tool(
                 message=message + _device_context(message),
                 user_token=_user_token,
                 card_dict=_card,
+                session_id=_session_id,
             )
         except A2AUnavailable as e:
             # Distinguished from a failure: the call was never attempted, so the
@@ -556,6 +584,7 @@ def _send_a2a_message(
     message: str,
     user_token: str | None = None,
     card_dict: dict | None = None,
+    session_id: str = "",
 ) -> str:
     """Send one A2A ``message/send`` and collect the reply text.
 
@@ -588,6 +617,15 @@ def _send_a2a_message(
                 "no user token on this turn, and the end user's token is the only "
                 "credential a specialist accepts")
         headers = {"Authorization": f"Bearer {token}"}
+        # This turn's session id, on the platform's own header. Its job is to make
+        # AgentCore adopt the id as the sub-agent's runtimeSessionId, which is what
+        # puts it on the sub-agent's spans; the container never sees this header
+        # (see the metadata note below). Validated by the caller, so an empty string
+        # here means "there was nothing sendable" and the header is omitted rather
+        # than sent empty — AgentCore rejects a too-short value and would take the
+        # whole delegation down with it.
+        if session_id:
+            headers[a2a_session.RUNTIME_SESSION_ID_HEADER] = session_id
         timeout = httpx.Timeout(_READ_TIMEOUT, connect=_CONNECT_TIMEOUT)
         async with httpx.AsyncClient(headers=headers, timeout=timeout) as http:
             card = _local_agent_card(card_dict or {}, endpoint_url)
@@ -604,6 +642,14 @@ def _send_a2a_message(
                 message_id=str(uuid.uuid4()),
                 role=Role.user,
                 parts=[Part(root=TextPart(text=message))],
+                # The same session id, in the body — and this is the copy the
+                # sub-agent's own code actually reads. AgentCore's header allowlist
+                # cannot admit an `x-amzn-` header, so the one set above reaches the
+                # platform (which adopts the session) but never the container. The
+                # memory namespace needs it in the container, hence both.
+                # See shared/a2a_session.py.
+                metadata=({a2a_session.SESSION_ID_METADATA_KEY: session_id}
+                          if session_id else None),
             )
             reply_text: str | None = None
             async for event in client.send_message(msg):

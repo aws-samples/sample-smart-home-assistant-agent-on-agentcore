@@ -16,6 +16,25 @@ to happen at the sub-agent's authorizer, before our code runs, on something the
 caller cannot forge. So intent lives where it can be expressed and enforcement lives
 where it can be enforced, and this module is the one-way bridge.
 
+GLOBAL grants do not cross that bridge
+--------------------------------------
+Only PER-USER grants are materialised as memberships. A global grant is the same
+value for everybody, and writing it a million times is not a scaling detail but a
+wall: `AdminAddUserToGroup` sits in Cognito's `UserUpdate` category at 25 RPS,
+account-wide and NOT adjustable, each write bills the user as a monthly active user,
+and a user may hold at most 100 groups. So global grants are computed at token issue
+by `cdk/lambda/pre-token` and written straight into the `cognito:groups` claim.
+
+The consequence to hold on to: **a group name in the claim with no membership behind
+it is normal and correct.** `AdminListGroupsForUser` answers "what was materialised
+for this user", not "what may this user reach" — which is why `diff_user` and the
+reconcile UI compare against per-user intent only, and why the console labels the
+rest as claim-injected rather than reporting it as drift.
+
+This module is imported by BOTH Lambdas so the merge rule has one implementation.
+Two would not fail loudly; one class of user would simply end up with more access
+than an admin granted.
+
 A one-way bridge drifts, so `reconcile` exists and the UI surfaces its result. The
 precedent is `sync-schedules` for scenes: a sync without a reconcile is not a sync,
 it is a hope.
@@ -225,6 +244,135 @@ def force_token_refresh(cognito, pool_id: str, username: str) -> bool:
         logger.warning("could not sign out %s after narrowing grants: %s",
                        username, exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Revocation sweep: a record that is no longer grantable keeps no groups
+#
+# Scanned from the GROUP side, not the record side, and that is the whole design.
+# The obvious implementation — "for each record that is no longer grantable, work
+# out its group names and revoke them" — cannot handle the case that matters most:
+# a DELETED record can no longer be read, so its card name and skill list are gone
+# and there is nothing to derive names from. Listing the groups instead needs
+# nothing from the record but its NAME, which the group already encodes.
+#
+# It also closes a gap nothing else covers. A sub-agent's authorizer matches group
+# names written into it at deploy time from the agent's own card, not from the
+# Registry — so a group hand-made in Cognito would admit its holder even with no
+# record at all. A group whose agent is not in the grantable catalog is removed
+# here whether or not anything ever granted it.
+#
+# Cost is bounded by the number of GRANTED users, not the size of the pool: one
+# ListGroups (about 25 groups), then ListUsersInGroup only for the groups that
+# have to go.
+# ---------------------------------------------------------------------------
+
+def all_a2a_groups(cognito, pool_id: str) -> list[str]:
+    """Every `a2a-` group in the pool, paginated.
+
+    Only this prefix. `admin` and anything else in the pool is not this module's
+    to touch, which is the same rule materialisation follows.
+    """
+    out: list[str] = []
+    token = None
+    while True:
+        kwargs = {"UserPoolId": pool_id, "Limit": 60}
+        if token:
+            kwargs["NextToken"] = token
+        resp = _with_retry(cognito.list_groups, **kwargs)
+        for group in resp.get("Groups", []):
+            name = group.get("GroupName", "")
+            if name.startswith(a2a_groups.GROUP_PREFIX):
+                out.append(name)
+        token = resp.get("NextToken")
+        if not token:
+            return out
+
+
+def users_in_group(cognito, pool_id: str, group: str) -> list[str]:
+    """Usernames holding `group`, paginated."""
+    out: list[str] = []
+    token = None
+    while True:
+        kwargs = {"UserPoolId": pool_id, "GroupName": group, "Limit": 60}
+        if token:
+            kwargs["NextToken"] = token
+        resp = _with_retry(cognito.list_users_in_group, **kwargs)
+        for user in resp.get("Users", []):
+            username = user.get("Username", "")
+            if username:
+                out.append(username)
+        token = resp.get("NextToken")
+        if not token:
+            return out
+
+
+def groups_to_revoke(group_names, grantable_agents: set[str]) -> list[str]:
+    """The `a2a-` groups whose agent may not be granted right now.
+
+    Pure, so the decision is testable without Cognito. A group whose name does not
+    parse is left ALONE rather than revoked: the prefix is ours, but an unparseable
+    name means something upstream changed shape, and deleting memberships on a
+    guess is worse than leaving a group nobody's tools reference.
+    """
+    doomed = []
+    for name in group_names:
+        parsed = a2a_groups.parse_group(name)
+        if parsed is None:
+            logger.warning("group %s carries our prefix but does not parse; "
+                           "left alone rather than revoked", name)
+            continue
+        agent_name, _skill = parsed
+        if agent_name not in grantable_agents:
+            doomed.append(name)
+    return sorted(doomed)
+
+
+def revoke_groups(cognito, pool_id: str, groups: list[str],
+                  sign_out: bool = True) -> dict:
+    """Remove every membership of `groups`, and sign those users out.
+
+    The sign-out is what makes this a REVOCATION rather than an intention: group
+    membership is baked into a token at issue, so without it a removed grant keeps
+    working until the token expires. Done once per user rather than once per
+    membership — `AdminUserGlobalSignOut` shares the same 25 RPS `UserUpdate`
+    quota as the removals themselves.
+
+    Never raises. This runs on a schedule; one unlucky group must not stop the
+    sweep from finishing the rest.
+    """
+    removed: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for group in groups:
+        try:
+            holders = users_in_group(cognito, pool_id, group)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not list holders of %s: %s", group, exc)
+            errors.append(f"{group}: {exc}")
+            continue
+        for username in holders:
+            try:
+                _with_retry(cognito.admin_remove_user_from_group,
+                            UserPoolId=pool_id, Username=username,
+                            GroupName=group)
+                removed.setdefault(username, []).append(group)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not remove %s from %s: %s",
+                               username, group, exc)
+                errors.append(f"{username}/{group}: {exc}")
+
+    signed_out = []
+    if sign_out:
+        for username in removed:
+            if force_token_refresh(cognito, pool_id, username):
+                signed_out.append(username)
+
+    return {
+        "revokedGroups": sorted(groups),
+        "affectedUsers": {u: sorted(g) for u, g in sorted(removed.items())},
+        "signedOut": sorted(signed_out),
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------

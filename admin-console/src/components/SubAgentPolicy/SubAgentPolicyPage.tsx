@@ -434,23 +434,39 @@ const SubAgentPolicyPage: React.FC<Props> = ({
             </CloudscapeHeader>
           }
         >
-          {(reconcile.outOfSync || []).length === 0 ? (
-            <StatusIndicator type="success">{t('subagent.reconcileClean')}</StatusIndicator>
-          ) : (
-            <SpaceBetween size="xs">
-              {reconcile.users.filter((u) => !u.inSync).map((u) => (
-                <div key={u.username}>
-                  <code>{u.username}</code>
-                  {u.error
-                    ? <> — {u.error}</>
-                    : <>
-                        {(u.missing || []).length > 0 && <> {t('subagent.missing')}: {(u.missing || []).join(', ')}</>}
-                        {(u.extra || []).length > 0 && <> {t('subagent.extra')}: {(u.extra || []).join(', ')}</>}
-                      </>}
-                </div>
-              ))}
-            </SpaceBetween>
-          )}
+          <SpaceBetween size="s">
+            {/* Global grants are not memberships. They are injected into
+                `cognito:groups` at token issue, so `AdminListGroupsForUser` — which
+                is what the rows below compare against — cannot see them. Rendering
+                only the memberships would show every user as having lost every
+                global grant, so the claim side is stated explicitly and is NOT
+                counted as drift. */}
+            {(reconcile.claimInjectedGroups || []).length > 0 && (
+              <CloudscapeBox variant="p" color="text-body-secondary">
+                {t('subagent.claimInjected')}:{' '}
+                {(reconcile.claimInjectedGroups || []).map((g) => (
+                  <Badge key={g}>{g}</Badge>
+                ))}
+              </CloudscapeBox>
+            )}
+            {(reconcile.outOfSync || []).length === 0 ? (
+              <StatusIndicator type="success">{t('subagent.reconcileClean')}</StatusIndicator>
+            ) : (
+              <SpaceBetween size="xs">
+                {reconcile.users.filter((u) => !u.inSync).map((u) => (
+                  <div key={u.username}>
+                    <code>{u.username}</code>
+                    {u.error
+                      ? <> — {u.error}</>
+                      : <>
+                          {(u.missing || []).length > 0 && <> {t('subagent.missing')}: {(u.missing || []).join(', ')}</>}
+                          {(u.extra || []).length > 0 && <> {t('subagent.extra')}: {(u.extra || []).join(', ')}</>}
+                        </>}
+                  </div>
+                ))}
+              </SpaceBetween>
+            )}
+          </SpaceBetween>
         </Container>
       )}
 

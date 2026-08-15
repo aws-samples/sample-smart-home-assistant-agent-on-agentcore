@@ -915,6 +915,17 @@ export interface A2AAgentRecord {
   updatedAt: string;
   card: A2AAgentCard;
   publishedBy: string;
+  /** Whether a user may hold this agent's skills right now.
+   *
+   *  Deliberately separate from `status`, because the two genuinely differ: a
+   *  record knocked back to DRAFT by an edit is not approved and IS still
+   *  grantable, for the length of its re-approval window. */
+  grantable: boolean;
+  /** Why, in words, for the column an admin reads when access disappears. */
+  grantableReason: string;
+  /** Seconds until an in-flight record loses its grants; null when nothing is on
+   *  the clock. Lets a revocation be seen coming rather than discovered. */
+  graceRemainingSeconds: number | null;
 }
 
 /** One entry in the agent fleet. */
@@ -1282,6 +1293,14 @@ export interface A2AReconcileResult {
   catalogError?: string;
   users: A2AReconcileRow[];
   outOfSync?: string[];
+  /** Groups every user holds through the `cognito:groups` claim, with NO Cognito
+   *  membership behind them — the global grants the pre-token trigger injects at
+   *  token issue.
+   *
+   *  Surfaced because `AdminListGroupsForUser` cannot see them, so a page that
+   *  rendered memberships alone would show every user as having lost every global
+   *  grant. They are not drift and the repair must not try to "fix" them. */
+  claimInjectedGroups?: string[];
 }
 
 /** Compare grant intent against the Cognito groups that actually enforce it.
