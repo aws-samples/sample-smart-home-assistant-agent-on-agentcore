@@ -33,10 +33,19 @@ A signed claim cannot be widened by the caller, and it is checked by the platfor
 rather than by us. The sub-agent still re-verifies the token independently rather
 than trusting this hop — see a2a-agent-registry/common/user_identity.py.
 
-The call goes straight to the sub-agent's Runtime rather than through the Gateway.
-A Gateway passthrough hop was designed in to unify auth; unifying it on the user's
-token achieved that without the hop, so adding one would now cost a round trip and
-eight targets to keep in step for centralised egress alone.
+The endpoint comes from the AgentCard and nothing here knows or cares whether it is
+a Runtime or a Gateway. Since 2026-08-15 the cards point at `smarthome-a2a-gw`, a
+dedicated inbound gateway with one A2A passthrough target per sub-agent (see
+scripts/setup-a2a-gateway.py). Rolling back is a card edit, not a code change —
+scripts/cutover-a2a-cards.py --to runtime.
+
+Measured over that hop, so none of it is assumed: the caller's `cognito:groups` is
+still enforced (a user narrowed to no grant gets 401), per-user identity still
+resolves in the container, the session id still arrives, the span-level join still
+works, and the added latency is inside noise (±0.1s over a ~4.8s call). What the
+gateway adds is a Cedar per-agent `forbid` that denies on the next request for
+everyone — the one thing a claim-based grant cannot do, since a claim only changes
+when a token does.
 
 All failures are soft: the tool returns a string beginning with
 ``"A2A agent call failed: ..."`` so the LLM can apologise / fall back rather
@@ -304,13 +313,10 @@ def build_a2a_tools(
                 "grant names agent %r, which has no approved Registry record; "
                 "skipped", agent_name)
             continue
-        # Straight to the sub-agent's Runtime, not through the Gateway. Routing A2A
-        # through a Gateway passthrough target was designed in to unify auth, and
-        # that reason evaporated once the user's own token became the credential:
-        # the sub-agent's authorizer validates it and checks the grant claim
-        # directly. A gateway hop would now buy centralised egress and its own
-        # observability at the price of a round trip and eight targets to keep in
-        # step, so it is deliberately not in this path. See docs §9.13.
+        # The URL we were GRANTED, whatever it points at. It is the gateway now
+        # (see the module docstring); it was the runtime before, and it can be again
+        # without touching this file. A sub-agent's self-reported URL is never
+        # consulted, which is what keeps that true.
         endpoint_url = card.get("url", "")
         if not endpoint_url:
             logger.warning("A2A card %s has no endpoint; skipped", agent_name)

@@ -3441,8 +3441,46 @@ JSON-RPC `message/send` against AgentCore Runtime's native A2A protocol mode
 specialist are independent AgentCore Runtimes.
 
 Since 2026-08-12 the call carries **one token — the end user's own idToken** — and
-each specialist's Runtime authorizes it directly. It goes straight to the
-specialist's Runtime, not through the Gateway.
+each specialist's Runtime authorizes it directly.
+
+Since 2026-08-15 it goes **through a dedicated inbound gateway**,
+`smarthome-a2a-gw`, with one A2A `passthrough` target per specialist and
+`JWT_PASSTHROUGH` outbound so the user's token arrives unchanged. The AgentCards
+carry the gateway URL; the orchestrator routes on `card.url` and knows nothing about
+the topology, so rolling back is `scripts/cutover-a2a-cards.py --to runtime`.
+
+Measured over the hop before cutting over (`scripts/probe-a2a-gateway.py`):
+`cognito:groups` is still enforced by each specialist's own authorizer — a user
+narrowed to no grant gets **401** — per-user identity still resolves in the
+container, the propagated session id still arrives, the span-level join still works
+(13 orchestrator spans and 13 specialist spans under one `session.id`), and the
+latency delta is inside noise (±0.1s on a ~4.8s call).
+
+What the gateway adds is a Cedar **per-agent `forbid`**: an all-users deny that
+takes effect on the next request, which a claim-based grant cannot do because a
+claim only changes when a token does. Verified: the forbidden agent answers `403 …
+[Policy evaluation denied due to Forbid_energy_optimization]` while every other
+target still answers 200.
+
+What it does **not** add is guardrails — see §9.13.1.
+
+#### 9.13.1 Why the gateway cannot carry guardrails, and where Cedar stops
+
+Two limits, both measured, both worth stating because each looks like a
+configuration problem and is not:
+
+- **Gateway guardrails cannot filter A2A at all.** In us-west-2 `CreatePolicy` with
+  a guardrails block fails `AccessDeniedException: Guardrails policies are not
+  enabled for this account`, which is regional rather than an entitlement. And even
+  in a supported region, Cedar dataPaths cannot traverse arrays, so nothing can read
+  an A2A message's text at `params.message.parts[i].text`. Content filtering for a
+  specialist has to be `ApplyGuardrail` inside its own container.
+- **Cedar cannot do per-user authorization here.** The generated schema gives
+  `AgentCore::OAuthUser` no `groups` and no `claims` attribute (probed 2026-08-15),
+  so a policy cannot read the caller's `cognito:groups`. Its only per-user lever is
+  an explicit `principal.id` list. So the gateway's permit is deliberately broad —
+  the analyzer calls it "Overly Permissive" and is right — and authorization stays
+  at each specialist's runtime authorizer, one layer down, on a signed claim.
 
 #### Why each of these is an agent and not a skill
 
