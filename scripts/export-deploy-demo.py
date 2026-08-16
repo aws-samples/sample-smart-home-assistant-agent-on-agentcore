@@ -275,6 +275,13 @@ def main(argv=None) -> int:
             stale.append(f"MISSING  {AGENT}/memory_actor.py")
         elif actor_dst.read_bytes() != actor_src:
             stale.append(f"STALE    {AGENT}/memory_actor.py")
+        for src, name in ((REPO / "scripts" / "a2a-preflight.py", "a2a-preflight.py"),
+                          (REPO / "shared" / "a2a_preflight.py", "a2a_preflight.py")):
+            dst = AGENT_BUNDLE / name
+            if not dst.exists():
+                stale.append(f"MISSING  {name}")
+            elif dst.read_bytes() != src.read_bytes():
+                stale.append(f"STALE    {name}")
         stale.extend(_check_payload_is_self_contained())
         print("\n".join(stale) if stale else "bundle is current")
         return 1 if stale else 0
@@ -295,6 +302,18 @@ def main(argv=None) -> int:
         shutil.copy2(REPO / "shared" / "agent_registry.py",
                      bundle / "agent_registry.py")
     log("agent_registry.py refreshed in both bundle roots (deploy-time only)")
+
+    # 2b. The offline pre-flight, into the agent bundle's ROOT — the two files side by
+    #     side, which is how the CLI resolves its rule module and the arrangement an
+    #     agent team will naturally end up with when they copy it into their own CI.
+    #     Shipped with the bundle rather than left as a link in the manifest, because
+    #     it is the ONE check a third party can run before they have anything deployed
+    #     and before they have access to this account. Stdlib only; it reads its rules
+    #     out of the manifest, not out of this repo.
+    for src, dst in ((REPO / "scripts" / "a2a-preflight.py", "a2a-preflight.py"),
+                     (REPO / "shared" / "a2a_preflight.py", "a2a_preflight.py")):
+        shutil.copy2(src, AGENT_BUNDLE / dst)
+    log("a2a-preflight.py + a2a_preflight.py -> bundle root (offline, stdlib only)")
 
     # 3. The Memory actor rule, INSIDE the payload. `common/memory.py` reaches for it
     #    by path — in a real deployment `deploy.py` copies all of `shared/` next to the
