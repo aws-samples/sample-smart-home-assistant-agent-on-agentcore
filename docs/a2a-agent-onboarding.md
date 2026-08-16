@@ -135,6 +135,17 @@ agent,原有授权不会跟过去。
 - **卡必须能通过真正的 A2A schema 校验**。缺 `capabilities` / `defaultInputModes` /
   `securitySchemes` 会被 Registry 拒,报 "does not match any supported version" ——
   听起来像版本问题,其实是完整性问题。manifest 的 `card.requiredFields` 是清单。
+- **`securitySchemes` / `security` 请从 manifest 的 `card.securitySchemes` 原样抄,把
+  `{cardName}` 换成你的卡名。** 这是 manifest 里唯一一段"也要放进卡里"的内容,因为
+  `securitySchemes` 是 A2A 协议字段:调用方是读它来决定发什么凭证的。当前这套部署的答案是
+  **终端用户自己的 idToken**(`openIdConnect`,签发者就是 authorizer 校验的那个
+  discoveryUrl),授权靠 `cognito:groups` claim —— **没有 m2m token,没有第二个 header**。
+  `security` 里的 scope 列表是**空的**:A2A 没有"必须持有某个 group"这种字段,所以那条要求
+  写在 description 里,机器可读的规则在 `groups.doorGroup`。
+  > 这个字段是**声明性**的:平台没有任何地方读它来做授权判断(判断在你的 Runtime
+  > authorizer)。所以声明了不等于安全,而**声明错了会把相信你的调用方全部坑死** —— 他们
+  > 会去取一个门口不认的凭证,而卡片告诉他们这么做是对的。`scripts/a2a-preflight.py` 会把
+  > 不一致报成 `card-security-mismatch`(note 级,不拦部署)。
 - **改一张已 APPROVED 的卡会把记录打回 `DRAFT`**,需要重新审批。授权不会丢:撤销扫描给
   in-flight 记录留了一个重新审批窗口(manifest 的 `lifecycle.reapprovalGraceSeconds`,
   默认 1 小时)。

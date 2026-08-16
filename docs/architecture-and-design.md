@@ -3663,6 +3663,21 @@ a2a-agent-registry/
 
 #### Identity: two tokens, because one cannot answer both questions
 
+> **Superseded — read §9.13.1 and §9.13.3 for the mechanism in force.** This
+> subsection describes the two-token hop as it was built, and it is kept because the
+> reasoning below is why the replacement looks the way it does. What changed: there is
+> now **one** credential, the end user's own idToken, and the grant is the
+> `cognito:groups` claim on it. The m2m client_credentials token is gone, and so is
+> `X-A2A-Allowed-Skills` as an authorization input — the container derives the granted
+> skills from the same signed claim, which a caller cannot widen.
+>
+> The retired mechanism outlived its use in one place worth naming: every AgentCard
+> went on advertising an OAuth2 `client_credentials` scheme in its `securitySchemes`,
+> which is what a caller reads to decide what to send. Nothing enforced it and our own
+> orchestrator never read it, so it cost us nothing and would have cost a third party
+> their first day. The manifest now publishes the correct declaration as
+> `card.securitySchemes` and `a2a_preflight` reports a card that disagrees.
+
 The `Authorization` header carries an OAuth2 **client_credentials** m2m token
 (Cognito app client `smarthome-a2a-m2m`, scope `a2a-server/invoke`). Every
 downstream Runtime validates it with `customJWTAuthorizer`. That token proves *an

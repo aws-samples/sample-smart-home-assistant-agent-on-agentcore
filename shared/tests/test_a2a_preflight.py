@@ -49,6 +49,15 @@ def manifest():
 
 @pytest.fixture
 def card():
+    """A card an agent team following the manifest would produce.
+
+    `securitySchemes` is built from the same generator the manifest publishes rather
+    than typed here: this fixture is the "good card" every happy-path test asserts
+    against, and a hand-written stub would make those tests pass while a real correct
+    card reported a mismatch.
+    """
+    schemes, security = a2a_manifest.card_security(
+        discovery_url=DISCOVERY, door_group="a2a-third-party-agent")
     return {
         "name": "third-party-agent",
         "description": "A third-party specialist.",
@@ -58,7 +67,8 @@ def card():
         "capabilities": {"streaming": False},
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
-        "securitySchemes": {"oauth2": {}},
+        "securitySchemes": schemes,
+        "security": security,
     }
 
 
@@ -416,3 +426,78 @@ def test_block_outranks_risk_outranks_note():
 
 def test_notes_alone_do_not_block():
     assert not pf.is_blocking([pf._finding("a", pf.NOTE, "")])
+
+
+# ---------------------------------------------------------------------------
+# What the card claims about authenticating to it
+#
+# NOTE-only, and the ceiling is the point. Nothing on the platform reads
+# `securitySchemes` to decide anything — the Runtime authorizer does that — so a card
+# declaring the wrong scheme works for every caller who ignores it, including this
+# platform's own orchestrator. Blocking would refuse a functioning agent. Reporting it
+# is still worth doing, because the failure it causes belongs entirely to someone else:
+# a caller who BELIEVES the card fetches the wrong credential and is refused at a door
+# the card told them they were allowed through.
+# ---------------------------------------------------------------------------
+
+def _with_declared_security(card, manifest, name="third-party-agent"):
+    published = json.dumps(manifest["card"]["securitySchemes"]).replace(
+        "{cardName}", name)
+    card["securitySchemes"] = json.loads(published)
+    card["security"] = manifest["card"]["security"]
+    return card
+
+
+def test_copying_the_published_template_is_clean(card, manifest):
+    """The strongest statement about the template: follow it and there is nothing to
+    report."""
+    _with_declared_security(card, manifest)
+    assert not [f for f in pf.check(card, manifest)
+                if f["code"].startswith("card-security")
+                or f["code"] == "card-declares-no-security"]
+
+
+def test_the_retired_m2m_flow_is_named_for_what_it_is(card, manifest):
+    """Every card here advertised this for weeks after the mechanism was retired, and
+    `oauth2` reads as MORE secure rather than wrong, so the finding has to say what
+    actually happens to a caller who follows it."""
+    card["securitySchemes"] = {"oauth2": {"type": "oauth2", "flows": {
+        "clientCredentials": {"tokenUrl": "https://example.invalid/oauth2/token",
+                              "scopes": {"a2a-server/invoke": "Invoke A2A agents"}}}}}
+    findings = pf.check(card, manifest)
+    hit = next(f for f in findings if f["code"] == "card-security-mismatch")
+    assert hit["severity"] == pf.NOTE
+    assert not pf.is_blocking(findings), "a working agent must not be blocked"
+    assert "retired" in hit["detail"] and "refused at the door" in hit["detail"]
+
+
+def test_declaring_nothing_is_reported_separately(card, manifest):
+    """Distinct from declaring the WRONG thing: this is what the A2AServer default
+    produced, and the fix is to copy the template rather than to correct a value."""
+    card.pop("securitySchemes", None)
+    findings = pf.check(card, manifest)
+    codes = _codes(findings)
+    # `card-incomplete` also fires, because securitySchemes is a required field.
+    assert "card-declares-no-security" in codes
+    assert not any(f["code"] == "card-security-mismatch" for f in findings)
+
+
+def test_a_different_scheme_name_is_reported(card, manifest):
+    """`security` references the scheme by key, so a renamed key makes the card
+    self-inconsistent as well as non-standard here."""
+    _with_declared_security(card, manifest)
+    card["securitySchemes"] = {"myOwnName": next(iter(
+        card["securitySchemes"].values()))}
+    findings = pf.check(card, manifest)
+    assert "card-security-mismatch" in _codes(findings)
+    assert not pf.is_blocking(findings)
+
+
+def test_a_manifest_without_the_template_reports_nothing(card, manifest):
+    """The check is additive. An older manifest that does not publish the template is
+    not a manifest bug — unlike the rules `_require` guards, this one has no
+    enforcement to fall out of sync with."""
+    manifest["card"].pop("securitySchemes")
+    findings = pf.check(card, manifest)
+    assert not [f for f in findings if "security" in f["code"]]
+    assert "manifest-incomplete" not in _codes(findings)

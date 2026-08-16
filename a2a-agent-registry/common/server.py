@@ -388,6 +388,63 @@ def _build_skills(card_dict: dict[str, Any]):
     ]
 
 
+def _declaring_security(base):
+    """`A2AServer` subclass whose served card declares how to authenticate to it.
+
+    The card at ``/.well-known/agent-card.json`` is built by ``A2AServer`` from a
+    read-only ``public_agent_card`` property, which sets no ``securitySchemes`` and
+    takes no argument for them. So the served card told a caller NOTHING about the
+    credential — not wrong, but the one question a discovery document exists to answer.
+    A generic A2A client resolves this card and then has to be told out of band what to
+    send, which is the coupling the platform manifest exists to remove.
+
+    Subclassed rather than assigned onto the instance, because a property lives on the
+    class. The property is re-read per request, so the override applies to every fetch.
+
+    Failing soft: an agent that cannot name its issuer still serves, with no scheme
+    declared. Refusing to start would trade an incomplete discovery document for no
+    agent at all, and the enforcement of who may call is the Runtime authorizer's —
+    unaffected either way.
+    """
+    from common.card import card_security_for
+
+    class _WithSecurity(base):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, card_name: str = "", **kwargs):
+            super().__init__(*args, **kwargs)
+            self._card_name = card_name
+
+        @property
+        def public_agent_card(self):
+            card = super().public_agent_card
+            try:
+                schemes, security = card_security_for(self._card_name)
+                if not schemes[next(iter(schemes))]["openIdConnectUrl"]:
+                    logger.warning(
+                        "serving an agent card with no security scheme: this "
+                        "deployment's OIDC issuer is not resolvable from the "
+                        "environment (COGNITO_REGION / COGNITO_USER_POOL_ID)")
+                    return card
+                # Validated into the SDK's model rather than assigned as a plain
+                # dict. Both serialise to the same JSON today, but the plain dict
+                # makes pydantic warn on every card fetch
+                # ("Expected `SecurityScheme`") and a warning that fires on the
+                # happy path is a warning nobody will read when it matters.
+                # `card.py` keeps returning plain dicts: its other caller writes a
+                # Registry descriptor and must not need the A2A SDK.
+                from a2a.types import SecurityScheme
+
+                card.security_schemes = {
+                    name: SecurityScheme.model_validate(scheme)
+                    for name, scheme in schemes.items()
+                }
+                card.security = security
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not declare card security: %s", exc)
+            return card
+
+    return _WithSecurity
+
+
 class _MarkedResult:
     """An AgentResult whose ``str()`` carries the routing marker."""
 
@@ -626,12 +683,13 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
 
     from strands.multiagent.a2a import A2AServer
 
-    a2a_server = A2AServer(
+    a2a_server = _declaring_security(A2AServer)(
         agent=strands_agent,
         http_url=runtime_url,
         serve_at_root=True,
         skills=_build_skills(card_dict),
         version=card_dict.get("version", "1.0.0"),
+        card_name=card_dict["name"],
     )
 
     # Wrap the executor for every agent, tools or not: skill enforcement has to

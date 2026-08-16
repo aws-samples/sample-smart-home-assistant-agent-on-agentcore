@@ -118,22 +118,16 @@ def _read_env() -> dict:
         "registryId": state["registryId"],
         "userPoolId": stack["UserPoolId"],
         "userPoolClientId": stack["UserPoolClientId"],
-        "cognitoTokenUrl": (
-            f"https://smarthome-{_account_id()}.auth.{region}.amazoncognito.com"
-            "/oauth2/token"),
-        "scope": "a2a-server/invoke",
+        # No cognitoTokenUrl / scope. They belonged to the client_credentials m2m hop
+        # this platform retired: the credential is the end user's own idToken and the
+        # grant is its `cognito:groups` claim. The pool id + region above are what a
+        # card needs to name its issuer, and the deploy scripts no longer read the
+        # other two — a required-looking config key that nothing reads is how the
+        # retired mechanism kept looking live.
         "skillsTableName": "smarthome-skills",
         "adminConsoleUrl": stack["AdminConsoleUrl"],
         "chatbotUrl": stack["ChatbotUrl"],
     }
-
-
-def _account_id() -> str:
-    outputs = json.loads((REPO / "cdk-outputs.json").read_text())
-    stack = next(iter(outputs.values()))
-    # ChatbotBucketName is `smarthome-chatbot-<account>`; cheaper and more reliable
-    # here than an STS call, which would make an offline export impossible.
-    return stack["ChatbotBucketName"].rsplit("-", 1)[-1]
 
 
 CONFIG_COMMENT = (

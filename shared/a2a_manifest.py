@@ -71,6 +71,50 @@ def _templated(value: str) -> str:
                  .replace(_PLACEHOLDER_SKILL, "{skillId}"))
 
 
+# The key an AgentCard's `securitySchemes` map uses for this deployment's credential.
+# Named for what it IS rather than for the protocol it rides on: `oauth2` was the old
+# key and it described a client_credentials flow that no longer exists here, which is
+# exactly the confusion this name avoids.
+SECURITY_SCHEME_NAME = "endUserIdToken"
+
+
+def card_security(*, discovery_url: str, door_group: str) -> tuple[dict, list]:
+    """`(securitySchemes, security)` an AgentCard here should declare.
+
+    This is the ONE part of the platform contract that belongs in each agent's own
+    card rather than only in this document, because `securitySchemes` is an A2A
+    protocol field: a caller reads it from the card to decide what credential to send.
+    Published here as a template so nobody has to invent it, and so a card that
+    declares something else is detectable (`a2a_preflight` reports it).
+
+    `openIdConnect` rather than `http`/`bearer`, though both would be true. The OIDC
+    form names the ISSUER, which is the thing a caller actually has to get right —
+    it is the same discovery URL the Runtime authorizer validates against, so a token
+    from anywhere else is refused at the door.
+
+    `security` carries an EMPTY scope list on purpose. Authorization here is not a
+    scope: it is the `cognito:groups` claim, and A2A has no field for "the caller must
+    hold group X". Putting the group in a scopes array would make it look like
+    something an OAuth server would issue on request, which is the opposite of the
+    truth — an administrator grants it. So the requirement is stated in the
+    description, and the machine-readable rule stays in `groups.doorGroup`.
+    """
+    return (
+        {SECURITY_SCHEME_NAME: {
+            "type": "openIdConnect",
+            "openIdConnectUrl": discovery_url,
+            "description": (
+                "Send the END USER's own OIDC id token as "
+                "`Authorization: Bearer <token>`. There is no machine-to-machine "
+                "credential and no second header. Authorization is the "
+                f"`{conf.CLAIM_NAME}` claim on that same token: the caller must hold "
+                f"`{door_group}`, which a platform administrator grants. A token from "
+                "any other issuer is refused before your container is reached."),
+        }},
+        [{SECURITY_SCHEME_NAME: []}],
+    )
+
+
 def build(*, region: str, registry_id: str, user_pool_id: str, app_client_id: str,
           discovery_url: str, gateway_url: str = "",
           grant_grace_seconds: int = registry_ns.DEFAULT_GRANT_GRACE_SECONDS) -> dict:
@@ -89,6 +133,8 @@ def build(*, region: str, registry_id: str, user_pool_id: str, app_client_id: st
         placeholder_card, discovery_url, app_client_id)
     door_group = a2a_groups.agent_group_name(_PLACEHOLDER_CARD)
     skill_group = a2a_groups.group_name(_PLACEHOLDER_CARD, _PLACEHOLDER_SKILL)
+    card_schemes, card_sec = card_security(
+        discovery_url=discovery_url, door_group=_templated(door_group))
 
     manifest: dict = {
         "manifestVersion": MANIFEST_VERSION,
@@ -163,6 +209,17 @@ def build(*, region: str, registry_id: str, user_pool_id: str, app_client_id: st
                                "defaultOutputModes", "securitySchemes"],
             "namePattern": a2a_groups._SAFE.pattern,
             "skillIdPattern": a2a_groups._SAFE.pattern,
+            # Copy these two into your card verbatim. They are the only part of this
+            # document that belongs in the card as well as here — see `card_security`.
+            "securitySchemes": card_schemes,
+            "security": card_sec,
+            "securityNote": (
+                "DECLARATIVE. It tells a caller what to send; it does not enforce "
+                "anything, and nothing on this platform reads it to make an "
+                "authorization decision — your Runtime authorizer does that. So "
+                "declaring a scheme does not protect your agent, and declaring the "
+                "wrong one does not lock it: it strands every caller who believes "
+                "you. Keep it true."),
             "urlNote": (
                 "Your Runtime's invocations URL, or a gateway target URL. This is what "
                 "the conformance check resolves back to a runtime to read its "

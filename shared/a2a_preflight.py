@@ -226,6 +226,60 @@ def check_card(card: dict, manifest: dict) -> list[dict]:
     if url:
         findings.extend(_check_url(url, manifest))
 
+    # --- what the card claims about authenticating to it -------------------
+    findings.extend(_check_declared_security(card, manifest))
+
+    return findings
+
+
+def _check_declared_security(card: dict, manifest: dict) -> list[dict]:
+    """Does the card's `securitySchemes` match the one the manifest publishes?
+
+    NOTE, never blocking, and that ceiling is deliberate. Nothing on the platform reads
+    this field to make a decision — the Runtime authorizer does that — so a card
+    declaring the wrong scheme is fully functional for callers who ignore it, which
+    includes this platform's own orchestrator. Blocking would refuse a working agent.
+
+    Worth reporting all the same, because the failure it causes is entirely someone
+    else's: a caller who BELIEVES the card fetches the wrong kind of credential and is
+    refused at the door, with a card that says they did as they were told.
+    """
+    findings: list[dict] = []
+    want_schemes = _dig(manifest, "card.securitySchemes")
+    if not want_schemes:
+        # An older manifest that does not publish this yet. Not a manifest bug worth a
+        # BLOCK: the check is additive and its absence costs a note, not a rule.
+        return findings
+
+    # The published template carries `{cardName}`; a real card carries the name. Compare
+    # against the substituted form, or every correctly-copied card reports a mismatch
+    # against the very template it was copied from.
+    want_schemes = json.loads(
+        _substitute(json.dumps(want_schemes), card.get("name") or ""))
+
+    declared = card.get("securitySchemes") or {}
+    if not declared:
+        findings.append(_finding(
+            "card-declares-no-security", NOTE,
+            "the card names no securitySchemes, so it does not tell a caller what "
+            f"credential to send. The manifest publishes {sorted(want_schemes)} under "
+            "`card.securitySchemes` — copy it verbatim"))
+        return findings
+
+    if declared != want_schemes:
+        expected_name = sorted(want_schemes)[0]
+        detail = (f"the card declares {sorted(declared)} where the manifest publishes "
+                  f"{sorted(want_schemes)}")
+        # The specific legacy shape, called out because it is the one a copied older
+        # card carries and because "oauth2" reads as more secure, not less.
+        if "oauth2" in declared and "clientCredentials" in json.dumps(declared):
+            detail = (
+                "the card declares an OAuth2 client_credentials flow. That mechanism "
+                "was retired: there is no machine-to-machine token here, and a caller "
+                "who follows this card will be refused at the door. The manifest "
+                f"publishes the current scheme as {expected_name!r} under "
+                "`card.securitySchemes`")
+        findings.append(_finding("card-security-mismatch", NOTE, detail))
     return findings
 
 
