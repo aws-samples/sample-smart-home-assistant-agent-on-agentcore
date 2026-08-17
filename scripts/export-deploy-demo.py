@@ -97,6 +97,37 @@ COMMON_IGNORE = shutil.ignore_patterns("tests", "__pycache__", "*.pyc")
 RUNBOOK_SRC = REPO / "docs" / "agentcore-deploy-runbook.md"
 
 
+# Local artifacts a run of the demo leaves behind. They must never travel: the export
+# tars whatever is in the bundle directory, and `demo-state.json` in particular names a
+# real runtime ARN and recordId. Shipping one means the next person to run
+# `register_record.py` silently UPDATES someone else's record — a version bump against
+# an agent they have never seen — instead of creating their own. Caught by leaving two
+# of these behind while writing the docs; the tarball went from 43 files to 45 and
+# looked perfectly fine.
+NOT_SHIPPED = {
+    "demo-state.json",       # runtimeId / runtimeArn / invocationUrl / recordId
+    "rendered-card.json",    # derived from card.json + demo-state.json
+    "manifest.json",         # the platform contract, fetched per deployment
+    "authorizer.json",       # derived from the manifest
+}
+NOT_SHIPPED_DIRS = {"__pycache__", ".venv", "venv", ".agentcore-project", ".pytest_cache"}
+
+
+def _ship_path(path: Path) -> bool:
+    """Does this path belong in the tarball?"""
+    if path.name in NOT_SHIPPED:
+        return False
+    return not (NOT_SHIPPED_DIRS & set(path.parts))
+
+
+def _ship(tarinfo):
+    """`tarfile` filter form of `_ship_path`."""
+    parts = set(Path(tarinfo.name).parts)
+    if NOT_SHIPPED_DIRS & parts:
+        return None
+    return None if Path(tarinfo.name).name in NOT_SHIPPED else tarinfo
+
+
 def log(msg: str) -> None:
     print(f"  [export] {msg}", flush=True)
 
@@ -352,9 +383,8 @@ def main(argv=None) -> int:
     if TARBALL.exists():
         TARBALL.unlink()
     with tarfile.open(TARBALL, "w:gz") as tar:
-        tar.add(OUT_DIR, arcname=OUT_DIR.name,
-                filter=lambda ti: None if "__pycache__" in ti.name else ti)
-    files = sum(1 for _ in OUT_DIR.rglob("*") if _.is_file())
+        tar.add(OUT_DIR, arcname=OUT_DIR.name, filter=_ship)
+    files = sum(1 for f in OUT_DIR.rglob("*") if f.is_file() and _ship_path(f))
     log(f"{TARBALL.relative_to(REPO)} -> {TARBALL.stat().st_size // 1024} KB, "
         f"{files} files")
     return 0
