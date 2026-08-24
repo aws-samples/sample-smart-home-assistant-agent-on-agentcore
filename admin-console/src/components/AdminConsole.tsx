@@ -4439,36 +4439,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   header: t('users.colGroups'),
                   cell: (u) => <GroupsCell groups={u.groups} t={t} />,
                 },
-                {
-                  id: 'demo',
-                  header: t('users.colDemo'),
-                  minWidth: 280,
-                  cell: (u) => {
-                    const cfg = getConfig();
-                    const loginHint = u.email || u.username;
-                    const chatUrl = cfg.chatbotUrl
-                      ? `${cfg.chatbotUrl.replace(/\/$/, '')}/?username=${encodeURIComponent(loginHint)}`
-                      : '';
-                    const simUrl = cfg.deviceSimulatorUrl
-                      ? `${cfg.deviceSimulatorUrl.replace(/\/$/, '')}/?userId=${encodeURIComponent(u.sub)}`
-                      : '';
-                    return (
-                      <SpaceBetween direction="horizontal" size="xxs">
-                        {chatUrl && (
-                          <Button iconName="external" iconAlign="right" href={chatUrl} target="_blank">
-                            {t('users.openChatbot')}
-                          </Button>
-                        )}
-                        {simUrl && (
-                          <Button iconName="external" iconAlign="right" href={simUrl} target="_blank">
-                            {t('users.openDeviceSim')}
-                          </Button>
-                        )}
-                        {!chatUrl && !simUrl && <span>-</span>}
-                      </SpaceBetween>
-                    );
-                  },
-                },
+                // No Demo column here: both demo launchers (chatbot and device
+                // simulator) live in the side nav now, so a column of them was a
+                // second, narrower copy of the same links crowding this table.
                 {
                   id: 'actions',
                   header: t('users.colActions'),
