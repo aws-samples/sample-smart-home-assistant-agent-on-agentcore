@@ -636,7 +636,17 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             header: t('models.colModel'),
             cell: (u) => (
               <div style={{ minWidth: 260 }}>
+                {/*
+                  expandToViewport is not cosmetic here. A table body cell is
+                  `overflow: hidden` (that is how Cloudscape ellipsises long cell
+                  text), so an inline dropdown is measured against the 51px cell
+                  box, not the page: 51px of cell minus the 32px trigger leaves
+                  negative room, and the dropdown collapses to Cloudscape's 15px
+                  floor — a blue sliver under the trigger with no options in it.
+                  Rendering in a portal measures against the viewport instead.
+                */}
                 <Select
+                  expandToViewport
                   selectedOption={findOption(userModelOptions, userModels[u.sub] || '')}
                   onChange={({ detail }) =>
                     setUserModels((prev) => ({ ...prev, [u.sub]: (detail.selectedOption.value as string) || '' }))
@@ -652,6 +662,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             cell: (u) => (
               <div style={{ minWidth: 240 }}>
                 <Select
+                  expandToViewport
                   selectedOption={findOption(userVisionModelOptions, userVisionModels[u.sub] || '')}
                   onChange={({ detail }) =>
                     setUserVisionModels((prev) => ({ ...prev, [u.sub]: (detail.selectedOption.value as string) || '' }))
