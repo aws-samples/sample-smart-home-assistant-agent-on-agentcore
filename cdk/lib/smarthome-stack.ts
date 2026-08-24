@@ -1226,6 +1226,31 @@ export class SmartHomeStack extends cdk.Stack {
       resources: ["*"],
     }));
 
+    // The Skill scanner's semantic tier (cdk/lambda/admin-api/skill_scan.py, invoked
+    // from index.py `_semantic_judge`). Static pattern rules cannot see the risk that
+    // has no code signature at all — a skill whose prose collects far more than its
+    // description admits — so the scan reads the SKILL.md with a model as well.
+    //
+    // Guardrails would be the obvious alternative and is NOT available in us-west-2,
+    // where this deployment lives, so this is an InvokeModel call rather than a
+    // guardrail policy.
+    //
+    // Deliberately an IAM-only change: adding a CDK-DECLARED environment variable to
+    // this Lambda makes CloudFormation rewrite its whole Environment table, which wipes
+    // the ~15 variables the setup scripts patch in afterwards. The scanner reads the
+    // deployment's existing MODEL_ID instead of declaring one.
+    //
+    // Cross-region inference profiles are what is actually invocable for a current
+    // Claude model, and a profile fans the call out to the regional model ARNs, so both
+    // the profile and the foundation model have to be allowed.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["bedrock:InvokeModel"],
+      resources: [
+        `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
     // Grant user-init Lambda access to KB docs bucket (create user folder on signup)
     userInitLambda.addEnvironment("KB_DOCS_BUCKET", kbDocsBucket.bucketName);
     kbDocsBucket.grantWrite(userInitLambda);

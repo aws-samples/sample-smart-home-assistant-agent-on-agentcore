@@ -21,6 +21,7 @@ import {
   MyRecord,
   CreateRecordInput,
 } from '../api/erpApi';
+import DemoSkillGenerator from './DemoSkillGenerator';
 import { useI18n } from '../i18n';
 
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
@@ -346,6 +347,10 @@ const SkillManager: React.FC = () => {
           </form>
         </Container>
       )}
+
+      {/* Hidden while the form is open, so the author editing one skill is not looking
+          at a button that publishes ten more. */}
+      {!showForm && <DemoSkillGenerator onRegistered={load} />}
 
       {!showForm && (
         <Table

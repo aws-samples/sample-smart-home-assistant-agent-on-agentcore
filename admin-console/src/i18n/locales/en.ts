@@ -953,6 +953,41 @@ const en: Record<string, string> = {
   'registry.reviewDone': 'Record is now {status} (reviewed by {by}).',
   'registry.colActions': 'Actions',
   'registry.colStatus': 'Status',
+
+  // ---------------------------------------------------------------------------
+  // Skill risk scanning. Two tiers — deterministic rules plus a semantic pass — and a
+  // report that is the reviewer's EVIDENCE, not a gate: Approve is never blocked by it.
+  // Rule ids (SS..) and OWASP AST ids are not translated; they are identifiers.
+  // ---------------------------------------------------------------------------
+  'scan.colRisk': 'Risk',
+  'scan.scan': 'Scan',
+  'scan.rescan': 'Rescan',
+  'scan.scanAll': 'Scan all',
+  'scan.scanningProgress': 'Scanning {done}/{total}',
+  'scan.notScanned': 'Not scanned',
+  'scan.stale': 'Stale',
+  'scan.staticOnly': 'Static only',
+  'scan.allDone': 'Scanned {count} record(s).',
+  'scan.someFailed': 'Some records could not be scanned: {errors}',
+  'scan.notPersisted': 'The report is shown below but could not be saved, so it will be gone after a reload and will not appear beside the approval.',
+  'scan.reportFor': 'Risk scan —',
+  'scan.sectionTitle': 'Risk scan',
+  'scan.neverScanned': 'This record has never been scanned. Scanning happens in the approval queue on Build → Skills.',
+  'scan.score': 'score',
+  'scan.tierBoth': 'Static + semantic',
+  'scan.tierStaticOnly': 'Static only',
+  'scan.scannedAt': 'Scanned {when} by {who} · scanner {version}',
+  'scan.semanticMissingTitle': 'The semantic tier did not run',
+  'scan.semanticMissingBody': 'Only the deterministic rules were applied ({reason}). Risks that carry no pattern — prose that collects more than the description admits, behaviour gated on a date or a user — would not be reported. Rescan when the model is reachable.',
+  'scan.noFindingsTitle': 'No findings',
+  'scan.noFindingsBody': 'Neither tier reported anything. That is evidence, not a clearance — read the SKILL.md before approving.',
+  'scan.colSeverity': 'Severity',
+  'scan.colRule': 'Rule',
+  'scan.colDetail': 'Finding',
+  'scan.fix': 'Fix:',
+  'scan.disclaimer': 'No findings does not mean no risk. This is one layer of defence in depth: every public skill scanner tested in 2026 was bypassed, and a skill can fetch its real instructions after approval. Judge the content, not the badge.',
+  'scan.approvedWith': 'recorded against scan {verdict} {score}',
+  'scan.approvedUnscanned': 'recorded as approved without a scan',
 };
 
 export default en;

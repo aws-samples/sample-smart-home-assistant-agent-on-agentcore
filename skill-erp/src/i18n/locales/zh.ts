@@ -124,6 +124,26 @@ const zh: Record<string, string> = {
   'erp.a2a.validation.skills': '至少需要一个技能。',
   'erp.a2a.validation.skillId': '技能 ID 不合法（小写字母、数字、连字符）。',
   'erp.a2a.validation.skillName': '技能名称为必填项。',
+
+  // 演示 Skill 生成器（skill-erp/src/components/DemoSkillGenerator.tsx）。它发布的
+  // 模板正文在 shared/demo-skill-templates.json，这里只翻译外围界面。
+  'erp.demo.title': '演示 Skill 生成器',
+  'erp.demo.description': '一键发布十个覆盖不同风险类型的示例 Skill，让 Admin Console 有可扫描、可审批的对象。',
+  'erp.demo.generate': '生成 10 个演示 Skill',
+  'erp.demo.register': '注册到 Registry',
+  'erp.demo.empty': '尚未生成。先生成这一组，发布前可以预览。',
+  'erp.demo.warningTitle': '这些 Skill 刻意植入了风险',
+  'erp.demo.warningBody': '它们的用途是演练风险扫描：其中几个包含隐藏指令、明文凭证、shell 管道或外部指令源。用于演示可以，但不要导入任何有人真正依赖的环境。',
+  'erp.demo.colName': 'Skill',
+  'erp.demo.colType': '类型',
+  'erp.demo.colRisk': '植入的风险',
+  'erp.demo.colStatus': '发布结果',
+  'erp.demo.semanticOnly': '仅语义层可见',
+  'erp.demo.registering': '正在发布到 Registry',
+  'erp.demo.progress': '已发布 {done} / {total}',
+  'erp.demo.progressWithFailures': '已发布 {done} / {total}，失败 {failed} 个',
+  'erp.demo.registered': '已提交审批',
+  'erp.demo.rerunHint': 'Registry 的记录名唯一，因此重复发布这一组会自动追加短后缀，不会失败。',
 };
 
 export default zh;

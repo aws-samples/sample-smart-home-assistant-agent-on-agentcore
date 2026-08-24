@@ -949,6 +949,40 @@ const zh: Record<string, string> = {
   'registry.reviewDone': '记录状态现为 {status}（审批人 {by}）。',
   'registry.colActions': '操作',
   'registry.colStatus': '状态',
+
+  // ---------------------------------------------------------------------------
+  // Skill 风险扫描。两层——确定性规则 + 语义判定——报告是审批者的「依据」而非门禁：
+  // Approve 永不因它被阻断。规则号（SS..）与 OWASP AST 编号是标识符，不翻译。
+  // ---------------------------------------------------------------------------
+  'scan.colRisk': '风险',
+  'scan.scan': '扫描',
+  'scan.rescan': '重新扫描',
+  'scan.scanAll': '全部扫描',
+  'scan.scanningProgress': '扫描中 {done}/{total}',
+  'scan.notScanned': '未扫描',
+  'scan.stale': '已过期',
+  'scan.staticOnly': '仅静态层',
+  'scan.allDone': '已扫描 {count} 条记录。',
+  'scan.someFailed': '部分记录扫描失败：{errors}',
+  'scan.notPersisted': '报告已在下方显示，但未能保存——刷新后会丢失，也不会记入本次审批。',
+  'scan.reportFor': '风险扫描 —',
+  'scan.sectionTitle': '风险扫描',
+  'scan.neverScanned': '该记录从未被扫描。扫描入口在 Build → Skills 的审批队列。',
+  'scan.score': '评分',
+  'scan.tierBoth': '静态 + 语义',
+  'scan.tierStaticOnly': '仅静态层',
+  'scan.scannedAt': '{when} 由 {who} 扫描 · 扫描器 {version}',
+  'scan.semanticMissingTitle': '语义层未执行',
+  'scan.semanticMissingBody': '本次只跑了确定性规则（{reason}）。没有模式特征的风险——例如正文采集范围远超描述所声明、或行为以日期/用户为触发条件——不会被报出。模型可用时请重新扫描。',
+  'scan.noFindingsTitle': '未发现问题',
+  'scan.noFindingsBody': '两层都没有报出内容。这是一项依据，不是安全放行——批准前仍请阅读 SKILL.md。',
+  'scan.colSeverity': '严重度',
+  'scan.colRule': '规则',
+  'scan.colDetail': '发现',
+  'scan.fix': '修复建议：',
+  'scan.disclaimer': '无发现不等于无风险。这只是纵深防御中的一层：2026 年公开的 Skill 扫描器均被绕过，且 Skill 可以在获批之后才去远端取回真正的指令。请判断内容本身，而不是这个徽章。',
+  'scan.approvedWith': '已记录审批依据：扫描 {verdict} {score}',
+  'scan.approvedUnscanned': '已记录为「未扫描即批准」',
 };
 
 export default zh;

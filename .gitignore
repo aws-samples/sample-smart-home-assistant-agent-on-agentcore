@@ -139,6 +139,11 @@ agent/device-catalog.json
 # mid-demo that nothing exercises some agent. Source of truth is
 # shared/prompt-examples.json.
 chatbot/src/generated/
+# Same arrangement for the demo Skill templates the Skill ERP's generator publishes.
+# The ERP renders them and cdk/lambda/admin-api/tests/test_skill_scan.py asserts the
+# verdict each one scans to, so the expectation lives next to the content it belongs
+# to. Source of truth is shared/demo-skill-templates.json.
+skill-erp/src/generated/
 
 # Latency/cost measurement runs (scripts/measure-baseline.py and the ab-* probes).
 # Development-phase output: a baseline is only comparable against another baseline

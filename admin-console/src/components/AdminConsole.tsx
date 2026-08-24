@@ -37,6 +37,10 @@ import {
   RegistrySkill,
   reviewRegistryRecord,
   importRegistryRecords,
+  scanSkillRecord,
+  listSkillScans,
+  SkillScanReport,
+  SkillScanFinding,
   listA2aAgents,
   A2AAgentRecord,
   cardAuthSchemes,
@@ -2391,6 +2395,129 @@ interface RecommendationDetailDrawerProps {
   onApply: () => void;
 }
 
+/**
+ * A skill's risk scan report, rendered the same way wherever it is shown.
+ *
+ * Used by the approval queue (where it informs a decision) and by the Integration
+ * Registry's Skills drawer (where it is the record's risk posture). One component,
+ * because a reviewer who learns to read it in one place should not have to learn a
+ * second layout in the other.
+ *
+ * Three things this renders on purpose:
+ *
+ *   - Evidence, with invisible characters shown as `<U+200B>`. The scanner does that
+ *     substitution server-side; printing the raw match would print nothing, which is
+ *     exactly why that class of payload hides from a human reading the file.
+ *   - The OWASP AST id beside each finding, so a reviewer can take the taxonomy they
+ *     already have and look the category up.
+ *   - Whether the semantic tier actually ran. A static-only scan that presented
+ *     identically to a full one would overstate what was checked.
+ */
+const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) => {
+  const { t } = useI18n();
+  const severityOrder = ['critical', 'high', 'medium', 'low', 'info'];
+  const sorted = [...(report.findings || [])].sort(
+    (a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity));
+  const indicator = (s: string) => (
+    s === 'critical' || s === 'high' ? 'error' : s === 'medium' ? 'warning' : 'info');
+
+  return (
+    <SpaceBetween size="m">
+      <SpaceBetween direction="horizontal" size="xs">
+        <Badge color={report.verdict === 'FAIL' ? 'red'
+          : report.verdict === 'WARN' ? 'blue' : 'green'}>
+          {`${report.verdict} · ${t('scan.score')} ${report.score} · ${report.riskTier}`}
+        </Badge>
+        {report.llmTier === 'ok'
+          ? <Badge color="green">{t('scan.tierBoth')}</Badge>
+          : <Badge color="grey">{t('scan.tierStaticOnly')}</Badge>}
+      </SpaceBetween>
+
+      <CloudscapeBox variant="small" color="text-body-secondary">
+        {t('scan.scannedAt')
+          .replace('{when}', report.scannedAt ? new Date(report.scannedAt).toLocaleString() : '—')
+          .replace('{who}', report.scannedBy || '—')
+          .replace('{version}', report.scannerVersion || '—')}
+      </CloudscapeBox>
+
+      {/* The semantic tier did not run. Said plainly, because a report that only ran
+          half of the checks and looks like a full one is worse than no report. */}
+      {report.llmTier !== 'ok' && (
+        <Alert type="warning" header={t('scan.semanticMissingTitle')}>
+          {t('scan.semanticMissingBody').replace('{reason}', report.llmTier || '—')}
+        </Alert>
+      )}
+
+      {sorted.length === 0 ? (
+        <Alert type="success" header={t('scan.noFindingsTitle')}>
+          {t('scan.noFindingsBody')}
+        </Alert>
+      ) : (
+        <Table
+          variant="embedded"
+          contentDensity="compact"
+          items={sorted}
+          trackBy="rule"
+          columnDefinitions={[
+            {
+              id: 'severity',
+              header: t('scan.colSeverity'),
+              minWidth: 110,
+              cell: (f: SkillScanFinding) => (
+                <StatusIndicator type={indicator(f.severity) as any}>
+                  {f.severity.toUpperCase()}
+                </StatusIndicator>
+              ),
+            },
+            {
+              id: 'rule',
+              header: t('scan.colRule'),
+              minWidth: 200,
+              cell: (f: SkillScanFinding) => (
+                <SpaceBetween size="xxxs">
+                  <CloudscapeBox><code>{f.id}</code> {f.rule}</CloudscapeBox>
+                  <SpaceBetween direction="horizontal" size="xxs">
+                    <Badge color="grey">{f.ast}</Badge>
+                    <Badge color={f.source.includes('semantic') ? 'blue' : 'grey'}>
+                      {f.source}
+                    </Badge>
+                  </SpaceBetween>
+                </SpaceBetween>
+              ),
+            },
+            {
+              id: 'detail',
+              header: t('scan.colDetail'),
+              cell: (f: SkillScanFinding) => (
+                <SpaceBetween size="xxs">
+                  <CloudscapeBox>{f.detail}</CloudscapeBox>
+                  {!!f.evidence && (
+                    <pre className="skill-md-preview" style={{ margin: 0, maxHeight: 120 }}>
+                      {f.evidence}
+                    </pre>
+                  )}
+                  {!!f.remediation && (
+                    <CloudscapeBox variant="small" color="text-body-secondary">
+                      {t('scan.fix')} {f.remediation}
+                    </CloudscapeBox>
+                  )}
+                </SpaceBetween>
+              ),
+            },
+          ]}
+        />
+      )}
+
+      {/* Not decoration. Every public skill scanner tested in 2026 was bypassed inside
+          an hour, and a console that implies otherwise is selling the reviewer a
+          guarantee this cannot give them. */}
+      <CloudscapeBox variant="small" color="text-body-secondary">
+        {t('scan.disclaimer')}
+      </CloudscapeBox>
+    </SpaceBetween>
+  );
+};
+
 const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({ rec, onClose, onApply }) => {
   const { t } = useI18n();
   return (
@@ -2546,6 +2673,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [pendingRecords, setPendingRecords] = useState<RegistryRecord[]>([]);
   const [reviewing, setReviewing] = useState('');
   const [rejectReason, setRejectReason] = useState<Record<string, string>>({});
+  // Risk scan reports, keyed by recordId. Loaded as one request with the modal so the
+  // queue can render a risk column without a round trip per row; individual rows are
+  // rescanned on demand and merged back in.
+  const [scanReports, setScanReports] = useState<Record<string, SkillScanReport>>({});
+  const [scanning, setScanning] = useState('');
+  const [scanAllProgress, setScanAllProgress] = useState<{ done: number; total: number } | null>(null);
+  const [scanDrawer, setScanDrawer] = useState<{ name: string; report: SkillScanReport } | null>(null);
 
   // User settings (model ID)
   const [modelId, setModelId] = useState('');
@@ -2999,6 +3133,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         })
         .catch((err) => setRegistrySkillsError(err.message))
         .finally(() => setRegistrySkillsLoading(false));
+      // The inventory's drawer shows each record's latest scan report. Loaded here as
+      // well as with the approval queue, because an admin can reach this page without
+      // ever opening that modal. A failure is not this page's problem — the drawer says
+      // "never scanned" and the rest of the inventory renders.
+      listSkillScans()
+        .then(setScanReports)
+        .catch(() => { /* the drawer falls back to "never scanned" */ });
     }
     if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
       void loadA2aInventory();
@@ -3147,17 +3288,89 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       // mind should not have to ask the author to republish — and a rejected
       // record that vanished from every screen was effectively unrecoverable
       // without the AWS console.
-      const [records, pending, rejected] = await Promise.all([
+      // The scan reports come along in the same pass: the reviewer's first question
+      // about a queued skill is now "what did the scan say", and answering it with a
+      // request per row would make the queue render in stages.
+      const [records, pending, rejected, reports] = await Promise.all([
         listRegistryRecords('APPROVED'),
         listRegistryRecords('PENDING_APPROVAL').catch(() => []),
         listRegistryRecords('REJECTED').catch(() => []),
+        listSkillScans().catch(() => ({} as Record<string, SkillScanReport>)),
       ]);
       setRegistryRecords(records);
       setPendingRecords([...pending, ...rejected]);
+      setScanReports(reports);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setRegistryLoading(false);
+    }
+  };
+
+  /**
+   * Is the stored report still about the record as it stands now?
+   *
+   * Compared on timestamps rather than on `recordVersion`, because editing a record
+   * through the Skill ERP does not pass `recordVersion` to UpdateRegistryRecord — the
+   * version stays put while the content changes, so a version check would call a stale
+   * report current. `updatedAt` moves on every edit, which is the signal we want.
+   *
+   * The scanner has its own, stronger check: a rescan compares content hashes and
+   * reports SS13 when they differ. This is the cheap client-side version, so the queue
+   * can mark a report stale without re-reading every record's content.
+   */
+  const scanIsStale = (record: RegistryRecord, report?: SkillScanReport) => {
+    if (!report || !report.scannedAt || !record.updatedAt) return false;
+    return new Date(record.updatedAt).getTime() > new Date(report.scannedAt).getTime();
+  };
+
+  const handleScan = async (recordId: string) => {
+    clearMessages();
+    setScanning(recordId);
+    try {
+      const report = await scanSkillRecord(recordId);
+      setScanReports((prev) => ({ ...prev, [recordId]: report }));
+      if (report.persisted === false) {
+        // The report is on screen either way; what was lost is the badge after a reload
+        // and the note that goes into statusReason on approval. Worth saying.
+        setError(t('scan.notPersisted'));
+      }
+      return report;
+    } catch (err: any) {
+      setError(err.message);
+      return null;
+    } finally {
+      setScanning('');
+    }
+  };
+
+  /**
+   * Scan the whole queue, one record at a time.
+   *
+   * Sequential and client-driven rather than a batch endpoint: each scan is a model
+   * round trip, and ten of them inside one request would sit against API Gateway's hard
+   * 29s integration timeout — the whole batch would fail because of the slowest record.
+   * This way a failure costs one row and the reviewer watches the rest arrive.
+   */
+  const handleScanAll = async () => {
+    clearMessages();
+    const targets = pendingRecords.map((r) => r.recordId);
+    setScanAllProgress({ done: 0, total: targets.length });
+    const failures: string[] = [];
+    for (const recordId of targets) {
+      try {
+        const report = await scanSkillRecord(recordId);
+        setScanReports((prev) => ({ ...prev, [recordId]: report }));
+      } catch (err: any) {
+        failures.push(`${recordId}: ${err.message}`);
+      }
+      setScanAllProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
+    }
+    setScanAllProgress(null);
+    if (failures.length) {
+      setError(t('scan.someFailed').replace('{errors}', failures.join('; ')));
+    } else {
+      setSuccess(t('scan.allDone').replace('{count}', String(targets.length)));
     }
   };
 
@@ -3183,9 +3396,19 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     setReviewing(recordId);
     try {
       const out = await reviewRegistryRecord(recordId, decision, reason);
+      // The scan verdict is echoed back because the server just wrote it into the
+      // record's statusReason. Saying so here is what tells the reviewer their decision
+      // was recorded against evidence — or, for "scan not run", against none.
+      const scanNote = out.scan
+        ? (out.scan.verdict === 'NOT_SCANNED'
+            ? ` · ${t('scan.approvedUnscanned')}`
+            : ` · ${t('scan.approvedWith')
+                .replace('{verdict}', out.scan.verdict)
+                .replace('{score}', String(out.scan.score ?? ''))}`)
+        : '';
       setSuccess(t('registry.reviewDone')
         .replace('{status}', out.status)
-        .replace('{by}', out.reviewedBy || ''));
+        .replace('{by}', out.reviewedBy || '') + scanNote);
       // Reload both lists: an approval moves a record from one to the other.
       const [approved, pending, rejected] = await Promise.all([
         listRegistryRecords('APPROVED'),
@@ -3617,8 +3840,25 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 here called it. */}
             {pendingRecords.length > 0 && (
               <Container header={
-                <CloudscapeHeader variant="h3" description={t('registry.reviewDesc')}
-                                  counter={`(${pendingRecords.length})`}>
+                <CloudscapeHeader
+                  variant="h3"
+                  description={t('registry.reviewDesc')}
+                  counter={`(${pendingRecords.length})`}
+                  actions={
+                    <Button
+                      iconName="search"
+                      onClick={handleScanAll}
+                      loading={!!scanAllProgress}
+                      disabled={!!scanning}
+                    >
+                      {scanAllProgress
+                        ? t('scan.scanningProgress')
+                            .replace('{done}', String(scanAllProgress.done))
+                            .replace('{total}', String(scanAllProgress.total))
+                        : t('scan.scanAll')}
+                    </Button>
+                  }
+                >
                   {t('registry.reviewTitle')}
                 </CloudscapeHeader>
               }>
@@ -3635,6 +3875,51 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       cell: (r) => (r.status === 'REJECTED'
                         ? <StatusIndicator type="error">{r.status}</StatusIndicator>
                         : <StatusIndicator type="pending">{r.status}</StatusIndicator>),
+                    },
+                    {
+                      // The reviewer's evidence, next to the decision it informs. Not a
+                      // gate: Approve stays enabled whatever this says, because the
+                      // scanner is one layer of defence with real false positives and a
+                      // reviewer who has read the findings may be right to overrule them.
+                      // What the approval records is what this column said at the time.
+                      id: 'risk',
+                      header: t('scan.colRisk'),
+                      minWidth: 210,
+                      cell: (r) => {
+                        const report = scanReports[r.recordId];
+                        const stale = scanIsStale(r, report);
+                        return (
+                          <SpaceBetween direction="horizontal" size="xxs">
+                            {!report ? (
+                              <Badge>{t('scan.notScanned')}</Badge>
+                            ) : (
+                              <Link
+                                onFollow={(e) => {
+                                  e.preventDefault();
+                                  setScanDrawer({ name: r.name, report });
+                                }}
+                                href="#"
+                              >
+                                <Badge color={report.verdict === 'FAIL' ? 'red'
+                                  : report.verdict === 'WARN' ? 'blue' : 'green'}>
+                                  {`${report.verdict} ${report.score} · ${report.riskTier}`}
+                                </Badge>
+                              </Link>
+                            )}
+                            {stale && <Badge color="grey">{t('scan.stale')}</Badge>}
+                            {report && report.llmTier !== 'ok' && (
+                              <Badge color="grey">{t('scan.staticOnly')}</Badge>
+                            )}
+                            <Button
+                              variant="inline-link"
+                              loading={scanning === r.recordId}
+                              onClick={() => handleScan(r.recordId)}
+                            >
+                              {report ? t('scan.rescan') : t('scan.scan')}
+                            </Button>
+                          </SpaceBetween>
+                        );
+                      },
                     },
                     { id: 'description', header: t('registry.colDescription'),
                       cell: (r) => r.description },
@@ -3726,6 +4011,27 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               }
             />
           </SpaceBetween>
+        </Modal>
+      )}
+
+      {/* The findings for one queued skill. A sibling of the import modal rather than a
+          child, so it stacks on top and dismissing it returns the reviewer to the queue
+          with their place intact. */}
+      {scanDrawer && (
+        <Modal
+          visible
+          size="large"
+          onDismiss={() => setScanDrawer(null)}
+          header={`${t('scan.reportFor')} ${scanDrawer.name}`}
+          footer={
+            <CloudscapeBox float="right">
+              <Button onClick={() => setScanDrawer(null)}>
+                {t('integrations.skills.close')}
+              </Button>
+            </CloudscapeBox>
+          }
+        >
+          <SkillScanReportView report={scanDrawer.report} />
         </Modal>
       )}
 
@@ -4613,6 +4919,24 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                             <li key={scope}><code>{displayUserId(scope)}</code></li>
                           ))}
                         </ul>
+                      )}
+                    </div>
+
+                    {/* The record's risk posture, read-only. This page is the registry's
+                        inventory, and "what did the scan say about the thing that is
+                        live" is a question it should be able to answer without sending
+                        the admin back to the approval queue. Scanning happens there;
+                        nothing here re-runs it. */}
+                    <div>
+                      <b>{t('scan.sectionTitle')}</b>
+                      {scanReports[skillDrawer.recordId] ? (
+                        <CloudscapeBox padding={{ top: 'xs' }}>
+                          <SkillScanReportView report={scanReports[skillDrawer.recordId]} />
+                        </CloudscapeBox>
+                      ) : (
+                        <CloudscapeBox color="text-body-secondary" padding={{ top: 'xs' }}>
+                          {t('scan.neverScanned')}
+                        </CloudscapeBox>
                       )}
                     </div>
 

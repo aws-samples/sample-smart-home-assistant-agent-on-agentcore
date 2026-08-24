@@ -43,11 +43,21 @@ def _event(**body):
     }
 
 
-def _review(status="PENDING_APPROVAL", **body):
-    """Run the handler against a record in the given status."""
+def _review(status="PENDING_APPROVAL", scan_row=None, **body):
+    """Run the handler against a record in the given status.
+
+    `table` is patched because approving a SKILL now reads that record's latest scan
+    report to stamp the verdict into `statusReason`. Left unpatched, that query would
+    reach the real account — credentials exist in the dev environment, so it would
+    SUCCEED rather than fail, and the test would depend on what is in DynamoDB. Pass
+    `scan_row` to stand in for a stored report.
+    """
     control = MagicMock()
     control.get_registry_record.return_value = {"status": status}
+    ddb = MagicMock()
+    ddb.query.return_value = {"Items": [scan_row] if scan_row else []}
     with patch.object(index, "registry_control", control), \
+         patch.object(index, "table", ddb), \
          patch.object(index, "REGISTRY_ID", "reg-1"), \
          patch.object(index.registry_ns, "approve_record",
                       return_value="APPROVED") as approve, \
