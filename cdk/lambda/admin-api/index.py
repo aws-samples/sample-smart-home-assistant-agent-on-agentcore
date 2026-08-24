@@ -3466,8 +3466,16 @@ def _scan_a2a_ownership_map():
 
 
 def list_registry_skills(_event):
-    """GET /registry/records?action=skill-list — approved SKILL records for the
+    """GET /registry/records?action=skill-list — every SKILL record for the
     Integration Registry's Skills sub-tab.
+
+    Deliberately NOT filtered to APPROVED. This page is the registry's inventory,
+    and an admin's question is usually about a skill that is *not* live yet: a
+    DRAFT nobody submitted, something still PENDING_APPROVAL, a REJECTED record
+    whose author is asking why. Filtering those out made every one of them
+    indistinguishable from "never published". The Status column carries the
+    distinction; Build -> Skills is still the view of what actually runs, and the
+    import dialog is what stays APPROVED-only.
 
     The read-only sibling of `list_a2a_agents`. Two enrichments the raw records do
     not carry:
@@ -3491,8 +3499,7 @@ def list_registry_skills(_event):
     try:
         records = registry_ns.list_records(
             registry_control, REGISTRY_ID,
-            record_type=registry_ns.RECORD_TYPE_SKILL,
-            status=registry_ns.STATUS_APPROVED)
+            record_type=registry_ns.RECORD_TYPE_SKILL)
     except Exception as exc:  # noqa: BLE001
         # Same reasoning as the A2A catalog: a failed lookup must not render as an
         # empty registry, or an admin goes looking for records to approve.

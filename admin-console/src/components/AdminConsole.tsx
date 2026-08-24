@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   listSkills,
-  createSkill,
   updateSkill,
   deleteSkill,
   listUsers,
@@ -78,7 +77,6 @@ import {
   OptABToggle,
   RegistryRecord,
   SkillItem,
-  SkillInput,
   SkillFile,
   SessionInfo,
   CognitoUserInfo,
@@ -165,9 +163,6 @@ interface ActorRow {
   actorId: string;
   email: string | null;
 }
-
-// Skill name validation (matches Strands SDK pattern)
-const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
 
 // The model picker's contents are no longer listed here. They come from
 // `GET /settings/{userId}?action=catalog`, which merges bedrock-runtime's
@@ -2534,7 +2529,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
   // Form state
   const [showForm, setShowForm] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState<SkillFormData>(emptyForm);
 
   // Delete confirmation
@@ -2691,7 +2685,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   }, []);
 
   const handleFileUpload = async (directory: string, file: File) => {
-    if (!isEditing) return;
     setUploading(true);
     clearMessages();
     try {
@@ -3056,13 +3049,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     }
   };
 
-  const handleCreate = () => {
-    clearMessages();
-    setForm({ ...emptyForm, userId: selectedUserId });
-    setIsEditing(false);
-    setShowForm(true);
-  };
-
   const handleEdit = (skill: SkillItem) => {
     clearMessages();
     const metadataEntries: MetadataEntry[] = skill.metadata
@@ -3078,7 +3064,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       compatibility: skill.compatibility || '',
       metadata: metadataEntries,
     });
-    setIsEditing(true);
     setShowForm(true);
     loadSkillFiles(skill.userId, skill.skillName);
   };
@@ -3092,11 +3077,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearMessages();
-
-    if (!isEditing && !SKILL_NAME_RE.test(form.skillName)) {
-      setError(t('skills.invalidName'));
-      return;
-    }
 
     if (!form.description.trim()) {
       setError(t('skills.descriptionRequired'));
@@ -3116,30 +3096,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     }
 
     try {
-      if (isEditing) {
-        await updateSkill(form.userId, form.skillName, {
-          description: form.description,
-          instructions: form.instructions,
-          allowedTools,
-          license: form.license,
-          compatibility: form.compatibility,
-          metadata,
-        });
-        setSuccess(t('skills.skillUpdated').replace('{name}', form.skillName));
-      } else {
-        const input: SkillInput = {
-          userId: form.userId,
-          skillName: form.skillName,
-          description: form.description,
-          instructions: form.instructions,
-          allowedTools,
-          license: form.license || undefined,
-          compatibility: form.compatibility || undefined,
-          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-        };
-        await createSkill(input);
-        setSuccess(t('skills.skillCreated').replace('{name}', form.skillName));
-      }
+      await updateSkill(form.userId, form.skillName, {
+        description: form.description,
+        instructions: form.instructions,
+        allowedTools,
+        license: form.license,
+        compatibility: form.compatibility,
+        metadata,
+      });
+      setSuccess(t('skills.skillUpdated').replace('{name}', form.skillName));
       setShowForm(false);
       setForm(emptyForm);
       setSkillFiles([]);
@@ -3610,8 +3575,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           />
         </div>
         <div style={{ flex: 1 }} />
-        <Button onClick={handleOpenRegistryModal}>{t('registry.addFromRegistry')}</Button>
-        <Button variant="primary" onClick={handleCreate}>{t('skills.createSkill')}</Button>
+        {/* No local "Create Skill" here on purpose: a skill is registered and
+            reviewed in AgentCore Registry, and this console imports the approved
+            record. A second creation path produces skills with no registry
+            record behind them, which is what the Registry is for. */}
+        <Button variant="primary" onClick={handleOpenRegistryModal}>
+          {t('registry.addFromRegistry')}
+        </Button>
       </SpaceBetween>
 
       {/* Registry import modal */}
@@ -3784,16 +3754,16 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       {/* Skill Form */}
       {showForm && (
         <div className="skill-form-container">
-          <h3>{isEditing ? t('skills.editSkill') : t('skills.createSkillTitle')}</h3>
+          <h3>{t('skills.editSkill')}</h3>
           <form onSubmit={handleSubmit}>
             <div className="form-row">
               <div className="form-group">
                 <label>{t('skills.userScopeLabel')}</label>
                 <input
                   type="text"
-                  value={isEditing ? displayUserId(form.userId) : form.userId}
+                  value={displayUserId(form.userId)}
                   onChange={(e) => setForm({ ...form, userId: e.target.value })}
-                  disabled={isEditing}
+                  disabled
                   placeholder="__global__"
                 />
               </div>
@@ -3805,7 +3775,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   onChange={(e) =>
                     setForm({ ...form, skillName: e.target.value.toLowerCase() })
                   }
-                  disabled={isEditing}
+                  disabled
                   placeholder={t('skills.skillNamePlaceholder')}
                 />
               </div>
@@ -3923,111 +3893,109 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 {t('skills.cancel')}
               </button>
               <button type="submit" className="btn btn-primary">
-                {isEditing ? t('skills.saveChanges') : t('skills.createSkill')}
+                {t('skills.saveChanges')}
               </button>
             </div>
           </form>
 
-          {/* File Manager (only when editing) */}
-          {isEditing && (
-            <div className="file-manager">
-              <h4>{t('files.title')}</h4>
-              <p className="file-manager-hint">
-                {t('files.hint')}
-              </p>
-              {filesLoading ? (
-                <div className="loading">{t('files.loading')}</div>
-              ) : (
-                ['scripts', 'references', 'assets'].map((dir) => {
-                  const dirFiles = skillFiles.filter((f) => f.path.startsWith(dir + '/'));
-                  return (
-                    <div key={dir} className="file-dir-section">
-                      <button
-                        type="button"
-                        className="file-dir-header"
-                        onClick={() =>
-                          setExpandedDirs((prev) => ({ ...prev, [dir]: !prev[dir] }))
-                        }
-                      >
-                        <span className="file-dir-arrow">
-                          {expandedDirs[dir] ? '\u25BE' : '\u25B8'}
-                        </span>
-                        <span className="file-dir-name">{dir}/</span>
-                        <span className="file-dir-count">
-                          {dirFiles.length} file{dirFiles.length !== 1 ? 's' : ''}
-                        </span>
-                      </button>
-                      {expandedDirs[dir] && (
-                        <div className="file-dir-body">
-                          {dirFiles.length > 0 && (
-                            <table className="file-table">
-                              <thead>
-                                <tr>
-                                  <th>{t('files.colName')}</th>
-                                  <th>{t('files.colSize')}</th>
-                                  <th>{t('files.colModified')}</th>
-                                  <th>{t('files.colActions')}</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {dirFiles.map((f) => {
-                                  const name = f.path.split('/').pop() || f.path;
-                                  return (
-                                    <tr key={f.path}>
-                                      <td className="cell-name">{name}</td>
-                                      <td className="cell-date">
-                                        {f.size < 1024
-                                          ? `${f.size} B`
-                                          : `${(f.size / 1024).toFixed(1)} KB`}
-                                      </td>
-                                      <td className="cell-date">
-                                        {new Date(f.lastModified).toLocaleDateString()}
-                                      </td>
-                                      <td className="cell-actions">
-                                        <button
-                                          type="button"
-                                          className="btn btn-sm btn-secondary"
-                                          onClick={() => handleFileDownload(f.path)}
-                                        >
-                                          {t('files.download')}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="btn btn-sm btn-danger"
-                                          onClick={() => handleFileDelete(f.path)}
-                                        >
-                                          {t('files.delete')}
-                                        </button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          )}
-                          <label className="file-upload-btn btn btn-sm btn-secondary">
-                            {uploading ? t('files.uploading') : t('files.uploadTo').replace('{dir}', dir)}
-                            <input
-                              type="file"
-                              hidden
-                              disabled={uploading}
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (file) {
-                                  handleFileUpload(dir, file);
-                                  e.target.value = '';
-                                }
-                              }}
-                            />
-                          </label>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
+          {/* File Manager: the form only ever edits an existing skill. */}
+          <div className="file-manager">
+            <h4>{t('files.title')}</h4>
+            <p className="file-manager-hint">
+              {t('files.hint')}
+            </p>
+            {filesLoading ? (
+              <div className="loading">{t('files.loading')}</div>
+            ) : (
+              ['scripts', 'references', 'assets'].map((dir) => {
+                const dirFiles = skillFiles.filter((f) => f.path.startsWith(dir + '/'));
+                return (
+                  <div key={dir} className="file-dir-section">
+                    <button
+                      type="button"
+                      className="file-dir-header"
+                      onClick={() =>
+                        setExpandedDirs((prev) => ({ ...prev, [dir]: !prev[dir] }))
+                      }
+                    >
+                      <span className="file-dir-arrow">
+                        {expandedDirs[dir] ? '\u25BE' : '\u25B8'}
+                      </span>
+                      <span className="file-dir-name">{dir}/</span>
+                      <span className="file-dir-count">
+                        {dirFiles.length} file{dirFiles.length !== 1 ? 's' : ''}
+                      </span>
+                    </button>
+                    {expandedDirs[dir] && (
+                      <div className="file-dir-body">
+                        {dirFiles.length > 0 && (
+                          <table className="file-table">
+                            <thead>
+                              <tr>
+                                <th>{t('files.colName')}</th>
+                                <th>{t('files.colSize')}</th>
+                                <th>{t('files.colModified')}</th>
+                                <th>{t('files.colActions')}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dirFiles.map((f) => {
+                                const name = f.path.split('/').pop() || f.path;
+                                return (
+                                  <tr key={f.path}>
+                                    <td className="cell-name">{name}</td>
+                                    <td className="cell-date">
+                                      {f.size < 1024
+                                        ? `${f.size} B`
+                                        : `${(f.size / 1024).toFixed(1)} KB`}
+                                    </td>
+                                    <td className="cell-date">
+                                      {new Date(f.lastModified).toLocaleDateString()}
+                                    </td>
+                                    <td className="cell-actions">
+                                      <button
+                                        type="button"
+                                        className="btn btn-sm btn-secondary"
+                                        onClick={() => handleFileDownload(f.path)}
+                                      >
+                                        {t('files.download')}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-sm btn-danger"
+                                        onClick={() => handleFileDelete(f.path)}
+                                      >
+                                        {t('files.delete')}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        )}
+                        <label className="file-upload-btn btn btn-sm btn-secondary">
+                          {uploading ? t('files.uploading') : t('files.uploadTo').replace('{dir}', dir)}
+                          <input
+                            type="file"
+                            hidden
+                            disabled={uploading}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                handleFileUpload(dir, file);
+                                e.target.value = '';
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
 
@@ -4547,11 +4515,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   },
                   { id: 'version', header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
                   {
-                    // Every row here is APPROVED today, because that is what the
-                    // endpoint filters on. Shown anyway: if the filter is ever
-                    // widened, a DRAFT record must be distinguishable from a live
-                    // one, and a record that is present but unapproved is exactly
-                    // the thing an admin is looking for when a skill "is missing".
+                    // The endpoint lists every status, so this column is what
+                    // separates a live skill from a DRAFT nobody submitted or a
+                    // REJECTED one — which is exactly what an admin is after when
+                    // a skill "is missing".
                     id: 'status',
                     header: t('integrations.skills.col.status'),
                     cell: (r) => (r.status === 'APPROVED'

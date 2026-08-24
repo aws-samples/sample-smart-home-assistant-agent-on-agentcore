@@ -150,9 +150,9 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 |------|------|---------|
 | **Discover** | **Overview** | 产品说明 + 架构图（默认折叠）以及 **Agent 运维统计大屏**（见下节）。三个 Demo 入口已移至侧边栏「演示入口」分组 |
 | Discover | **Agents** | **机队总览**：1 主 + 8 子 + 1 语音 + 1 A/B 变体 + 1 Tool，含运行时名、状态、skill 数与实时指标。点进详情页可**逐个 Agent 编辑 system prompt**（保存后下一次请求即生效，不用重新部署容器）。列表由 Runtime ARN + Registry 记录推导，新部署的子 Agent 自动出现 |
-| Discover | **Integration Registry** | 工具集成概览 + 从 AWS Agent Registry 读取已批准的 **A2A Agent** 记录（显示名称/端点/能力/发布者） |
+| Discover | **Integration Registry** | 工具集成概览 + 从 AWS Agent Registry 读取记录：**A2A Agent** 子页读已批准记录（显示名称/端点/能力/发布者），**Skills** 子页读全部已注册技能（含 DRAFT / 待审批 / 已驳回，状态列区分） |
 | **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型。清单由 `ListFoundationModels` + `ListInferenceProfiles` **实时拉取**（本部署 88 个），不再硬编码 |
-| Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AWS Agent Registry 导入已批准技能** |
+| Build | **Skills** | 编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖。**新技能只能从 AWS Agent Registry 导入已批准记录** —— 控制台不再本地创建技能，统一由 Registry 注册与审批 |
 | Build | **Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时叠加拼接 |
 | Build | **Tool Policy** | 按用户配置可调用的工具（Cedar 策略）；内置工具与 Gateway 工具并列并用 Badge 区分；ENFORCE / LOG_ONLY 切换。每个 Gateway 工具旁列出**谁在用它** —— 撤掉 `control_device` 会同时停掉聊天指令、定时场景和两个子 Agent |
 | Build | **Memories** | 查看每个用户的长期记忆（事实 + 偏好 + 情景，来自 AgentCore Memory 的四种内置策略） |
@@ -658,7 +658,7 @@ cd cdk && npx cdk destroy --all --force
 
 ### 三、Integration Registry
 
-A2A Agents 与 Skills 两个子页都是从 AgentCore Registry 读 **APPROVED** 记录。空列表和「查询失败」在页面上是**两种不同的显示**：查询失败会显示原因（warning），空就是空。看到空列表先确认是哪一种，再去 Bedrock 控制台找。
+两个子页都是从 AgentCore Registry 读记录：A2A Agents 只读 **APPROVED**；Skills 读**全部状态**（DRAFT / PENDING_APPROVAL / APPROVED / REJECTED），因为管理员来这个页面的问题通常正是「某个技能为什么还没上线」，只列已批准的会让「还没提交」和「从来没注册过」长得一模一样 —— 状态列负责区分。空列表和「查询失败」在页面上是**两种不同的显示**：查询失败会显示原因（warning），空就是空。看到空列表先确认是哪一种，再去 Bedrock 控制台找。
 
 **Skills 页少记录 ≠ 页面坏了。** 内置技能由 `scripts/seed-skills.py` 直接写进 DynamoDB,
 **不会**自动出现在 Registry 里 —— 2026-08-12 之前这个 registry 只有 1 条 SKILL 记录,而线上跑着 9 个技能。
@@ -928,9 +928,9 @@ The side navigation groups 17 pages by agent lifecycle stage:
 |-------|------|-----------------|
 | **Discover** | **Overview** | Product intro + architecture diagram (collapsed by default) and the **agent operations dashboard** (see below). The three demo launchers moved to the side nav's **Demos** group |
 | Discover | **Agents** | **Fleet view**: 1 orchestrator + 8 specialists + voice + an A/B variant + 1 tool, with runtime name, status, skill count and live metrics. The detail page **edits that agent's system prompt** — saved, and in effect on its next request, with no container redeploy. The list is derived from runtime ARNs + Registry records, so a newly deployed sub-agent appears with no frontend change |
-| Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AWS Agent Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card |
+| Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AWS Agent Registry with endpoint / auth / capabilities / publisher (details drawer shows the full agent card), and a **Skills sub-tab** listing every registered skill at any status (DRAFT / pending / approved / rejected), told apart by the Status column |
 | **Build** | **Models** | Set the global default LLM; override text and vision models per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
-| Build | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides; **import approved records from AWS Agent Registry** |
+| Build | **Skills** | Edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides. **New skills arrive only by importing an approved record from AWS Agent Registry** — the console no longer creates one locally, so registration and review stay in the Registry |
 | Build | **Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
 | Build | **Tool Policy** | Configure per-user tool permissions (Cedar policies); built-in and gateway tools listed side-by-side with source badges; toggle ENFORCE / LOG_ONLY. Each gateway tool also names **who calls it** — revoking `control_device` stops chat commands, scheduled scenes and two specialists |
 | Build | **Memories** | View each user's long-term memory (facts + preferences + episodes, from AgentCore Memory's four built-in strategies) |
