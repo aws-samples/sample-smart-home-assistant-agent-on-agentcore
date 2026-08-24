@@ -2927,10 +2927,17 @@ def main():
                 print(f"  Warning: registry {registry_id} is {reg_status}, not READY — "
                       "the Integration Registry tab will be empty until this is resolved")
 
-        # Patch admin + skill-erp Lambdas with REGISTRY_ID env
+        # Patch admin + skill-erp + pre-token Lambdas with REGISTRY_ID env.
+        #
+        # The pre-token trigger is on this list because it filters GLOBAL A2A grants
+        # by record grantability at token issue. Without REGISTRY_ID it cannot read
+        # the catalog, and its own fail-open path then injects nothing on a cold
+        # container — so every user silently loses their globally granted
+        # specialists, with a sign-in that works perfectly.
         if registry_id:
             lambda_client = boto3.client("lambda", region_name=REGION)
-            for fn_name in ("smarthome-admin-api", "smarthome-skill-erp-api"):
+            for fn_name in ("smarthome-admin-api", "smarthome-skill-erp-api",
+                            "smarthome-pre-token"):
                 try:
                     resp_cfg = lambda_client.get_function_configuration(FunctionName=fn_name)
                     env = resp_cfg.get("Environment", {}).get("Variables", {})

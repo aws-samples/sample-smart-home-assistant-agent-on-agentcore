@@ -228,10 +228,89 @@ def _extra_runtime_arns():
     return [a.strip() for a in EXTRA_RUNTIME_ARNS.split(",") if a.strip()]
 
 
+# The Registry-derived half of the allowlist, cached per container.
+#
+# `DASHBOARD_EXTRA_RUNTIME_ARNS` is a hand-maintained list, and every failure it has
+# ever had is the same one: a sub-agent exists, nobody added it, and its tokens are
+# missing from a page that gives no sign anything is missing. It is also
+# script-patched env, which `cdk deploy` silently wipes whenever the CDK-DECLARED
+# environment map changes — so the list can go from correct to empty with no error.
+#
+# An APPROVED Registry record already names its runtime, in the card's `url`. Deriving
+# from it means a third-party team that registers an agent is on the dashboard with no
+# cross-team step at all. The env var is KEPT and unioned rather than replaced: it also
+# carries the bundles/voice runtimes, which have no Registry record.
+_REGISTRY_ARNS_TTL_SECONDS = 300
+_registry_arns_cache = {"at": 0.0, "arns": []}
+
+
+def _registry_runtime_arns():
+    """Runtime ARNs named by APPROVED AGENT records, or the last known list.
+
+    Never raises and never returns a SHORTER list on failure: on an error it serves the
+    previous answer. Dropping a runtime from this allowlist does not error anywhere — it
+    silently removes that agent's data from every spans card, which is the failure this
+    function exists to stop, so a Registry blip must not cause it.
+    """
+    now = time.time()
+    if now - _registry_arns_cache["at"] < _REGISTRY_ARNS_TTL_SECONDS:
+        return list(_registry_arns_cache["arns"])
+    try:
+        import a2a_runtimes
+        import agent_registry as registry_ns
+
+        registry_id = os.environ.get("REGISTRY_ID", "")
+        if not registry_id or registry_id.startswith("PLACEHOLDER"):
+            return list(_registry_arns_cache["arns"])
+        client = registry_ns.registry_client(AWS_REGION)
+        control = _client("bedrock-agentcore-control")
+        arns, token = [], None
+        while True:
+            kwargs = {"registryId": registry_id, "maxResults": 50,
+                      "filters": [{"name": "recordType",
+                                   "values": [registry_ns.RECORD_TYPE_AGENT]}]}
+            if token:
+                kwargs["nextToken"] = token
+            page = client.list_registry_records(**kwargs)
+            for record in page.get("registryRecords", []):
+                if (record.get("status") or "") != registry_ns.STATUS_APPROVED:
+                    continue
+                record_id = record.get("recordId", "")
+                if not record_id:
+                    continue
+                detail = client.get_registry_record(
+                    registryId=registry_id, recordId=record_id)
+                raw = registry_ns.read_agent_card(detail)
+                if not raw:
+                    continue
+                url = (json.loads(raw) or {}).get("url") or ""
+                arn = a2a_runtimes.resolve_arn(url, control)
+                if arn and arn not in arns:
+                    arns.append(arn)
+            token = page.get("nextToken")
+            if not token:
+                break
+        _registry_arns_cache.update({"at": now, "arns": arns})
+        logger.info("dashboard allowlist: %d runtime ARN(s) from the Registry",
+                    len(arns))
+        return list(arns)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not derive runtime ARNs from the Registry (%s); "
+                       "using the last known list of %d", e,
+                       len(_registry_arns_cache["arns"]))
+        return list(_registry_arns_cache["arns"])
+
+
 def _all_runtime_arns():
-    """Text + voice + any extras, de-duplicated, order preserved."""
+    """Text + voice + Registry-derived sub-agents + any manual extras.
+
+    De-duplicated, order preserved, and the union is on purpose: the Registry covers
+    every registered A2A agent automatically, while the env var still carries the
+    runtimes that have no Registry record (voice, bundles) and any manual override.
+    """
     out = []
-    for arn in [RUNTIME_ARN, VOICE_RUNTIME_ARN, *_extra_runtime_arns()]:
+    for arn in [RUNTIME_ARN, VOICE_RUNTIME_ARN,
+                *_registry_runtime_arns(), *_extra_runtime_arns()]:
         if arn and arn not in out:
             out.append(arn)
     return out

@@ -32,14 +32,22 @@ millisecond, so this costs nothing next to an LLM call.
 
 Authorization comes from a signed claim
 --------------------------------------
-A grant is a Cognito group (``a2a-<agent>.<skill>``, see ``common/a2a_groups.py``)
-on the end user's own token. Two checks, in this order:
+A grant is a Cognito group on the end user's own token, in two shapes (see
+``common/a2a_groups.py``). Two checks read different shapes of the same claim:
 
-  1. This Runtime's ``customJWTAuthorizer.customClaims`` matches ``cognito:groups``
-     with ``CONTAINS_ANY`` over every group of this agent, so AgentCore refuses a
-     caller with no grant on this agent *before* the container is reached.
-  2. This module derives the skill subset from the same claim, after verifying the
-     token itself.
+  1. **The door.** This Runtime's ``customJWTAuthorizer.customClaims`` matches
+     ``cognito:groups`` with ``CONTAINS_ANY`` over the single stable
+     ``a2a-<agent>``, so AgentCore refuses a caller with no grant on this agent
+     *before* the container is reached.
+  2. **Here.** This module derives the skill subset from the ``a2a-<agent>.<skill>``
+     groups in the same claim, after verifying the token itself.
+
+The door used to be handed the full per-skill list. It was dropped because both
+checks were then asking the identical question — ``CONTAINS_ANY`` passes on any one
+group, and ``enforce_allowed_skills`` below refuses only an EMPTY subset — while the
+enumeration coupled every card edit to an ``UpdateAgentRuntime``. Holding a door key
+and no skill group still gets refused here, which is what keeps the coarse door
+honest: it authorizes reaching this agent, never a skill.
 
 The previous design read ``X-A2A-Allowed-Skills``, a header the *client* set. That
 made the grant client-asserted: the server could only refuse a skill the caller had
@@ -69,6 +77,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 # Import via the package so a stale copy on sys.path can't shadow these.
+from common import a2a_session
 from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER
 from common.governed_prompt import resolve_system_prompt
 
@@ -140,6 +149,43 @@ def _headers_from_context(a2a_context) -> dict[str, str]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("could not read request headers from A2A context: %s", exc)
         return {}
+
+
+def _message_metadata(a2a_context) -> dict:
+    """The inbound A2A message's metadata, lower-cased keys untouched.
+
+    `RequestContext.message.metadata` is where the orchestrator puts the session
+    id; `RequestContext.metadata` is the *params* metadata, a different slot, and
+    is read as a secondary in case a hop or a future client moves it. Returns {}
+    rather than raising — no metadata means no session id, which is a supported
+    state.
+    """
+    for source in ("message", None):
+        try:
+            if source is None:
+                found = getattr(a2a_context, "metadata", None)
+            else:
+                message = getattr(a2a_context, source, None)
+                found = getattr(message, "metadata", None)
+            if isinstance(found, dict) and found:
+                return found
+        except Exception as exc:  # noqa: BLE001
+            logger.info("could not read A2A message metadata: %s", exc)
+    return {}
+
+
+def _orchestrator_session_id(a2a_context, headers: dict[str, str]) -> str:
+    """The orchestrator's runtime session id for this request, or "".
+
+    In practice this reads the message metadata: AgentCore's request-header
+    allowlist cannot admit an `x-amzn-` header, so the platform's session header
+    reaches the platform but never this container. The shared module owns the
+    precedence and the validation and explains both channels.
+
+    "" is the pre-propagation behaviour and stays fully supported: every sub-agent
+    answered without this.
+    """
+    return a2a_session.session_id_from(headers, _message_metadata(a2a_context))
 
 
 def _parse_allowed_skills(headers: dict[str, str]) -> frozenset[str]:
@@ -342,6 +388,63 @@ def _build_skills(card_dict: dict[str, Any]):
     ]
 
 
+def _declaring_security(base):
+    """`A2AServer` subclass whose served card declares how to authenticate to it.
+
+    The card at ``/.well-known/agent-card.json`` is built by ``A2AServer`` from a
+    read-only ``public_agent_card`` property, which sets no ``securitySchemes`` and
+    takes no argument for them. So the served card told a caller NOTHING about the
+    credential — not wrong, but the one question a discovery document exists to answer.
+    A generic A2A client resolves this card and then has to be told out of band what to
+    send, which is the coupling the platform manifest exists to remove.
+
+    Subclassed rather than assigned onto the instance, because a property lives on the
+    class. The property is re-read per request, so the override applies to every fetch.
+
+    Failing soft: an agent that cannot name its issuer still serves, with no scheme
+    declared. Refusing to start would trade an incomplete discovery document for no
+    agent at all, and the enforcement of who may call is the Runtime authorizer's —
+    unaffected either way.
+    """
+    from common.card import card_security_for
+
+    class _WithSecurity(base):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, card_name: str = "", **kwargs):
+            super().__init__(*args, **kwargs)
+            self._card_name = card_name
+
+        @property
+        def public_agent_card(self):
+            card = super().public_agent_card
+            try:
+                schemes, security = card_security_for(self._card_name)
+                if not schemes[next(iter(schemes))]["openIdConnectUrl"]:
+                    logger.warning(
+                        "serving an agent card with no security scheme: this "
+                        "deployment's OIDC issuer is not resolvable from the "
+                        "environment (COGNITO_REGION / COGNITO_USER_POOL_ID)")
+                    return card
+                # Validated into the SDK's model rather than assigned as a plain
+                # dict. Both serialise to the same JSON today, but the plain dict
+                # makes pydantic warn on every card fetch
+                # ("Expected `SecurityScheme`") and a warning that fires on the
+                # happy path is a warning nobody will read when it matters.
+                # `card.py` keeps returning plain dicts: its other caller writes a
+                # Registry descriptor and must not need the A2A SDK.
+                from a2a.types import SecurityScheme
+
+                card.security_schemes = {
+                    name: SecurityScheme.model_validate(scheme)
+                    for name, scheme in schemes.items()
+                }
+                card.security = security
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not declare card security: %s", exc)
+            return card
+
+    return _WithSecurity
+
+
 class _MarkedResult:
     """An AgentResult whose ``str()`` carries the routing marker."""
 
@@ -450,6 +553,21 @@ def _make_per_request_executor(base_executor_cls, agent_kwargs: dict,
             # Retrieved with the request text as the query, so relevance ranking
             # has something to rank against; "" when there is nothing to add, in
             # which case the prompt is byte-for-byte what it was before.
+            # The orchestrator's session id, when it reached us. Logged, and that is
+            # ALL it is for here: this line is what joins a specialist's LOG group
+            # to the orchestrator turn that delegated to it. (The span-level join
+            # needs nothing from us — the client's session header makes AgentCore
+            # adopt the id, and this container never receives that header.)
+            #
+            # It is deliberately NOT passed to memory. The session summary's
+            # namespace is keyed on the MEMORY session id, which is derivable from
+            # the actor; see `common/memory.namespaces_for`, where believing
+            # otherwise is recorded as a measured mistake.
+            orchestrator_session = _orchestrator_session_id(
+                context, _headers_from_context(context))
+            logger.info("delegated turn: orchestrator session=%s",
+                        orchestrator_session or "<not propagated>")
+
             try:
                 from common.memory import memory_prompt_section
 
@@ -565,12 +683,13 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
 
     from strands.multiagent.a2a import A2AServer
 
-    a2a_server = A2AServer(
+    a2a_server = _declaring_security(A2AServer)(
         agent=strands_agent,
         http_url=runtime_url,
         serve_at_root=True,
         skills=_build_skills(card_dict),
         version=card_dict.get("version", "1.0.0"),
+        card_name=card_dict["name"],
     )
 
     # Wrap the executor for every agent, tools or not: skill enforcement has to

@@ -73,7 +73,13 @@ print(f"    -> boto3 {boto3.__version__} (>= {minimum})")
 PY
 
 echo "==> Bundling latest boto3 into Lambda code directories..."
-for lambda_dir in admin-api user-init kb-query skill-erp-api; do
+# pre-token is on this list because it reads the Agent Registry to decide which
+# global grants may go into a token's `cognito:groups`. Lambda's built-in botocore
+# has no `agent-registry-control` service model, and the failure is a plain
+# `UnknownServiceError` at client construction — which, on the authentication path,
+# presents as every user's A2A grants quietly missing from their token while sign-in
+# itself works perfectly. Measured 2026-08-15.
+for lambda_dir in admin-api user-init kb-query skill-erp-api pre-token; do
     pip install boto3 -t "$SCRIPT_DIR/cdk/lambda/$lambda_dir" -q --upgrade
 done
 
@@ -185,11 +191,53 @@ echo "    -> agent"
 # second hand-written copy would be a second chance to get it wrong.
 # ------------------------------------------------------------------------------
 echo "==> Copying the Agent Registry helper into Registry Lambda directories..."
-for lambda_dir in skill-erp-api admin-api; do
+for lambda_dir in skill-erp-api admin-api pre-token; do
     target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
     [ -d "$target" ] || continue
     cp "$SCRIPT_DIR/shared/agent_registry.py" "$target/agent_registry.py"
     echo "    -> $lambda_dir"
+done
+
+# ------------------------------------------------------------------------------
+# A2A grant intent -> Cognito groups, for the two Lambdas that both decide what a
+# user may reach. The admin API materialises per-user grants as real memberships
+# and sweeps revoked ones; the pre-token trigger injects the GLOBAL grants into
+# `cognito:groups` at token issue, because materialising "everyone has this" as one
+# membership per user is a constant written a million times (see the design doc's
+# scaling section, and Cognito's non-adjustable 25 RPS UserUpdate quota).
+#
+# They MUST agree on the merge — per-user replaces global per sub-agent, and an
+# empty skill list means "none" rather than "inherit". Two implementations of that
+# rule would not fail loudly; they would leave one class of user with more access
+# than the admin granted.
+# ------------------------------------------------------------------------------
+# `a2a_groups.py` is NOT copied here: its copies are hand-maintained so each can
+# say which deployment unit it serves, and shared/tests/test_a2a_groups_parity.py
+# holds them byte-identical below that header.
+echo "==> Copying the A2A grant policy into the Lambdas that enforce it..."
+for lambda_dir in admin-api pre-token; do
+    target="$SCRIPT_DIR/cdk/lambda/$lambda_dir"
+    [ -d "$target" ] || continue
+    cp "$SCRIPT_DIR/shared/subagent_policy.py" "$target/subagent_policy.py"
+    echo "    -> $lambda_dir"
+done
+
+# The authorizer-conformance rule, for the admin API's check route. Same file backs
+# scripts/a2a-authorizer-contract.py, which prints the config an agent's author
+# should deploy — so "what we check" and "what we tell people to do" cannot drift.
+echo "==> Copying the A2A conformance rule into the admin API..."
+cp "$SCRIPT_DIR/shared/a2a_conformance.py" \
+   "$SCRIPT_DIR/cdk/lambda/admin-api/a2a_conformance.py"
+echo "    -> admin-api"
+
+# The published platform contract, served at ?action=a2a-manifest. It is GENERATED from
+# a2a_conformance / a2a_groups / a2a_session rather than written out, so all three have
+# to travel with it — a manifest that disagreed with the check would have a third party
+# configure exactly what we published and still be refused.
+echo "==> Copying the A2A platform manifest into the admin API..."
+for f in a2a_manifest.py a2a_session.py; do
+    cp "$SCRIPT_DIR/shared/$f" "$SCRIPT_DIR/cdk/lambda/admin-api/$f"
+    echo "    -> admin-api/$f"
 done
 
 # ------------------------------------------------------------------------------

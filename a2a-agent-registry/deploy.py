@@ -563,11 +563,14 @@ def patch_agentcore_json(agent: str, project_dir: Path, state: dict[str, Any]) -
             "AWS_REGION": state["region"],
             "COGNITO_REGION": state["region"],
             "COGNITO_USER_POOL_ID": state["user_pool_id"],
-            "EXPECTED_SCOPE": SCOPE_FULL,
-            "A2A_TOKEN_URL": cognito["tokenUrl"],
-            "EXPECTED_CLIENT_ID": cognito["clientId"],
-            # Audience for the forwarded USER idToken — the chatbot's app client,
-            # not the m2m client above. Without it the audience check is skipped.
+            # Audience for the forwarded USER idToken — the chatbot's app client.
+            # Without it the audience check is skipped.
+            #
+            # EXPECTED_SCOPE / A2A_TOKEN_URL / EXPECTED_CLIENT_ID are gone. All three
+            # described the retired client_credentials m2m hop; the only code that read
+            # them was common/jwt_verify.py, which is not mounted and could never have
+            # run in the container, plus the card renderer that advertised that flow to
+            # callers. Leaving them would keep suggesting the mechanism is live.
             "COGNITO_APP_CLIENT_ID": state.get("user_pool_client_id", ""),
         }
     cfg_file.write_text(json.dumps(cfg, indent=2))
@@ -627,9 +630,6 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         "AWS_REGION": state["region"],
         "COGNITO_REGION": state["region"],
         "COGNITO_USER_POOL_ID": state["user_pool_id"],
-        "EXPECTED_SCOPE": SCOPE_FULL,
-        "A2A_TOKEN_URL": cognito["tokenUrl"],
-        "EXPECTED_CLIENT_ID": cognito["clientId"],
         # Audience for the forwarded USER idToken (chatbot app client). The
         # agentcore CLI drops custom env on deploy, so this has to be re-applied
         # here as well as in agentcore.json.
@@ -855,8 +855,20 @@ def _authorizer_config(agent: str, discovery_url: str, cognito: dict[str, Any],
             f"every request would be refused. Re-run with --legacy-m2m-auth to "
             f"deploy the pre-migration auth model instead.")
 
-    groups = a2a_groups.all_groups_for_agent(card_name, skill_ids)
-    log(f"  [{agent}] grant groups ({len(groups)}): {groups}")
+    # ONE stable agent-level group, not the per-skill list this used to enumerate.
+    # `CONTAINS_ANY` has no wildcard, so the old list made "add a skill to the card"
+    # into "redeploy this runtime or its grantees are refused at the door with nothing
+    # explaining why". It bought no authorization to pay for that: the door passed on
+    # ANY one of the skill groups, and the container derives the skill subset from the
+    # same signed claim anyway (`common/server.enforce_allowed_skills`). See
+    # `shared/a2a_groups.authorizer_groups`.
+    #
+    # ORDER MATTERS on the way in: the admin API and the pre-token trigger have to be
+    # emitting `a2a-<agent>` before this runs, or every already-granted user is refused
+    # until the next materialisation reaches them.
+    groups = a2a_groups.authorizer_groups(card_name, skill_ids)
+    log(f"  [{agent}] door group: {groups} "
+        f"(skills gated in-container: {sorted(skill_ids)})")
     return {
         "discoveryUrl": discovery_url,
         "allowedAudience": [app_client],
@@ -1005,8 +1017,12 @@ def ensure_registry_record(
     card_for_registry = render_card_for_registry(
         card_dict,
         runtime_url=invocation_url,
-        token_url=state["deployed"]["cognito"]["tokenUrl"],
-        scope=SCOPE_FULL,
+        # The issuer a caller must get a token from, which is also what the Runtime
+        # authorizer validates against. It replaced the token_url / scope pair that
+        # advertised the retired m2m flow.
+        discovery_url=(
+            f"https://cognito-idp.{state['region']}.amazonaws.com/"
+            f"{state['user_pool_id']}/.well-known/openid-configuration"),
     )
     # GA: descriptors.a2aAgentCard.data — one level shallower than preview's
     # descriptors.a2a.agentCard.inlineContent. The service validates the card

@@ -3441,8 +3441,83 @@ JSON-RPC `message/send` against AgentCore Runtime's native A2A protocol mode
 specialist are independent AgentCore Runtimes.
 
 Since 2026-08-12 the call carries **one token — the end user's own idToken** — and
-each specialist's Runtime authorizes it directly. It goes straight to the
-specialist's Runtime, not through the Gateway.
+each specialist's Runtime authorizes it directly.
+
+Since 2026-08-15 it goes **through a dedicated inbound gateway**,
+`smarthome-a2a-gw`, with one A2A `passthrough` target per specialist and
+`JWT_PASSTHROUGH` outbound so the user's token arrives unchanged. The AgentCards
+carry the gateway URL; the orchestrator routes on `card.url` and knows nothing about
+the topology, so rolling back is `scripts/cutover-a2a-cards.py --to runtime`.
+
+Measured over the hop before cutting over (`scripts/probe-a2a-gateway.py`):
+`cognito:groups` is still enforced by each specialist's own authorizer — a user
+narrowed to no grant gets **401** — per-user identity still resolves in the
+container, the propagated session id still arrives, the span-level join still works
+(13 orchestrator spans and 13 specialist spans under one `session.id`), and the
+latency delta is inside noise (±0.1s on a ~4.8s call).
+
+What the gateway adds is a Cedar **per-agent `forbid`**: an all-users deny that
+takes effect on the next request, which a claim-based grant cannot do because a
+claim only changes when a token does. Verified: the forbidden agent answers `403 …
+[Policy evaluation denied due to Forbid_energy_optimization]` while every other
+target still answers 200.
+
+What it does **not** add is guardrails — see §9.13.2.
+
+#### 9.13.1 Registered is discoverable; the authorizer decides callable
+
+Registering an APPROVED card is the **only** integration step for discovery: the
+console lists the agent, the orchestrator registers `a2a_*` tools for it, the
+delegation prompt names it, and its system prompt becomes governable — all derived
+from the Registry, with no code change or redeploy anywhere upstream. Someone who
+knows nothing about this deployment can get that far.
+
+They cannot get further without two of its values. Authorization happens at the
+sub-agent's OWN Runtime authorizer: `discoveryUrl` must be this pool, `allowedAudience`
+must carry this app client, and `customClaims` must match the card's door group under
+`CONTAINS_ANY`. That configuration lives with whoever deployed the runtime, and until
+2026-08-15 nothing checked it.
+
+Both ways of getting it wrong are silent and they fail in opposite directions: no
+`customClaims` and every authenticated user of the pool reaches every skill; a wrong
+pool or audience and granted users get 401 while the orchestrator still offers the
+tool, so the model apologises. The Integration Registry page reads Registry STATUS, so
+it shows `approved` either way.
+
+Closed by three things that share one rule (`shared/a2a_conformance.py`):
+
+- `GET /registry/records?action=a2a-conformance` resolves each card's URL back to its
+  runtime — through the gateway target when the card points at the gateway — reads the
+  authorizer and reports findings by direction. The A2A Agents page renders it as an
+  **Authorizer** column: *Too permissive* (red) / *Callers refused* (amber).
+- **It is also the approval gate.** An AGENT record whose worst finding is `open` or
+  `closed` cannot be approved (409, with the findings and the command that fixes them).
+  `info` passes, and that boundary is deliberate: an unreadable runtime in another
+  account, and a still-coupled-but-working pre-migration authorizer, are both states a
+  platform admin must be able to approve. A gate that reddened working runtimes would
+  be switched off. `?force=true` overrides and writes the override into the record's own
+  `statusReason`.
+- `scripts/a2a-authorizer-contract.py` prints the config an agent SHOULD be deployed
+  with, from the same function, so what is checked and what is handed out cannot
+  drift. The contract for third parties is `docs/a2a-agent-onboarding.md`.
+
+#### 9.13.2 Why the gateway cannot carry guardrails, and where Cedar stops
+
+Two limits, both measured, both worth stating because each looks like a
+configuration problem and is not:
+
+- **Gateway guardrails cannot filter A2A at all.** In us-west-2 `CreatePolicy` with
+  a guardrails block fails `AccessDeniedException: Guardrails policies are not
+  enabled for this account`, which is regional rather than an entitlement. And even
+  in a supported region, Cedar dataPaths cannot traverse arrays, so nothing can read
+  an A2A message's text at `params.message.parts[i].text`. Content filtering for a
+  specialist has to be `ApplyGuardrail` inside its own container.
+- **Cedar cannot do per-user authorization here.** The generated schema gives
+  `AgentCore::OAuthUser` no `groups` and no `claims` attribute (probed 2026-08-15),
+  so a policy cannot read the caller's `cognito:groups`. Its only per-user lever is
+  an explicit `principal.id` list. So the gateway's permit is deliberately broad —
+  the analyzer calls it "Overly Permissive" and is right — and authorization stays
+  at each specialist's runtime authorizer, one layer down, on a signed claim.
 
 #### Why each of these is an agent and not a skill
 
@@ -3588,6 +3663,21 @@ a2a-agent-registry/
 
 #### Identity: two tokens, because one cannot answer both questions
 
+> **Superseded — read §9.13.1 and §9.13.3 for the mechanism in force.** This
+> subsection describes the two-token hop as it was built, and it is kept because the
+> reasoning below is why the replacement looks the way it does. What changed: there is
+> now **one** credential, the end user's own idToken, and the grant is the
+> `cognito:groups` claim on it. The m2m client_credentials token is gone, and so is
+> `X-A2A-Allowed-Skills` as an authorization input — the container derives the granted
+> skills from the same signed claim, which a caller cannot widen.
+>
+> The retired mechanism outlived its use in one place worth naming: every AgentCard
+> went on advertising an OAuth2 `client_credentials` scheme in its `securitySchemes`,
+> which is what a caller reads to decide what to send. Nothing enforced it and our own
+> orchestrator never read it, so it cost us nothing and would have cost a third party
+> their first day. The manifest now publishes the correct declaration as
+> `card.securitySchemes` and `a2a_preflight` reports a card that disagrees.
+
 The `Authorization` header carries an OAuth2 **client_credentials** m2m token
 (Cognito app client `smarthome-a2a-m2m`, scope `a2a-server/invoke`). Every
 downstream Runtime validates it with `customJWTAuthorizer`. That token proves *an
@@ -3704,6 +3794,70 @@ orchestrator therefore streams **tool lifecycle** instead of tokens — see
 §9.20 — which replaces ~31s of motionless "thinking…" with "asking the Home
 Security specialist…". The marker stays applied to the result rather than the
 stream, unchanged.
+
+#### 9.13.3 The door asks one question, so it stopped enumerating skills
+
+Group names encode `(agent, skill)`, and the authorizer's `CONTAINS_ANY` list used to
+carry every one of an agent's. Measured against what each enforcement point actually
+decides, that was redundant in one direction and expensive in the other:
+
+| | reads | decides | passes when |
+| --- | --- | --- | --- |
+| Runtime authorizer (the door) | `cognito:groups` | may this caller reach this agent | ANY listed group is held |
+| `common/server.py` (the container) | the same signed claim | which skills were granted | the derived subset is non-empty |
+
+`CONTAINS_ANY` passes on any single group, and `enforce_allowed_skills` refuses only an
+EMPTY subset — so both were answering *"is there any grant on this agent"*. The
+enumeration added no authorization. What it added was a coupling: no wildcard means a
+skill added to a card left its grantees refused at the door, with no log line, until
+somebody redeployed that runtime.
+
+So since 2026-08-15 the door matches ONE stable group, `a2a-<cardName>`, constant for
+the agent's lifetime. Per-skill groups keep doing the job only they can do — telling
+the container which skills a caller holds. A caller holding the door key and no skill
+group passes the door and is refused inside, which is what keeps the coarse door
+honest: it authorizes reaching the agent, never a skill.
+
+**The migration has an order, and reversing it locks every user out.** The grant side
+(`subagent_policy.wanted_groups`, so both the admin API's materialiser and the
+pre-token trigger) must emit `a2a-<agent>` and be backfilled BEFORE any authorizer
+requires it. `scripts/migrate-a2a-door-groups.py` refuses to flip an agent whose door
+group does not yet exist in the pool, and `--rollback` restores the enumeration —
+reversible because granted users hold both shapes. Measured on the live deployment: 10
+door-key memberships backfilled across 3 per-user scopes, global grants needing none
+(the trigger computes them per token), then 8 authorizers flipped with the acceptance
+gate still passing all five checks including **401 for an ungranted caller**.
+
+Two consequences worth holding on to:
+
+- Conformance reports a skill-group-only authorizer as `info`, not `closed`. Such a
+  runtime works; it is merely still coupled. Reporting it red would be false, and a red
+  row an operator cannot reproduce is how a check earns being ignored.
+- A revocation sweep must decode the door key. `parse_group` answers None for it (no
+  separator), so a sweep built on that would strip every skill group off a deprecated
+  agent's holders, leave the one group that opens the door, and report success —
+  `agent_of_group` exists for this.
+
+#### 9.13.4 The interface is three things; everything else is derived
+
+The goal an independent A2A team needs is that its only contract with this platform is
+(1) an inbound endpoint accepting our users' idTokens, (2) an AGENT record with a
+conformant card, and (3) our approval and granting. Approval and granting stay here on
+purpose — otherwise an agent could grant itself — and accepting our Cognito pool is
+inherent to sharing users. Everything else is derived from (2):
+
+| was a cross-team step | now |
+| --- | --- |
+| hand-copying `discoveryUrl` / app client / registry id | `?action=a2a-manifest`, and a **Platform manifest** button on the A2A Agents page. GENERATED from `a2a_conformance` / `a2a_groups` / `a2a_session`, so what we publish cannot drift from what we check — a test substitutes a real card name into the published template and asserts the real checker finds nothing |
+| a platform engineer adding a gateway `passthrough` target | `?action=a2a-gateway-reconcile`, driven from the Registry. Matched by RUNTIME, never by target name — the eight built-in targets are named `light-effect` while their cards say `light-effect-agent`, so name matching would call all eight missing and duplicate them. Orphans are reported, never deleted: an orphaned target is dead weight, not an open door (the sweep closes access), and deleting one would break any card still pointing at it |
+| adding a runtime ARN to `DASHBOARD_EXTRA_RUNTIME_ARNS` | derived from APPROVED records, unioned with the env var (which still carries the voice and bundles runtimes, having no Registry record). Never returns a SHORTER list on failure — it serves the last known one, because a silently shorter allowlist is the exact failure it exists to prevent |
+| "does my agent actually work, and is it actually closed?" | `scripts/a2a-delegation-smoke.py`, asserting BOTH directions. Only the positive one is visible in normal use: a test that checks admission alone passes just as happily against an agent with no `customClaims` at all |
+
+The gateway URL in the manifest is **derived**, not read from an environment variable —
+first from a record already routed through it, else by gateway name. This Lambda's
+script-patched env has been wiped by `cdk deploy` more than once (§9.2), and the failure
+mode for a published contract is the worst kind: a third party configures against a
+blank or stale value we handed them.
 
 ### Delegation latency, measured
 

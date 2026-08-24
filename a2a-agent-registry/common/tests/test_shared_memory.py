@@ -79,23 +79,67 @@ def test_no_identity_yields_no_actor():
 # Namespaces
 # ---------------------------------------------------------------------------
 
-def test_namespaces_are_facts_and_preferences():
+def test_the_session_summary_is_keyed_on_the_memory_session_not_a_runtime_one():
+    """The correction that measuring produced.
+
+    This namespace was documented for months as unreadable from a sub-agent,
+    because the A2A hop propagated no runtime session id. But the session component
+    is not a runtime session id: the orchestrator writes Memory under
+    `memory_session_id(actor)` = `mem-{actor}`, stable across logins. A sub-agent
+    holds the actor, so it can derive it — no propagation required.
+
+    Verified against the live Memory: `mem-{actor}` holds the running summary and
+    the `user-session-...` variant is empty.
+    """
     mod = _load()
     assert mod.namespaces_for("admin_smarthome_local") == [
         "/users/admin_smarthome_local/facts",
         "/users/admin_smarthome_local/preferences",
+        "/summaries/admin_smarthome_local/mem-admin_smarthome_local",
     ]
 
 
-def test_session_summaries_are_not_read():
-    """A sub-agent cannot name the orchestrator's session.
+def test_the_memory_session_matches_what_the_orchestrator_computes():
+    """Both sides must produce the same string from what each of them holds.
 
-    AgentCore assigns runtimeSessionId per runtime and the A2A hop does not
-    propagate it, so `/summaries/{actor}/{sessionId}` would be this agent's own
-    empty namespace. Reading it would cost a call per request and return nothing.
+    The orchestrator has the raw email; a sub-agent has the sanitised actor. The
+    shared rule is idempotent so the two agree — if they ever stopped agreeing, the
+    specialist would read an empty namespace and look like it had no memory.
     """
-    assert not any("summaries" in ns
-                   for ns in _load().namespaces_for("admin_smarthome_local"))
+    import sys, os
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, os.path.join(repo, "shared"))
+    import memory_actor
+
+    actor = memory_actor.memory_actor_id(email="admin@smarthome.local")
+    orchestrator_side = memory_actor.memory_session_id("admin@smarthome.local")
+    assert f"/summaries/{actor}/{orchestrator_side}" in _load().namespaces_for(actor)
+
+
+def test_an_unresolvable_memory_session_degrades_to_the_two_actor_namespaces():
+    """A standalone copy of this code without `memory_actor.py` must still answer.
+
+    `common/memory.py` reaches `shared/` through a path lookup, so a rendered
+    container built without it — or the self-contained demo bundle — resolves
+    nothing. Found by extracting logs/agentcore-deploy-demo.tar.gz and importing it:
+    `namespaces_for` raised ModuleNotFoundError, which would have cost the whole
+    delegation rather than just the session summary.
+    """
+    mod = _load()
+
+    def _boom():
+        raise ModuleNotFoundError("No module named 'memory_actor'")
+
+    original = mod._memory_actor_module
+    mod._memory_actor_module = _boom
+    try:
+        assert mod.namespaces_for("admin_smarthome_local") == [
+            "/users/admin_smarthome_local/facts",
+            "/users/admin_smarthome_local/preferences",
+        ]
+    finally:
+        mod._memory_actor_module = original
 
 
 def test_no_actor_means_no_namespaces():
@@ -157,7 +201,7 @@ def test_a_missing_or_odd_content_shape_is_empty_not_an_error():
 # Retrieval
 # ---------------------------------------------------------------------------
 
-def test_retrieves_from_both_namespaces_with_the_request_as_the_query():
+def test_retrieves_from_every_namespace_with_the_request_as_the_query():
     mod = _load()
     client = _FakeMemoryClient({
         "/users/admin_smarthome_local/facts": ["Has a 30-segment light strip"],
@@ -171,7 +215,48 @@ def test_retrieves_from_both_namespaces_with_the_request_as_the_query():
     # relevant rather than arbitrary.
     assert all(c["searchCriteria"]["searchQuery"] == "make the living room cosy"
                for c in client.calls)
-    assert len(client.calls) == 2
+    # Facts, preferences and the running session summary.
+    assert len(client.calls) == 3
+
+
+def test_lines_keep_namespace_order_despite_concurrency():
+    """Facts, then preferences, then the summary — regardless of which returns first.
+
+    Retrieval is concurrent now (three serial calls would sit on the critical path
+    of every delegated turn). Completion order must not reach the prompt: a prompt
+    whose lines reorder between turns is a prompt-cache miss, and the intended
+    reading is general-to-specific.
+    """
+    mod = _load()
+
+    class _SlowFirstNamespace(_FakeMemoryClient):
+        def retrieve_memory_records(self, **kwargs):
+            # The first namespace answers last.
+            if kwargs["namespace"].endswith("/facts"):
+                import time
+                time.sleep(0.05)
+            return super().retrieve_memory_records(**kwargs)
+
+    client = _SlowFirstNamespace({
+        "/users/admin_smarthome_local/facts": ["FACT"],
+        "/users/admin_smarthome_local/preferences": ["PREFERENCE"],
+        "/summaries/admin_smarthome_local/mem-admin_smarthome_local": ["SUMMARY"],
+    })
+    out = mod.retrieve_memory(_Caller(email="admin@smarthome.local"), "q",
+                              client=client)
+    assert out.index("FACT") < out.index("PREFERENCE") < out.index("SUMMARY")
+
+
+def test_a_missing_summary_namespace_is_not_an_error():
+    """A user with no summary yet is the normal case on their first conversation."""
+    mod = _load()
+    client = _FakeMemoryClient(
+        {"/users/admin_smarthome_local/facts": ["Has a light strip"]},
+        fail={"/summaries/admin_smarthome_local/mem-admin_smarthome_local"},
+    )
+    out = mod.retrieve_memory(_Caller(email="admin@smarthome.local"), "q",
+                              client=client)
+    assert "Has a light strip" in out
 
 
 def test_one_failing_namespace_does_not_cost_the_other():

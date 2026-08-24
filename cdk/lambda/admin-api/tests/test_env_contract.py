@@ -160,3 +160,52 @@ def test_the_gateway_id_absence_is_what_empties_the_tool_list():
         assert [g.label for g in gateway_catalog.gateways()] == ["tools", "websearch"]
     finally:
         gateway_catalog.GATEWAY_ID, gateway_catalog.WEBSEARCH_GATEWAY_ID = saved
+
+
+# ---------------------------------------------------------------------------
+# The other half of the same contract: IAM
+#
+# Env vars are not the only thing CDK owns and the Python code silently depends on.
+# Approving a DRAFT record needs TWO Registry actions, and the stack granted one of
+# them: `UpdateRegistryRecordStatus` but not `SubmitRegistryRecordForApproval`. The
+# console could therefore approve a PENDING_APPROVAL record and answered 500 on a
+# DRAFT one — measured 2026-08-15 against a real record.
+#
+# It hid for the same reason the env resets hide: the only caller was the SKILL review
+# queue, and the Skill ERP submits on publish, so nothing in that queue was ever a
+# DRAFT. Every AGENT record starts as one, and so does every APPROVED record knocked
+# back by a version bump, which is what made this surface as soon as AGENT records got
+# an Approve button.
+# ---------------------------------------------------------------------------
+
+def _admin_registry_actions() -> set:
+    """Every `agent-registry:` action granted to the admin Lambda by the stack.
+
+    Scoped to `adminLambda.addToRolePolicy` blocks on purpose: the Skill ERP Lambda
+    has its own, wider Registry grant a few lines above, and reading the whole file
+    would let its actions vouch for the admin Lambda's.
+    """
+    source = open(STACK, encoding="utf-8").read()
+    actions = set()
+    for chunk in source.split("adminLambda.addToRolePolicy(")[1:]:
+        block = chunk.split("}));", 1)[0]
+        actions |= set(re.findall(r'"agent-registry:(\w+)"', block))
+    return actions
+
+
+def test_the_admin_lambda_can_perform_both_halves_of_an_approval():
+    """`agent_registry.approve_record` calls Submit then UpdateStatus, and a DRAFT
+    record needs both — DRAFT's only route to APPROVED goes via PENDING_APPROVAL."""
+    granted = _admin_registry_actions()
+    needed = {"GetRegistryRecord", "SubmitRegistryRecordForApproval",
+              "UpdateRegistryRecordStatus"}
+    assert needed <= granted, (
+        "the admin Lambda cannot complete an approval it offers a button for; "
+        f"missing: {sorted(needed - granted)}")
+
+
+def test_the_admin_lambda_can_read_the_a2a_inventory_and_its_grantability():
+    """The A2A page lists records in every status and derives each one's grantability,
+    which is a List plus a Get per record."""
+    granted = _admin_registry_actions()
+    assert {"ListRegistryRecords", "GetRegistryRecord"} <= granted

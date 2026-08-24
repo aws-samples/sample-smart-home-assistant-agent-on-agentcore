@@ -41,10 +41,18 @@ def test_no_user_grants_is_pure_inheritance():
 # --- group naming from intent ---------------------------------------------
 
 def test_wanted_groups_maps_record_ids_through_card_names():
+    """Both shapes: the door key once, plus one per granted skill.
+
+    The agent-level group is what the sub-agent's Runtime authorizer matches; the
+    per-skill ones are what the container reads to decide WHICH skills were granted.
+    A user holding only the latter cannot get in once that runtime is redeployed, and
+    a user holding only the former gets in and is refused inside.
+    """
     wanted = sp.wanted_groups(
         {"rec-qa": ["answer_from_docs", "troubleshoot_from_docs"]},
         {"rec-qa": "knowledge-qa-agent"})
     assert wanted == {
+        "a2a-knowledge-qa-agent",
         "a2a-knowledge-qa-agent.answer_from_docs",
         "a2a-knowledge-qa-agent.troubleshoot_from_docs",
     }
@@ -56,9 +64,29 @@ def test_unknown_record_id_is_skipped_not_guessed():
 
 
 def test_unencodable_skill_is_skipped_not_sanitised():
+    """The door key still comes, because one skill DID encode."""
     wanted = sp.wanted_groups({"rec-qa": ["ok_skill", "bad skill"]},
                               {"rec-qa": "knowledge-qa-agent"})
-    assert wanted == {"a2a-knowledge-qa-agent.ok_skill"}
+    assert wanted == {"a2a-knowledge-qa-agent", "a2a-knowledge-qa-agent.ok_skill"}
+
+
+def test_narrowed_to_zero_skills_gets_no_door_key():
+    """An admin narrowing a user to nothing must produce a clean 401, not a 200.
+
+    An empty skill list is a real entry meaning "nothing on this sub-agent" (see
+    `effective_grants`). Handing out the agent-level group anyway would let the user
+    through the door for the container to refuse — the model then apologises about a
+    failed delegation, where being turned away at the door is both correct and
+    cheaper.
+    """
+    assert sp.wanted_groups({"rec-qa": []}, {"rec-qa": "knowledge-qa-agent"}) == set()
+
+
+def test_a_card_whose_every_skill_is_unencodable_gets_no_door_key():
+    """No skill group means the container could never authorize anything, so a door
+    key would be strictly worse than the existing silent skip."""
+    assert sp.wanted_groups({"rec-qa": ["bad skill", "also bad"]},
+                            {"rec-qa": "knowledge-qa-agent"}) == set()
 
 
 # --- materialisation ------------------------------------------------------

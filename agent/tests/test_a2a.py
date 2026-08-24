@@ -64,7 +64,7 @@ def _patch_send(monkeypatch, replies):
     from tools import a2a as a2a_mod
 
     def _fake_send(endpoint_url, message,
-                   user_token=None, card_dict=None):
+                   user_token=None, card_dict=None, session_id=""):
         handler = replies.get(endpoint_url)
         if handler is None:
             raise RuntimeError(f"no stub for endpoint {endpoint_url}")
@@ -195,7 +195,7 @@ def test_tool_invocation_returns_remote_reply(monkeypatch):
     calls = []
 
     def _fake_send(endpoint_url, message,
-                   user_token=None, card_dict=None):
+                   user_token=None, card_dict=None, session_id=""):
         calls.append({
             "endpoint": endpoint_url,
             "message": message,
@@ -245,8 +245,8 @@ def _capture_sends(monkeypatch):
     calls = []
 
     def _fake_send(endpoint_url, message,
-                   user_token=None, card_dict=None):
-        calls.append({"user_token": user_token})
+                   user_token=None, card_dict=None, session_id=""):
+        calls.append({"user_token": user_token, "session_id": session_id})
         return "⟦A2A⟧ ok"
 
     monkeypatch.setattr(a2a_mod, "_send_a2a_message", _fake_send)
@@ -343,11 +343,109 @@ def test_bearer_prefix_is_stripped_before_the_header_is_set(monkeypatch):
             message="hi",
             user_token="Bearer  user.id.token  ",
         )
-    # One header, carrying the end user's own token. The grant travels inside it as
-    # a `cognito:groups` claim, so there is nothing else to send.
+    # One CREDENTIAL header, carrying the end user's own token. The grant travels
+    # inside it as a `cognito:groups` claim, so there is nothing else to send.
     assert sent["Authorization"] == "Bearer user.id.token"
     assert "X-SuperApp-User-Token" not in sent
     assert "X-A2A-Allowed-Skills" not in sent
+    # And no session header, because this call was given no session id.
+    assert "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id" not in sent
+
+
+# ---------------------------------------------------------------------------
+# Session id propagation (shared/a2a_session.py)
+# ---------------------------------------------------------------------------
+
+ORCHESTRATOR_SESSION = "user-session-88c1a3e0-b041-4c2a-9f31-1755000000000"
+
+
+def test_the_turns_session_id_reaches_every_delegation(monkeypatch):
+    """Without it, a delegated turn cannot be joined to the turn that caused it.
+
+    Threaded through the closure rather than read from the environment: it is
+    per-request state, and it must not be reachable from the LLM-facing signature.
+    """
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
+    calls = _capture_sends(monkeypatch)
+
+    tools = build_a2a_tools(
+        grants={"energy-optimization-agent": ["estimate_savings", "tariff_analysis"]},
+        registry_id="test-registry",
+        user_token="user.id.token",
+        session_id=ORCHESTRATOR_SESSION,
+    )
+    for tool in tools:
+        _invoke_tool(tool, "hello")
+    assert [c["session_id"] for c in calls] == [ORCHESTRATOR_SESSION] * 2
+
+
+def test_a_warmup_session_id_is_dropped_rather_than_sent(monkeypatch):
+    """AgentCore rejects a session id under 33 characters.
+
+    A warmup invocation's is the literal "default", and sending it would turn a
+    healthy delegation into a 400. An unjoinable turn is the lesser failure.
+    """
+    from tools.a2a import build_a2a_tools
+
+    _patch_card_fetch(monkeypatch, {"energy-optimization-agent": CARD_ENERGY})
+    calls = _capture_sends(monkeypatch)
+
+    tools = build_a2a_tools(
+        grants={"energy-optimization-agent": ["estimate_savings"]},
+        registry_id="test-registry",
+        user_token="user.id.token",
+        session_id="default",
+    )
+    _invoke_tool(tools[0], "hello")
+    assert calls[0]["session_id"] == ""
+
+
+def test_the_session_id_travels_on_both_the_header_and_the_metadata(monkeypatch):
+    """Two channels: a Gateway hop may not forward custom headers (untested).
+
+    Metadata rides in the JSON-RPC body, so it cannot be stripped by something that
+    only rewrites headers.
+    """
+    import httpx
+    from tools import a2a as a2a_mod
+
+    sent_headers = {}
+
+    class _FakeClient:
+        def __init__(self, headers=None, timeout=None):
+            sent_headers.update(headers or {})
+
+        async def __aenter__(self):
+            raise RuntimeError("stop here — headers already captured")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    with pytest.raises(RuntimeError, match="headers already captured"):
+        a2a_mod._send_a2a_message(
+            endpoint_url="https://example.invalid/invocations",
+            message="hi",
+            user_token="user.id.token",
+            session_id=ORCHESTRATOR_SESSION,
+        )
+    assert sent_headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"] == \
+        ORCHESTRATOR_SESSION
+
+    # The body channel. Built where the Message is, so it is asserted on the real
+    # a2a type rather than on a hand-written dict.
+    import a2a_session
+    from a2a.types import Message, Part, Role, TextPart
+
+    msg = Message(
+        message_id="m1",
+        role=Role.user,
+        parts=[Part(root=TextPart(text="hi"))],
+        metadata={a2a_session.SESSION_ID_METADATA_KEY: ORCHESTRATOR_SESSION},
+    )
+    assert msg.metadata["orchestratorSessionId"] == ORCHESTRATOR_SESSION
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +462,7 @@ def test_the_registry_card_is_passed_to_the_send_so_no_fetch_is_needed(monkeypat
     seen = {}
 
     def _fake_send(endpoint_url, message,
-                   user_token=None, card_dict=None):
+                   user_token=None, card_dict=None, session_id=""):
         seen["card"] = card_dict
         return "ok"
 
@@ -598,7 +696,7 @@ def test_the_device_brief_is_appended_to_the_delegated_message(monkeypatch):
     sent = []
 
     def _fake_send(endpoint_url, message,
-                   user_token=None, card_dict=None):
+                   user_token=None, card_dict=None, session_id=""):
         sent.append(message)
         return "ok"
 
@@ -628,8 +726,8 @@ def test_no_brief_leaves_the_message_byte_for_byte_unchanged(monkeypatch):
     sent = []
     monkeypatch.setattr(
         a2a_mod, "_send_a2a_message",
-        lambda endpoint_url, message,
-        user_token=None, card_dict=None: sent.append(message) or "ok")
+        lambda endpoint_url, message, user_token=None, card_dict=None,
+        session_id="": sent.append(message) or "ok")
     monkeypatch.setattr(a2a_mod, "_device_context", lambda msg: "")
 
     tools = build_a2a_tools(grants={"energy-optimization-agent": ["estimate_savings"]},

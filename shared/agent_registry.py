@@ -117,6 +117,149 @@ REGISTRY_PENDING_STATUSES = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Grantability: may a record's skills be held by a user RIGHT NOW?
+#
+# One rule, two enforcement points, and they must not disagree.
+#
+#   - The sweep in the admin Lambda revokes `a2a-` Cognito GROUP memberships,
+#     which is how per-user grants are enforced.
+#   - The pre-token-generation trigger decides which groups to inject into
+#     `cognito:groups`, which is how GLOBAL grants are enforced (they are not
+#     memberships at all, so the sweep cannot see them).
+#
+# If the two used different rules, the same record in the same state would leave
+# global users working and per-user users revoked — a split nobody would think to
+# look for. Hence one function, here, next to the status names it reads.
+#
+# NOT used by the orchestrator. `tools/a2a.py` filters strictly on APPROVED when it
+# builds the tool list, because "a non-approved agent must not be callable" is the
+# requirement; the grace window below is about not CHURNING grants, not about
+# widening what a model may call. During the window a user keeps the group while
+# the orchestrator offers no tool for it.
+# ---------------------------------------------------------------------------
+
+# Statuses a record passes through on its way somewhere else. A record here has
+# not been judged — it is mid-edit or waiting for a human.
+IN_FLIGHT_STATUSES = frozenset({
+    STATUS_DRAFT, STATUS_PENDING_APPROVAL, STATUS_CREATING, STATUS_UPDATING,
+})
+
+# How long an in-flight record keeps its grants. Sized for the fact that approval
+# is a HUMAN step: `deploy.py` only submits for approval, and production approves
+# in the AgentCore Registry console. Any edit to an APPROVED record resets it to
+# DRAFT, so without a window every version bump would revoke every user's grants
+# and then need a re-materialisation once someone clicked approve.
+DEFAULT_GRANT_GRACE_SECONDS = 3600
+
+
+def grant_grace_seconds(env: dict | None = None) -> int:
+    """`A2A_GRANT_GRACE_SECONDS`, or the default. Never raises.
+
+    A malformed value falls back rather than failing: this is read on the token
+    path and in a scheduled sweep, and neither should break because someone typed
+    a word into an env var. Negative is allowed and means "no window".
+    """
+    import os
+
+    raw = (env if env is not None else os.environ).get("A2A_GRANT_GRACE_SECONDS")
+    if raw in (None, ""):
+        return DEFAULT_GRANT_GRACE_SECONDS
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_GRANT_GRACE_SECONDS
+
+
+def _updated_at_epoch(record: dict) -> float | None:
+    """`updatedAt` as a POSIX timestamp, or None if it cannot be read.
+
+    boto3 returns a timezone-aware datetime; the console API layer re-serialises
+    it as an ISO string. Both shapes arrive at this function depending on the
+    caller, and a record whose timestamp cannot be read must not be treated as
+    "changed just now" — that would keep a rejected record grantable forever.
+    """
+    value = record.get("updatedAt") or record.get("createdAt")
+    if value is None:
+        return None
+    if hasattr(value, "timestamp"):
+        try:
+            return value.timestamp()
+        except Exception:  # noqa: BLE001
+            return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        from datetime import datetime
+
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def grantable(record: dict | None, now: float, grace_seconds: int) -> tuple[bool, str]:
+    """(may its skills be granted now, why). `record=None` means "no such record".
+
+    Returns a reason string in both cases because every caller displays or logs
+    one: an admin looking at why a user lost access to a specialist needs to be
+    told "its record was rejected", not shown an empty column.
+
+    APPROVED is grantable. REJECTED, DEPRECATED and a missing record are refused
+    immediately — those are judgements, not transitions. In-flight statuses keep
+    their grants for `grace_seconds` after the record last changed, then lose them.
+    An unknown status is refused: a status this code has never heard of is not a
+    licence to keep granting.
+
+    In practice a deprecated record arrives here as `None` rather than as
+    `status == DEPRECATED`: measured 2026-08-15, deprecating REMOVES the record from
+    the API (`GetRegistryRecord` answers `ResourceNotFoundException`, and it lists
+    under no status). The explicit DEPRECATED branch still stands for the window
+    between the status change and the record disappearing.
+    """
+    if record is None:
+        return False, "no such record in the registry"
+
+    status = (record.get("status") or "").strip().upper()
+    if status == STATUS_APPROVED:
+        return True, "approved"
+    if status not in IN_FLIGHT_STATUSES:
+        # REJECTED / DEPRECATED / *_FAILED / anything unrecognised.
+        return False, f"status is {status or 'unknown'}"
+
+    updated = _updated_at_epoch(record)
+    if updated is None:
+        return False, f"status is {status} and its timestamp could not be read"
+    age = now - updated
+    if age <= grace_seconds:
+        return True, (f"status is {status}, within the "
+                      f"{grace_seconds}s re-approval window")
+    return False, (f"status is {status} and it has been "
+                   f"{int(age)}s, past the {grace_seconds}s window")
+
+
+def grace_remaining_seconds(record: dict | None, now: float,
+                            grace_seconds: int) -> int | None:
+    """Seconds until an in-flight record loses its grants, or None.
+
+    None for anything not on the clock — approved, already past the window, or
+    unreadable. For the console, so an admin can see a revocation coming rather
+    than discovering it.
+    """
+    if not record:
+        return None
+    status = (record.get("status") or "").strip().upper()
+    if status not in IN_FLIGHT_STATUSES:
+        return None
+    updated = _updated_at_epoch(record)
+    if updated is None:
+        return None
+    remaining = int(grace_seconds - (now - updated))
+    return remaining if remaining > 0 else None
+
+
 def registry_client(region: str | None = None):
     """A boto3 client for AWS Agent Registry's control plane.
 
@@ -163,15 +306,24 @@ def record_id_from_create(resp: dict) -> str:
     return arn.rsplit("/", 1)[-1] if arn else ""
 
 
+class RecordNotApprovable(RuntimeError):
+    """`approve_record` could not reach APPROVED, rather than quietly not trying."""
+
+
 def approve_record(client, registry_id: str, record_id: str,
                    reason: str = "", timeout: int = 60) -> str:
-    """Take a record from DRAFT to APPROVED, and return the status reached.
+    """Take a record to APPROVED, or raise `RecordNotApprovable`.
 
     Two calls, not one: a DRAFT record cannot be set APPROVED directly — the only
     UpdateRegistryRecordStatus transition out of DRAFT is DEPRECATED. It has to be
     submitted for approval first, which moves it to PENDING_APPROVAL, and only
     then can it be approved. Waits for each step to settle because the record sits
     in UPDATING in between and the next call would be rejected.
+
+    DRAFT, PENDING_APPROVAL and REJECTED can all reach APPROVED. **DEPRECATED
+    cannot — it is terminal.** Raising rather than returning the unchanged status,
+    because the previous behaviour reported an approve on a deprecated record as a
+    success.
     """
     import time
 
@@ -203,6 +355,22 @@ def approve_record(client, registry_id: str, record_id: str,
         set_record_status(client, registry_id, record_id, STATUS_APPROVED,
                           reason or "approved")
         status = _wait()
+    if status != STATUS_APPROVED:
+        # The same phantom-success bug the comment above describes, one status
+        # later. DEPRECATED is TERMINAL — measured 2026-08-15:
+        # `UpdateRegistryRecordStatus` answers "Cannot update registry record in
+        # DEPRECATED status (terminal state)" for every target, including back to
+        # APPROVED. Falling through and returning the unchanged status made an
+        # approve on a deprecated record answer 200 with `status: DEPRECATED`, and
+        # the caller had to notice the field to know nothing had happened.
+        #
+        # There is no recovery in place: the record must be recreated, which mints a
+        # new recordId and therefore voids every grant keyed on the old one.
+        raise RecordNotApprovable(
+            f"record {record_id} is {status or 'in an unknown status'} and cannot be "
+            f"approved" + (" — DEPRECATED is terminal, so it has to be recreated "
+                           "(which mints a new recordId and voids grants keyed on "
+                           "the old one)" if status == STATUS_DEPRECATED else ""))
     return status
 
 

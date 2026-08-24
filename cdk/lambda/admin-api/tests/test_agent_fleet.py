@@ -26,6 +26,10 @@ import agents as fleet
 TEXT_ARN = "arn:aws:bedrock-agentcore:us-west-2:111:runtime/smarthome_smarthome-ee97ToCthI"
 VOICE_ARN = "arn:aws:bedrock-agentcore:us-west-2:111:runtime/smarthomevoice_smarthomevoice-HAi7bi8jxA"
 LIGHT_ARN = "arn:aws:bedrock-agentcore:us-west-2:111:runtime/sha2alight_sha2alight-KAoLvdD6OV"
+# What every one of our cards has advertised since the 2026-08-15 gateway cutover.
+# The whole file used the direct shape before, which is why the join broke silently.
+GATEWAY_URL = ("https://smarthome-a2a-gw-gazpaav3r9.gateway.bedrock-agentcore."
+               "us-west-2.amazonaws.com/light-effect")
 
 
 def _card(name, runtime_arn, skills=(), description="d", version="1.0.0"):
@@ -59,6 +63,74 @@ def test_a_card_url_that_is_not_a_runtime_url_yields_nothing():
     deploy rewrote them."""
     assert fleet._runtime_name_from_card_url("https://example.com/a2a/x") == ""
     assert fleet._runtime_name_from_card_url("") == ""
+
+
+def test_a_gateway_card_url_carries_no_arn_to_parse():
+    """Not a bug in the parser — a gateway target URL genuinely has no ARN in it.
+    The bug was believing every card URL had one."""
+    assert fleet._runtime_name_from_card_url(GATEWAY_URL) == ""
+
+
+def test_the_join_key_prefers_the_arn_the_caller_resolved():
+    """The regression. Every card moved behind the gateway on 2026-08-15, the URL
+    parse started returning "", and all eight specialists split into two rows each:
+    a runtime row with no identity plus a record row wrongly flagged as having no
+    live runtime. Nothing failed, and the page read "8 approved records with no
+    live runtime" while all eight were serving traffic."""
+    rec = {"recordId": "REC1", "displayName": "light-effect-agent",
+           "status": "APPROVED", "runtimeArn": LIGHT_ARN,
+           "card": {"name": "light-effect-agent", "url": GATEWAY_URL, "skills": []}}
+    assert fleet.runtime_name_for_record(rec) == "sha2alight_sha2alight"
+
+
+def test_the_join_key_falls_back_to_the_url_when_no_arn_was_resolved():
+    """A third party registering their own runtime URL needs no resolution, and
+    must not depend on the caller having done one."""
+    rec = {"card": _card("third-party-agent", LIGHT_ARN)}
+    assert fleet.runtime_name_for_record(rec) == "sha2alight_sha2alight"
+
+
+def test_the_join_key_is_empty_when_neither_source_answers():
+    assert fleet.runtime_name_for_record({"card": {"url": GATEWAY_URL}}) == ""
+    assert fleet.runtime_name_for_record({}) == ""
+
+
+def test_a_gateway_fronted_record_collapses_onto_its_runtime():
+    """The end-to-end shape of the same regression, through build_fleet."""
+    out = fleet.build_fleet(
+        runtime_arns=[TEXT_ARN, LIGHT_ARN],
+        registry_records=[{
+            "recordId": "REC1", "displayName": "light-effect-agent",
+            "status": "APPROVED", "runtimeArn": LIGHT_ARN,
+            "card": {"name": "light-effect-agent", "url": GATEWAY_URL,
+                     "version": "2.0.0",
+                     "skills": [{"id": "compose_effect", "name": "", "description": ""}]},
+        }],
+        metadata={},
+    )
+    assert len(out) == 2, "the specialist must not appear twice"
+    light = next(a for a in out if a["recordId"] == "REC1")
+    assert light["live"] is True
+    assert light["runtimeId"] == "sha2alight_sha2alight-KAoLvdD6OV"
+    assert [s["id"] for s in light["skills"]] == ["compose_effect"]
+
+
+def test_a_joined_row_is_labelled_with_the_record_name_not_the_runtime_name():
+    """`sha2alight_sha2alight` is an artifact of an 18-character CLI slug limit.
+    The Registry record name is the agent's identity, and it is what the console's
+    Agent column must show."""
+    out = fleet.build_fleet(
+        runtime_arns=[LIGHT_ARN],
+        registry_records=[{
+            "recordId": "REC1", "displayName": "light-effect-agent",
+            "status": "APPROVED", "runtimeArn": LIGHT_ARN,
+            "card": {"name": "light-effect-agent", "url": GATEWAY_URL, "skills": []},
+        }],
+        metadata={},
+    )
+    assert out[0]["displayName"] == "light-effect-agent"
+    # And the runtime is still reported, because the Runtime column shows the id.
+    assert out[0]["runtimeId"] == "sha2alight_sha2alight-KAoLvdD6OV"
 
 
 # ---------------------------------------------------------------------------

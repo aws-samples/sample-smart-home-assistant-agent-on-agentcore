@@ -2,7 +2,7 @@
 """Publish the built-in skills to AWS Agent Registry as approved SKILL records.
 
 Why this exists. `Admin Console → Integration Registry → Skills` lists every
-APPROVED SKILL record in the registry and marks the ones nobody has imported. That
+SKILL record in the registry and marks the ones nobody has imported. That
 page was correct and almost empty: the registry held exactly ONE SKILL record
 (`nightly-air-check`, published through the Skill ERP), while the nine built-in
 skills under `agent/skills/` went straight into DynamoDB by `seed-skills.py` and
@@ -22,9 +22,9 @@ so a re-run finds the existing record and updates its descriptors rather than
 creating a second copy. That matters because the record id is what
 `importedFromRegistry` rows point at — churning ids would orphan every import.
 
-Records are published and then APPROVED, because an unapproved record does not
-appear on the page at all, and a script whose output is invisible reads as a
-script that did not run.
+Records are published and then APPROVED, because these are the skills the
+deployment ships: they are not somebody's submission awaiting a curator, and
+leaving them in DRAFT would put ten permanent rows in the review queue.
 
 Usage:
     ./venv/bin/python scripts/publish-builtin-skills.py
@@ -163,8 +163,8 @@ def publish(client, registry_id: str, skill: dict, existing: dict, dry_run: bool
         client, registry_id, record_id,
         reason="built-in skill shipped with the deployment")
     if status != registry_ns.STATUS_APPROVED:
-        # An unapproved record is invisible on the Skills page, so reporting
-        # success here would describe a result nobody can see.
+        # The record is listed either way, but an unapproved built-in cannot be
+        # imported and sits in the review queue, so this is not a success.
         return f"{action}-but-{status}"
     return action
 

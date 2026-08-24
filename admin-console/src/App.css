@@ -1031,6 +1031,26 @@ a.btn {
 }
 .drawer-skills > li { margin-bottom: 6px; }
 
+/* The verbatim Registry record in the A2A drawer. Same treatment as the SKILL.md
+   preview, and for the same reason: theme variables rather than fixed colours, which
+   is what made Tool Policy unreadable in dark mode. `pre-wrap` rather than `pre`
+   because an AgentCard carries percent-encoded URLs long enough to scroll a modal
+   sideways otherwise. */
+.a2a-raw-record {
+  margin: 8px 0 0;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--admin-border, #d5dbdb);
+  border-radius: 8px;
+  background: var(--admin-surface-alt, #fafafa);
+  color: var(--admin-text, #16191f);
+}
+
 /* ---- Remote Shell modal ---- */
 .shell-modal {
   width: 800px;

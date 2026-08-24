@@ -62,3 +62,34 @@ def memory_actor_id(email: str = "", sub: str = "") -> str:
     """
     chosen = (email or "").strip() or (sub or "").strip()
     return sanitize_actor_id(chosen) if chosen else ""
+
+
+# The `mem-` prefix distinguishes a Memory session id from a RUNTIME session id at
+# a glance, which matters because the two are different strings for the same
+# conversation and both get logged.
+MEMORY_SESSION_PREFIX = "mem-"
+
+
+def memory_session_id(actor_id: str) -> str:
+    """The Memory session id for one user's conversation — STABLE across logins.
+
+    Deliberately NOT the runtime session id (`user-session-{sub}-{epoch_ms}`,
+    minted per login). AgentCore Memory's short-term memory is scoped to
+    `(memoryId, actorId, sessionId)`, so keying it per login means every login
+    starts with an empty transcript. `agent/memory/session.py` owns the full
+    reasoning and the three writers that must agree on it.
+
+    It lives HERE, next to the actor rule, because there is a fourth reader: the
+    A2A sub-agents retrieve `/summaries/{actor}/{session}`, and that session
+    component is this value. They can derive it from the actor alone — which is why
+    reading the session summary never actually needed the orchestrator's runtime
+    session id, even though it looked like it did. Propagating that id across the
+    A2A hop is worth doing for observability (see shared/a2a_session.py) and is not
+    what makes this namespace addressable.
+
+    Accepts either a raw identifier or an already-sanitised actor id: sanitising is
+    idempotent, so `memory_session_id(memory_actor_id(email=e))` and
+    `memory_session_id(e)` agree. That matters because the orchestrator holds the
+    raw email and a sub-agent holds the sanitised actor.
+    """
+    return f"{MEMORY_SESSION_PREFIX}{sanitize_actor_id(actor_id)}"

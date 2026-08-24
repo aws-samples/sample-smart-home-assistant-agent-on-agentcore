@@ -150,9 +150,9 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 |------|------|---------|
 | **Discover** | **Overview** | 产品说明 + 架构图（默认折叠）以及 **Agent 运维统计大屏**（见下节）。三个 Demo 入口已移至侧边栏「演示入口」分组 |
 | Discover | **Agents** | **机队总览**：1 主 + 8 子 + 1 语音 + 1 A/B 变体 + 1 Tool，含运行时名、状态、skill 数与实时指标。点进详情页可**逐个 Agent 编辑 system prompt**（保存后下一次请求即生效，不用重新部署容器）。列表由 Runtime ARN + Registry 记录推导，新部署的子 Agent 自动出现 |
-| Discover | **Integration Registry** | 工具集成概览 + 从 AWS Agent Registry 读取已批准的 **A2A Agent** 记录（显示名称/端点/能力/发布者） |
+| Discover | **Integration Registry** | 工具集成概览 + 从 AWS Agent Registry 读取记录：**A2A Agent** 子页读已批准记录（显示名称/端点/能力/发布者），**Skills** 子页读全部已注册技能（含 DRAFT / 待审批 / 已驳回，状态列区分） |
 | **Build** | **Models** | 设置全局默认 LLM 模型；按用户覆盖文字模型与视觉模型。清单由 `ListFoundationModels` + `ListInferenceProfiles` **实时拉取**（本部署 88 个），不再硬编码 |
-| Build | **Skills** | 创建/编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖；**从 AWS Agent Registry 导入已批准技能** |
+| Build | **Skills** | 编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖。**新技能只能从 AWS Agent Registry 导入已批准记录** —— 控制台不再本地创建技能，统一由 Registry 注册与审批 |
 | Build | **Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时叠加拼接 |
 | Build | **Tool Policy** | 按用户配置可调用的工具（Cedar 策略）；内置工具与 Gateway 工具并列并用 Badge 区分；ENFORCE / LOG_ONLY 切换。每个 Gateway 工具旁列出**谁在用它** —— 撤掉 `control_device` 会同时停掉聊天指令、定时场景和两个子 Agent |
 | Build | **Memories** | 查看每个用户的长期记忆（事实 + 偏好 + 情景，来自 AgentCore Memory 的四种内置策略） |
@@ -565,7 +565,14 @@ cd cdk && npx cdk destroy --all --force
 - **`boto3 ... is below the required 1.43.67`** → venv 中的 boto3 过旧。1.43.67 是首个包含 `agent-registry` / `agent-registry-control` 两个 service 的版本（AWS Agent Registry 于 2026-08-06 GA 时迁到该命名空间）。重跑 `scripts/01-install-deps.sh`（会自动升级），或 `pip install --upgrade boto3`。
 - **Skill ERP 新建技能后卡在 DRAFT 状态** → 表示 `SubmitRegistryRecordForApproval` 在记录仍处于 `CREATING` 时被调用。最新 Lambda 会轮询 `GetRegistryRecord` 直到状态脱离 `CREATING` 再提交，更新 Lambda 代码即可（重跑 `scripts/04-cdk-deploy.sh` 或 `aws lambda update-function-code`）。
 - **Tool Policy → Manage Permissions 里没有可授权的 A2A Agent（或只有 3 个）** → 跑 `./venv/bin/python scripts/check-registry-wiring.py`。它比对 admin Lambda、Skill ERP Lambda、orchestrator runtime 和 `agentcore-state.json` 四处的 `REGISTRY_ID`，再确认该 registry 为 READY 且有已批准记录。最常见的原因是用了**旧 `bedrock-agentcore` namespace** 的 id —— 两个 namespace 各持有一套互不可见的 registry，同一个 id 在另一边必然 404，所以单看 `GetRegistry` 报错**不能**断定 id 失效。修法是重跑 `scripts/setup-agentcore.py`；`REGISTRY_ID` 在模块导入时读取，需强制冷启动。现在读取失败会返回 `catalogError`，控制台直接显示原因而不是一个空列表。
-- **⚠️ 跑过 `cdk deploy` 之后：Tool Policy 里一个 Gateway 工具都不显示 / Optimization 认不出子 Agent / `/optimization/*` 报 ConfigurationError** → admin Lambda 的环境变量被重置了。CDK 声明 15 个（内联 8 + `addEnvironment` 7），另外 12 个（`GATEWAY_ID`、`MEMORY_ID`、`VOICE_AGENT_RUNTIME_ARN`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、`KB_ID`、`OPTIMIZATION_*`、eval/AB 的 ARN 等）由 `setup-agentcore.py` 在部署后补写，而 CloudFormation 里 `environment` 是整张表，所以任何一次 `cdk deploy` 都会把它们抹掉，**且全程没有任何报错**。`REGISTRY_ID` 和 `AGENT_RUNTIME_ARN` 比「丢掉」更麻烦：CDK 声明它们的值是 `PLACEHOLDER_SET_BY_SETUP_SCRIPT`，重置后它们**还在**、总数也正常，值却是占位符。修复：重跑 `python scripts/setup-agentcore.py`，再 `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。核对要**按名字**而不是按个数（新增一个变量总数就变了）：`aws lambda get-function-configuration --function-name smarthome-admin-api --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"` 不能有 null，且 `scripts/check-registry-wiring.py` 要 exit 0。
+- **⚠️ 跑过 `cdk deploy` 之后：Tool Policy 里一个 Gateway 工具都不显示 / Optimization 认不出子 Agent / `/optimization/*` 报 ConfigurationError** → admin Lambda 的环境变量被重置了。CDK 声明 15 个（内联 8 + `addEnvironment` 7），另外 12 个（`GATEWAY_ID`、`MEMORY_ID`、`VOICE_AGENT_RUNTIME_ARN`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、`KB_ID`、`OPTIMIZATION_*`、eval/AB 的 ARN 等）由 `setup-agentcore.py` 在部署后补写，而 CloudFormation 里 `environment` 是整张表，所以一旦 CFN 更新这张表就会把它们抹掉，**且全程没有任何报错**。
+>
+> **2026-08-15 修正了触发条件**：不是「任何一次 `cdk deploy`」。同一天连着四次 `cdk deploy`，前三次(只改了 Lambda 代码和 IAM)**一个变量都没丢**，第四次给 admin Lambda **新增了一个 CDK 声明的**环境变量(`COGNITO_APP_CLIENT_ID`),立刻丢了 15 个、另有 2 个回到 `PLACEHOLDER`。也就是说:**改声明的 environment 才会触发**,只改代码不会。这解释了为什么它「有时候不发生」——而那恰恰是最危险的地方,因为它让人以为问题已经不存在了。部署前先存一份:
+> ```bash
+> aws lambda get-function-configuration --function-name smarthome-admin-api \
+>   --query "Environment.Variables" --output json > /tmp/admin-env-before.json
+> ```
+`REGISTRY_ID` 和 `AGENT_RUNTIME_ARN` 比「丢掉」更麻烦：CDK 声明它们的值是 `PLACEHOLDER_SET_BY_SETUP_SCRIPT`，重置后它们**还在**、总数也正常，值却是占位符。修复：重跑 `python scripts/setup-agentcore.py`，再 `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。核对要**按名字**而不是按个数（新增一个变量总数就变了）：`aws lambda get-function-configuration --function-name smarthome-admin-api --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"` 不能有 null，且 `scripts/check-registry-wiring.py` 要 exit 0。
 
 ### 前端相关
 
@@ -651,7 +658,7 @@ cd cdk && npx cdk destroy --all --force
 
 ### 三、Integration Registry
 
-A2A Agents 与 Skills 两个子页都是从 AgentCore Registry 读 **APPROVED** 记录。空列表和「查询失败」在页面上是**两种不同的显示**：查询失败会显示原因（warning），空就是空。看到空列表先确认是哪一种，再去 Bedrock 控制台找。
+两个子页都是从 AgentCore Registry 读记录：A2A Agents 只读 **APPROVED**；Skills 读**全部状态**（DRAFT / PENDING_APPROVAL / APPROVED / REJECTED），因为管理员来这个页面的问题通常正是「某个技能为什么还没上线」，只列已批准的会让「还没提交」和「从来没注册过」长得一模一样 —— 状态列负责区分。空列表和「查询失败」在页面上是**两种不同的显示**：查询失败会显示原因（warning），空就是空。看到空列表先确认是哪一种，再去 Bedrock 控制台找。
 
 **Skills 页少记录 ≠ 页面坏了。** 内置技能由 `scripts/seed-skills.py` 直接写进 DynamoDB,
 **不会**自动出现在 Registry 里 —— 2026-08-12 之前这个 registry 只有 1 条 SKILL 记录,而线上跑着 9 个技能。
@@ -921,9 +928,9 @@ The side navigation groups 17 pages by agent lifecycle stage:
 |-------|------|-----------------|
 | **Discover** | **Overview** | Product intro + architecture diagram (collapsed by default) and the **agent operations dashboard** (see below). The three demo launchers moved to the side nav's **Demos** group |
 | Discover | **Agents** | **Fleet view**: 1 orchestrator + 8 specialists + voice + an A/B variant + 1 tool, with runtime name, status, skill count and live metrics. The detail page **edits that agent's system prompt** — saved, and in effect on its next request, with no container redeploy. The list is derived from runtime ARNs + Registry records, so a newly deployed sub-agent appears with no frontend change |
-| Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AWS Agent Registry with endpoint / auth / capabilities / publisher; details drawer shows the full agent card |
+| Discover | **Integration Registry** | Tool integration overview + **A2A Agents sub-tab**: approved A2A records from AWS Agent Registry with endpoint / auth / capabilities / publisher (details drawer shows the full agent card), and a **Skills sub-tab** listing every registered skill at any status (DRAFT / pending / approved / rejected), told apart by the Status column |
 | **Build** | **Models** | Set the global default LLM; override text and vision models per user (Kimi, Claude 4.5/4.6, DeepSeek, Qwen, Llama 4, OpenAI GPT, ...) |
-| Build | **Skills** | Create/edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides; **import approved records from AWS Agent Registry** |
+| Build | **Skills** | Edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides. **New skills arrive only by importing an approved record from AWS Agent Registry** — the console no longer creates one locally, so registration and review stay in the Registry |
 | Build | **Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
 | Build | **Tool Policy** | Configure per-user tool permissions (Cedar policies); built-in and gateway tools listed side-by-side with source badges; toggle ENFORCE / LOG_ONLY. Each gateway tool also names **who calls it** — revoking `control_device` stops chat commands, scheduled scenes and two specialists |
 | Build | **Memories** | View each user's long-term memory (facts + preferences + episodes, from AgentCore Memory's four built-in strategies) |

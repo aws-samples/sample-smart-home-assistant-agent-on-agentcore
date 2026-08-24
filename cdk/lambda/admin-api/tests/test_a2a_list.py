@@ -64,7 +64,11 @@ def test_list_passes_correct_filters_to_boto():
     assert "descriptorType" not in kw
     assert "status" not in kw
     assert {"name": "recordType", "values": ["AGENT"]} in kw["filters"]
-    assert {"name": "status", "values": ["APPROVED"]} in kw["filters"]
+    # And NOT filtered by status. This page used to list APPROVED records only,
+    # which hid an agent exactly when an admin came looking for it — "access to the
+    # energy specialist disappeared" has no answer on a page that shows only
+    # healthy records. Grantability is reported per row instead.
+    assert not any(f["name"] == "status" for f in kw["filters"])
 
 
 def test_list_joins_published_by_from_ownership_rows():
