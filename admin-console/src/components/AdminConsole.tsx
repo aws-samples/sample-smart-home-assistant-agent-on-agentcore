@@ -3500,11 +3500,21 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 variant="footer"
                 headerText={t('overview.diagramToggle')}
               >
-                <img
-                  src={architectureDiagram}
-                  alt={t('overview.diagramAlt')}
-                  style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
-                />
+                {/* The white card is not decoration and is deliberately NOT
+                    theme-conditional. The PNG has a transparent background and dark
+                    ink, so it needs a light surface: in dark mode, rendered bare, the
+                    diagram's own labels would sit on near-black and the pale box fills
+                    would be the only readable part. Pinning one light surface means one
+                    asset serves both themes — a light and a dark export would be two
+                    files to keep in step, which is exactly how this diagram went stale
+                    in the first place. */}
+                <div style={{ background: '#ffffff', padding: 12, borderRadius: 8 }}>
+                  <img
+                    src={architectureDiagram}
+                    alt={t('overview.diagramAlt')}
+                    style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
+                  />
+                </div>
               </ExpandableSection>
             </SpaceBetween>
           </Container>
