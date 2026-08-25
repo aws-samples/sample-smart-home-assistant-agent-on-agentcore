@@ -10,6 +10,9 @@ import ExpandableSection from '@cloudscape-design/components/expandable-section'
 import { DashboardRelease } from '../../api/adminApi';
 import { stamp } from './format';
 import { useI18n } from '../../i18n';
+import {
+  useResizableTables, W_NUM, W_BADGE, W_STATUS, W_DATE, W_NAME, W_WIDE,
+} from '../tableColumns';
 
 interface Props {
   release?: DashboardRelease;
@@ -29,6 +32,7 @@ interface Props {
  * "Shadow" has no implementation here and never appears.
  */
 export function ReleaseTable({ release, loading }: Props) {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const endpoints = release?.endpoints ?? [];
   const history = release?.rollbackHistory ?? [];
@@ -75,11 +79,11 @@ export function ReleaseTable({ release, loading }: Props) {
         loadingText={t('dashboard.loading')}
         items={endpoints}
         trackBy="name"
-        columnDefinitions={[
-          { id: 'name', header: t('dashboard.release.endpoint'), cell: (e) => e.name },
-          { id: 'live', header: t('dashboard.release.liveVersion'), cell: (e) => e.liveVersion || '--' },
+        {...resizable<typeof endpoints[number]>('dashboard-releases', [
+          { id: 'name', width: W_NAME, header: t('dashboard.release.endpoint'), cell: (e) => e.name },
+          { id: 'live', width: W_BADGE, header: t('dashboard.release.liveVersion'), cell: (e) => e.liveVersion || '--' },
           {
-            id: 'status',
+            id: 'status', width: W_STATUS,
             header: t('dashboard.release.status'),
             cell: (e) => (
               <StatusIndicator type={e.status === 'READY' ? 'success' : 'pending'}>
@@ -88,7 +92,7 @@ export function ReleaseTable({ release, loading }: Props) {
             ),
           },
           { id: 'updated', header: t('dashboard.release.lastUpdated'), cell: (e) => stamp(e.lastUpdatedAt) },
-        ]}
+        ])}
         empty={
           <Box textAlign="center" padding="m" color="text-body-secondary">
             {t('dashboard.noData')}
@@ -112,12 +116,12 @@ export function ReleaseTable({ release, loading }: Props) {
             variant="embedded"
             contentDensity="compact"
             items={history}
-            columnDefinitions={[
-              { id: 'time', header: t('dashboard.release.eventTime'), cell: (h) => stamp(h.eventTime) },
-              { id: 'endpoint', header: t('dashboard.release.endpoint'), cell: (h) => h.endpointName || '--' },
-              { id: 'version', header: t('dashboard.release.targetVersion'), cell: (h) => h.targetVersion || '--' },
+            {...resizable<typeof history[number]>('dashboard-release-history', [
+              { id: 'time', width: W_DATE, header: t('dashboard.release.eventTime'), cell: (h) => stamp(h.eventTime) },
+              { id: 'endpoint', width: W_WIDE, header: t('dashboard.release.endpoint'), cell: (h) => h.endpointName || '--' },
+              { id: 'version', width: W_NUM, header: t('dashboard.release.targetVersion'), cell: (h) => h.targetVersion || '--' },
               { id: 'user', header: t('dashboard.release.actor'), cell: (h) => h.username || '--' },
-            ]}
+            ])}
             empty={
               <Box textAlign="center" padding="m" color="text-body-secondary">
                 {t('dashboard.release.historyEmpty')}

@@ -21,34 +21,7 @@ import {
 } from '../api/adminApi';
 import { PromptEditorCard } from './AdminConsole';
 import { useI18n } from '../i18n';
-
-/**
- * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
- *
- * An unconstrained column sizes itself to its content, so one long description stretches it
- * across the viewport and squeezes the rest of the row into the corner. Two things fix it:
- * the cell must wrap (Cloudscape truncates to one line otherwise), and the bound must sit
- * on the span rather than the column — CSS `max-width` on a `<td>` is only a hint to the
- * auto table-layout algorithm, and a cell with `max-width: 420px` was measured rendering
- * 481px wide. Per cell, and NOT via the Table's `wrapLines` prop: that applies to every
- * column and stacks the short ones letter by letter ("PE / NDING / _APPR / OVAL").
- */
-const TEXT_COL_MAX = 420;
-
-/** A prose table cell: bounded, and wrapping inside that bound instead of truncating. */
-const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
-  children,
-  max = TEXT_COL_MAX,
-}) => (
-  <span style={{
-    display: 'block',
-    maxWidth: max,
-    whiteSpace: 'normal',
-    overflowWrap: 'break-word',
-  }}>
-    {children}
-  </span>
-);
+import { useResizableTables, WrapCell, TEXT_COL_MAX, W_NAME } from './tableColumns';
 
 /**
  * One agent, with its prompt editable.
@@ -79,6 +52,7 @@ function editorRowsFor(agent: FleetAgent): number {
 }
 
 export function AgentDetailPage({ agent, onBack, cognitoUsers }: Props) {
+  const resizable = useResizableTables();
   const { t, language } = useI18n();
 
   const [scope, setScope] = useState('__global__');
@@ -236,16 +210,16 @@ export function AgentDetailPage({ agent, onBack, cognitoUsers }: Props) {
             contentDensity="compact"
             items={agent.skills}
             trackBy="id"
-            columnDefinitions={[
-              { id: 'id', header: t('agentDetail.skillId'), cell: (s) => s.id },
-              { id: 'name', header: t('agentDetail.skillName'), cell: (s) => s.name || s.id },
+            {...resizable<typeof agent.skills[number]>('agent-skills', [
+              { id: 'id', width: W_NAME, header: t('agentDetail.skillId'), cell: (s) => s.id },
+              { id: 'name', width: W_NAME, header: t('agentDetail.skillName'), cell: (s) => s.name || s.id },
               {
                 id: 'description',
                 header: t('agentDetail.skillDescription'),
-                maxWidth: TEXT_COL_MAX,
+                width: TEXT_COL_MAX,
                 cell: (s) => <WrapCell>{s.description || '--'}</WrapCell>,
               },
-            ]}
+            ])}
           />
         </Container>
       )}

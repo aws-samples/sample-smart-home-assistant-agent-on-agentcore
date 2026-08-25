@@ -123,6 +123,10 @@ import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
 import { DashboardSection } from './Dashboard/DashboardSection';
 import { AgentsPage } from './AgentsPage';
 import architectureDiagram from '../assets/architecture.drawio.png';
+import {
+  useResizableTables, WrapCell, TEXT_COL_MAX, LONG_TEXT_COL_MAX,
+  W_NUM, W_BADGE, W_STATUS, W_DATE, W_NAME, W_EMAIL, W_WIDE, W_XWIDE,
+} from './tableColumns';
 
 /**
  * Every routable tab, as a runtime value.
@@ -194,61 +198,6 @@ interface PlaceDraft {
 }
 
 const EMPTY_PLACE_DRAFT: PlaceDraft = { timezone: '', latitude: '', longitude: '' };
-
-/**
- * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
- *
- * The problem: a column with no width constraint sizes itself to its content, so one long
- * description stretches it across the viewport and squeezes the rest of the row into the
- * corner. That is what "the Description column is too wide" is.
- *
- * Two things are needed, and the second one is the one that actually works.
- *
- * **The cell has to wrap, per cell.** Cloudscape truncates a cell to one line with an
- * ellipsis by default, so a bounded column would be unreadable rather than merely narrow.
- * The Table has a `wrapLines` prop for this and it is the WRONG tool: it applies to every
- * column, and measured on the Registered Skills table it stacked the short structured
- * columns letter by letter — `PENDING_APPROVAL` rendered as "PE / NDING / _APPR / OVAL"
- * and the View button as "Vi / e / w". Those columns are meant to hold one line and
- * truncate. This is why the memories table already carried an inline
- * `whiteSpace: 'normal'` on its own content cell; that was deliberate, and `WrapCell` is
- * it, named.
- *
- * **The width has to be on the span, not the column.** `columnDefinitions[].maxWidth`
- * becomes `max-width` on the `<td>`, and CSS `max-width` on a table cell is only a HINT to
- * the `table-layout: auto` algorithm — measured on the Skill ERP's table, a cell with a
- * computed `max-width: 420px` rendered 481px wide, because the algorithm sizes columns
- * from their content and had the room. The column-level value is kept below because it is
- * Cloudscape's documented knob and it does bind when the table is under width pressure,
- * but `WrapCell` carries the same number as a block-level `max-width` and that is what
- * makes the bound hold. Do not "simplify" it away.
- */
-const TEXT_COL_MAX = 420;
-
-/** Wider tier, for columns whose text IS the row rather than a label on it — a memory
- *  record's content, a scan finding's detail. 600 because the memories table already used
- *  exactly that, so naming the value keeps that table pixel-identical. */
-const LONG_TEXT_COL_MAX = 600;
-
-/**
- * A prose table cell: bounded, and wrapping inside that bound instead of truncating.
- *
- * `overflowWrap` is for the tokens prose CONTAINS but is not made of — a URL, a record id
- * — which have no space to break at and would otherwise push past the bound.
- */
-const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
-  children,
-  max = TEXT_COL_MAX,
-}) => (
-  <span style={{
-    display: 'block',
-    maxWidth: max,
-    whiteSpace: 'normal',
-    overflowWrap: 'break-word',
-  }}>
-    {children}
-  </span>
-);
 
 /** A short list of IANA zones, not all 599 of them. These cover the demo's
  *  users; the field also accepts anything typed, and the API validates against
@@ -400,6 +349,7 @@ interface ModelsTabProps {
 }
 
 const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, setError, setSuccess }) => {
+  const resizable = useResizableTables();
   const [globalModelId, setGlobalModelId] = useState('');
   const [savedGlobalModelId, setSavedGlobalModelId] = useState('');
   const [globalVisionModelId, setGlobalVisionModelId] = useState('');
@@ -673,10 +623,10 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
         loadingText={t('models.loadingUsers')}
         items={users}
         trackBy="sub"
-        columnDefinitions={[
-          { id: 'email', header: t('models.colEmail'), cell: (u) => u.email || u.username },
+        {...resizable<CognitoUserInfo>('models', [
+          { id: 'email', width: W_EMAIL, header: t('models.colEmail'), cell: (u) => u.email || u.username },
           {
-            id: 'status',
+            id: 'status', width: W_STATUS,
             header: t('models.colStatus'),
             cell: (u) =>
               u.status === 'CONFIRMED' ? (
@@ -686,7 +636,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
               ),
           },
           {
-            id: 'model',
+            id: 'model', width: W_XWIDE,
             header: t('models.colModel'),
             cell: (u) => (
               <div style={{ minWidth: 260 }}>
@@ -711,7 +661,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             ),
           },
           {
-            id: 'visionModel',
+            id: 'visionModel', width: W_XWIDE,
             header: t('models.colVisionModel'),
             cell: (u) => (
               <div style={{ minWidth: 240 }}>
@@ -743,7 +693,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
               </Button>
             ),
           },
-        ]}
+        ])}
         empty={
           <CloudscapeBox textAlign="center" padding="m">
             <b>{t('models.noUsers')}</b>
@@ -753,7 +703,6 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     </SpaceBetween>
   );
 };
-
 
 // ---------------------------------------------------------------------------
 // Scenarios Tab — every saved automation, across users
@@ -778,6 +727,7 @@ interface ScenariosTabProps {
 const ScenariosTab: React.FC<ScenariosTabProps> = ({
   error, success, clearMessages, setError, setSuccess,
 }) => {
+  const resizable = useResizableTables();
   const [rows, setRows] = useState<ScenarioRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -946,9 +896,9 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
         loadingText={t('scenarios.loading')}
         items={rows}
         trackBy={(row) => `${row.userId}#${row.scenarioId}`}
-        columnDefinitions={[
+        {...resizable<ScenarioRow>('scenarios', [
           {
-            id: 'name',
+            id: 'name', width: W_NAME,
             header: t('scenarios.colName'),
             cell: (row) => (
               <SpaceBetween size="xxs">
@@ -959,9 +909,9 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
               </SpaceBetween>
             ),
           },
-          { id: 'user', header: t('scenarios.colUser'), cell: (row) => row.userId },
+          { id: 'user', width: W_EMAIL, header: t('scenarios.colUser'), cell: (row) => row.userId },
           {
-            id: 'trigger',
+            id: 'trigger', width: W_STATUS,
             header: t('scenarios.colTrigger'),
             cell: (row) => (
               <SpaceBetween direction="horizontal" size="xxs">
@@ -976,26 +926,26 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
             // The cron AND its timezone. A bare "cron(0 15 ...)" is unreadable:
             // 15:00 UTC is 23:00 in Shanghai and 07:00 in Los Angeles, and the
             // zone is what tells them apart.
-            id: 'schedule',
+            id: 'schedule', width: W_DATE,
             header: t('scenarios.colSchedule'),
             cell: (row) => (row.scheduled
               ? <span><code>{row.cron}</code> {row.timezone ? `(${row.timezone})` : ''}</span>
               : <span style={{ opacity: 0.6 }}>{t('scenarios.noSchedule')}</span>),
           },
           {
-            id: 'actions',
+            id: 'actions', width: W_DATE,
             header: t('scenarios.colActions'),
             cell: (row) => row.actionCount,
           },
           {
-            id: 'active',
+            id: 'active', width: W_BADGE,
             header: t('scenarios.colActive'),
             cell: (row) => (row.isActive
               ? <StatusIndicator type="success">{t('scenarios.active')}</StatusIndicator>
               : <StatusIndicator type="stopped">{t('scenarios.inactive')}</StatusIndicator>),
           },
           {
-            id: 'lastRun',
+            id: 'lastRun', width: W_DATE,
             header: t('scenarios.colLastRun'),
             minWidth: 200,
             cell: (row) => (
@@ -1008,7 +958,7 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
             ),
           },
           { id: 'source', header: t('scenarios.colSource'), cell: (row) => row.source || '-' },
-        ]}
+        ])}
         selectionType="single"
         selectedItems={selected}
         onSelectionChange={({ detail }) => setSelected(detail.selectedItems)}
@@ -1450,6 +1400,7 @@ interface MemoriesTabProps {
 }
 
 const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, setSuccess, clearMessages }) => {
+  const resizable = useResizableTables();
   const [actors, setActors] = useState<ActorRow[]>([]);
   const [selectedActor, setSelectedActor] = useState<ActorRow | null>(null);
   const [records, setRecords] = useState<MemoryRecord[]>([]);
@@ -1532,9 +1483,9 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
           loadingText={t('memories.loadingActors')}
           items={actors}
           trackBy="actorId"
-          columnDefinitions={[
-            { id: 'email', header: t('memories.colEmail'), cell: (row) => row.email ?? '—', sortingField: 'email' },
-            { id: 'actorId', header: t('memories.colActorId'), cell: (row) => <code>{row.actorId}</code> },
+          {...resizable<ActorRow>('memory-actors', [
+            { id: 'email', width: W_EMAIL, header: t('memories.colEmail'), cell: (row) => row.email ?? '—', sortingField: 'email' },
+            { id: 'actorId', width: W_WIDE, header: t('memories.colActorId'), cell: (row) => <code>{row.actorId}</code> },
             {
               id: 'actions',
               header: t('memories.colActions'),
@@ -1545,7 +1496,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
                 </Button>
               ),
             },
-          ]}
+          ])}
           empty={
             <CloudscapeBox textAlign="center" padding="m">
               <b>{t('memories.noActors')}</b>
@@ -1584,9 +1535,9 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
           loadingText={t('memories.loadingMemories')}
           items={records}
           trackBy="id"
-          columnDefinitions={[
+          {...resizable<MemoryRecord>('memory-records', [
             {
-              id: 'type',
+              id: 'type', width: W_BADGE,
               header: t('memories.colType'),
               cell: (r) =>
                 r.type === 'facts' ? (
@@ -1600,15 +1551,15 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
               header: t('memories.colContent'),
               // This cell's inline `whiteSpace: 'normal'` is where WrapCell came from:
               // it wraps the long text without making the type and date columns wrap too.
-              cell: (r) => <WrapCell max={LONG_TEXT_COL_MAX}>{r.text}</WrapCell>,
-              maxWidth: LONG_TEXT_COL_MAX,
+              cell: (r) => <WrapCell>{r.text}</WrapCell>,
+              width: LONG_TEXT_COL_MAX,
             },
             {
               id: 'created',
               header: t('memories.colCreated'),
               cell: (r) => (r.createdAt ? new Date(r.createdAt).toLocaleString() : '-'),
             },
-          ]}
+          ])}
           empty={
             <CloudscapeBox textAlign="center" padding="m">
               <b>{t('memories.noRecords')}</b>
@@ -1635,6 +1586,7 @@ interface KnowledgeBaseTabProps {
 const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
   error, success, setError, setSuccess, clearMessages, cognitoUsers,
 }) => {
+  const resizable = useResizableTables();
   const [scopes, setScopes] = useState<(string | KBScopeInfo)[]>([]);
   const [selectedScope, setSelectedScope] = useState('__shared__');
   const [documents, setDocuments] = useState<KBDocument[]>([]);
@@ -1868,10 +1820,10 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
         loadingText={t('files.loading')}
         items={documents}
         trackBy="key"
-        columnDefinitions={[
-          { id: 'name', header: t('kb.colName'), cell: (doc) => doc.name },
+        {...resizable<KBDocument>('kb-documents', [
+          { id: 'name', width: W_XWIDE, header: t('kb.colName'), cell: (doc) => doc.name },
           {
-            id: 'size',
+            id: 'size', width: W_NUM,
             header: t('kb.colSize'),
             cell: (doc) =>
               doc.size < 1024
@@ -1881,7 +1833,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
                   : `${(doc.size / 1048576).toFixed(1)} MB`,
           },
           {
-            id: 'modified',
+            id: 'modified', width: W_DATE,
             header: t('kb.colModified'),
             cell: (doc) => new Date(doc.lastModified).toLocaleDateString(),
           },
@@ -1891,7 +1843,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
             minWidth: 110,
             cell: (doc) => <Button onClick={() => handleDelete(doc.key)}>{t('kb.delete')}</Button>,
           },
-        ]}
+        ])}
         empty={
           <CloudscapeBox textAlign="center" padding="m">
             <b>{kbStatus === 'NOT_INITIALIZED' ? t('kb.notInitialized') : t('kb.noDocuments')}</b>
@@ -1907,9 +1859,9 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
           header={<CloudscapeHeader variant="h3">{t('kb.syncStatus')}</CloudscapeHeader>}
           items={syncJobs}
           trackBy="ingestionJobId"
-          columnDefinitions={[
+          {...resizable<KBSyncJob>('kb-sync-jobs', [
             {
-              id: 'status',
+              id: 'status', width: W_STATUS,
               header: t('kb.syncJobStatus'),
               cell: (job) =>
                 job.status === 'COMPLETE' ? (
@@ -1921,7 +1873,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
                 ),
             },
             {
-              id: 'started',
+              id: 'started', width: W_DATE,
               header: t('kb.syncJobStarted'),
               cell: (job) => (job.startedAt ? new Date(job.startedAt).toLocaleString() : '-'),
             },
@@ -1930,7 +1882,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
               header: t('kb.syncJobUpdated'),
               cell: (job) => (job.updatedAt ? new Date(job.updatedAt).toLocaleString() : '-'),
             },
-          ]}
+          ])}
         />
       )}
     </SpaceBetween>
@@ -1969,6 +1921,7 @@ interface OptimizationTabProps {
 const OptimizationTab: React.FC<OptimizationTabProps> = ({
   error, success, setError, setSuccess, cognitoUsers,
 }) => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const [scope, setScope] = useState<string>('__global__');
   const [agentType, setAgentType] = useState<OptUiAgentType>('text');
@@ -2157,15 +2110,15 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
         <Table
           loading={loading}
           items={recs}
-          columnDefinitions={[
-            { id: 'id', header: t('optimization.col.name'), cell: (i: OptRecommendation) => i.recommendationId },
-            { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptRecommendation) => i.agentType },
-            { id: 'eval', header: t('optimization.col.evaluator'), cell: (i: OptRecommendation) => i.evaluatorArn.split('/').pop() || '' },
-            { id: 'status', header: t('optimization.col.status'), cell: (i: OptRecommendation) =>
+          {...resizable('opt-recommendations', [
+            { id: 'id', width: W_WIDE, header: t('optimization.col.name'), cell: (i: OptRecommendation) => i.recommendationId },
+            { id: 'agent', width: W_NAME, header: t('optimization.col.agent'), cell: (i: OptRecommendation) => i.agentType },
+            { id: 'eval', width: W_NAME, header: t('optimization.col.evaluator'), cell: (i: OptRecommendation) => i.evaluatorArn.split('/').pop() || '' },
+            { id: 'status', width: W_STATUS, header: t('optimization.col.status'), cell: (i: OptRecommendation) =>
               <StatusIndicator type={i.status === 'COMPLETED' ? 'success' : i.status === 'FAILED' ? 'error' : 'in-progress'}>{i.status}</StatusIndicator>
             },
-            { id: 'created', header: t('optimization.col.created'), cell: (i: OptRecommendation) => new Date(i.createdAt).toLocaleString() },
-            { id: 'applied', header: t('optimization.col.applied'), cell: (i: OptRecommendation) => i.appliedAt ? new Date(i.appliedAt).toLocaleString() : '—' },
+            { id: 'created', width: W_DATE, header: t('optimization.col.created'), cell: (i: OptRecommendation) => new Date(i.createdAt).toLocaleString() },
+            { id: 'applied', width: W_DATE, header: t('optimization.col.applied'), cell: (i: OptRecommendation) => i.appliedAt ? new Date(i.appliedAt).toLocaleString() : '—' },
             { id: 'actions', header: '', cell: (i: OptRecommendation) =>
               <SpaceBetween size="xs" direction="horizontal">
                 <Button onClick={async () => {
@@ -2179,7 +2132,7 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
                 }}>{t('optimization.delete')}</Button>
               </SpaceBetween>
             },
-          ]}
+          ])}
           empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.recsEmpty')}</CloudscapeBox>}
         />
       </Container>
@@ -2195,13 +2148,13 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
             <Table
               loading={loading}
               items={bundles}
-              columnDefinitions={[
-                { id: 'name', header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
-                { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
-                { id: 'src', header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
-                { id: 'latest', header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
+              {...resizable('opt-bundles', [
+                { id: 'name', width: W_NAME, header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
+                { id: 'agent', width: W_NAME, header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
+                { id: 'src', width: W_WIDE, header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
+                { id: 'latest', width: W_BADGE, header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
                 { id: 'created', header: t('optimization.col.created'), cell: (i: OptBundle) => new Date(i.createdAt).toLocaleString() },
-              ]}
+              ])}
               empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.bundlesEmpty')}</CloudscapeBox>}
             />
           </Container>
@@ -2229,17 +2182,17 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
           <Table
             loading={loading}
             items={tests}
-            columnDefinitions={[
-              { id: 'id', header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
-              { id: 'status', header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
+            {...resizable('opt-ab-tests', [
+              { id: 'id', width: W_WIDE, header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
+              { id: 'status', width: W_STATUS, header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
                 <StatusIndicator type={
                   i.executionStatus === 'RUNNING' ? 'in-progress' :
                   i.executionStatus === 'STOPPED' ? 'stopped' :
                   'pending'
                 }>{i.executionStatus}</StatusIndicator>
               },
-              { id: 'winner', header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
-              { id: 'auto', header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
+              { id: 'winner', width: W_NAME, header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
+              { id: 'auto', width: W_DATE, header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
               { id: 'actions', header: '', cell: (i: OptABTestSummary) =>
                 <SpaceBetween size="xs" direction="horizontal">
                   {i.executionStatus === 'RUNNING' && <Button onClick={async () => {
@@ -2248,7 +2201,7 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
                   }}>{t('optimization.stop')}</Button>}
                 </SpaceBetween>
               },
-            ]}
+            ])}
             empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.abEmpty')}</CloudscapeBox>}
           />
         </Container>
@@ -2471,6 +2424,7 @@ interface RecommendationDetailDrawerProps {
  *     identically to a full one would overstate what was checked.
  */
 const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const severityOrder = ['critical', 'high', 'medium', 'low', 'info'];
   const sorted = [...(report.findings || [])].sort(
@@ -2515,9 +2469,9 @@ const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) 
           contentDensity="compact"
           items={sorted}
           trackBy="rule"
-          columnDefinitions={[
+          {...resizable<SkillScanFinding>('skill-scan-findings', [
             {
-              id: 'severity',
+              id: 'severity', width: W_BADGE,
               header: t('scan.colSeverity'),
               minWidth: 110,
               cell: (f: SkillScanFinding) => (
@@ -2527,7 +2481,7 @@ const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) 
               ),
             },
             {
-              id: 'rule',
+              id: 'rule', width: W_EMAIL,
               header: t('scan.colRule'),
               minWidth: 200,
               cell: (f: SkillScanFinding) => (
@@ -2545,10 +2499,10 @@ const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) 
             {
               id: 'detail',
               header: t('scan.colDetail'),
-              maxWidth: LONG_TEXT_COL_MAX,
+              width: LONG_TEXT_COL_MAX,
               cell: (f: SkillScanFinding) => (
                 <SpaceBetween size="xxs">
-                  <CloudscapeBox><WrapCell max={LONG_TEXT_COL_MAX}>{f.detail}</WrapCell></CloudscapeBox>
+                  <CloudscapeBox><WrapCell>{f.detail}</WrapCell></CloudscapeBox>
                   {!!f.evidence && (
                     <pre className="skill-md-preview" style={{ margin: 0, maxHeight: 120 }}>
                       {f.evidence}
@@ -2562,7 +2516,7 @@ const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) 
                 </SpaceBetween>
               ),
             },
-          ]}
+          ])}
         />
       )}
 
@@ -2577,6 +2531,7 @@ const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) 
 };
 
 const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({ rec, onClose, onApply }) => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   return (
     <Modal visible size="large" header={`${t('optimization.recDetail')} — ${rec.recommendationId}`} onDismiss={onClose}>
@@ -2594,12 +2549,12 @@ const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({
         {rec.tools && rec.tools.length > 0 && (
           <Table
             items={rec.tools}
-            columnDefinitions={[
-              { id: 'name', header: 'Tool', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.toolName },
-              { id: 'desc', header: 'Recommended description', maxWidth: LONG_TEXT_COL_MAX,
+            {...resizable('opt-rec-tools', [
+              { id: 'name', width: W_NAME, header: 'Tool', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.toolName },
+              { id: 'desc', header: 'Recommended description', width: LONG_TEXT_COL_MAX,
                 cell: (i: { toolName: string; recommendedToolDescription: string }) =>
-                  <WrapCell max={LONG_TEXT_COL_MAX}>{i.recommendedToolDescription}</WrapCell> },
-            ]}
+                  <WrapCell>{i.recommendedToolDescription}</WrapCell> },
+            ])}
           />
         )}
         {rec.errorMessage && <Alert type="error">{rec.errorMessage}</Alert>}
@@ -2623,6 +2578,9 @@ interface AdminConsoleProps {
   theme: 'light' | 'dark';
 }
 const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, theme }) => {
+  // Column widths are the reader's to set, and are remembered per table. See
+  // useResizableTables.ts for why they are stored per column id rather than positionally.
+  const resizable = useResizableTables();
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [userIds, setUserIds] = useState<string[]>(['__global__']);
   const [selectedUserId, setSelectedUserId] = useState('__global__');
@@ -2818,7 +2776,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [policyMode, setPolicyMode] = useState<'ENFORCE' | 'LOG_ONLY'>('ENFORCE');
   const [policyModeSaving, setPolicyModeSaving] = useState(false);
   const [permOriginal, setPermOriginal] = useState<string[]>([]);
-
 
   // File manager (shown when editing a skill)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
@@ -3080,7 +3037,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     const orig = [...permOriginal].sort();
     return JSON.stringify(current) !== JSON.stringify(orig);
   })();
-
 
   const handleSaveSettings = async () => {
     clearMessages();
@@ -3587,10 +3543,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           loadingText={t('users.loadingUsers')}
           items={cognitoUsers}
           trackBy="sub"
-          columnDefinitions={[
-            { id: 'email', header: t('users.colEmail'), cell: (u) => u.email || u.username },
+          {...resizable<CognitoUserInfo>('identity-users', [
+            { id: 'email', width: W_EMAIL, header: t('users.colEmail'), cell: (u) => u.email || u.username },
             {
-              id: 'status',
+              id: 'status', width: W_STATUS,
               header: t('users.colStatus'),
               cell: (u) =>
                 u.status === 'CONFIRMED' ? (
@@ -3600,17 +3556,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 ),
             },
             {
-              id: 'groups',
+              id: 'groups', width: W_BADGE,
               header: t('users.colGroups'),
               cell: (u) => <GroupsCell groups={u.groups} t={t} />,
             },
             {
-              id: 'created',
+              id: 'created', width: W_DATE,
               header: t('identity.colCreated'),
               cell: (u) => (u.createdAt ? new Date(u.createdAt).toLocaleString() : '-'),
             },
             {
-              id: 'userId',
+              id: 'userId', width: W_WIDE,
               header: t('users.colUserId'),
               cell: (u) => <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>,
             },
@@ -3618,7 +3574,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               // Timezone and coordinates. Read-only here with an Edit button —
               // "UTC" shown for an unset zone is the truth, not a placeholder:
               // that is the zone their scenes are actually scheduled in.
-              id: 'place',
+              id: 'place', width: W_XWIDE,
               header: t('identity.colPlace'),
               minWidth: 200,
               cell: (u) => {
@@ -3676,7 +3632,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 );
               },
             },
-          ]}
+          ])}
           empty={<CloudscapeBox textAlign="center" padding="m"><b>{t('users.noUsers')}</b></CloudscapeBox>}
         />
         <Modal
@@ -3772,10 +3728,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 { id: 'ec2', name: 'EC2', status: 'planned', description: t('instanceType.ec2Desc') },
               ]}
               trackBy="id"
-              columnDefinitions={[
-                { id: 'name', header: t('instanceType.colName'), cell: (r) => r.name },
+              {...resizable<{ id: string; name: string; status: string; description: string }>('instance-types', [
+                { id: 'name', width: W_NAME, header: t('instanceType.colName'), cell: (r) => r.name },
                 { id: 'description', header: t('instanceType.colDescription'),
-                    maxWidth: TEXT_COL_MAX,
+                    width: TEXT_COL_MAX,
                     cell: (r) => <WrapCell>{r.description}</WrapCell> },
                 {
                   id: 'status',
@@ -3787,7 +3743,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       <StatusIndicator type="pending">{t('instanceType.planned')}</StatusIndicator>
                     ),
                 },
-              ]}
+              ])}
             />
           </SpaceBetween>
         </Container>
@@ -3929,10 +3885,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   contentDensity="compact"
                   items={pendingRecords}
                   trackBy="recordId"
-                  columnDefinitions={[
-                    { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
+                  {...resizable<RegistryRecord>('registry-review-queue', [
+                    { id: 'name', width: W_NAME, header: t('registry.colName'), cell: (r) => r.name },
                     {
-                      id: 'status',
+                      id: 'status', width: W_STATUS,
                       header: t('registry.colStatus'),
                       cell: (r) => (r.status === 'REJECTED'
                         ? <StatusIndicator type="error">{r.status}</StatusIndicator>
@@ -3944,7 +3900,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       // scanner is one layer of defence with real false positives and a
                       // reviewer who has read the findings may be right to overrule them.
                       // What the approval records is what this column said at the time.
-                      id: 'risk',
+                      id: 'risk', width: W_WIDE,
                       header: t('scan.colRisk'),
                       minWidth: 210,
                       cell: (r) => {
@@ -3984,10 +3940,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       },
                     },
                     { id: 'description', header: t('registry.colDescription'),
-                      maxWidth: TEXT_COL_MAX,
+                      width: TEXT_COL_MAX,
                       cell: (r) => <WrapCell>{r.description}</WrapCell> },
                     {
-                      id: 'reason',
+                      id: 'reason', width: W_WIDE,
                       header: t('registry.reviewReason'),
                       minWidth: 200,
                       // Required to reject: statusReason is the only feedback the
@@ -4022,7 +3978,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                         </SpaceBetween>
                       ),
                     },
-                  ]}
+                  ])}
                 />
               </Container>
             )}
@@ -4040,7 +3996,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               loadingText={t('registry.loading')}
               items={registryRecords}
               trackBy="recordId"
-              columnDefinitions={[
+              {...resizable<RegistryRecord>('registry-import', [
                 {
                   id: 'select',
                   header: '',
@@ -4055,17 +4011,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     />
                   ),
                 },
-                { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
+                { id: 'name', width: W_NAME, header: t('registry.colName'), cell: (r) => r.name },
                 { id: 'description', header: t('registry.colDescription'),
-                  maxWidth: TEXT_COL_MAX,
+                  width: TEXT_COL_MAX,
                   cell: (r) => <WrapCell>{r.description}</WrapCell> },
-                { id: 'version', header: t('registry.colVersion'), cell: (r) => r.recordVersion },
+                { id: 'version', width: W_NUM, header: t('registry.colVersion'), cell: (r) => r.recordVersion },
                 {
                   id: 'updated',
                   header: t('registry.colUpdated'),
                   cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
                 },
-              ]}
+              ])}
               empty={
                 <CloudscapeBox textAlign="center" padding="m">
                   <b>{t('registry.noApproved')}</b>
@@ -4377,18 +4333,18 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           loadingText={t('skills.loading')}
           items={skills}
           trackBy={(s) => `${s.userId}:${s.skillName}`}
-          columnDefinitions={[
-            { id: 'name', header: t('skills.colName'), cell: (s) => s.skillName },
+          {...resizable<SkillItem>('skills', [
+            { id: 'name', width: W_NAME, header: t('skills.colName'), cell: (s) => s.skillName },
             { id: 'description', header: t('skills.colDescription'),
-            maxWidth: TEXT_COL_MAX,
+            width: TEXT_COL_MAX,
             cell: (s) => <WrapCell>{s.description}</WrapCell> },
             {
-              id: 'tools',
+              id: 'tools', width: W_WIDE,
               header: t('skills.colTools'),
               cell: (s) => (s.allowedTools || []).join(', ') || '-',
             },
             {
-              id: 'updated',
+              id: 'updated', width: W_DATE,
               header: t('skills.colUpdated'),
               cell: (s) => (s.updatedAt ? new Date(s.updatedAt).toLocaleDateString() : '-'),
             },
@@ -4403,7 +4359,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 </SpaceBetween>
               ),
             },
-          ]}
+          ])}
           empty={
             <CloudscapeBox textAlign="center" padding="m">
               <b>{t('skills.noSkills')}</b>
@@ -4500,9 +4456,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
             // share the same sessionId (derived from the JWT sub). Compose a
             // key that includes kind so React diffing stays stable.
             trackBy={(s) => `${s.kind || 'text'}:${s.sessionId}`}
-            columnDefinitions={[
+            {...resizable<SessionInfo>('sessions', [
               {
-                id: 'userId',
+                id: 'userId', width: W_EMAIL,
                 header: t('sessions.colUserId'),
                 cell: (s) => (
                   <span title={s.userId}>
@@ -4511,12 +4467,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 ),
               },
               {
-                id: 'kind',
+                id: 'kind', width: W_BADGE,
                 header: t('sessions.colKind'),
                 cell: (s) => (s.kind === 'voice' ? t('sessions.kindVoice') : t('sessions.kindText')),
               },
               {
-                id: 'sessionId',
+                id: 'sessionId', width: W_WIDE,
                 header: t('sessions.colSessionId'),
                 cell: (s) => (
                   <span title={s.sessionId}>
@@ -4525,12 +4481,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 ),
               },
               {
-                id: 'lastActive',
+                id: 'lastActive', width: W_DATE,
                 header: t('sessions.colLastActive'),
                 cell: (s) => (s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '-'),
               },
               {
-                id: 'tokens7d',
+                id: 'tokens7d', width: W_NUM,
                 header: t('sessions.colTokens7d'),
                 // The agent is named next to the number when the split says which
                 // one it was. Until now every session's tokens were one figure
@@ -4577,7 +4533,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   </SpaceBetween>
                 ),
               },
-            ]}
+            ])}
             empty={
               <CloudscapeBox textAlign="center" padding="m">
                 <b>{t('sessions.noSessions')}</b>
@@ -4756,17 +4712,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               loadingText={t('users.loadingUsers')}
               items={cognitoUsers}
               trackBy="sub"
-              columnDefinitions={[
-                { id: 'email', header: t('users.colEmail'), cell: (u) => u.email || u.username },
+              {...resizable<CognitoUserInfo>('users', [
+                { id: 'email', width: W_EMAIL, header: t('users.colEmail'), cell: (u) => u.email || u.username },
                 {
-                  id: 'userId',
+                  id: 'userId', width: W_WIDE,
                   header: t('users.colUserId'),
                   cell: (u) => (
                     <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>
                   ),
                 },
                 {
-                  id: 'status',
+                  id: 'status', width: W_STATUS,
                   header: t('users.colStatus'),
                   cell: (u) =>
                     u.status === 'CONFIRMED' ? (
@@ -4776,7 +4732,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     ),
                 },
                 {
-                  id: 'groups',
+                  id: 'groups', width: W_BADGE,
                   header: t('users.colGroups'),
                   cell: (u) => <GroupsCell groups={u.groups} t={t} />,
                 },
@@ -4793,7 +4749,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     </Button>
                   ),
                 },
-              ]}
+              ])}
               empty={
                 <CloudscapeBox textAlign="center" padding="m">
                   <b>{t('users.noUsers')}</b>
@@ -4835,10 +4791,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   { id: 'api', name: t('integrations.apiGateway'), description: t('integrations.apiDesc'), active: false },
                 ]}
                 trackBy="id"
-                columnDefinitions={[
-                  { id: 'type', header: t('integrations.colType'), cell: (i) => i.name },
+                {...resizable<{ id: string; name: string; description: string; active: boolean }>('integrations-overview', [
+                  { id: 'type', width: W_NAME, header: t('integrations.colType'), cell: (i) => i.name },
                   { id: 'description', header: t('integrations.colDescription'),
-                    maxWidth: TEXT_COL_MAX,
+                    width: TEXT_COL_MAX,
                     cell: (i) => <WrapCell>{i.description}</WrapCell> },
                   {
                     id: 'status',
@@ -4850,7 +4806,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                         <StatusIndicator type="pending">{t('integrations.planned')}</StatusIndicator>
                       ),
                   },
-                ]}
+                ])}
               />
               <Container header={<CloudscapeHeader variant="h3">{t('integrations.roadmap')}</CloudscapeHeader>}>
                 <CloudscapeBox color="text-body-secondary">{t('integrations.roadmapDesc')}</CloudscapeBox>
@@ -4881,42 +4837,42 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 loadingText={t('integrations.skills.loading')}
                 items={registrySkills}
                 trackBy="recordId"
-                columnDefinitions={[
-                  { id: 'name', header: t('integrations.skills.col.name'), cell: (r) => r.name },
+                {...resizable<RegistrySkill>('registry-skills', [
+                  { id: 'name', width: W_NAME, header: t('integrations.skills.col.name'), cell: (r) => r.name },
                   {
                     id: 'description',
                     header: t('integrations.skills.col.description'),
-                    maxWidth: TEXT_COL_MAX,
+                    width: TEXT_COL_MAX,
                     cell: (r) => <WrapCell>{r.description || '—'}</WrapCell>,
                   },
-                  { id: 'version', header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
+                  { id: 'version', width: W_NUM, header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
                   {
                     // The endpoint lists every status, so this column is what
                     // separates a live skill from a DRAFT nobody submitted or a
                     // REJECTED one — which is exactly what an admin is after when
                     // a skill "is missing".
-                    id: 'status',
+                    id: 'status', width: W_STATUS,
                     header: t('integrations.skills.col.status'),
                     cell: (r) => (r.status === 'APPROVED'
                       ? <StatusIndicator type="success">{r.status}</StatusIndicator>
                       : <StatusIndicator type="pending">{r.status || '—'}</StatusIndicator>),
                   },
                   {
-                    id: 'publishedBy',
+                    id: 'publishedBy', width: W_EMAIL,
                     header: t('integrations.skills.col.publishedBy'),
                     cell: (r) => r.publishedBy || '—',
                   },
                   {
                     // The question an admin actually has about an approved skill.
-                    id: 'importedBy',
+                    id: 'importedBy', width: W_WIDE,
                     header: t('integrations.skills.col.importedBy'),
                     cell: (r) => (r.importedBy.length === 0
                       ? <Badge color="grey">{t('integrations.skills.notImported')}</Badge>
                       : <span>{r.importedBy.map(displayUserId).join(', ')}</span>),
                   },
-                  { id: 'license', header: t('integrations.skills.col.license'), cell: (r) => r.license || '—' },
+                  { id: 'license', width: W_NUM, header: t('integrations.skills.col.license'), cell: (r) => r.license || '—' },
                   {
-                    id: 'updated',
+                    id: 'updated', width: W_DATE,
                     header: t('integrations.skills.col.updated'),
                     cell: (r) => (r.updatedAt ? r.updatedAt.slice(0, 19).replace('T', ' ') : '—'),
                   },
@@ -4926,7 +4882,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     minWidth: 100,
                     cell: (r) => <Button onClick={() => setSkillDrawer(r)}>{t('integrations.skills.view')}</Button>,
                   },
-                ]}
+                ])}
                 empty={
                   <CloudscapeBox textAlign="center" padding="m">
                     <b>{t('integrations.skills.empty')}</b>
@@ -5070,13 +5026,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 loadingText={t('common.loading')}
                 items={a2aAgents}
                 trackBy="recordId"
-                columnDefinitions={[
-                  { id: 'name', header: t('integrations.a2a.col.name'), cell: (r) => r.name },
+                {...resizable<A2AAgentRecord>('integrations-a2a', [
+                  { id: 'name', width: W_NAME, header: t('integrations.a2a.col.name'), cell: (r) => r.name },
                   { id: 'description', header: t('integrations.a2a.col.description'),
-                    maxWidth: TEXT_COL_MAX,
+                    width: TEXT_COL_MAX,
                     cell: (r) => <WrapCell>{r.description}</WrapCell> },
                   {
-                    id: 'endpoint',
+                    id: 'endpoint', width: W_WIDE,
                     header: t('integrations.a2a.col.endpoint'),
                     cell: (r) => (
                       <span title={r.card.url}>
@@ -5094,7 +5050,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // Declarative, and deliberately NOT the same question as the
                     // Authorizer column. This is the agent's own claim about how to
                     // authenticate to it; the door is its Runtime authorizer.
-                    id: 'auth',
+                    id: 'auth', width: W_BADGE,
                     header: t('integrations.a2a.col.auth'),
                     cell: (r) => {
                       const schemes = cardAuthSchemes(r.card);
@@ -5123,7 +5079,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // column did not exist, so a record knocked back to DRAFT by a
                     // version bump was indistinguishable from a healthy one here, and
                     // the only hint was the Access column's expiry badge.
-                    id: 'status',
+                    id: 'status', width: W_STATUS,
                     header: t('integrations.a2a.col.status'),
                     cell: (r) => (
                       <SpaceBetween direction="horizontal" size="xxs">
@@ -5139,7 +5095,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     ),
                   },
                   {
-                    id: 'tags',
+                    id: 'tags', width: W_BADGE,
                     header: t('integrations.a2a.col.tags'),
                     cell: (r) => {
                       const tags = r.card.tags || [];
@@ -5153,7 +5109,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       );
                     },
                   },
-                  { id: 'publishedBy', header: t('integrations.a2a.col.publishedBy'), cell: (r) => r.publishedBy || '—' },
+                  { id: 'publishedBy', width: W_EMAIL, header: t('integrations.a2a.col.publishedBy'), cell: (r) => r.publishedBy || '—' },
                   {
                     // Registry status and "can it be reached" are different
                     // questions and both belong here. A record edited back to DRAFT
@@ -5162,7 +5118,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // once. This column is what answers "why did access to the
                     // energy specialist disappear", which is the question that
                     // brings an admin to this page.
-                    id: 'access',
+                    id: 'access', width: W_BADGE,
                     header: t('integrations.a2a.col.access'),
                     cell: (r) => {
                       const remaining = r.graceRemainingSeconds;
@@ -5185,7 +5141,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     },
                   },
                   {
-                    id: 'accessReason',
+                    id: 'accessReason', width: W_WIDE,
                     header: t('integrations.a2a.col.accessReason'),
                     cell: (r) => r.grantableReason || '—',
                   },
@@ -5195,7 +5151,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // people we offer it to. They are independent, and a record can
                     // read `approved` while nobody can call it — or while everybody
                     // can, which is the worse case and why `open` is red.
-                    id: 'authorizer',
+                    id: 'authorizer', width: W_STATUS,
                     header: t('integrations.a2a.col.authorizer'),
                     cell: (r) => {
                       const row = a2aConformance[r.recordId];
@@ -5226,7 +5182,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     },
                   },
                   {
-                    id: 'lastUpdated',
+                    id: 'lastUpdated', width: W_DATE,
                     header: t('integrations.a2a.col.lastUpdated'),
                     cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'),
                   },
@@ -5266,7 +5222,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       </SpaceBetween>
                     ),
                   },
-                ]}
+                ])}
                 empty={
                   <CloudscapeBox textAlign="center" padding="m">
                     <b>{t('integrations.a2a.empty')}</b>
@@ -5712,13 +5668,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
             }
             items={items}
             trackBy="id"
-            columnDefinitions={[
-              { id: 'name', header: t('guardrails.colGuardrail'), cell: (i) => i.name },
+            {...resizable<typeof items[number]>('guardrails', [
+              { id: 'name', width: W_NAME, header: t('guardrails.colGuardrail'), cell: (i) => i.name },
               { id: 'description', header: t('guardrails.colDescription'),
-                maxWidth: TEXT_COL_MAX,
+                width: TEXT_COL_MAX,
                 cell: (i) => <WrapCell>{i.description}</WrapCell> },
               { id: 'action', header: t('guardrails.colAction'), minWidth: 220, cell: (i) => i.action },
-            ]}
+            ])}
           />
         );
       })()}

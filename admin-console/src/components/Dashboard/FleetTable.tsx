@@ -5,6 +5,7 @@ import ExpandableSection from '@cloudscape-design/components/expandable-section'
 import { RuntimeBreakdown } from '../../api/adminApi';
 import { compact, ms } from './format';
 import { useI18n } from '../../i18n';
+import { useResizableTables, W_NUM, W_NAME } from '../tableColumns';
 
 interface Props {
   runtimes?: RuntimeBreakdown[];
@@ -40,6 +41,7 @@ function count(n: number | null | undefined): string {
  * backend's (name-ascending) so the row order is stable between refreshes.
  */
 export function FleetTable({ runtimes, loading }: Props) {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const items = runtimes ?? [];
 
@@ -63,29 +65,29 @@ export function FleetTable({ runtimes, loading }: Props) {
         loadingText={t('dashboard.loading')}
         items={items}
         trackBy="name"
-        columnDefinitions={[
+        {...resizable<typeof items[number]>('dashboard-fleet', [
           {
-            id: 'name',
+            id: 'name', width: W_NAME,
             header: t('dashboard.fleet.runtime'),
             cell: (r) => r.name,
           },
           {
-            id: 'invocations',
+            id: 'invocations', width: W_NUM,
             header: t('dashboard.fleet.invocations'),
             cell: (r) => count(r.invocations),
           },
           {
-            id: 'sessions',
+            id: 'sessions', width: W_NUM,
             header: t('dashboard.fleet.sessions'),
             cell: (r) => count(r.sessions),
           },
           {
-            id: 'errors',
+            id: 'errors', width: W_NUM,
             header: t('dashboard.fleet.errors'),
             cell: (r) => count((r.userErrors ?? 0) + (r.systemErrors ?? 0)),
           },
           {
-            id: 'throttles',
+            id: 'throttles', width: W_NUM,
             header: t('dashboard.fleet.throttles'),
             cell: (r) => count(r.throttles),
           },
@@ -99,7 +101,7 @@ export function FleetTable({ runtimes, loading }: Props) {
             // null (no samples) renders as -- rather than a misleading 0ms.
             cell: (r) => ms(r.latencyP95),
           },
-        ]}
+        ])}
         empty={
           <Box textAlign="center" padding="m" color="text-body-secondary">
             {t('dashboard.noData')}

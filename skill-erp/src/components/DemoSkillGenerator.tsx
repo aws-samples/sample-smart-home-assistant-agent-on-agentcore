@@ -12,34 +12,9 @@ import Table from '@cloudscape-design/components/table';
 import { createMyRecord } from '../api/erpApi';
 import { useI18n } from '../i18n';
 import templateData from '../generated/demo-skill-templates.json';
-
-/**
- * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
- *
- * An unconstrained column sizes itself to its content, so one long description stretches it
- * across the viewport and squeezes the rest of the row into the corner. Two things fix it:
- * the cell must wrap (Cloudscape truncates to one line otherwise), and the bound must sit
- * on the span rather than the column — CSS `max-width` on a `<td>` is only a hint to the
- * auto table-layout algorithm, and a cell with `max-width: 420px` was measured rendering
- * 481px wide. Per cell, and NOT via the Table's `wrapLines` prop: that applies to every
- * column and stacks the short ones letter by letter ("PE / NDING / _APPR / OVAL").
- */
-const TEXT_COL_MAX = 420;
-
-/** A prose table cell: bounded, and wrapping inside that bound instead of truncating. */
-const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
-  children,
-  max = TEXT_COL_MAX,
-}) => (
-  <span style={{
-    display: 'block',
-    maxWidth: max,
-    whiteSpace: 'normal',
-    overflowWrap: 'break-word',
-  }}>
-    {children}
-  </span>
-);
+import {
+  useResizableTables, WrapCell, TEXT_COL_MAX, W_BADGE, W_NAME,
+} from './tableColumns';
 
 /**
  * Ten demo Skills, generated on click and publishable to the Registry in one pass.
@@ -92,6 +67,7 @@ interface Props {
 }
 
 const DemoSkillGenerator: React.FC<Props> = ({ onRegistered }) => {
+  const resizable = useResizableTables();
   const { t, language } = useI18n();
   const [generated, setGenerated] = useState<DemoTemplate[]>([]);
   const [registering, setRegistering] = useState(false);
@@ -205,18 +181,21 @@ const DemoSkillGenerator: React.FC<Props> = ({ onRegistered }) => {
               contentDensity="compact"
               items={generated}
               trackBy="id"
-              columnDefinitions={[
+              {...resizable<DemoTemplate>('erp-demo-skills', [
                 {
-                  id: 'name',
+                  id: 'name', width: W_NAME,
                   header: t('erp.demo.colName'),
                   cell: (r) => <code>{r.skillName}</code>,
                 },
-                { id: 'type', header: t('erp.demo.colType'), cell: (r) => label(r.type) },
+                { id: 'type', width: W_BADGE, header: t('erp.demo.colType'), cell: (r) => label(r.type) },
                 {
                   id: 'risk',
                   header: t('erp.demo.colRisk'),
+                  // Prose, so it takes the text width and wraps. minWidth is the resize
+                  // FLOOR here, not a layout hint: it stops the badge and the risk
+                  // sentence being dragged into a one-word-per-line column.
                   minWidth: 260,
-                  maxWidth: TEXT_COL_MAX,
+                  width: TEXT_COL_MAX,
                   cell: (r) => (
                     <SpaceBetween direction="horizontal" size="xxs">
                       <Badge
@@ -249,7 +228,7 @@ const DemoSkillGenerator: React.FC<Props> = ({ onRegistered }) => {
                       : <StatusIndicator type="error">{o.message}</StatusIndicator>;
                   },
                 },
-              ]}
+              ])}
             />
             <Box variant="small" color="text-body-secondary">
               {t('erp.demo.rerunHint')}

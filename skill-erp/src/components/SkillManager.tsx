@@ -23,34 +23,9 @@ import {
 } from '../api/erpApi';
 import DemoSkillGenerator from './DemoSkillGenerator';
 import { useI18n } from '../i18n';
-
-/**
- * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
- *
- * An unconstrained column sizes itself to its content, so one long description stretches it
- * across the viewport and squeezes the rest of the row into the corner. Two things fix it:
- * the cell must wrap (Cloudscape truncates to one line otherwise), and the bound must sit
- * on the span rather than the column — CSS `max-width` on a `<td>` is only a hint to the
- * auto table-layout algorithm, and a cell with `max-width: 420px` was measured rendering
- * 481px wide. Per cell, and NOT via the Table's `wrapLines` prop: that applies to every
- * column and stacks the short ones letter by letter ("PE / NDING / _APPR / OVAL").
- */
-const TEXT_COL_MAX = 420;
-
-/** A prose table cell: bounded, and wrapping inside that bound instead of truncating. */
-const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
-  children,
-  max = TEXT_COL_MAX,
-}) => (
-  <span style={{
-    display: 'block',
-    maxWidth: max,
-    whiteSpace: 'normal',
-    overflowWrap: 'break-word',
-  }}>
-    {children}
-  </span>
-);
+import {
+  useResizableTables, WrapCell, TEXT_COL_MAX, W_STATUS, W_DATE, W_NAME,
+} from './tableColumns';
 
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
 
@@ -80,6 +55,7 @@ const emptyForm: FormData = {
 };
 
 const SkillManager: React.FC = () => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const [records, setRecords] = useState<MyRecord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -400,14 +376,14 @@ const SkillManager: React.FC = () => {
           loadingText={t('common.loading')}
           items={records}
           trackBy="recordId"
-          columnDefinitions={[
-            { id: 'name', header: t('table.name'), cell: (r) => r.name },
+          {...resizable<MyRecord>('erp-skills', [
+            { id: 'name', width: W_NAME, header: t('table.name'), cell: (r) => r.name },
             { id: 'description', header: t('table.description'),
-              maxWidth: TEXT_COL_MAX,
+              width: TEXT_COL_MAX,
               cell: (r) => <WrapCell>{r.description}</WrapCell> },
-            { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
+            { id: 'status', width: W_STATUS, header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
             {
-              id: 'updated',
+              id: 'updated', width: W_DATE,
               header: t('table.updated'),
               cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
             },
@@ -422,7 +398,7 @@ const SkillManager: React.FC = () => {
                 </SpaceBetween>
               ),
             },
-          ]}
+          ])}
           empty={
             <Box textAlign="center" padding="m">
               <b>{t('table.empty')}</b>

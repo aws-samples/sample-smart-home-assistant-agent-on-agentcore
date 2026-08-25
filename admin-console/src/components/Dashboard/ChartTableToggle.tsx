@@ -4,11 +4,15 @@ import Table from '@cloudscape-design/components/table';
 import Box from '@cloudscape-design/components/box';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useI18n } from '../../i18n';
+import { useResizableTables } from '../tableColumns';
 
 export interface TableColumn<T> {
   id: string;
   header: string;
   cell: (item: T) => React.ReactNode;
+  /** Starting width, from the scale in ../tableColumns. Needed because these tables are
+   *  resizable, and a resizable column with no width collapses to 120px. */
+  width?: number;
 }
 
 interface Props<T> {
@@ -19,6 +23,10 @@ interface Props<T> {
   columns: TableColumn<T>[];
   /** Caveat shown under BOTH views — e.g. where span history actually starts. */
   footer?: React.ReactNode;
+  /** Stable slug for remembering this table's column widths. Required rather than
+   *  optional: one component renders several different tables, and sharing a storage
+   *  key between them would have each chart's twin overwrite the others' widths. */
+  tableId: string;
 }
 
 /**
@@ -28,8 +36,9 @@ interface Props<T> {
  * a value (three of the light-mode chart hues sit below 3:1 against the white
  * surface, so the table is also the documented contrast relief channel).
  */
-export function ChartTableToggle<T>({ chart, items, columns, footer }: Props<T>) {
+export function ChartTableToggle<T>({ chart, items, columns, footer, tableId }: Props<T>) {
   const { t } = useI18n();
+  const resizable = useResizableTables();
   const [view, setView] = useState<'chart' | 'table'>('chart');
 
   return (
@@ -51,7 +60,7 @@ export function ChartTableToggle<T>({ chart, items, columns, footer }: Props<T>)
         <Table
           variant="embedded"
           items={items}
-          columnDefinitions={columns}
+          {...resizable<T>(tableId, columns)}
           empty={
             <Box textAlign="center" padding="m" color="text-body-secondary">
               {t('dashboard.noData')}

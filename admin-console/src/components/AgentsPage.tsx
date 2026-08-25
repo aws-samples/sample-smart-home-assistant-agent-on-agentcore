@@ -12,6 +12,9 @@ import Table from '@cloudscape-design/components/table';
 import { CognitoUserInfo, FleetAgent, listAgentFleet, listCognitoUsers } from '../api/adminApi';
 import { AgentDetailPage } from './AgentDetailPage';
 import { useI18n } from '../i18n';
+import {
+  useResizableTables, W_NUM, W_BADGE, W_STATUS, W_NAME, W_WIDE,
+} from './tableColumns';
 
 /**
  * The Agents page — the fleet as one list.
@@ -50,6 +53,7 @@ const KIND_COLOR: Record<string, 'blue' | 'green' | 'grey' | 'severity-neutral'>
 };
 
 export function AgentsPage() {
+  const resizable = useResizableTables();
   const { t, language } = useI18n();
   const [agents, setAgents] = useState<FleetAgent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -153,9 +157,9 @@ export function AgentsPage() {
                 </Box>
               </Box>
             }
-            columnDefinitions={[
+            {...resizable<FleetAgent>('agents-fleet', [
               {
-                id: 'name',
+                id: 'name', width: W_NAME,
                 header: t('agents.col.name'),
                 cell: (a) => (
                   <Link
@@ -171,7 +175,7 @@ export function AgentsPage() {
                 sortingField: 'displayName',
               },
               {
-                id: 'kind',
+                id: 'kind', width: W_BADGE,
                 header: t('agents.col.kind'),
                 cell: (a) => (
                   <Badge color={KIND_COLOR[a.kind] || 'grey'}>
@@ -180,7 +184,7 @@ export function AgentsPage() {
                 ),
               },
               {
-                id: 'status',
+                id: 'status', width: W_STATUS,
                 header: t('agents.col.status'),
                 cell: (a) =>
                   a.live ? (
@@ -196,7 +200,7 @@ export function AgentsPage() {
                   ),
               },
               {
-                id: 'skills',
+                id: 'skills', width: W_WIDE,
                 header: t('agents.col.skills'),
                 // The count, with the ids as the tooltip-ish secondary line: six
                 // agents' worth of skill ids inline makes the table unreadable.
@@ -210,7 +214,7 @@ export function AgentsPage() {
                   ),
               },
               {
-                id: 'runtime',
+                id: 'runtime', width: W_WIDE,
                 // The runtime ID, not the runtime name. The name
                 // (`sha2aenergy_sha2aenergy`) is only the id with its suffix cut off,
                 // and the suffix is what identifies the deployment — it is what every
@@ -225,12 +229,12 @@ export function AgentsPage() {
                 ),
               },
               {
-                id: 'invocations',
+                id: 'invocations', width: W_NUM,
                 header: t('agents.col.invocations'),
                 cell: (a) => count(a.invocations),
               },
               {
-                id: 'errors',
+                id: 'errors', width: W_NUM,
                 header: t('agents.col.errors'),
                 cell: (a) =>
                   a.errors ? (
@@ -244,7 +248,7 @@ export function AgentsPage() {
                 header: t('agents.col.latency'),
                 cell: (a) => latency(a.latencyP95Ms),
               },
-            ]}
+            ])}
           />
           <Box variant="small" color="text-body-secondary">
             {t('agents.metricsNote')}
