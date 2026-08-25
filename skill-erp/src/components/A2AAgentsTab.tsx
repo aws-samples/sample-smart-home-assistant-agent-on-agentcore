@@ -25,6 +25,34 @@ import {
 } from '../api/erpApi';
 import { useI18n } from '../i18n';
 
+/**
+ * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
+ *
+ * An unconstrained column sizes itself to its content, so one long description stretches it
+ * across the viewport and squeezes the rest of the row into the corner. Two things fix it:
+ * the cell must wrap (Cloudscape truncates to one line otherwise), and the bound must sit
+ * on the span rather than the column — CSS `max-width` on a `<td>` is only a hint to the
+ * auto table-layout algorithm, and a cell with `max-width: 420px` was measured rendering
+ * 481px wide. Per cell, and NOT via the Table's `wrapLines` prop: that applies to every
+ * column and stacks the short ones letter by letter ("PE / NDING / _APPR / OVAL").
+ */
+const TEXT_COL_MAX = 420;
+
+/** A prose table cell: bounded, and wrapping inside that bound instead of truncating. */
+const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
+  children,
+  max = TEXT_COL_MAX,
+}) => (
+  <span style={{
+    display: 'block',
+    maxWidth: max,
+    whiteSpace: 'normal',
+    overflowWrap: 'break-word',
+  }}>
+    {children}
+  </span>
+);
+
 const NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const URL_RE = /^https?:\/\/.+/;
 
@@ -360,7 +388,9 @@ const A2AAgentsTab: React.FC = () => {
           trackBy="recordId"
           columnDefinitions={[
             { id: 'name', header: t('table.name'), cell: (r) => r.name },
-            { id: 'description', header: t('table.description'), cell: (r) => r.description },
+            { id: 'description', header: t('table.description'),
+              maxWidth: TEXT_COL_MAX,
+              cell: (r) => <WrapCell>{r.description}</WrapCell> },
             { id: 'endpoint', header: t('erp.a2a.list.colEndpoint'), cell: (r) => r.card.endpoint },
             { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
             {

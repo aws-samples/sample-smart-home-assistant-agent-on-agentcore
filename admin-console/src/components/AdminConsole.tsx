@@ -195,6 +195,61 @@ interface PlaceDraft {
 
 const EMPTY_PLACE_DRAFT: PlaceDraft = { timezone: '', latitude: '', longitude: '' };
 
+/**
+ * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
+ *
+ * The problem: a column with no width constraint sizes itself to its content, so one long
+ * description stretches it across the viewport and squeezes the rest of the row into the
+ * corner. That is what "the Description column is too wide" is.
+ *
+ * Two things are needed, and the second one is the one that actually works.
+ *
+ * **The cell has to wrap, per cell.** Cloudscape truncates a cell to one line with an
+ * ellipsis by default, so a bounded column would be unreadable rather than merely narrow.
+ * The Table has a `wrapLines` prop for this and it is the WRONG tool: it applies to every
+ * column, and measured on the Registered Skills table it stacked the short structured
+ * columns letter by letter — `PENDING_APPROVAL` rendered as "PE / NDING / _APPR / OVAL"
+ * and the View button as "Vi / e / w". Those columns are meant to hold one line and
+ * truncate. This is why the memories table already carried an inline
+ * `whiteSpace: 'normal'` on its own content cell; that was deliberate, and `WrapCell` is
+ * it, named.
+ *
+ * **The width has to be on the span, not the column.** `columnDefinitions[].maxWidth`
+ * becomes `max-width` on the `<td>`, and CSS `max-width` on a table cell is only a HINT to
+ * the `table-layout: auto` algorithm — measured on the Skill ERP's table, a cell with a
+ * computed `max-width: 420px` rendered 481px wide, because the algorithm sizes columns
+ * from their content and had the room. The column-level value is kept below because it is
+ * Cloudscape's documented knob and it does bind when the table is under width pressure,
+ * but `WrapCell` carries the same number as a block-level `max-width` and that is what
+ * makes the bound hold. Do not "simplify" it away.
+ */
+const TEXT_COL_MAX = 420;
+
+/** Wider tier, for columns whose text IS the row rather than a label on it — a memory
+ *  record's content, a scan finding's detail. 600 because the memories table already used
+ *  exactly that, so naming the value keeps that table pixel-identical. */
+const LONG_TEXT_COL_MAX = 600;
+
+/**
+ * A prose table cell: bounded, and wrapping inside that bound instead of truncating.
+ *
+ * `overflowWrap` is for the tokens prose CONTAINS but is not made of — a URL, a record id
+ * — which have no space to break at and would otherwise push past the bound.
+ */
+const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
+  children,
+  max = TEXT_COL_MAX,
+}) => (
+  <span style={{
+    display: 'block',
+    maxWidth: max,
+    whiteSpace: 'normal',
+    overflowWrap: 'break-word',
+  }}>
+    {children}
+  </span>
+);
+
 /** A short list of IANA zones, not all 599 of them. These cover the demo's
  *  users; the field also accepts anything typed, and the API validates against
  *  the real tz database, so the list is a convenience rather than a whitelist. */
@@ -1543,8 +1598,10 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
             {
               id: 'content',
               header: t('memories.colContent'),
-              cell: (r) => <span style={{ whiteSpace: 'normal' }}>{r.text}</span>,
-              maxWidth: 600,
+              // This cell's inline `whiteSpace: 'normal'` is where WrapCell came from:
+              // it wraps the long text without making the type and date columns wrap too.
+              cell: (r) => <WrapCell max={LONG_TEXT_COL_MAX}>{r.text}</WrapCell>,
+              maxWidth: LONG_TEXT_COL_MAX,
             },
             {
               id: 'created',
@@ -2488,9 +2545,10 @@ const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) 
             {
               id: 'detail',
               header: t('scan.colDetail'),
+              maxWidth: LONG_TEXT_COL_MAX,
               cell: (f: SkillScanFinding) => (
                 <SpaceBetween size="xxs">
-                  <CloudscapeBox>{f.detail}</CloudscapeBox>
+                  <CloudscapeBox><WrapCell max={LONG_TEXT_COL_MAX}>{f.detail}</WrapCell></CloudscapeBox>
                   {!!f.evidence && (
                     <pre className="skill-md-preview" style={{ margin: 0, maxHeight: 120 }}>
                       {f.evidence}
@@ -2538,7 +2596,9 @@ const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({
             items={rec.tools}
             columnDefinitions={[
               { id: 'name', header: 'Tool', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.toolName },
-              { id: 'desc', header: 'Recommended description', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.recommendedToolDescription },
+              { id: 'desc', header: 'Recommended description', maxWidth: LONG_TEXT_COL_MAX,
+                cell: (i: { toolName: string; recommendedToolDescription: string }) =>
+                  <WrapCell max={LONG_TEXT_COL_MAX}>{i.recommendedToolDescription}</WrapCell> },
             ]}
           />
         )}
@@ -3714,7 +3774,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               trackBy="id"
               columnDefinitions={[
                 { id: 'name', header: t('instanceType.colName'), cell: (r) => r.name },
-                { id: 'description', header: t('instanceType.colDescription'), cell: (r) => r.description },
+                { id: 'description', header: t('instanceType.colDescription'),
+                    maxWidth: TEXT_COL_MAX,
+                    cell: (r) => <WrapCell>{r.description}</WrapCell> },
                 {
                   id: 'status',
                   header: t('instanceType.colStatus'),
@@ -3922,7 +3984,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       },
                     },
                     { id: 'description', header: t('registry.colDescription'),
-                      cell: (r) => r.description },
+                      maxWidth: TEXT_COL_MAX,
+                      cell: (r) => <WrapCell>{r.description}</WrapCell> },
                     {
                       id: 'reason',
                       header: t('registry.reviewReason'),
@@ -3993,7 +4056,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   ),
                 },
                 { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
-                { id: 'description', header: t('registry.colDescription'), cell: (r) => r.description },
+                { id: 'description', header: t('registry.colDescription'),
+                  maxWidth: TEXT_COL_MAX,
+                  cell: (r) => <WrapCell>{r.description}</WrapCell> },
                 { id: 'version', header: t('registry.colVersion'), cell: (r) => r.recordVersion },
                 {
                   id: 'updated',
@@ -4314,7 +4379,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           trackBy={(s) => `${s.userId}:${s.skillName}`}
           columnDefinitions={[
             { id: 'name', header: t('skills.colName'), cell: (s) => s.skillName },
-            { id: 'description', header: t('skills.colDescription'), cell: (s) => s.description },
+            { id: 'description', header: t('skills.colDescription'),
+            maxWidth: TEXT_COL_MAX,
+            cell: (s) => <WrapCell>{s.description}</WrapCell> },
             {
               id: 'tools',
               header: t('skills.colTools'),
@@ -4770,7 +4837,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 trackBy="id"
                 columnDefinitions={[
                   { id: 'type', header: t('integrations.colType'), cell: (i) => i.name },
-                  { id: 'description', header: t('integrations.colDescription'), cell: (i) => i.description },
+                  { id: 'description', header: t('integrations.colDescription'),
+                    maxWidth: TEXT_COL_MAX,
+                    cell: (i) => <WrapCell>{i.description}</WrapCell> },
                   {
                     id: 'status',
                     header: t('integrations.colStatus'),
@@ -4817,7 +4886,8 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   {
                     id: 'description',
                     header: t('integrations.skills.col.description'),
-                    cell: (r) => r.description || '—',
+                    maxWidth: TEXT_COL_MAX,
+                    cell: (r) => <WrapCell>{r.description || '—'}</WrapCell>,
                   },
                   { id: 'version', header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
                   {
@@ -5002,7 +5072,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 trackBy="recordId"
                 columnDefinitions={[
                   { id: 'name', header: t('integrations.a2a.col.name'), cell: (r) => r.name },
-                  { id: 'description', header: t('integrations.a2a.col.description'), cell: (r) => r.description },
+                  { id: 'description', header: t('integrations.a2a.col.description'),
+                    maxWidth: TEXT_COL_MAX,
+                    cell: (r) => <WrapCell>{r.description}</WrapCell> },
                   {
                     id: 'endpoint',
                     header: t('integrations.a2a.col.endpoint'),
@@ -5642,7 +5714,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
             trackBy="id"
             columnDefinitions={[
               { id: 'name', header: t('guardrails.colGuardrail'), cell: (i) => i.name },
-              { id: 'description', header: t('guardrails.colDescription'), cell: (i) => i.description },
+              { id: 'description', header: t('guardrails.colDescription'),
+                maxWidth: TEXT_COL_MAX,
+                cell: (i) => <WrapCell>{i.description}</WrapCell> },
               { id: 'action', header: t('guardrails.colAction'), minWidth: 220, cell: (i) => i.action },
             ]}
           />

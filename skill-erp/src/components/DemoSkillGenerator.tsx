@@ -14,6 +14,34 @@ import { useI18n } from '../i18n';
 import templateData from '../generated/demo-skill-templates.json';
 
 /**
+ * Max width for a table column holding prose, paired with `<WrapCell>` in that column.
+ *
+ * An unconstrained column sizes itself to its content, so one long description stretches it
+ * across the viewport and squeezes the rest of the row into the corner. Two things fix it:
+ * the cell must wrap (Cloudscape truncates to one line otherwise), and the bound must sit
+ * on the span rather than the column — CSS `max-width` on a `<td>` is only a hint to the
+ * auto table-layout algorithm, and a cell with `max-width: 420px` was measured rendering
+ * 481px wide. Per cell, and NOT via the Table's `wrapLines` prop: that applies to every
+ * column and stacks the short ones letter by letter ("PE / NDING / _APPR / OVAL").
+ */
+const TEXT_COL_MAX = 420;
+
+/** A prose table cell: bounded, and wrapping inside that bound instead of truncating. */
+const WrapCell: React.FC<{ children?: React.ReactNode; max?: number }> = ({
+  children,
+  max = TEXT_COL_MAX,
+}) => (
+  <span style={{
+    display: 'block',
+    maxWidth: max,
+    whiteSpace: 'normal',
+    overflowWrap: 'break-word',
+  }}>
+    {children}
+  </span>
+);
+
+/**
  * Ten demo Skills, generated on click and publishable to the Registry in one pass.
  *
  * The point of this panel is the scan demo downstream of it. A reviewer looking at an
@@ -188,6 +216,7 @@ const DemoSkillGenerator: React.FC<Props> = ({ onRegistered }) => {
                   id: 'risk',
                   header: t('erp.demo.colRisk'),
                   minWidth: 260,
+                  maxWidth: TEXT_COL_MAX,
                   cell: (r) => (
                     <SpaceBetween direction="horizontal" size="xxs">
                       <Badge
@@ -203,7 +232,9 @@ const DemoSkillGenerator: React.FC<Props> = ({ onRegistered }) => {
                           ? t('erp.demo.semanticOnly')
                           : r.expected.static.verdict}
                       </Badge>
-                      <Box variant="small">{label(r.riskProfile)}</Box>
+                      <Box variant="small">
+                        <WrapCell>{label(r.riskProfile)}</WrapCell>
+                      </Box>
                     </SpaceBetween>
                   ),
                 },
