@@ -522,6 +522,7 @@ DRAFT ──submit──> PENDING_APPROVAL ──update status──> APPROVED
 | 授权保存了但 agent 没有这个工具 | grant 在 token claim 里, 旧 token 没有 | 重新登录 / 开新会话 |
 | 用户在门口被拒, 无日志 | 用户的 token 里没有 `a2a-<cardName>` 门钥匙。要么授权没落地, 要么手里是**迁移前签发的旧 token** | 重新登录换新 token;或跑一次 `?action=a2a-reconcile` 的 PUT 回填 |
 | 迁移到门钥匙之后一批用户突然全被拒 | 授权侧还没发门钥匙就先翻了 authorizer —— 顺序反了 | `scripts/migrate-a2a-door-groups.py --rollback --apply` 回退, 回填后再翻 |
+| 部署后每轮对话 `424 ... Received error (502) from runtime`, 日志里 `ImportError` | `agentcore deploy` 用 `uv` 按 **pyproject.toml**(不是 requirements.txt)重新解析依赖, 未锁版本的包漂移 (2026-09-18: mcp 1.29 → 2.1.1 删掉了 `streamablehttp_client`); 部署本身报成功 | 依赖已在 `agent/pyproject.toml` 与 `requirements.txt` 中钉死(2026-09-18 升到 strands[bidi] 1.56 / mcp 2.1.1 / bedrock-agentcore 1.23.1); 升级流程: `uv venv --python 3.14` 装新版本 → 跑 `agent/tests` → 导入 agent.py / voice_agent.py → 部署 → 一轮真实 chatbot 对话。MCP 连接改用 `MCPClient(url=, headers=)`, 不再依赖 mcp 的 transport 函数。任何 orchestrator 部署后, 先在 `-DEFAULT` 日志组 grep `Traceback` 再宣布成功 |
 | 部署后容器 401 / 拒绝一切请求 | 只跑了 `agentcore deploy`, 没做部署后 patch(env / authorizer / header allowlist) | 重跑 `deploy_runtime.py`(幂等) |
 | 导入的 skill 没有工具 | frontmatter 写了 `allowed-tools`(连字符) | 改成 `allowed_tools` |
 | registry 里改了但 agent 行为没变 | 两个存储解耦, DynamoDB 里还是导入时的旧内容 | 重新导入 |

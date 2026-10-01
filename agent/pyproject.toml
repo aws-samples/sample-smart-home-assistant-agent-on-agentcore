@@ -4,21 +4,25 @@ version = "1.0.0"
 description = "Smart Home Assistant Agent for AgentCore Runtime"
 requires-python = ">=3.12"
 dependencies = [
-    "strands-agents>=1.25.0",
-    "strands-agents-tools",
-    "strands-agents-builder",
-    "bedrock-agentcore",
+    # PINNED. `agentcore deploy` builds the CodeZip from THIS file with uv, not from
+    # requirements.txt; keep the two identical. Latest stable set as of 2026-09-18,
+    # verified by agent/tests under Python 3.14 and a real chatbot turn. Before
+    # this they floated, and a routine rebuild moved 61 packages at once — mcp 2.x
+    # removed streamablehttp_client and every chatbot turn returned 502.
+    "strands-agents[bidi]==1.56.0",
+    "strands-agents-tools==0.8.9",
+    "bedrock-agentcore==1.23.1",
     "boto3",
     "requests",
-    "mcp",
+    "mcp==2.1.1",
     "websockets>=14.0",
-    "aws_sdk_bedrock_runtime>=0.3.0",
-    "aws-opentelemetry-distro>=0.10.0",
+    "aws_sdk_bedrock_runtime==0.11.0",
+    "aws-opentelemetry-distro==0.20.0",
     "opentelemetry-exporter-otlp-proto-http",
-    "browser-use>=0.1.40",
-    "playwright>=1.50",
+    "browser-use==0.11.13",
+    "playwright==1.63.0",
     # A2A downstream client (agent/tools/a2a.py). 0.3.x matches the Strands
     # A2AServer runtimes published under a2a-agent-registry/.
-    "a2a-sdk<1.0",
+    "a2a-sdk==0.3.26",
     "httpx>=0.28",
 ]

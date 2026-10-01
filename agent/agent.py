@@ -17,7 +17,6 @@ from strands import Agent, AgentSkills
 from strands.vended_plugins.skills import Skill
 from strands.models.bedrock import CacheConfig
 from strands.tools.mcp.mcp_client import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
 from bedrock_agentcore import BedrockAgentCoreApp
 from memory.session import (
     get_memory_session_manager,
@@ -619,7 +618,10 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             logger.info("Forwarding user JWT to gateway for policy evaluation")
         else:
             logger.warning("No Authorization header available — gateway per-user policies won't apply")
-        mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
+        # `url=`/`headers=` lets strands own the transport. The previous form built
+        # it from `mcp.client.streamable_http.streamablehttp_client`, which mcp 2.x
+        # removed; that import failing at module load was the 2026-09-18 outage.
+        mcp_client = MCPClient(url=GATEWAY_URL, headers=gw_headers or None)
         # ExitStack rather than nested `with`: web search is a second gateway and a
         # second client, and it must be able to fail without taking the device
         # tools down with it. A nested `with` would put the whole tool-assembly
@@ -639,8 +641,8 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             # include it. That is why there is no skill-name check here.
             if WEBSEARCH_GATEWAY_URL:
                 try:
-                    ws_client = MCPClient(lambda: streamablehttp_client(
-                        WEBSEARCH_GATEWAY_URL, headers=gw_headers or None))
+                    ws_client = MCPClient(url=WEBSEARCH_GATEWAY_URL,
+                                          headers=gw_headers or None)
                     _gw_stack.enter_context(ws_client)
                     ws_tools = get_mcp_tools(ws_client)
                     mcp_tools = mcp_tools + ws_tools
