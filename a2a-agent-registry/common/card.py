@@ -10,9 +10,8 @@ Both used to declare an OAuth2 ``client_credentials`` scheme pointing at Cognito
 token endpoint, filled from ``A2A_TOKEN_URL`` / ``EXPECTED_SCOPE``. That mechanism was
 RETIRED: the credential is now the END USER's own id token, and authorization is the
 ``cognito:groups`` claim on it, checked by the Runtime authorizer. Nothing enforced the
-m2m scheme any more — ``common/jwt_verify.py`` is the only code that ever checked a
-scope and it is not mounted — so the declaration survived purely as a claim about
-ourselves that was no longer true.
+m2m scheme any more, so the declaration survived purely as a claim about ourselves
+that was no longer true.
 
 That matters because ``securitySchemes`` is a PROTOCOL field: a caller reads it to
 decide what to send. Our own orchestrator never reads it (it sends the user's bearer

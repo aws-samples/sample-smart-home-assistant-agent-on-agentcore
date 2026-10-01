@@ -12,9 +12,8 @@ Removes (per-agent only):
   - The entry in ``deployed-state.json``
 
 Keeps (so Step 1 is fast on rerun):
-  - Cognito m2m app client / resource server / Secrets Manager secret
   - Other agents' Runtimes / Registry records
-  - The text-agent's ``A2A_*`` env vars (still valid for remaining agents)
+  - The text-agent's ``REGISTRY_ID`` env var (still valid for remaining agents)
 
 Usage:
     python demo_reset.py --agent energy-optimization

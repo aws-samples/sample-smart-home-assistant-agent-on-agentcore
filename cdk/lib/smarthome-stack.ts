@@ -1716,7 +1716,7 @@ export class SmartHomeStack extends cdk.Stack {
     sensorHistoryTable.grantReadData(scenarioRunner);
 
     // Read the per-user scheduling credential, and nothing else. Scoped to the
-    // prefix so this role cannot read the m2m secret or any other secret in the
+    // prefix so this role cannot read any other secret in the
     // account — the refresh tokens are a real credential at rest and this is the
     // only principal that needs them.
     scenarioRunner.addToRolePolicy(new iam.PolicyStatement({

@@ -238,11 +238,7 @@ def build(*, region: str, registry_id: str, user_pool_id: str, app_client_id: st
                 "Bearer <the END USER's own Cognito idToken>. There is no m2m token "
                 "and no second header; the grant is the cognito:groups claim on that "
                 "token."),
-            "requestHeaderAllowlist": [
-                "Authorization",
-                "X-A2A-Allowed-Skills",
-                "X-SuperApp-User-Token",
-            ],
+            "requestHeaderAllowlist": ["Authorization"],
             "headerAllowlistNote": (
                 "AgentCore's Runtime edge DROPS any header not on your runtime's "
                 "allowlist, silently — the request arrives looking like one that chose "

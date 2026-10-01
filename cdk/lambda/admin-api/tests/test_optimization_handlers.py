@@ -311,7 +311,7 @@ def test_delete_bundle_calls_control_api_and_ddb():
     stub = Stubber(optimization._agentcore_control())
     stub.add_response(
         "delete_configuration_bundle",
-        {"bundleId": "b1", "status": "DELETING"},
+        {"bundleArn": "arn:bundle/foo", "bundleId": "b1", "status": "DELETING"},
         expected_params={"bundleId": "arn:bundle/foo"},
     )
     with stub, patch.object(optimization, "_delete_bundle_row") as drow, \

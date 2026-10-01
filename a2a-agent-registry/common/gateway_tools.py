@@ -113,7 +113,9 @@ class GatewaySession:
     """
 
     def __init__(self, caller, wanted: tuple[str, ...]):
-        from mcp.client.streamable_http import streamablehttp_client
+        # MCPClient opens the streamable-HTTP transport itself from `url=`; importing
+        # mcp's transport here is what broke when mcp 2.x removed
+        # `streamablehttp_client` (the orchestrator hit the same break, 9c36ab6).
         from strands.tools.mcp.mcp_client import MCPClient
 
         url = gateway_url()
@@ -127,8 +129,8 @@ class GatewaySession:
 
         self.caller = caller
         # The user's own token, so the Gateway and Cedar see the real end user.
-        self.client = MCPClient(lambda: streamablehttp_client(
-            url, headers={"Authorization": f"Bearer {caller.raw_token}"}))
+        self.client = MCPClient(
+            url=url, headers={"Authorization": f"Bearer {caller.raw_token}"})
         # The background pump has to stay alive for as long as the tools might be
         # called. The per-request Agent is discarded when the request ends, and
         # this client with it.
@@ -157,8 +159,9 @@ class GatewaySession:
                 logger.info("no WEBSEARCH_GATEWAY_URL — web search unavailable")
             else:
                 try:
-                    ws_client = MCPClient(lambda: streamablehttp_client(
-                        ws_url, headers={"Authorization": f"Bearer {caller.raw_token}"}))
+                    ws_client = MCPClient(
+                        url=ws_url,
+                        headers={"Authorization": f"Bearer {caller.raw_token}"})
                     ws_client.start()
                     self._extra_clients.append(ws_client)
                     self._discover(ws_client, (WEB_SEARCH,))

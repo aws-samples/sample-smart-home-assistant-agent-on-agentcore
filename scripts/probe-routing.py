@@ -10,11 +10,14 @@ ran.
 Three things this got wrong before it worked, all of which made correct behaviour
 look broken:
 
-  - `userId` in the payload becomes `actor_id`, and A2A grants are keyed on it.
-    Omit it and it defaults to "default", which scopes nothing to a real user —
-    so no a2a_* tool is registered at all and every delegation "fails".
-  - That key is the EMAIL, not the sub. The chatbot sends `email or username or
-    sub` and the Admin Console resolves sub -> email when writing grants.
+  - A2A grants come from the `cognito:groups` claim on the idToken sent in the
+    custom auth header (below), not from the payload. Probing without a token, or
+    as a user with no grant, registers no a2a_* tool at all and every delegation
+    "fails".
+  - `userId` in the payload still becomes `actor_id`, which scopes the user's
+    skills, tool policy and memory. It is the EMAIL, not the sub: the chatbot
+    sends `email or username or sub` and the Admin Console writes per-user rows
+    under the email.
   - The ⟦A2A:…⟧ marker is on the SUB-AGENT's reply. The orchestrator summarises
     rather than pasting it through, so a correctly delegated turn usually shows no
     marker. Scanning the reply text reported six false misses.
@@ -45,9 +48,9 @@ import base64
 claims = json.loads(base64.urlsafe_b64decode(
     tok.split(".")[1] + "=" * (-len(tok.split(".")[1]) % 4)))
 # The chatbot sends `email or cognito:username or sub`, and the Admin Console
-# resolves sub -> email when writing grants, so the row key is the EMAIL. Sending
-# the sub here reads a row that does not exist and registers no a2a_* tool at all
-# — the probe's first two runs measured that and looked like six routing bugs.
+# writes per-user rows under the email, so actor_id must be the EMAIL. Sending the
+# sub reads per-user rows that do not exist. (A2A grants are not among them: they
+# ride in the token's `cognito:groups` claim.)
 SUB = claims.get("email") or claims["sub"]
 
 arn = st["runtimeArn"]
@@ -84,11 +87,9 @@ for label, prompt in PROMPTS:
     # A fresh session per prompt: a shared one lets an earlier answer bias the
     # next routing decision, which is the opposite of measuring each intent.
     sid = f"p5-{uuid.uuid4().hex}"[:40] + "0" * 24
-    # `userId` is what becomes actor_id, and A2A grants are keyed on it. Omitting
-    # it defaults to "default", which scopes nothing to a real user — so
-    # NO a2a_* tool is registered and every delegation "fails" for a reason that
-    # has nothing to do with the prompt. The first run of this probe measured
-    # exactly that and looked like six routing bugs.
+    # `userId` is what becomes actor_id. Omitting it defaults to "default", which
+    # scopes the user's skills, tool policy and memory to nobody. A2A grants come
+    # from the token's `cognito:groups` claim instead, so they are unaffected.
     body = json.dumps({"prompt": prompt, "userId": SUB}).encode()
     req = AWSRequest(method="POST", url=url, data=body, headers={
         "Content-Type": "application/json",

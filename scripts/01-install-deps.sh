@@ -204,6 +204,7 @@ echo "    -> skill-erp/src/generated"
 # screenshots/ is the canonical one because README.md embeds that path.
 # ------------------------------------------------------------------------------
 echo "==> Copying the architecture diagram into the admin console..."
+mkdir -p "$SCRIPT_DIR/admin-console/src/assets"
 cp "$SCRIPT_DIR/screenshots/architecture.drawio.png" \
    "$SCRIPT_DIR/admin-console/src/assets/architecture.drawio.png"
 echo "    -> admin-console/src/assets"

@@ -184,3 +184,13 @@ def test_authorization_is_first_in_the_allowlist_and_explained():
     inv = _build()["invocation"]
     assert inv["requestHeaderAllowlist"][0] == "Authorization"
     assert "DROPS" in inv["headerAllowlistNote"]
+
+
+def test_the_retired_m2m_headers_are_not_published():
+    """The m2m model sent the user token and a client-asserted skill list in two
+    custom headers. Nothing sends or reads them now; publishing them would tell an
+    agent team to allowlist a credential channel that no longer exists."""
+    allow = _build()["invocation"]["requestHeaderAllowlist"]
+    assert allow == ["Authorization"]
+    assert "X-A2A-Allowed-Skills" not in allow
+    assert "X-SuperApp-User-Token" not in allow

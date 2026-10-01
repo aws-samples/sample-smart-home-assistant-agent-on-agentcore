@@ -49,20 +49,12 @@ enumeration coupled every card edit to an ``UpdateAgentRuntime``. Holding a door
 and no skill group still gets refused here, which is what keeps the coarse door
 honest: it authorizes reaching this agent, never a skill.
 
-The previous design read ``X-A2A-Allowed-Skills``, a header the *client* set. That
-made the grant client-asserted: the server could only refuse a skill the caller had
-already declined to claim, so anything holding the shared m2m token could widen its
-own access simply by sending a longer header. A claim signed by Cognito cannot be
-widened by the caller, and it is checked by the platform rather than by us.
-
-Rollout note (remove once all eight agents run the claim path)
--------------------------------------------------------------
-``resolve_caller`` still accepts the old two-token shape, because the orchestrator
-switches to sending the user token in ``Authorization`` in one step for all agents,
-so every agent has to accept both before any of them can rely on the new one. The
-legacy branch logs at warning so the migration's tail is visible rather than
-becoming permanent. Deleting it is a three-line change plus the m2m client id
-leaving ``allowedClients``.
+The previous design read a skills header the *client* set, which made the grant
+client-asserted: anything holding the shared service token could widen its own
+access simply by sending a longer header. A claim signed by Cognito cannot be
+widened by the caller, and it is checked by the platform rather than by us. That
+two-token model is retired; ``Authorization`` carrying a verified user idToken is
+the only way in, and no other header is read as a credential or a grant.
 """
 
 from __future__ import annotations
@@ -78,7 +70,6 @@ logger = logging.getLogger(__name__)
 
 # Import via the package so a stale copy on sys.path can't shadow these.
 from common import a2a_session
-from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER
 from common.governed_prompt import resolve_system_prompt
 
 # The skill ids this agent publishes, read from card.json at startup. Module-level
@@ -188,11 +179,6 @@ def _orchestrator_session_id(a2a_context, headers: dict[str, str]) -> str:
     return a2a_session.session_id_from(headers, _message_metadata(a2a_context))
 
 
-def _parse_allowed_skills(headers: dict[str, str]) -> frozenset[str]:
-    raw = headers.get(ALLOWED_SKILLS_HEADER.lower(), "")
-    return frozenset(s.strip() for s in raw.split(",") if s.strip())
-
-
 def _request_text(a2a_context) -> str:
     """The delegated request as plain text, or "".
 
@@ -217,15 +203,16 @@ def enforce_allowed_skills(allowed: frozenset[str], skill_ids: frozenset[str]) -
     which is what turns the Admin Console's per-skill checkboxes from decoration
     into a server-side control.
 
-    A caller that sends no header is refused rather than waved through: an
-    unauthenticated omission must not be more permissive than an explicit grant.
+    A caller with no verified user token, or one whose ``cognito:groups`` names no
+    skill here, is refused rather than waved through: an omission must not be more
+    permissive than an explicit grant.
     """
     if not skill_ids:
         return  # agent publishes no skills; nothing to gate
     if not allowed:
         raise PermissionError(
-            f"{ALLOWED_SKILLS_HEADER} is missing or empty — this agent requires an "
-            f"explicit skill grant. Expected one of: {sorted(skill_ids)}"
+            f"no skill grant on this agent — the caller's verified token carries "
+            f"no {GROUPS_CLAIM} group for any of: {sorted(skill_ids)}"
         )
     overlap = allowed & skill_ids
     if not overlap:
@@ -271,15 +258,16 @@ def skills_from_claims(claims: dict, agent_name: str) -> frozenset[str]:
 def resolve_caller(a2a_context, require_user_identity: bool) -> CallerIdentity:
     """Verify the request's identity and skill grant. Raises on refusal.
 
-    Primary path: ``Authorization`` carries the end user's own token. It has already
-    been validated by this Runtime's authorizer, including the ``cognito:groups``
-    match that proves a grant on this agent exists, but it is verified again here —
-    the same reasoning that has always applied to a forwarded token, and it is how
-    we get the claims to derive the skill subset from.
+    ``Authorization`` carries the end user's own idToken. It has already been
+    validated by this Runtime's authorizer, including the ``cognito:groups`` match
+    that proves a grant on this agent exists, but it is verified again here — the
+    same reasoning that has always applied to a forwarded token, and it is how we
+    get the claims to derive the skill subset from.
 
-    Legacy path (temporary, see the module docstring): the old two-token shape,
-    where ``Authorization`` was an m2m token with no ``sub`` and the grant arrived
-    in a client-set header.
+    A token that fails verification is a refusal, not a fall-through to some weaker
+    check. No token at all is refused too, unless this agent publishes no skills and
+    acts on no user's data (``require_user_identity=False``), in which case there is
+    nothing to gate and nobody to act as.
     """
     headers = _headers_from_context(a2a_context)
     from common.user_identity import UserTokenError, verify_user_token
@@ -289,53 +277,26 @@ def resolve_caller(a2a_context, require_user_identity: bool) -> CallerIdentity:
         try:
             claims = verify_user_token(bearer)
         except UserTokenError as exc:
-            claims = None
-            # Not fatal by itself: during the migration this is what an m2m token
-            # looks like here, and the legacy branch below handles it. Logged
-            # without the token.
-            logger.info("Authorization did not verify as a user token: %s", exc)
-        if claims is not None:
-            allowed = skills_from_claims(claims, _agent_name())
-            enforce_allowed_skills(allowed, _SKILL_IDS)
-            return CallerIdentity(
-                sub=claims["sub"],
-                email=claims.get("email", ""),
-                raw_token=bearer,
-                allowed_skills=allowed,
-            )
+            # Log the reason, never the token.
+            logger.info("Authorization did not verify as a user idToken: %s", exc)
+            raise PermissionError(f"user token rejected: {exc}") from exc
+        allowed = skills_from_claims(claims, _agent_name())
+        enforce_allowed_skills(allowed, _SKILL_IDS)
+        return CallerIdentity(
+            sub=claims["sub"],
+            email=claims.get("email", ""),
+            raw_token=bearer,
+            allowed_skills=allowed,
+        )
 
-    # ---- legacy two-token path; delete with the m2m client id ----
-    legacy_allowed = _parse_allowed_skills(headers)
-    raw = headers.get(USER_TOKEN_HEADER.lower(), "")
-    if legacy_allowed or raw:
-        logger.warning(
-            "legacy A2A auth path used (client-asserted %s + %s). The caller has "
-            "not been migrated to Cognito group claims.",
-            ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER)
-    enforce_allowed_skills(legacy_allowed, _SKILL_IDS)
-
-    if not raw:
-        if require_user_identity:
-            raise PermissionError(
-                f"{USER_TOKEN_HEADER} is missing — this agent acts on a user's "
-                f"devices and cannot do so without a verified user identity"
-            )
-        return CallerIdentity(sub="", email="", raw_token="",
-                              allowed_skills=legacy_allowed)
-
-    try:
-        claims = verify_user_token(raw)
-    except UserTokenError as exc:
-        # Log the reason, never the token.
-        logger.info("forwarded user token rejected: %s", exc)
-        raise PermissionError(f"user token rejected: {exc}") from exc
-
-    return CallerIdentity(
-        sub=claims["sub"],
-        email=claims.get("email", ""),
-        raw_token=_strip_bearer(raw),
-        allowed_skills=legacy_allowed,
-    )
+    # No credential. Refused by the skill gate whenever this agent publishes a
+    # skill, which every deployed agent does; the identity check covers the rest.
+    enforce_allowed_skills(frozenset(), _SKILL_IDS)
+    if require_user_identity:
+        raise PermissionError(
+            "Authorization is missing — this agent acts on a user's devices and "
+            "cannot do so without a verified user identity")
+    return CallerIdentity(sub="", email="", raw_token="", allowed_skills=frozenset())
 
 
 def _build_strands_agent(system_prompt: str, model_id: str, name: str,
@@ -693,8 +654,8 @@ def run_agent(system_prompt_path: str, card_json_path: str, port: int = 9000,
     )
 
     # Wrap the executor for every agent, tools or not: skill enforcement has to
-    # apply to all of them, because without it the shared m2m token is a master
-    # key to every skill on every sub-agent. With no tools factory the wrapper
+    # apply to all of them, or a token granted on one agent would reach every
+    # skill on every sub-agent. With no tools factory the wrapper
     # rebuilds an identical tool-free Agent, so the three original agents behave
     # as they did.
     from strands.multiagent.a2a.executor import StrandsA2AExecutor

@@ -1,9 +1,8 @@
 """Verify the end user's Cognito idToken forwarded on an A2A hop.
 
-A sub-agent that touches a user's devices needs that user's identity, so the
-orchestrator forwards the idToken it was given in a second header
-(`X-SuperApp-User-Token`) — `Authorization` is taken by the m2m token the
-Runtime's CUSTOM_JWT authorizer checks.
+A sub-agent that touches a user's devices needs that user's identity. The
+orchestrator sends the idToken it was given as the `Authorization` bearer — the
+same token the Runtime's CUSTOM_JWT authorizer checks at the door.
 
 The whole point is to verify it here rather than trust it. Anyone can write three
 base64 segments separated by dots, so reading the payload without checking the
@@ -145,8 +144,8 @@ def verify_user_token(
         raise UserTokenError(f"token rejected: {exc}") from exc
 
     # An access token for this pool also carries a valid signature and issuer, so
-    # the type has to be checked explicitly — otherwise the m2m token in the
-    # Authorization header would pass as a user identity, and it has no `sub`.
+    # the type has to be checked explicitly — otherwise an access token in the
+    # Authorization header would pass as a user identity.
     if claims.get("token_use") != "id":
         raise UserTokenError(
             f"token_use is {claims.get('token_use')!r}, expected 'id' — an access "

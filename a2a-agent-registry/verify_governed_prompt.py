@@ -39,15 +39,9 @@ from a2a.types import Message, Part, Role, TextPart
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from common.agents import (  # noqa: E402
-    AGENT_LONG_NAMES,
-    ALLOWED_SKILLS_HEADER,
-    USER_TOKEN_HEADER,
-)
+from common.agents import AGENT_LONG_NAMES  # noqa: E402
 from smoke_test import (  # noqa: E402
     DEPLOYED_STATE,
-    _card_skill_ids,
-    fetch_m2m_token,
     fetch_user_id_token,
 )
 
@@ -89,15 +83,15 @@ def delete_override(table, card_name: str) -> None:
     table.delete_item(Key=prompt_row_key(card_name))
 
 
-async def ask(entry: dict, m2m: str, user_token: str, question: str) -> str:
-    """Send one A2A message and return the reply text."""
+async def ask(entry: dict, user_token: str, question: str) -> str:
+    """Send one A2A message and return the reply text.
+
+    The user's idToken is the only credential: the grant is its `cognito:groups`
+    claim, so the signed-in user must hold one on this agent.
+    """
     invocation_url = entry["invocationUrl"]
     endpoint = invocation_url.rsplit("/invocations", 1)[0]
-    headers = {
-        "Authorization": f"Bearer {m2m}",
-        ALLOWED_SKILLS_HEADER: ",".join(_card_skill_ids(entry["agent"])),
-        USER_TOKEN_HEADER: user_token,
-    }
+    headers = {"Authorization": f"Bearer {user_token}"}
     async with httpx.AsyncClient(headers=headers, timeout=180) as http:
         card = None
         for card_url in (endpoint, invocation_url):
@@ -149,10 +143,8 @@ async def main() -> int:
         log(f"{args.agent} is not in deployed-state.json — deploy it first")
         return 2
 
-    cognito = state["cognito"]
-    region = cognito["tokenUrl"].split(".auth.")[1].split(".amazoncognito")[0]
-    m2m = fetch_m2m_token(region=region, token_url=cognito["tokenUrl"],
-                          scope=cognito["scope"], secret_arn=cognito["m2mSecretArn"])
+    # arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>
+    region = entry["runtimeArn"].split(":")[3]
     user_token = fetch_user_id_token()
     if not user_token:
         log("could not sign in as the admin user — the sub-agent will refuse")
@@ -167,7 +159,7 @@ async def main() -> int:
     failures: list[str] = []
     try:
         log(f"\n=== {card_name}: baseline (no override) ===")
-        baseline = await ask(entry, m2m, user_token, QUESTION)
+        baseline = await ask(entry, user_token, QUESTION)
         log(f"  reply: {baseline[:220]}")
         if CANARY in baseline:
             failures.append(
@@ -178,7 +170,7 @@ async def main() -> int:
 
         log(f"\n=== {card_name}: with a global override ===")
         put_override(table, card_name, OVERRIDE_PROMPT)
-        overridden = await ask(entry, m2m, user_token, QUESTION)
+        overridden = await ask(entry, user_token, QUESTION)
         log(f"  reply: {overridden[:220]}")
         if CANARY in overridden:
             log("  ok: the override reached the running agent")
@@ -191,7 +183,7 @@ async def main() -> int:
 
         log(f"\n=== {card_name}: after removing the override ===")
         delete_override(table, card_name)
-        reverted = await ask(entry, m2m, user_token, QUESTION)
+        reverted = await ask(entry, user_token, QUESTION)
         log(f"  reply: {reverted[:220]}")
         if CANARY in reverted:
             failures.append(

@@ -39,14 +39,14 @@ a2a-agent-registry/
 ```bash
 cd a2a-agent-registry
 
-# 全量部署 (3 个 agent + Cognito m2m + Registry 注册 + 打补丁到 text agent env)
+# 全量部署 (全部 agent + Registry 注册 + 把 REGISTRY_ID 补丁到 text agent env)
 python deploy.py
 
 # 单个 agent (只构建/刷新这一个)
 python deploy.py --agent energy-optimization
 
-# 跳过重型步骤 (比如仅刷新 Cognito 凭据, 不重新构建)
-python deploy.py --only cognito
+# 跳过重型步骤 (比如仅刷新 Registry 记录, 不重新构建)
+python deploy.py --only registry,persist
 ```
 
 脚本执行完后, 3 条 A2A 记录状态为 `PENDING_APPROVAL`。打开 AWS Console → Bedrock AgentCore → Registry 逐条审批。审批后它们会出现在 Admin Console 的 `Discover → Integration Registry → A2A Agents`。接着在 `Users → Manage Permissions` 里给某个用户勾选要授权的 skill 并保存 —— 文本 agent 在下一次调用时就会加载新的授权。
@@ -61,7 +61,7 @@ python approve_records.py
 ## 清理
 
 ```bash
-# 全部清理 (最后一个 agent 被删后会一并清掉 Cognito m2m 资源)
+# 全部清理 (最后一个 agent 被删后会一并清掉 text agent 的 REGISTRY_ID, 以及旧版 deploy.py 遗留的 m2m 资源)
 python teardown.py
 
 # 只清理某一个 agent
@@ -149,21 +149,21 @@ cd a2a-agent-registry
 python demo_reset.py --agent energy-optimization
 ```
 
-Cognito m2m 凭据和其它 agent 保留, Step 1 会跑得很快。
+其它 agent 保留, Step 1 会跑得很快。
 
 ### Step 1 —— 部署一个 Runtime (暂不注册 Registry)
 
-创建 Cognito m2m 凭据 + 通过 CodeBuild 构建并部署 Runtime + 把 A2A env 补丁到 text agent。跳过 Registry 便于演示 Runtime 本身就能独立工作。
+通过 CodeBuild 构建并部署 Runtime (入站鉴权: 终端用户自己的 Cognito idToken, 按 `cognito:groups` 授权) + 把 REGISTRY_ID 补丁到 text agent。跳过 Registry 便于演示 Runtime 本身就能独立工作。
 
 ```bash
 python deploy.py --agent energy-optimization --skip registry
 ```
 
-*验证:* `python smoke_test.py` —— 直接用 m2m token 访问 A2A endpoint, 不走 Registry。应输出 `summary: {'energy-optimization': True}`。
+*验证:* `python smoke_test.py` —— 以 admin 用户的 idToken 直接访问 A2A endpoint, 不走 Registry (该用户需持有此 agent 的授权, 否则会被跳过)。应输出 `summary: {'energy-optimization': True}`。
 
 ### Step 2 —— 注册到 AWS Agent Registry
 
-用真实的 invocation URL + OAuth2 安全 scheme 渲染 AgentCard, 删除 `example.com` placeholder, 创建真实记录, 提交审批。
+用真实的 invocation URL + `endUserIdToken` 安全 scheme 渲染 AgentCard, 删除 `example.com` placeholder, 创建真实记录, 提交审批。
 
 ```bash
 python deploy.py --agent energy-optimization --only registry,persist
@@ -248,6 +248,6 @@ import boto3
 t = boto3.resource('dynamodb', region_name='us-west-2').Table('smarthome-skills')
 t.delete_item(Key={'userId':'admin@smarthome.local','skillName':'__a2a_permissions__'})"
 
-# 只清理这一个 agent (保留 Cognito m2m, 其它 agent 仍可用)
+# 只清理这一个 agent (其它 agent 仍可用)
 python teardown.py --agent energy-optimization
 ```

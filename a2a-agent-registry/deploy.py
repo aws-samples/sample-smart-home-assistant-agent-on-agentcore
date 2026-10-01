@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Deploy the three sample A2A agents.
+"""Deploy the sample A2A agents.
 
 Driven by the ``agentcore`` CLI (no local Docker daemon — CodeBuild runs the
 image build server-side). Idempotent; re-running only touches what changed.
 
 Steps:
   1. LOAD — read cdk-outputs.json, agentcore-state.json, deployed-state.json
-  2. COGNITO (global) — idempotent resource server + m2m app client + Secret
-  3. RENDER (per-agent) — materialize ``.agentcore-project/<name>/``
-  4. AGENTCORE DEPLOY (per-agent) — agentcore create + deploy -y
-  5. WORKLOAD IDENTITY (per-agent) — aud claim for downstream JWT check
-  6. REGISTRY (per-agent) — create/update + submit-for-approval
-  7. PERSIST (global merge) — rewrite deployed-state.json keeping other agents
-  8. PATCH TEXT AGENT (global) — add A2A_* envs + secret read permission
+  2. RENDER (per-agent) — materialize ``.agentcore-project/<name>/``
+  3. AGENTCORE DEPLOY (per-agent) — agentcore create + deploy -y, then the
+     inbound authorizer: the END USER's idToken, gated on `cognito:groups`
+  4. WORKLOAD IDENTITY (per-agent)
+  5. REGISTRY (per-agent) — create/update + submit-for-approval
+  6. PERSIST (global merge) — rewrite deployed-state.json keeping other agents
+  7. PATCH TEXT AGENT (global) — set REGISTRY_ID on the orchestrator runtime
+
+No Cognito client, secret or service token is created: the orchestrator forwards
+the user's own idToken and the grant is a claim on it.
 
 CLI:
   python deploy.py                           # all agents, all steps
   python deploy.py --agent energy-optimization
   python deploy.py --agent a,b
-  python deploy.py --only cognito,registry   # step filter (in/out)
+  python deploy.py --only registry,persist   # step filter (in/out)
   python deploy.py --skip deploy             # skip a specific step
 """
 
@@ -48,7 +51,7 @@ AGENTCORE_STATE = PROJECT_ROOT / "agentcore-state.json"
 DEPLOYED_STATE = HERE / "deployed-state.json"
 AC_PROJECT_DIR = HERE / ".agentcore-project"
 
-# The roster and the Cognito identifiers live in common/agents.py — one
+# The roster lives in common/agents.py — one
 # definition, imported by deploy / teardown / demo_reset / smoke_test. They used
 # to be copy-pasted into all four, which meant a roster edit that missed a copy
 # failed at a different stage depending on which script ran.
@@ -57,25 +60,11 @@ from common.agents import (  # noqa: E402
     AGENT_LONG_NAMES,
     AGENT_NAMES,
     AGENT_SHORT_SLUG,
-    ALLOWED_SKILLS_HEADER,
-    M2M_CLIENT_NAME,
-    RESOURCE_SERVER_ID,
-    SCOPE_FULL,
-    SCOPE_NAME,
     REGISTRY_CLIENT,
     SCENARIO_AGENT,
-    SECRET_NAME,
-    USER_TOKEN_HEADER,
 )
 
-# Set from --legacy-m2m-auth. Deploys the pre-migration auth model: the m2m client
-# in `allowedClients` and no `cognito:groups` grant check. The two models cannot
-# coexist on one runtime, because a client_credentials token carries no groups claim
-# and would be refused by the check, so this is a switch rather than a flag that
-# widens acceptance. It exists as the rollback for the claim migration.
-LEGACY_M2M_AUTH = False
-
-ALL_STEPS = ("cognito", "render", "deploy", "workload", "registry", "persist", "patch-text-agent")
+ALL_STEPS = ("render", "deploy", "workload", "registry", "persist", "patch-text-agent")
 
 # The single-table store the Admin Console writes prompt overrides into. Named by
 # the CDK stack (`skillsTable`) and hardcoded there too; a sub-agent reads it to
@@ -122,7 +111,7 @@ def load_state() -> dict[str, Any]:
         if len(parts) >= 4:
             region = parts[3]
 
-    deployed = {"agents": [], "cognito": {}}
+    deployed = {"agents": []}
     if DEPLOYED_STATE.exists():
         try:
             deployed = json.loads(DEPLOYED_STATE.read_text())
@@ -133,10 +122,7 @@ def load_state() -> dict[str, Any]:
         "region": region,
         "user_pool_id": cdk_out["UserPoolId"],
         # The chatbot's app client — the `aud` of the user idTokens that get
-        # forwarded on an A2A hop. Distinct from the m2m client id in
-        # `deployed.cognito.clientId`, which is the `client_id` of the service
-        # token in the Authorization header. Verifying a user token against the
-        # m2m client would reject every real user.
+        # forwarded on an A2A hop, and so the authorizer's `allowedAudience`.
         "user_pool_client_id": cdk_out.get("UserPoolClientId", ""),
         "cognito_domain": cdk_out["CognitoDomain"],
         "registry_id": agentcore_out.get("registryId", ""),
@@ -180,90 +166,7 @@ def parse_steps(only: list[str] | None, skip: list[str] | None) -> set[str]:
 
 
 # ------------------------------------------------------------------
-# Step 2: Cognito OAuth2 (global, idempotent)
-# ------------------------------------------------------------------
-
-def ensure_cognito(state: dict[str, Any]) -> dict[str, Any]:
-    region = state["region"]
-    pool_id = state["user_pool_id"]
-
-    cognito = boto3.client("cognito-idp", region_name=region)
-    secrets = boto3.client("secretsmanager", region_name=region)
-
-    # Resource server
-    try:
-        cognito.describe_resource_server(UserPoolId=pool_id, Identifier=RESOURCE_SERVER_ID)
-        log(f"  resource server '{RESOURCE_SERVER_ID}' already exists")
-    except cognito.exceptions.ResourceNotFoundException:
-        cognito.create_resource_server(
-            UserPoolId=pool_id,
-            Identifier=RESOURCE_SERVER_ID,
-            Name="A2A Server",
-            Scopes=[{"ScopeName": SCOPE_NAME, "ScopeDescription": "Invoke A2A downstream agents"}],
-        )
-        log(f"  created resource server '{RESOURCE_SERVER_ID}'")
-
-    # App client (look up by name — no native ByName API)
-    client_id = None
-    paginator = cognito.get_paginator("list_user_pool_clients")
-    for page in paginator.paginate(UserPoolId=pool_id, MaxResults=60):
-        for c in page["UserPoolClients"]:
-            if c["ClientName"] == M2M_CLIENT_NAME:
-                client_id = c["ClientId"]
-                break
-        if client_id:
-            break
-
-    if not client_id:
-        resp = cognito.create_user_pool_client(
-            UserPoolId=pool_id,
-            ClientName=M2M_CLIENT_NAME,
-            GenerateSecret=True,
-            AllowedOAuthFlows=["client_credentials"],
-            AllowedOAuthScopes=[SCOPE_FULL],
-            AllowedOAuthFlowsUserPoolClient=True,
-            ExplicitAuthFlows=[],
-            SupportedIdentityProviders=["COGNITO"],
-            EnableTokenRevocation=True,
-        )
-        client_id = resp["UserPoolClient"]["ClientId"]
-        log(f"  created m2m app client '{M2M_CLIENT_NAME}' ({client_id})")
-    else:
-        log(f"  m2m app client '{M2M_CLIENT_NAME}' already exists ({client_id})")
-
-    desc = cognito.describe_user_pool_client(UserPoolId=pool_id, ClientId=client_id)["UserPoolClient"]
-    client_secret = desc["ClientSecret"]
-
-    # Secrets Manager
-    secret_payload = json.dumps({"client_id": client_id, "client_secret": client_secret})
-    try:
-        sec = secrets.describe_secret(SecretId=SECRET_NAME)
-        secrets.put_secret_value(SecretId=SECRET_NAME, SecretString=secret_payload)
-        secret_arn = sec["ARN"]
-        log(f"  updated Secret {SECRET_NAME}")
-    except secrets.exceptions.ResourceNotFoundException:
-        sec = secrets.create_secret(
-            Name=SECRET_NAME,
-            Description="Cognito m2m client_id+secret for A2A agents",
-            SecretString=secret_payload,
-        )
-        secret_arn = sec["ARN"]
-        log(f"  created Secret {SECRET_NAME}")
-
-    token_url = f"https://{state['cognito_domain']}/oauth2/token"
-
-    state["deployed"]["cognito"] = {
-        "clientId": client_id,
-        "resourceServer": RESOURCE_SERVER_ID,
-        "scope": SCOPE_FULL,
-        "tokenUrl": token_url,
-        "m2mSecretArn": secret_arn,
-    }
-    return state
-
-
-# ------------------------------------------------------------------
-# Step 3: Render per-agent agentcore project
+# Step 2: Render per-agent agentcore project
 # ------------------------------------------------------------------
 
 def _text_agent_gateway_env(state: dict[str, Any]) -> dict[str, str]:
@@ -513,23 +416,24 @@ def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
         "description = \"SmartHome A2A sample agent\"\n"
         "readme = \"README.md\"\n"
         "requires-python = \">=3.10\"\n"
+        # PINNED, to the same set as agent/pyproject.toml. Floating these let a
+        # routine redeploy pick up mcp 2.x, which removed streamablehttp_client and
+        # made every specialist refuse with an ImportError.
         "dependencies = [\n"
-        "    \"aws-opentelemetry-distro\",\n"
-        "    \"bedrock-agentcore >= 1.6.0\",\n"
-        "    \"strands-agents[a2a] >= 1.13.0\",\n"
+        "    \"aws-opentelemetry-distro==0.20.0\",\n"
+        "    \"bedrock-agentcore==1.23.1\",\n"
+        "    \"strands-agents[a2a]==1.56.0\",\n"
+        "    \"a2a-sdk==0.3.26\",\n"
         "    \"fastapi >= 0.110\",\n"
         "    \"uvicorn[standard] >= 0.27\",\n"
         "    \"httpx >= 0.28\",\n"
         "    \"botocore[crt] >= 1.35.0\",\n"
-        # Verifying the forwarded user idToken needs a JWT library, and calling
-        # the Gateway as that user needs an MCP client. Both were missing, which
-        # is why common/jwt_verify.py could never have run in the deployed
-        # container: `from jose import jwt` would have ImportError'd at startup.
-        # A dependency list that omits what the code imports is how that module
-        # sat here looking functional without ever executing.
+        # Verifying the forwarded user idToken (common/user_identity.py) needs a
+        # JWT library, and calling the Gateway as that user needs an MCP client.
+        # Omit either and the container ImportErrors at startup.
         "    \"python-jose[cryptography] >= 3.3.0\",\n"
         "    \"boto3 >= 1.42.93\",\n"
-        "    \"mcp >= 1.9.0\",\n"
+        "    \"mcp==2.1.1\",\n"
         "]\n\n"
         "[tool.hatch.build.targets.wheel]\n"
         "packages = [\".\"]\n"
@@ -551,7 +455,6 @@ def render_agent_project(agent: str, state: dict[str, Any]) -> Path:
 def patch_agentcore_json(agent: str, project_dir: Path, state: dict[str, Any]) -> None:
     cfg_file = project_dir / "agentcore" / "agentcore.json"
     cfg = json.loads(cfg_file.read_text())
-    cognito = state["deployed"]["cognito"]
 
     if cfg.get("runtimes"):
         rt = cfg["runtimes"][0]
@@ -565,19 +468,13 @@ def patch_agentcore_json(agent: str, project_dir: Path, state: dict[str, Any]) -
             "COGNITO_USER_POOL_ID": state["user_pool_id"],
             # Audience for the forwarded USER idToken — the chatbot's app client.
             # Without it the audience check is skipped.
-            #
-            # EXPECTED_SCOPE / A2A_TOKEN_URL / EXPECTED_CLIENT_ID are gone. All three
-            # described the retired client_credentials m2m hop; the only code that read
-            # them was common/jwt_verify.py, which is not mounted and could never have
-            # run in the container, plus the card renderer that advertised that flow to
-            # callers. Leaving them would keep suggesting the mechanism is live.
             "COGNITO_APP_CLIENT_ID": state.get("user_pool_client_id", ""),
         }
     cfg_file.write_text(json.dumps(cfg, indent=2))
 
 
 # ------------------------------------------------------------------
-# Step 4: agentcore deploy
+# Step 3: agentcore deploy
 # ------------------------------------------------------------------
 
 def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> dict[str, str]:
@@ -611,7 +508,6 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
     # custom env values and does not expose JWT config knobs for A2A, so we
     # re-apply them directly against the control plane (same pattern as
     # scripts/setup-agentcore.py for the main smarthome runtime).
-    cognito = state["deployed"]["cognito"]
     ac = boto3.client("bedrock-agentcore-control", region_name=region)
     rt_info = ac.get_agent_runtime(agentRuntimeId=runtime_id)
     discovery_url = (
@@ -705,36 +601,26 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
         protocolConfiguration={"serverProtocol": "A2A"},
         authorizerConfiguration={
             "customJWTAuthorizer": _authorizer_config(
-                agent, discovery_url, cognito, state),
+                agent, discovery_url, state),
         },
-        # Without this the Runtime edge DROPS both custom headers before the
-        # container sees them, and it does it silently: the request arrives
-        # looking like one that simply chose not to send them. Measured — with no
-        # allowlist the server's skill check refused a request whose client had
-        # definitely sent X-A2A-Allowed-Skills. The main smarthome runtime needs
-        # the same treatment for its own auth-token header, so the mechanism is
-        # not new, just never applied to the A2A agents (which had nothing to pass
-        # through until now).
+        # Without this the Runtime edge DROPS the header before the container sees
+        # it, and it does it silently: the request arrives looking like one that
+        # simply chose not to send it.
         requestHeaderConfiguration={
-            # `Authorization` FIRST, and it is the one that matters now: the token in
+            # `Authorization` is the only header the container needs: the token in
             # it is both the credential the authorizer checks AND the source of the
             # `cognito:groups` claim the container derives the skill set from. The
             # Runtime edge consumes Authorization and does NOT pass it through unless
             # it is allowlisted here — measured: with it absent, a fully granted
-            # user's request reached the container with no bearer at all, so the
-            # container fell back to the legacy header path and refused. The platform
-            # said yes and the container said no, which reads like a container bug.
-            #
-            # The two legacy headers stay only for the rollback path
-            # (--legacy-m2m-auth); nothing sends them once the migration is done.
-            "requestHeaderAllowlist": [
-                "Authorization", ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER],
+            # user's request reached the container with no bearer at all and was
+            # refused. The platform said yes and the container said no, which reads
+            # like a container bug.
+            "requestHeaderAllowlist": ["Authorization"],
         },
     )
     ac.update_agent_runtime(**update_kwargs)
     log(f"  [{agent}] patched env + CUSTOM_JWT auth (discovery={discovery_url})")
-    log(f"  [{agent}] header allowlist: Authorization, {ALLOWED_SKILLS_HEADER}, "
-        f"{USER_TOKEN_HEADER}")
+    log(f"  [{agent}] header allowlist: Authorization")
 
     _grant_prompt_table_read(agent, rt_info["roleArn"], state)
     _grant_memory_read(agent, rt_info["roleArn"], memory_env, state)
@@ -791,28 +677,23 @@ def _grant_scenarios_table_access(agent: str, role_arn: str,
             f"{exc}. Every scene tool will fail at runtime.")
 
 
-def _authorizer_config(agent: str, discovery_url: str, cognito: dict[str, Any],
+def _authorizer_config(agent: str, discovery_url: str,
                        state: dict[str, Any]) -> dict[str, Any]:
     """The Runtime's inbound JWT authorizer, including the grant claim check.
 
     This is where sub-agent authorization actually happens. `customClaims` matches
     `cognito:groups` with `CONTAINS_ANY` over every group of this agent, so a caller
     with no grant is refused by AgentCore before the container is reached — on a
-    claim signed by Cognito, which the caller cannot forge or widen. It replaces
-    `X-A2A-Allowed-Skills`, which the client set itself.
+    claim signed by Cognito, which the caller cannot forge or widen. It replaced a
+    client-set skills header from the retired m2m model.
 
     `CONTAINS_ANY` takes an exact list with no wildcard, so the agent's skills are
     enumerated here from card.json. **Adding a skill therefore needs a redeploy**:
     granting a group that this list does not name leaves the user refused at the
     door with nothing explaining why.
 
-    **The claim check and the old m2m token cannot coexist.** A
-    `client_credentials` token carries no `cognito:groups` at all, so once
-    `customClaims` is set the authorizer refuses it — there is no both-ways window
-    at this layer. The cutover is therefore coordinated: all eight agents get this
-    config, then the orchestrator switches to sending the user token. Delegation
-    fails in between, which is why `--legacy-m2m-auth` exists as the rollback and
-    why the sequence is written down in README's demo notes.
+    A service (`client_credentials`) token carries no `cognito:groups` at all, so
+    the authorizer refuses it: only a user's idToken gets through.
 
     **`allowedAudience`, not `allowedClients`.** `allowedClients` validates the
     `client_id` claim, which only an *access* token carries; a Cognito **idToken**
@@ -825,9 +706,6 @@ def _authorizer_config(agent: str, discovery_url: str, cognito: dict[str, Any],
     The idToken is the right token here regardless: the container needs `sub` and
     `email` (the knowledge base scopes by email) and requires `token_use == "id"`,
     and a Cognito access token has neither `aud` nor `email`.
-
-    The m2m client is kept only under `--legacy-m2m-auth`, which also omits the claim
-    check.
     """
     from common import a2a_groups  # type: ignore
 
@@ -841,19 +719,11 @@ def _authorizer_config(agent: str, discovery_url: str, cognito: dict[str, Any],
 
     app_client = state.get("user_pool_client_id", "")
 
-    if LEGACY_M2M_AUTH:
-        log(f"  [{agent}] LEGACY auth: m2m client, no grant claim check")
-        return {
-            "discoveryUrl": discovery_url,
-            "allowedClients": [cognito["clientId"]],
-        }
-
     if not app_client:
         raise RuntimeError(
             f"[{agent}] no UserPoolClientId in cdk-outputs.json. The grant claim "
             f"path authorizes the END USER's token, so without the app client id "
-            f"every request would be refused. Re-run with --legacy-m2m-auth to "
-            f"deploy the pre-migration auth model instead.")
+            f"every request would be refused.")
 
     # ONE stable agent-level group, not the per-skill list this used to enumerate.
     # `CONTAINS_ANY` has no wildcard, so the old list made "add a skill to the card"
@@ -890,7 +760,7 @@ def _grant_prompt_table_read(agent: str, role_arn: str, state: dict[str, Any]) -
     override; it has no reason to write governance state, and the whole point of
     the design is that the Admin Console is the only writer.
 
-    Written as its own inline policy rather than merged into `A2AM2MSecretRead`:
+    Written as its own inline policy rather than merged into another grant:
     `put_role_policy` REPLACES a policy document, so sharing one name means
     whichever step runs last wins and the other grant vanishes. Same trap the
     tools-Gateway grant hit in setup-agentcore.py.
@@ -926,7 +796,7 @@ def _grant_prompt_table_read(agent: str, role_arn: str, state: dict[str, Any]) -
 
 
 # ------------------------------------------------------------------
-# Step 5: Workload identity (optional — JWT middleware uses client_id check)
+# Step 4: Workload identity (optional)
 # ------------------------------------------------------------------
 
 def ensure_workload_identity(agent: str, state: dict[str, Any]) -> str | None:
@@ -957,7 +827,7 @@ def ensure_workload_identity(agent: str, state: dict[str, Any]) -> str | None:
 
 
 # ------------------------------------------------------------------
-# Step 6: Registry create / update
+# Step 5: Registry create / update
 # ------------------------------------------------------------------
 
 def _as_update_descriptors(descriptors: dict[str, Any]) -> dict[str, Any]:
@@ -1151,25 +1021,33 @@ def ensure_registry_record(
 
 
 # ------------------------------------------------------------------
-# Step 8: Patch text agent Runtime env + secret IAM
+# Step 7: Patch text agent Runtime env
 # ------------------------------------------------------------------
 
+# Env vars an older deploy.py wrote for the retired m2m hop. Nothing reads them
+# any more; they are dropped here so a redeploy does not carry them forward
+# looking like live config.
+RETIRED_TEXT_AGENT_ENV = (
+    "A2A_M2M_SECRET_ARN", "A2A_COGNITO_TOKEN_URL", "A2A_COGNITO_SCOPE")
+
+
 def patch_text_agent(state: dict[str, Any]) -> None:
+    """Point the orchestrator at the Registry. REGISTRY_ID is the A2A feature gate:
+    without it no AgentCard resolves and no `a2a_*` tool is registered.
+
+    The orchestrator needs no credential of its own for A2A — it forwards the
+    signed-in user's idToken — so there is no secret to grant and no token URL.
+    """
     if not state["text_agent_runtime_id"]:
         log("  text agent runtime not found; skipping env patch")
         return
-    cognito = state["deployed"]["cognito"]
     region = state["region"]
     ac = boto3.client("bedrock-agentcore-control", region_name=region)
     runtime_id = state["text_agent_runtime_id"]
     rt = ac.get_agent_runtime(agentRuntimeId=runtime_id)
     env = rt.get("environmentVariables", {}) or {}
-    env.update({
-        "A2A_M2M_SECRET_ARN": cognito["m2mSecretArn"],
-        "A2A_COGNITO_TOKEN_URL": cognito["tokenUrl"],
-        "A2A_COGNITO_SCOPE": cognito["scope"],
-        "REGISTRY_ID": state["registry_id"],
-    })
+    dropped = [k for k in RETIRED_TEXT_AGENT_ENV if env.pop(k, None) is not None]
+    env["REGISTRY_ID"] = state["registry_id"]
     # Preserve existing runtime config (requestHeaderAllowlist / filesystem /
     # protocol) — without these the chatbot's custom auth-forwarding header
     # stops reaching the container and MCP gateway calls start 401ing.
@@ -1189,27 +1067,8 @@ def patch_text_agent(state: dict[str, Any]) -> None:
     if rt.get("filesystemConfigurations"):
         update_kwargs["filesystemConfigurations"] = rt["filesystemConfigurations"]
     ac.update_agent_runtime(**update_kwargs)
-    log(f"  text agent runtime env patched with A2A_*")
-
-    # Attach secrets:GetSecretValue to the role (inline)
-    role_arn = rt["roleArn"]
-    role_name = role_arn.split("/")[-1]
-    iam = boto3.client("iam")
-    inline_name = "A2AM2MSecretRead"
-    policy_doc = {
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Action": ["secretsmanager:GetSecretValue"],
-            "Resource": [cognito["m2mSecretArn"]],
-        }],
-    }
-    try:
-        iam.put_role_policy(RoleName=role_name, PolicyName=inline_name,
-                            PolicyDocument=json.dumps(policy_doc))
-        log(f"  attached inline policy {inline_name} to {role_name}")
-    except Exception as e:
-        log(f"  warn: failed to attach inline policy — {e}")
+    log("  text agent runtime env patched with REGISTRY_ID"
+        + (f" (dropped retired {dropped})" if dropped else ""))
 
 
 def register_runtimes_for_dashboard(state: dict[str, Any]) -> None:
@@ -1281,18 +1140,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="Only run these steps.")
     ap.add_argument("--skip", action="append", default=None,
                     help="Skip these steps.")
-    ap.add_argument("--legacy-m2m-auth", action="store_true",
-                    help="Deploy the pre-migration auth model: m2m client_credentials "
-                         "in Authorization, no cognito:groups grant check. This is "
-                         "the rollback for the claim-based migration; it must be "
-                         "paired with an orchestrator that still sends an m2m token.")
     args = ap.parse_args(argv)
-
-    global LEGACY_M2M_AUTH
-    LEGACY_M2M_AUTH = bool(args.legacy_m2m_auth)
-    if LEGACY_M2M_AUTH:
-        log("LEGACY M2M AUTH: sub-agent authorization falls back to the m2m token "
-            "and the cognito:groups grant check is NOT applied")
 
     agents = parse_agent_list(args.agent)
     steps = parse_steps(args.only, args.skip)
@@ -1302,10 +1150,6 @@ def main(argv: list[str] | None = None) -> int:
     state = load_state()
     log(f"Region: {state['region']}")
     log(f"Registry: {state['registry_id']}")
-
-    if "cognito" in steps:
-        log("\n[cognito] ensuring OAuth2 resources")
-        state = ensure_cognito(state)
 
     for agent in agents:
         log(f"\n=== {agent} ===")
@@ -1341,15 +1185,18 @@ def main(argv: list[str] | None = None) -> int:
         save_deployed(state["deployed"])
 
     if "patch-text-agent" in steps:
-        log("\n[patch-text-agent] wiring A2A envs into smarthome text agent runtime")
+        log("\n[patch-text-agent] wiring REGISTRY_ID into smarthome text agent runtime")
         patch_text_agent(state)
         register_runtimes_for_dashboard(state)
 
-    log(
-        "\nDone. A2A records are in PENDING_APPROVAL. Open the AgentCore "
-        "Registry console and approve them, then grant skill access in the "
-        "Admin Console → Users → Manage Permissions."
-    )
+    if "registry" in steps:
+        log(
+            "\nDone. A2A records are in PENDING_APPROVAL. Open the AgentCore "
+            "Registry console and approve them, then grant access in the "
+            "Admin Console → Build → SubAgent Policy."
+        )
+    else:
+        log("\nDone.")
     return 0
 
 

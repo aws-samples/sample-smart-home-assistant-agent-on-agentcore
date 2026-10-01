@@ -2,8 +2,13 @@
 """Teardown the A2A sample agents.
 
 Reverse of ``deploy.py``. Idempotent. Per-agent steps run first; global
-Cognito/Secret/text-agent-env cleanup runs only when all agents have been
-removed.
+text-agent-env cleanup runs only when all agents have been removed.
+
+The global step also removes what an OLDER deploy.py created for the retired
+m2m A2A auth model (a Cognito app client + resource server, a Secrets Manager
+secret, an inline IAM policy and three env vars on the text runtime). The current
+deploy.py creates none of them; they are cleaned up here, by name, so a
+deployment that predates the migration does not leave them behind.
 
 CLI:
   python teardown.py                              # remove everything
@@ -30,7 +35,7 @@ AGENTCORE_STATE = PROJECT_ROOT / "agentcore-state.json"
 DEPLOYED_STATE = HERE / "deployed-state.json"
 AC_PROJECT_DIR = HERE / ".agentcore-project"
 
-# Roster and Cognito identifiers: see common/agents.py. Teardown reading a stale
+# Roster: see common/agents.py. Teardown reading a stale
 # copy is the worst case of the four — it leaves runtimes running while reporting
 # success.
 sys.path.insert(0, str(HERE))
@@ -38,11 +43,18 @@ from common.agents import (  # noqa: E402
     AGENT_LONG_NAMES,
     AGENT_NAMES,
     AGENT_SHORT_SLUG,
-    M2M_CLIENT_NAME,
     REGISTRY_CLIENT,
-    RESOURCE_SERVER_ID,
-    SECRET_NAME,
 )
+
+# Leftovers of the retired m2m A2A auth model, by the names older deploy.py
+# runs gave them. Nothing creates these any more; listed only so teardown can
+# remove them from a deployment that predates the migration.
+LEGACY_M2M_CLIENT_NAME = "smarthome-a2a-m2m"
+LEGACY_RESOURCE_SERVER_ID = "a2a-server"
+LEGACY_SECRET_NAME = "smarthome/a2a/m2m-credentials"
+LEGACY_SECRET_POLICY_NAME = "A2AM2MSecretRead"
+LEGACY_TEXT_AGENT_ENV = (
+    "A2A_M2M_SECRET_ARN", "A2A_COGNITO_TOKEN_URL", "A2A_COGNITO_SCOPE")
 
 
 def log(msg: str) -> None:
@@ -52,7 +64,7 @@ def log(msg: str) -> None:
 def load_deployed() -> dict[str, Any]:
     if not DEPLOYED_STATE.exists():
         log(f"{DEPLOYED_STATE} not found — nothing to tear down")
-        return {"agents": [], "cognito": {}}
+        return {"agents": []}
     return json.loads(DEPLOYED_STATE.read_text())
 
 
@@ -193,11 +205,10 @@ def teardown_global(deployed: dict[str, Any], region: str, user_pool_id: str) ->
                 rt = ac.get_agent_runtime(agentRuntimeId=runtime_id)
                 env = rt.get("environmentVariables", {}) or {}
                 changed = False
-                # REGISTRY_ID is written by deploy.py's patch_text_agent alongside
-                # the A2A_* vars, so it has to come back off here too — otherwise
-                # agent.py's A2A feature gate stays half-armed after teardown.
-                for key in ("A2A_M2M_SECRET_ARN", "A2A_COGNITO_TOKEN_URL",
-                            "A2A_COGNITO_SCOPE", "REGISTRY_ID"):
+                # REGISTRY_ID is what deploy.py's patch_text_agent writes; it has
+                # to come back off or agent.py's A2A feature gate stays armed after
+                # teardown. The legacy vars go too, if an older deploy left them.
+                for key in (*LEGACY_TEXT_AGENT_ENV, "REGISTRY_ID"):
                     if key in env:
                         env.pop(key)
                         changed = True
@@ -223,38 +234,38 @@ def teardown_global(deployed: dict[str, Any], region: str, user_pool_id: str) ->
                 role_arn = rt["roleArn"]
                 role_name = role_arn.split("/")[-1]
                 try:
-                    iam.delete_role_policy(RoleName=role_name, PolicyName="A2AM2MSecretRead")
-                    log("  detached A2AM2MSecretRead inline policy")
+                    iam.delete_role_policy(RoleName=role_name,
+                                           PolicyName=LEGACY_SECRET_POLICY_NAME)
+                    log(f"  detached legacy {LEGACY_SECRET_POLICY_NAME} inline policy")
                 except Exception:
                     pass
     except Exception as e:
         log(f"  text agent env cleanup skipped — {e}")
 
-    # Delete secret
+    # Legacy m2m leftovers (see the module docstring)
     try:
-        secrets.delete_secret(SecretId=SECRET_NAME, ForceDeleteWithoutRecovery=True)
-        log(f"  deleted Secret {SECRET_NAME}")
+        secrets.delete_secret(SecretId=LEGACY_SECRET_NAME, ForceDeleteWithoutRecovery=True)
+        log(f"  deleted legacy Secret {LEGACY_SECRET_NAME}")
     except Exception as e:
         log(f"  secret delete skipped — {e}")
 
-    # Delete m2m client + resource server
     if user_pool_id:
         try:
             paginator = cognito.get_paginator("list_user_pool_clients")
             for page in paginator.paginate(UserPoolId=user_pool_id, MaxResults=60):
                 for c in page["UserPoolClients"]:
-                    if c["ClientName"] == M2M_CLIENT_NAME:
+                    if c["ClientName"] == LEGACY_M2M_CLIENT_NAME:
                         cognito.delete_user_pool_client(
                             UserPoolId=user_pool_id, ClientId=c["ClientId"]
                         )
-                        log(f"  deleted m2m app client {c['ClientId']}")
+                        log(f"  deleted legacy m2m app client {c['ClientId']}")
         except Exception as e:
             log(f"  m2m client delete skipped — {e}")
         try:
             cognito.delete_resource_server(
-                UserPoolId=user_pool_id, Identifier=RESOURCE_SERVER_ID
+                UserPoolId=user_pool_id, Identifier=LEGACY_RESOURCE_SERVER_ID
             )
-            log(f"  deleted resource server {RESOURCE_SERVER_ID}")
+            log(f"  deleted legacy resource server {LEGACY_RESOURCE_SERVER_ID}")
         except Exception:
             pass
 

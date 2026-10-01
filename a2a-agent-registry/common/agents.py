@@ -78,23 +78,6 @@ AGENT_LONG_NAMES: dict[str, str] = {k: v[0] for k, v in AGENTS.items()}
 AGENT_SHORT_SLUG: dict[str, str] = {k: v[1] for k, v in AGENTS.items()}
 LONG_NAME_TO_AGENT: dict[str, str] = {v: k for k, v in AGENT_LONG_NAMES.items()}
 
-# Cognito resource server / scope identifiers for the m2m inbound auth. Also
-# duplicated across the scripts before now.
-RESOURCE_SERVER_ID = "a2a-server"
-SCOPE_NAME = "invoke"
-SCOPE_FULL = f"{RESOURCE_SERVER_ID}/{SCOPE_NAME}"
-M2M_CLIENT_NAME = "smarthome-a2a-m2m"
-SECRET_NAME = "smarthome/a2a/m2m-credentials"
-
-# Header carrying the end user's idToken on an A2A hop. The `Authorization` slot
-# is taken by the m2m token the Runtime's CUSTOM_JWT authorizer checks, so user
-# identity needs its own header — the same split the main runtime uses with
-# X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken.
-USER_TOKEN_HEADER = "X-SuperApp-User-Token"
-# Skills the caller says it was granted. Sent by the client and ENFORCED
-# server-side; see common.server.
-ALLOWED_SKILLS_HEADER = "X-A2A-Allowed-Skills"
-
 MAX_SLUG_LEN = 18
 
 # AWS Agent Registry GA namespace. Registry left the `bedrock-agentcore` namespace

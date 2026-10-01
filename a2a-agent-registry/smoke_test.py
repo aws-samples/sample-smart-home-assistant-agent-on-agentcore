@@ -2,11 +2,14 @@
 """Smoke test the deployed A2A sample agents.
 
 For each entry in ``deployed-state.json``:
-  1. Fetch a Cognito m2m token (client_credentials grant).
+  1. Sign in as the admin user and take its idToken — the only credential an A2A
+     hop carries (the grant is its ``cognito:groups`` claim).
   2. Open the Runtime invocation URL as the A2A endpoint.
   3. Fetch ``/.well-known/agent-card.json`` and print name + skills.
   4. Send one ``message/send`` with a known prompt; assert reply contains
      the agent's marker token.
+
+Then a set of negative cases, each a way authorization could fail open.
 """
 
 from __future__ import annotations
@@ -82,33 +85,20 @@ PROMPTS = {
 # agent silently, which is the opposite of what a smoke test is for.
 sys.path.insert(0, str(HERE))
 from common.agents import AGENT_LONG_NAMES as AGENT_SHORT_TO_LONG  # noqa: E402
-from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER  # noqa: E402
 
 
-def fetch_m2m_token(region: str, token_url: str, scope: str, secret_arn: str) -> str:
-    sm = boto3.client("secretsmanager", region_name=region)
-    creds = json.loads(sm.get_secret_value(SecretId=secret_arn)["SecretString"])
-    r = httpx.post(
-        token_url,
-        data={"grant_type": "client_credentials", "scope": scope},
-        auth=(creds["client_id"], creds["client_secret"]),
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
+def fetch_admin_tokens() -> tuple[str, str]:
+    """Sign in as the admin user and return ``(idToken, accessToken)``.
 
-
-def fetch_user_id_token() -> str:
-    """Sign in as the admin user and return an idToken.
-
-    Stands in for the chatbot: an agent with tools needs a real end user to act
-    as, and the m2m token cannot supply one. Returns "" if the credentials are not
-    available, so the prompt-only agents still get tested.
+    The idToken stands in for the chatbot's: it is what the orchestrator forwards.
+    The access token is kept for a negative case — same pool, valid signature, but
+    not a user identity, so both the authorizer and the container must refuse it.
+    Returns ``("", "")`` if the credentials are not available.
     """
     outputs_path = HERE.parent / "cdk-outputs.json"
     if not outputs_path.exists():
         print(f"  note: {outputs_path} missing — skipping the user idToken")
-        return ""
+        return "", ""
     outputs = json.loads(outputs_path.read_text())
     out = outputs[next(iter(outputs))]
     try:
@@ -122,11 +112,17 @@ def fetch_user_id_token() -> str:
                 "PASSWORD": out["AdminPassword"],
             },
         )
-        return resp["AuthenticationResult"]["IdToken"]
+        result = resp["AuthenticationResult"]
+        return result["IdToken"], result.get("AccessToken", "")
     except Exception as exc:  # noqa: BLE001
-        print(f"  note: could not fetch a user idToken ({exc}) — tool-using "
-              f"agents will refuse")
-        return ""
+        print(f"  note: could not fetch a user idToken ({exc}) — every agent "
+              f"will refuse")
+        return "", ""
+
+
+def fetch_user_id_token() -> str:
+    """The admin user's idToken, or "" — see `fetch_admin_tokens`."""
+    return fetch_admin_tokens()[0]
 
 
 def _token_groups(token: str) -> list:
@@ -229,7 +225,7 @@ def _card_skill_ids(agent: str) -> list[str]:
     return [s["id"] for s in (card.get("skills") or []) if s.get("id")]
 
 
-async def smoke_one(entry: dict, token: str, user_token: str | None = None) -> bool:
+async def smoke_one(entry: dict, user_token: str) -> bool:
     agent_long = AGENT_SHORT_TO_LONG[entry["agent"]]
     if agent_long not in PROMPTS:
         # A new agent added to the roster without a probe here would otherwise
@@ -248,13 +244,12 @@ async def smoke_one(entry: dict, token: str, user_token: str | None = None) -> b
 
     # The end user's own token is the ONLY credential now: the Runtime authorizer
     # validates it and matches its `cognito:groups` claim against this agent's grant
-    # groups, and the server derives the skill set from the same claim. Sending an
-    # m2m token here would be refused at the door, which is the point.
-    headers = {"Authorization": f"Bearer {user_token or token}"}
+    # groups, and the server derives the skill set from the same claim.
+    headers = {"Authorization": f"Bearer {user_token}"}
     print(f"\n=== {agent_long} ===")
     print(f"  endpoint: {endpoint}")
     print(f"  granted skills (from the token claim): "
-          f"{sorted(_granted_skills_from_token(user_token or token, agent_long))}")
+          f"{sorted(_granted_skills_from_token(user_token, agent_long))}")
     async with httpx.AsyncClient(headers=headers, timeout=120) as http:
         try:
             # AgentCore Runtime likely serves the card under /invocations
@@ -311,8 +306,7 @@ async def smoke_one(entry: dict, token: str, user_token: str | None = None) -> b
             return False
 
 
-async def expect_refusal(entry: dict, token: str, skills_header: str | None,
-                         label: str) -> bool:
+async def expect_refusal(entry: dict, token: str, label: str) -> bool:
     """Send a request that SHOULD be refused and report whether it was.
 
     This is the half of the smoke test that proves authorization exists. A passing
@@ -325,11 +319,6 @@ async def expect_refusal(entry: dict, token: str, skills_header: str | None,
         reached. That arrives as a transport-level 403.
       - the container, which derives the skill set from the same claim and refuses
         with a readable "Request refused: ..." reply.
-
-    `skills_header` is accepted but no longer sent as a grant — the client cannot
-    assert its own grant any more, which is the whole point of the change. It is kept
-    in the signature so a caller that passes it does not silently get a DIFFERENT
-    test than it asked for.
     """
     invocation_url = entry["invocationUrl"]
     headers = {"Authorization": f"Bearer {token}"}
@@ -376,26 +365,15 @@ async def expect_refusal(entry: dict, token: str, skills_header: str | None,
 
 async def main() -> int:
     state = json.loads(DEPLOYED_STATE.read_text())
-    cognito = state["cognito"]
-    region = cognito["tokenUrl"].split(".")[1]  # parse "...auth.us-west-2.amazoncognito.com"
-    # More robust parse: token_url = https://<domain>.auth.<region>.amazoncognito.com/oauth2/token
-    try:
-        region = cognito["tokenUrl"].split(".auth.")[1].split(".amazoncognito")[0]
-    except Exception:
-        pass
-    token = fetch_m2m_token(
-        region=region,
-        token_url=cognito["tokenUrl"],
-        scope=cognito["scope"],
-        secret_arn=cognito["m2mSecretArn"],
-    )
-    print(f"fetched m2m token ({len(token)} chars)")
 
-    # An agent with tools acts on a real user's devices and refuses a request with
-    # no verified user identity, so the smoke test has to present one the way the
-    # orchestrator does. Sign in as the admin from cdk-outputs.json.
-    user_token = fetch_user_id_token()
+    # Every agent's Runtime authorizer admits only an end user's idToken whose
+    # `cognito:groups` holds a grant on it, so the smoke test presents one the way
+    # the orchestrator does. Sign in as the admin from cdk-outputs.json.
+    user_token, access_token = fetch_admin_tokens()
     print(f"fetched user idToken ({len(user_token) if user_token else 0} chars)")
+    if not user_token:
+        print("cannot smoke test without a user idToken — every agent would refuse")
+        return 2
 
     # A positive probe against an agent this user holds no grant on is not a test:
     # the authorizer refuses before the container, which is CORRECT behaviour and
@@ -412,7 +390,7 @@ async def main() -> int:
                   "probe would only re-test the authorizer's refusal. Grant it on "
                   "Build -> SubAgent Policy and sign in again to include it.")
             continue
-        results[entry["agent"]] = await smoke_one(entry, token, user_token)
+        results[entry["agent"]] = await smoke_one(entry, user_token)
 
     if skipped:
         print(f"\nnote: {len(skipped)} agent(s) skipped for lack of a grant: "
@@ -425,11 +403,19 @@ async def main() -> int:
     if state["agents"]:
         probe = state["agents"][0]
 
-        # 1. The old service token. It carries no `cognito:groups` at all, so the
-        #    Runtime authorizer must reject it. If this passes, the migration did not
-        #    take effect on this agent and the old client-asserted model still works.
-        results["negative:m2m-token-no-longer-accepted"] = await expect_refusal(
-            probe, token, None, "m2m service token (pre-migration credential)")
+        # 1. A token from the right pool that is not a user identity. The admin's
+        #    ACCESS token is signed by the same issuer, but it has no `aud` (so the
+        #    authorizer's allowedAudience refuses it) and `token_use` is "access" (so
+        #    the container would refuse it too). If this passes, something other than
+        #    an end user's idToken can reach a specialist.
+        if access_token:
+            results["negative:non-id-token-rejected"] = await expect_refusal(
+                probe, access_token, "access token from the same pool (not an idToken)")
+        else:
+            print("\n--- negative: access token — SKIPPED (sign-in returned none) ---")
+
+        #    It replaces the pre-migration check that the old m2m service token was
+        #    refused; that token type is no longer minted anywhere.
 
         # 2. A real, valid user token belonging to someone with NO grant on any
         #    agent. This is the case that matters most: a legitimate user must not
@@ -437,7 +423,7 @@ async def main() -> int:
         ungranted = fetch_ungranted_user_token()
         if ungranted:
             results["negative:valid-user-without-a-grant"] = await expect_refusal(
-                probe, ungranted, None, "valid user token with no grant")
+                probe, ungranted, "valid user token with no grant")
         else:
             print("\n--- negative: valid user with no grant — SKIPPED "
                   "(could not provision a grantless user) ---")
@@ -445,21 +431,20 @@ async def main() -> int:
         # 3. Cross-agent: a token granted on agent A must not open agent B. Only
         #    meaningful when the two agents have genuinely different grants, which is
         #    why it looks for an agent the user holds nothing on.
-        if user_token:
-            from common import a2a_groups  # type: ignore
+        from common import a2a_groups  # type: ignore
 
-            claims_groups = _token_groups(user_token)
-            held = set(a2a_groups.grants_from_claim(claims_groups))
-            other = next(
-                (e for e in state["agents"]
-                 if AGENT_SHORT_TO_LONG[e["agent"]] not in held), None)
-            if other is not None:
-                results["negative:cross-agent-grant"] = await expect_refusal(
-                    other, user_token, None,
-                    f"granted elsewhere but not on {AGENT_SHORT_TO_LONG[other['agent']]}")
-            else:
-                print("\n--- negative: cross-agent — SKIPPED (this user is granted "
-                      "on every deployed agent, so there is no negative to test) ---")
+        claims_groups = _token_groups(user_token)
+        held = set(a2a_groups.grants_from_claim(claims_groups))
+        other = next(
+            (e for e in state["agents"]
+             if AGENT_SHORT_TO_LONG[e["agent"]] not in held), None)
+        if other is not None:
+            results["negative:cross-agent-grant"] = await expect_refusal(
+                other, user_token,
+                f"granted elsewhere but not on {AGENT_SHORT_TO_LONG[other['agent']]}")
+        else:
+            print("\n--- negative: cross-agent — SKIPPED (this user is granted "
+                  "on every deployed agent, so there is no negative to test) ---")
 
     print()
     print("summary:", results)

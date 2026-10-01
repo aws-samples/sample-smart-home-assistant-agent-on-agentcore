@@ -30,17 +30,17 @@ from a2a.types import Message, Part, Role, TextPart
 REPO = Path(__file__).resolve().parent.parent
 HERE = REPO / "a2a-agent-registry"
 sys.path.insert(0, str(HERE))
-from common.agents import ALLOWED_SKILLS_HEADER
 
 state = json.loads((HERE / "deployed-state.json").read_text())
-cog = state["cognito"]
-region = cog["tokenUrl"].split(".auth.")[1].split(".amazoncognito")[0]
-creds = json.loads(boto3.client("secretsmanager", region_name=region)
-                   .get_secret_value(SecretId=cog["m2mSecretArn"])["SecretString"])
-m2m = httpx.post(cog["tokenUrl"],
-                 data={"grant_type": "client_credentials", "scope": cog["scope"]},
-                 auth=(creds["client_id"], creds["client_secret"]), timeout=10
-                 ).json()["access_token"]
+region = state["agents"][0]["runtimeArn"].split(":")[3]
+# The admin's idToken is the only credential an A2A hop carries; it must hold a
+# grant on each agent below (its `cognito:groups` claim), or that agent refuses.
+_out = json.loads((REPO / "cdk-outputs.json").read_text())
+_o = _out[next(iter(_out))]
+idtok = boto3.client("cognito-idp", region_name=region).initiate_auth(
+    ClientId=_o["UserPoolClientId"], AuthFlow="USER_PASSWORD_AUTH",
+    AuthParameters={"USERNAME": _o["AdminUsername"], "PASSWORD": _o["AdminPassword"]}
+)["AuthenticationResult"]["IdToken"]
 
 WORK = [
     ("home-security", "In one sentence: my biggest smart-home security gap?"),
@@ -51,13 +51,9 @@ WORK = [
 def _entry(agent):
     return next(a for a in state["agents"] if a["agent"] == agent)
 
-def _skills(agent):
-    return [s["id"] for s in json.loads((HERE / agent / "card.json").read_text())["skills"]]
-
 async def call(agent, text):
     e = _entry(agent)
-    headers = {"Authorization": f"Bearer {m2m}",
-               ALLOWED_SKILLS_HEADER: ",".join(_skills(agent))}
+    headers = {"Authorization": f"Bearer {idtok}"}
     async with httpx.AsyncClient(headers=headers, timeout=180) as http:
         card = await A2ACardResolver(http, e["invocationUrl"]).get_agent_card()
         card.url = e["invocationUrl"]

@@ -31,19 +31,11 @@ REPO = Path(__file__).resolve().parent.parent
 HERE = REPO / "a2a-agent-registry"
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "shared"))
-from common.agents import ALLOWED_SKILLS_HEADER, USER_TOKEN_HEADER
 from device_brief import delegation_context
 
 state = json.loads((HERE / "deployed-state.json").read_text())
 entry = next(a for a in state["agents"] if a["agent"] == "light-effect")
-cog = state["cognito"]
-region = cog["tokenUrl"].split(".auth.")[1].split(".amazoncognito")[0]
-sm = boto3.client("secretsmanager", region_name=region)
-creds = json.loads(sm.get_secret_value(SecretId=cog["m2mSecretArn"])["SecretString"])
-m2m = httpx.post(cog["tokenUrl"], data={"grant_type": "client_credentials",
-                 "scope": cog["scope"]},
-                 auth=(creds["client_id"], creds["client_secret"]), timeout=10
-                 ).json()["access_token"]
+region = entry["runtimeArn"].split(":")[3]
 out = json.loads((REPO / "cdk-outputs.json").read_text())
 o = out[next(iter(out))]
 idtok = boto3.client("cognito-idp", region_name=region).initiate_auth(
@@ -51,14 +43,13 @@ idtok = boto3.client("cognito-idp", region_name=region).initiate_auth(
     AuthParameters={"USERNAME": o["AdminUsername"], "PASSWORD": o["AdminPassword"]}
 )["AuthenticationResult"]["IdToken"]
 
-skills = [s["id"] for s in json.loads((HERE / "light-effect" / "card.json").read_text())["skills"]]
 BASE = "Compose a calm twilight lighting effect for the living room light strip."
 
 async def one(with_brief):
     msg = BASE + (delegation_context(BASE) if with_brief else "")
-    headers = {"Authorization": f"Bearer {m2m}",
-               ALLOWED_SKILLS_HEADER: ",".join(skills),
-               USER_TOKEN_HEADER: idtok}
+    # The admin's idToken is the only credential; it must hold a grant on this
+    # agent (its `cognito:groups` claim), or the Runtime authorizer refuses.
+    headers = {"Authorization": f"Bearer {idtok}"}
     async with httpx.AsyncClient(headers=headers, timeout=120) as http:
         card = await A2ACardResolver(http, entry["invocationUrl"]).get_agent_card()
         card.url = entry["invocationUrl"]
