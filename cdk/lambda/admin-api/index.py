@@ -1276,17 +1276,17 @@ def update_user_permissions(event):
     # Determine which tools need policy rebuild.
     #
     # The SYMMETRIC difference — only tools whose membership actually changed for
-    # this user. It was the union, which is wrong in a way that is invisible until
-    # it is not: a tool with no Cedar policy is allow-all (measured — the tools
-    # gateway runs in ENFORCE mode with zero policies and serves all six tools),
-    # and rebuilding materialises a permit naming only the users who hold the tool
-    # in DynamoDB. Just 14 of 40 users have a `__permissions__` row here, so
-    # granting ONE new tool to ONE user would have created permits for the six
-    # device tools and revoked them from the other 26 — reported as a successful
-    # save of an unrelated grant.
+    # this user. A tool present in both old and new cannot need a new policy: the
+    # policy is derived from every user holding it, and that set did not change.
+    # Rebuilding the unchanged ones is a wasted, throttle-prone control-plane call
+    # per tool per save.
     #
-    # A tool present in both old and new cannot need a new policy: the policy is
-    # derived from every user holding it, and that set did not change.
+    # On what an ABSENT policy means, two measurements: with ZERO policies on the
+    # engine this gateway served all six tools (2026-08); with policies present, a
+    # user named in no permit gets `tools/list` = [] (2026-09-18, throwaway user
+    # with no `__permissions__` row). Every tool carries a permit today, so "no
+    # row" means "no tools", and the Tool Policy page shows exactly that instead
+    # of pre-ticking built-ins the gateway refuses.
     affected_tools = set(old_tools) ^ set(new_tools)
 
     if not GATEWAY_ID:
@@ -1479,6 +1479,73 @@ def _resolve_ddb_user_key(user_id: str) -> str:
     return user_id
 
 
+# ---------------------------------------------------------------------------
+# Per-user skill policy: the skills a user does NOT get.
+#
+# Skills are global UNION per-user (`agent.load_skills_from_dynamodb`), which had
+# no way to take a global skill away from one user. Two global skills are not
+# prose: `browser-use` registers browse_web and `code-interpreter` registers
+# execute_python, so every user held both with no admin lever. Stored as one row:
+#   userId = <email> | skillName = "__skill_policy__" | disabledSkills = [name, ...]
+# and read by the agent AFTER the merge (agent/skill_policy.py). Same route and
+# `?action=` dispatch as the A2A grants, for the same 20 KB resource-policy reason.
+# ---------------------------------------------------------------------------
+
+_SKILL_POLICY_SK = "__skill_policy__"
+
+
+def get_user_skill_policy(event):
+    """GET /users/{userId}/permissions?action=skills -> {disabledSkills: [...]}."""
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    ddb_key = _resolve_ddb_user_key(user_id)
+    item = table.get_item(
+        Key={"userId": ddb_key, "skillName": _SKILL_POLICY_SK}).get("Item") or {}
+    raw = item.get("disabledSkills") or []
+    disabled = sorted({str(s) for s in raw}) if isinstance(raw, (set, list, tuple)) else []
+    return response(200, {
+        "userId": user_id,
+        "disabledSkills": disabled,
+        "updatedAt": item.get("updatedAt", ""),
+    })
+
+
+def update_user_skill_policy(event):
+    """PUT /users/{userId}/permissions?action=skills  body: {disabledSkills: [...]}.
+
+    An empty list deletes the row. Refused for `__global__`: the global scope IS the
+    baseline, so a global disable list would only be a slower way to delete the
+    skill. Keyed the way the agent reads per-user rows (email), like A2A grants.
+    """
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    if user_id == GLOBAL_SCOPE:
+        return response(400, {"error": "a disable list has no meaning for __global__; "
+                                       "delete the global skill instead"})
+    body = json.loads(event.get("body") or "{}")
+    raw = body.get("disabledSkills", [])
+    if not isinstance(raw, list):
+        return response(400, {"error": "disabledSkills must be a list"})
+    disabled = sorted({str(s).strip() for s in raw if str(s).strip()})
+    ddb_key = _resolve_ddb_user_key(user_id)
+    ts = now_iso()
+    if disabled:
+        table.put_item(Item={
+            "userId": ddb_key,
+            "skillName": _SKILL_POLICY_SK,
+            "disabledSkills": disabled,
+            "updatedAt": ts,
+            "updatedBy": _caller_id(event),
+        })
+    else:
+        table.delete_item(Key={"userId": ddb_key, "skillName": _SKILL_POLICY_SK})
+    return response(200, {"userId": user_id, "disabledSkills": disabled, "updatedAt": ts})
+
+
 def get_user_a2a_permissions(event):
     """GET /users/{userId}/permissions?action=a2a — return a user's A2A grants
     plus the full catalog of APPROVED A2A agents so the UI renders in one round
@@ -1559,7 +1626,17 @@ def update_user_a2a_permissions(event):
 
     Body: {"a2aGrants": {recordId: [skillId,...], ...}}. Empty map deletes the
     row. Validates every recordId is APPROVED + A2A and every skillId is in the
-    card. Returns 400 on validation error, 200 on success."""
+    card. Returns 400 on validation error, 200 on success.
+
+    An EMPTY skill list is kept, not dropped. `effective_grants` reads
+    `{agent: []}` as "no skills on this sub-agent for this user", and that entry is
+    the only way to take a globally granted sub-agent away from one user, because
+    per-user grants replace global per sub-agent and an ABSENT key inherits. This
+    handler used to strip empty lists as noise, so the narrowing every layer below
+    it was built to honour could not be saved: measured live on 2026-09-18, a user
+    whose row omitted appliance-maintenance carried all four of its groups in the
+    token and the A2A gateway admitted them with a 200.
+    """
     path_params = event.get("pathParameters") or {}
     user_id = unquote(path_params.get("userId", ""))
     if not user_id:
@@ -1570,16 +1647,14 @@ def update_user_a2a_permissions(event):
     grants_in = body.get("a2aGrants", {})
     if not isinstance(grants_in, dict):
         return response(400, {"error": "a2aGrants must be an object"})
-    # Normalise values to lists of strings.
+    # Normalise values to sorted lists of strings. `[]` stays — see the docstring.
     grants: dict = {}
     for rid, skills in grants_in.items():
         if not isinstance(rid, str) or not rid:
             return response(400, {"error": f"invalid recordId: {rid!r}"})
         if not isinstance(skills, list):
             return response(400, {"error": f"skills for {rid} must be a list"})
-        clean = [str(s) for s in skills if str(s).strip()]
-        if clean:
-            grants[rid] = sorted(set(clean))
+        grants[rid] = sorted({str(s) for s in skills if str(s).strip()})
 
     # Validate each recordId against the approved catalog.
     catalog = {c["recordId"]: c for c in _fetch_grantable_a2a_cards()}
@@ -1597,6 +1672,10 @@ def update_user_a2a_permissions(event):
             )
     if errors:
         return response(400, {"error": "validation failed", "details": errors})
+
+    # What this user could reach before the write, so a lost grant can be told
+    # apart from a rearranged one. Read BEFORE the put, or before == after.
+    lost_access = _effective_access_lost(ddb_key, grants)
 
     ts = now_iso()
     if grants:
@@ -1618,12 +1697,42 @@ def update_user_a2a_permissions(event):
     # successful and change nothing the platform can see.
     sync = _materialise_a2a_grants(user_id, ddb_key, catalog)
 
+    # The materialiser signs a user out only when it REMOVED a membership. A grant
+    # inherited from global was never a membership — it is injected into the claim
+    # at token issue — so blocking it here removes nothing, and without this the
+    # user keeps the specialist until their token expires. That is the revocation
+    # that silently does nothing for an hour, which this page promises not to have.
+    if (lost_access and ddb_key != GLOBAL_SCOPE and COGNITO_USER_POOL_ID
+            and user_id not in (sync.get("signedOut") or [])):
+        if subagent_policy.force_token_refresh(
+                cognito_client, COGNITO_USER_POOL_ID, user_id):
+            sync.setdefault("signedOut", []).append(user_id)
+
     return response(200, {
         "userId": user_id,
         "a2aGrants": grants,
         "updatedAt": ts,
         "groupSync": sync,
     })
+
+
+def _effective_access_lost(ddb_key: str, new_intent: dict) -> bool:
+    """Would `new_intent` leave this user able to reach LESS than they can now?
+
+    Compares EFFECTIVE access — global merged with the user's own row, per-user
+    replacing global per sub-agent — not the row alone. A row that gains an entry
+    `{agent: []}` grows, yet the user loses that agent; only the effective view
+    sees it. Global scope always answers False: narrowing the global default has
+    never signed everyone out, and that fan-out is not this function's to add.
+    """
+    if ddb_key == GLOBAL_SCOPE:
+        return False
+    global_intent = subagent_policy.read_intent(table, GLOBAL_SCOPE)
+    before = subagent_policy.effective_grants(
+        global_intent, subagent_policy.read_intent(table, ddb_key))
+    after = subagent_policy.effective_grants(global_intent, new_intent)
+    return any(set(skills) - set(after.get(rid, []))
+               for rid, skills in before.items())
 
 
 def _record_card_names(catalog: dict) -> dict[str, str]:
@@ -4794,6 +4903,8 @@ def _dispatch(event, context):
             return get_user_a2a_permissions(event)
         if action == "a2a-reconcile":
             return reconcile_a2a_grants(event)
+        if action == "skills":
+            return get_user_skill_policy(event)
         return get_user_permissions(event)
     if resource == "/users/{userId}/permissions" and method == "PUT":
         action = (event.get("queryStringParameters") or {}).get("action")
@@ -4801,6 +4912,8 @@ def _dispatch(event, context):
             return update_user_a2a_permissions(event)
         if action == "a2a-reconcile":
             return repair_a2a_grants(event)
+        if action == "skills":
+            return update_user_skill_policy(event)
         return update_user_permissions(event)
 
     # Skill routes — also carry agent-prompt traffic on the {userId}/{skillName}

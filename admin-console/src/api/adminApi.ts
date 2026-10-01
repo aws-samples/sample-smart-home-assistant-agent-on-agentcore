@@ -603,6 +603,46 @@ export async function getUserPermissions(userId: string): Promise<UserPermission
   return res.json();
 }
 
+/** Per-user skill policy: the GLOBAL skills this user does NOT get.
+ *
+ *  Skills are global UNION per-user on the agent side, so this list is the only
+ *  subtraction. Two global skills carry tools (browser-use -> browse_web,
+ *  code-interpreter -> execute_python), so disabling them here removes the tool. */
+export interface UserSkillPolicy {
+  userId: string;
+  disabledSkills: string[];
+  updatedAt?: string;
+}
+
+export async function getUserSkillPolicy(userId: string): Promise<UserSkillPolicy> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=skills`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get skill policy (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function updateUserSkillPolicy(
+  userId: string,
+  disabledSkills: string[]
+): Promise<UserSkillPolicy> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=skills`,
+    { method: 'PUT', headers, body: JSON.stringify({ disabledSkills }) }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to update skill policy (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function updateUserPermissions(
   userId: string,
   allowedTools: string[]

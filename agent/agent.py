@@ -36,6 +36,7 @@ import a2a_groups
 # Claim parsing lives in its own module so it can be imported and tested without
 # pulling in strands/playwright/browser-use.
 from a2a_grants import grants_from_user_token
+import skill_policy
 # The generated half of the delegation prompt. Also import-light.
 import a2a_prompt
 
@@ -128,7 +129,11 @@ def load_skills_from_dynamodb(actor_id: str) -> list:
                 metadata=item.get("metadata") or {},
             )
 
-    return list(skills_by_name.values())
+    # The ONE subtraction in an additive model, applied after the merge: skills an
+    # admin has disabled for this user on the Skills page. See skill_policy.py.
+    return skill_policy.apply_disabled(
+        list(skills_by_name.values()),
+        skill_policy.read_disabled(table, actor_id))
 
 
 def load_user_settings(actor_id: str) -> dict:
@@ -845,17 +850,29 @@ def invoke_agent(prompt, session_id="default", actor_id="default", auth_header=N
             # instantiation and does not load as a plain module. The
             # session_manager already persists turns to Memory, so the
             # user-feedback skill records its marker as conversation text.
+            #
+            # Registered only when an effective skill DECLARES the tool in its
+            # `allowedTools`. These two used to be handed to every user
+            # unconditionally — a live HTTP client and a file writer with no admin
+            # lever. The shipped skills already declare them (weather-lookup →
+            # http_request, user-feedback → file_write), so nothing changes for a
+            # user who holds those skills; disabling the skill now removes the tool.
             builtin_tools = []
-            try:
-                from strands_tools import http_request as _sst_http_request
-                builtin_tools.append(_sst_http_request)
-            except Exception as e:
-                logger.warning(f"http_request built-in not available: {e}")
-            try:
-                from strands_tools import file_write as _sst_file_write
-                builtin_tools.append(_sst_file_write)
-            except Exception as e:
-                logger.warning(f"file_write built-in not available: {e}")
+            if skill_policy.builtin_wanted(skills, "http_request"):
+                try:
+                    from strands_tools import http_request as _sst_http_request
+                    builtin_tools.append(_sst_http_request)
+                except Exception as e:
+                    logger.warning(f"http_request built-in not available: {e}")
+            if skill_policy.builtin_wanted(skills, "file_write"):
+                try:
+                    from strands_tools import file_write as _sst_file_write
+                    builtin_tools.append(_sst_file_write)
+                except Exception as e:
+                    logger.warning(f"file_write built-in not available: {e}")
+            logger.info(
+                f"built-in tools for actor={actor_id}: "
+                f"{[getattr(t, 'TOOL_SPEC', {}).get('name', getattr(t, '__name__', '?')) for t in builtin_tools]}")
 
             # Browser-use tool: only register when the effective skill set
             # for this user includes "browser-use". The closure pins user_id

@@ -23,6 +23,8 @@ import {
   CatalogModel,
   getUserPermissions,
   updateUserPermissions,
+  getUserSkillPolicy,
+  updateUserSkillPolicy,
   listMemoryActors,
   getMemoryRecords,
   getKBStatus,
@@ -2582,6 +2584,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   // useResizableTables.ts for why they are stored per column id rather than positionally.
   const resizable = useResizableTables();
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  // Per-user skill policy (Skills page, user scope): the global skills this user
+  // is denied. `globalSkillsForPolicy` is what the toggles list; the two disabled
+  // arrays are draft vs saved so the Save button knows when there is work.
+  const [globalSkillsForPolicy, setGlobalSkillsForPolicy] = useState<SkillItem[]>([]);
+  const [disabledSkills, setDisabledSkills] = useState<string[]>([]);
+  const [savedDisabledSkills, setSavedDisabledSkills] = useState<string[]>([]);
+  const [skillPolicySaving, setSkillPolicySaving] = useState(false);
   const [userIds, setUserIds] = useState<string[]>(['__global__']);
   const [selectedUserId, setSelectedUserId] = useState('__global__');
   const [isLoading, setIsLoading] = useState(false);
@@ -2776,6 +2785,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [policyMode, setPolicyMode] = useState<'ENFORCE' | 'LOG_ONLY'>('ENFORCE');
   const [policyModeSaving, setPolicyModeSaving] = useState(false);
   const [permOriginal, setPermOriginal] = useState<string[]>([]);
+  // Whether the selected user has a `__permissions__` row at all. Without one the
+  // gateway serves them NO tools (Cedar default-deny, measured 2026-09-18), and
+  // the panel says so instead of pre-ticking tools they cannot call.
+  const [permHasRow, setPermHasRow] = useState(true);
 
   // File manager (shown when editing a skill)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
@@ -2793,12 +2806,47 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     try {
       const items = await listSkills(selectedUserId);
       setSkills(items);
+      if (selectedUserId === '__global__') {
+        setGlobalSkillsForPolicy([]);
+        setDisabledSkills([]);
+        setSavedDisabledSkills([]);
+      } else {
+        // Under a user, the page also has to show what they INHERIT, because
+        // that is the only place the inherited part can be switched off.
+        const [globals, policy] = await Promise.all([
+          listSkills('__global__'),
+          getUserSkillPolicy(selectedUserId),
+        ]);
+        setGlobalSkillsForPolicy(globals);
+        setDisabledSkills(policy.disabledSkills || []);
+        setSavedDisabledSkills(policy.disabledSkills || []);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setIsLoading(false);
     }
   }, [selectedUserId]);
+
+  const skillPolicyDirty = useMemo(
+    () => JSON.stringify([...disabledSkills].sort()) !== JSON.stringify([...savedDisabledSkills].sort()),
+    [disabledSkills, savedDisabledSkills],
+  );
+
+  const handleSaveSkillPolicy = async () => {
+    clearMessages();
+    setSkillPolicySaving(true);
+    try {
+      const result = await updateUserSkillPolicy(selectedUserId, disabledSkills);
+      setDisabledSkills(result.disabledSkills || []);
+      setSavedDisabledSkills(result.disabledSkills || []);
+      setSuccess(t('skills.policySaved').replace('{user}', displayUserId(selectedUserId)));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSkillPolicySaving(false);
+    }
+  };
 
   const loadSettings = useCallback(async () => {
     try {
@@ -2987,16 +3035,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     try {
       const perms = await getUserPermissions(getActorId(user));
       const allowed = perms.allowedTools || [];
-      // If the user has no explicit permission record yet (empty list),
-      // default-allow every built-in tool per spec. Gateway-scanned tools
-      // stay unchecked by default — admins opt users in explicitly.
-      const initialAllowed = allowed.length === 0
-        ? gatewayTools.filter((t) => t.source === 'builtin').map((t) => t.name)
-        : allowed;
-      setPermOriginal(initialAllowed);
+      // Show what is STORED. This used to pre-tick every built-in tool for a user
+      // with no row ("default-allow per spec"), while the gateway — Cedar permits
+      // naming principal ids, default-deny otherwise — served that user nothing.
+      // A panel that shows access the platform refuses is worse than an empty one.
+      setPermHasRow(allowed.length > 0);
+      setPermOriginal(allowed);
       const selections: Record<string, boolean> = {};
       for (const tool of gatewayTools) {
-        selections[tool.name] = initialAllowed.includes(tool.name);
+        selections[tool.name] = allowed.includes(tool.name);
       }
       setUserToolSelections(selections);
     } catch (err: any) {
@@ -3014,6 +3061,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         .map(([name]) => name);
       await updateUserPermissions(getActorId(selectedPermUser), selectedTools);
       setPermOriginal(selectedTools);
+      setPermHasRow(selectedTools.length > 0);
 
       setSuccess(t('users.permsUpdated').replace('{user}', selectedPermUser.email || selectedPermUser.username || ''));
     } catch (err: any) {
@@ -3835,6 +3883,70 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         </Button>
       </SpaceBetween>
 
+      {/* Inherited global skills, with the per-user OFF switch. Skills are global
+          UNION per-user on the agent, so this is the only subtraction there is —
+          and two of these skills are tools (browser-use -> browse_web,
+          code-interpreter -> execute_python), which every user held with no lever
+          until this existed. */}
+      {selectedUserId !== '__global__' && !showForm && (
+        <Container
+          header={
+            <CloudscapeHeader
+              variant="h3"
+              description={t('skills.inheritedHint')}
+              counter={`(${globalSkillsForPolicy.length - disabledSkills.filter((n) =>
+                globalSkillsForPolicy.some((g) => g.skillName === n)).length}/${globalSkillsForPolicy.length})`}
+              actions={
+                <Button
+                  variant="primary"
+                  loading={skillPolicySaving}
+                  disabled={!skillPolicyDirty}
+                  onClick={handleSaveSkillPolicy}
+                >
+                  {t('skills.savePolicy')}
+                </Button>
+              }
+            >
+              {t('skills.inheritedTitle')}
+            </CloudscapeHeader>
+          }
+        >
+          {globalSkillsForPolicy.length === 0 ? (
+            <CloudscapeBox color="text-body-secondary">{t('skills.noGlobalSkills')}</CloudscapeBox>
+          ) : (
+            <Table
+              variant="embedded"
+              contentDensity="compact"
+              items={globalSkillsForPolicy}
+              trackBy="skillName"
+              {...resizable<SkillItem>('skills-inherited', [
+                { id: 'name', width: W_NAME, header: t('skills.colName'), cell: (g) => g.skillName },
+                { id: 'description', width: TEXT_COL_MAX, header: t('skills.colDescription'),
+                  cell: (g) => <WrapCell>{g.description}</WrapCell> },
+                { id: 'tools', width: W_WIDE, header: t('skills.colTools'),
+                  cell: (g) => (g.allowedTools || []).join(', ') || '-' },
+                {
+                  id: 'enabled', width: 200, header: t('skills.colEnabledForUser'),
+                  cell: (g) => {
+                    const on = !disabledSkills.includes(g.skillName);
+                    return (
+                      <Toggle
+                        checked={on}
+                        onChange={({ detail }) => setDisabledSkills((prev) => (detail.checked
+                          ? prev.filter((n) => n !== g.skillName)
+                          : [...prev, g.skillName]))}
+                      >
+                        {on ? t('skills.enabledForUser') : t('skills.disabledForUser')}
+                      </Toggle>
+                    );
+                  },
+                },
+              ])}
+            />
+          )}
+        </Container>
+      )}
+
       {/* Registry import modal */}
       {showRegistryModal && (
         <Modal
@@ -4618,6 +4730,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               }
             >
               <SpaceBetween size="m">
+                {!permHasRow && (
+                  <Alert type="warning">{t('users.noPermsRow')}</Alert>
+                )}
                 {gatewayTools.length === 0 ? (
                   <CloudscapeBox textAlign="center" padding="m">
                     <b>{t('users.noTools')}</b>

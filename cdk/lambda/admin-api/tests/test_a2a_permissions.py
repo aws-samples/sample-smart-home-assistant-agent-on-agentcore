@@ -18,6 +18,9 @@ _mock_ac = MagicMock()
 def _reset():
     _mock_table.reset_mock()
     _mock_ac.reset_mock()
+    # reset_mock() keeps side_effect; a test that wired get_item per-key must not
+    # leak into the next test's return_value.
+    _mock_table.get_item.side_effect = None
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -449,3 +452,194 @@ def test_a_user_with_no_email_falls_back_to_the_username():
                                                   "Attributes": []}]}
         assert index._affected_users("__global__") == [
             ("no-email-user", "no-email-user")]
+
+
+# ---------------------------------------------------------------------------
+# A per-user block must survive the write path (found live 2026-09-18)
+#
+# `effective_grants` treats `{agent: []}` as a real entry meaning "no skills on
+# this sub-agent for this user", and every layer below the API — the merge rule,
+# the materialiser, the pre-token trigger — has a test pinning that. The PUT
+# handler then dropped every empty list before storing, so the one instruction
+# that narrows a user below the global default could not be saved. Measured: an
+# admin whose row omitted appliance-maintenance still carried all four of its
+# groups in the token and the A2A gateway admitted them with a 200.
+# ---------------------------------------------------------------------------
+
+def _intent_rows(rows):
+    """Wire get_item to answer per (userId, skillName) from `rows`."""
+    def _get(Key):
+        item = rows.get((Key["userId"], Key["skillName"]))
+        return {"Item": item} if item else {}
+    _mock_table.get_item.side_effect = _get
+
+
+def test_put_keeps_an_empty_per_user_list_as_a_block():
+    import index
+    _approved_catalog_mocks()
+    _intent_rows({})
+
+    resp = index.update_user_a2a_permissions(_put_event("alice-sub", {
+        "a2aGrants": {"rec-energy": [], "rec-security": ["risk_assessment"]},
+    }))
+    assert resp["statusCode"] == 200, resp["body"]
+    item = _mock_table.put_item.call_args.kwargs["Item"]
+    assert item["a2aGrants"] == {"rec-energy": [], "rec-security": ["risk_assessment"]}, (
+        "an empty list is the only way to say 'nothing on this sub-agent' below a "
+        "global grant; dropping it silently re-grants global")
+    assert json.loads(resp["body"])["a2aGrants"]["rec-energy"] == []
+
+
+def test_put_of_only_blocks_still_writes_a_row():
+    """A row holding nothing but blocks is a real row, not an empty save."""
+    import index
+    _approved_catalog_mocks()
+    _intent_rows({})
+
+    resp = index.update_user_a2a_permissions(_put_event("alice-sub", {
+        "a2aGrants": {"rec-energy": []},
+    }))
+    assert resp["statusCode"] == 200, resp["body"]
+    _mock_table.put_item.assert_called_once()
+    _mock_table.delete_item.assert_not_called()
+
+
+def test_put_still_validates_the_record_behind_a_block():
+    import index
+    _approved_catalog_mocks()
+    _intent_rows({})
+
+    resp = index.update_user_a2a_permissions(_put_event("alice-sub", {
+        "a2aGrants": {"rec-ghost": []},
+    }))
+    assert resp["statusCode"] == 400
+
+
+def test_blocking_a_globally_granted_agent_signs_the_user_out():
+    """The grant being taken away lived in the token claim, not in a membership.
+
+    The materialiser signs a user out only when it REMOVED a membership. A global
+    grant is never a membership, so blocking it per-user removes nothing and the
+    user would keep the specialist until their token expired — the exact
+    'revocation that silently does nothing for an hour' this page promises not to
+    have. The handler has to compare effective access before and after.
+    """
+    import index
+    _approved_catalog_mocks()
+    _intent_rows({
+        ("__global__", "__a2a_permissions__"): {
+            "a2aGrants": {"rec-energy": ["estimate_savings"]}},
+    })
+
+    with patch.object(index, "COGNITO_USER_POOL_ID", "pool"), \
+         patch.object(index, "_materialise_a2a_grants",
+                      return_value={"ok": True, "users": [], "signedOut": []}), \
+         patch.object(index.subagent_policy, "force_token_refresh",
+                      return_value=True) as refresh:
+        resp = index.update_user_a2a_permissions(_put_event("alice-sub", {
+            "a2aGrants": {"rec-energy": []},
+        }))
+
+    assert resp["statusCode"] == 200, resp["body"]
+    refresh.assert_called_once()
+    assert refresh.call_args.args[2] == "alice-sub"
+    assert json.loads(resp["body"])["groupSync"]["signedOut"] == ["alice-sub"]
+
+
+def test_widening_a_user_does_not_sign_them_out():
+    import index
+    _approved_catalog_mocks()
+    _intent_rows({
+        ("__global__", "__a2a_permissions__"): {
+            "a2aGrants": {"rec-energy": ["estimate_savings"]}},
+    })
+
+    with patch.object(index, "COGNITO_USER_POOL_ID", "pool"), \
+         patch.object(index, "_materialise_a2a_grants",
+                      return_value={"ok": True, "users": [], "signedOut": []}), \
+         patch.object(index.subagent_policy, "force_token_refresh") as refresh:
+        resp = index.update_user_a2a_permissions(_put_event("alice-sub", {
+            "a2aGrants": {"rec-energy": ["estimate_savings", "tariff_analysis"]},
+        }))
+
+    assert resp["statusCode"] == 200, resp["body"]
+    refresh.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-user skill policy: GET/PUT /users/{userId}/permissions?action=skills
+#
+# Skills are global UNION per-user, so before this there was no way to take a
+# global skill away from one user — and `browser-use` / `code-interpreter` are
+# global, so every user had browse_web and execute_python with no admin lever.
+# ---------------------------------------------------------------------------
+
+def _skills_event(method, user_id, body=None):
+    ev = {
+        "httpMethod": method,
+        "resource": "/users/{userId}/permissions",
+        "pathParameters": {"userId": user_id},
+        "queryStringParameters": {"action": "skills"},
+        "requestContext": {"authorizer": {"claims": {
+            "sub": "admin-sub", "cognito:groups": "admin"}}},
+    }
+    if body is not None:
+        ev["body"] = json.dumps(body)
+    return ev
+
+
+def test_get_skill_policy_with_no_row_disables_nothing():
+    import index
+    _mock_table.get_item.return_value = {}
+    resp = index.get_user_skill_policy(_skills_event("GET", "alice@example.com"))
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"])["disabledSkills"] == []
+
+
+def test_get_skill_policy_returns_the_stored_list_sorted():
+    import index
+    _mock_table.get_item.return_value = {"Item": {
+        "disabledSkills": ["weather-lookup", "browser-use"], "updatedAt": "t"}}
+    resp = index.get_user_skill_policy(_skills_event("GET", "alice@example.com"))
+    body = json.loads(resp["body"])
+    assert body["disabledSkills"] == ["browser-use", "weather-lookup"]
+    assert body["updatedAt"] == "t"
+
+
+def test_put_skill_policy_writes_the_row_under_the_agent_key():
+    import index
+    resp = index.update_user_skill_policy(_skills_event(
+        "PUT", "alice@example.com", {"disabledSkills": ["browser-use", "browser-use", " "]}))
+    assert resp["statusCode"] == 200, resp["body"]
+    item = _mock_table.put_item.call_args.kwargs["Item"]
+    assert item["userId"] == "alice@example.com"
+    assert item["skillName"] == "__skill_policy__"
+    assert item["disabledSkills"] == ["browser-use"]
+    assert json.loads(resp["body"])["disabledSkills"] == ["browser-use"]
+
+
+def test_put_skill_policy_with_an_empty_list_deletes_the_row():
+    import index
+    resp = index.update_user_skill_policy(_skills_event(
+        "PUT", "alice@example.com", {"disabledSkills": []}))
+    assert resp["statusCode"] == 200
+    _mock_table.delete_item.assert_called_once_with(
+        Key={"userId": "alice@example.com", "skillName": "__skill_policy__"})
+    _mock_table.put_item.assert_not_called()
+
+
+def test_put_skill_policy_rejects_non_list_and_global_scope():
+    import index
+    assert index.update_user_skill_policy(_skills_event(
+        "PUT", "alice@example.com", {"disabledSkills": "browser-use"}))["statusCode"] == 400
+    # A global disable list has no meaning: the global scope IS the baseline.
+    assert index.update_user_skill_policy(_skills_event(
+        "PUT", "__global__", {"disabledSkills": ["browser-use"]}))["statusCode"] == 400
+
+
+def test_skills_action_is_dispatched_from_the_permissions_route():
+    import index
+    _mock_table.get_item.return_value = {}
+    resp = index.handler(_skills_event("GET", "alice@example.com"), None)
+    assert resp["statusCode"] == 200, resp["body"]
+    assert "disabledSkills" in json.loads(resp["body"])
