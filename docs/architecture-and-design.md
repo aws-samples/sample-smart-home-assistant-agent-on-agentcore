@@ -1098,10 +1098,30 @@ agent.py: load_skills_from_dynamodb(actor_id)
     |
     +-> Query userId = "__global__" (shared skills)
     +-> Query userId = actor_id (user-specific overrides)
+    +-> Get  userId = actor_id, skillName = "__skill_policy__"
+    |       -> drop every name in disabledSkills   (agent/skill_policy.py)
     +-> Construct Skill objects (all spec fields) -> AgentSkills plugin
     v
 Strands Agent (with dynamic skills)
 ```
+
+**Per-user skill policy (added 2026-09-18).** The merge above is global UNION
+per-user, which had no way to take a global skill away from one user — and two
+global skills are tools, not prose: `browser-use` registers `browse_web` and
+`code-interpreter` registers `execute_python`, so every user held a live browser
+and a Python sandbox with no admin lever. The `__skill_policy__` row is the one
+subtraction: the Skills page, under a user scope, lists the global skills that
+user inherits with an on/off toggle per skill, saved through
+`PUT /users/{id}/permissions?action=skills` (same `?action=` dispatch as A2A grants,
+for the same 20 KB resource-policy reason). The agent applies it after the merge,
+so switching a tool-bearing skill off removes the tool on the next turn.
+
+In the same change `http_request` and `file_write` stopped being registered for
+everyone unconditionally. They are registered only when an effective skill declares
+them in `allowedTools` — which the shipped skills already do (`weather-lookup` →
+`http_request`, `user-feedback` → `file_write`), so nothing a user had disappears,
+but the tool now follows the skill. `skills is None` (DynamoDB failed, filesystem
+fallback) keeps the old behaviour: an outage must not become a second, quieter one.
 
 **DynamoDB Table Schema (`smarthome-skills`):**
 
@@ -2210,13 +2230,19 @@ without it the policy does not fail to *match*, it fails to *attach*, with
 `attribute 'id' on entity type 'AgentCore::UnauthenticatedUser' not found` — while
 CreatePolicy/UpdatePolicy still returned 200.
 
-*No policy means allow-all.* The tools gateway runs in `ENFORCE` mode with **zero**
-policies and serves all six tools. Default-deny only begins for a tool once a
-permit exists for it. That makes `affected_tools` on a permission save dangerous as
-a union: 14 of 40 users hold a `__permissions__` row, so granting one new tool to
-one user would have materialised permits for the six device tools and revoked them
-from the other 26 — reported as a successful save of an unrelated grant. It is now
-the symmetric difference, i.e. only tools whose membership actually changed.
+*What an absent policy means, two measurements.* With **zero** policies on the
+engine the tools gateway (in `ENFORCE`) served all six tools — measured in 2026-08.
+With policies present, a user named in **no** permit gets `tools/list = []` —
+measured 2026-09-18 with a throwaway Cognito user that had no `__permissions__`
+row. So today, with every tool carrying a permit, "not configured" means "no
+tools"; the per-tool claim that default-deny begins only once *that* tool has a
+permit was never verified and is not relied on. Two consequences: `affected_tools`
+on a permission save is the symmetric difference (only tools whose membership
+actually changed get a rebuild — 14 of 40 users hold a row, and rebuilding the
+unchanged ones is a throttle-prone control-plane call per tool per save); and the
+Tool Policy panel shows the STORED grants, where it used to pre-tick every built-in
+tool for a user with no row and thereby show access the gateway refused. A user with
+no row now gets a warning saying so.
 
 **Provisioning and teardown.** `setup-agentcore.py:_ensure_websearch_gateway` is
 idempotent and runs before the runtime env patch, because both the runtime
@@ -2406,6 +2432,24 @@ Changing it to a union would have silently widened effective access for every
 existing user, which is why the page renders an **effective-permission preview**
 under per-user scope: a user with one skill ticked has been cut from four to one,
 not granted one, and a checkbox tree alone cannot show that.
+
+**Three states per sub-agent under a user, and the key is the state.** An ABSENT
+key inherits global. A present key with skills is the user's own list, replacing
+global. A present key with an EMPTY list is a **block**: the user cannot reach that
+sub-agent even though global grants it. The block is the only way to take a globally
+granted specialist away from one user, and until 2026-09-18 it could not be saved:
+both the page's save and the API's PUT stripped empty lists as noise, so "untick
+everything" round-tripped to "inherit global" and the user kept the specialist. The
+merge rule, the materialiser and the pre-token trigger had all honoured `[]` the
+whole time, each with a test; only the two layers an admin actually touches dropped
+it. Measured before the fix: a user whose row omitted `appliance-maintenance-agent`
+carried all four of its groups in the token and the A2A gateway admitted them with a
+200. The page now makes the state explicit — *inherits global* / *replaces global* /
+*blocked for this user*, with an **Override for this user** action that starts from
+the inherited list — and the API keeps `[]`. A block also signs the user out: the
+grant it removes lived in the claim, not in a membership, so the materialiser's
+"removed a membership" signal never fires for it, and the handler compares
+effective access before and after the write instead.
 
 **Where enforcement lives.** Authorization is an OAuth custom-claim check performed
 by each sub-agent Runtime's own JWT authorizer, before any of our code runs:
@@ -3296,6 +3340,69 @@ AWS console.
 > `approve_record` handled DRAFT and PENDING_APPROVAL and **fell through**
 > returning the unchanged status, so pressing Approve on a rejected skill answered
 > "Record is now REJECTED" as though it had worked.
+
+#### Registry event notifications (EventBridge → Overview panel)
+
+Both approval surfaces above — the Skills review modal and the A2A inventory — only
+revealed a new submission to an admin who happened to open them. AWS Agent Registry
+publishes every approval-workflow transition to the account's **default EventBridge
+bus** (source `aws.agent-registry`, detail-type `Registry Record State changed to
+Draft | Pending Approval | Approved | Rejected | Deprecated`), so the console now
+subscribes instead of polling two list pages.
+
+```
+Registry ──event──▶ default bus ──rule smarthome-registry-record-events──▶ admin Lambda
+                                                                            │ GetRegistryRecord (enrich)
+                                                                            ▼
+                                                     DynamoDB smarthome-registry-events (TTL 30d)
+                                                                            ▲
+Admin Console: Integration Registry tab polls GET /registry/records?action=events every 30s
+```
+
+**Why enrich and store, rather than render the event.** The event carries only
+`registryRecordId` and `registryId`; the name, type and version come from one
+`GetRegistryRecord` at ingest, and the publisher from the Skill ERP's ownership
+row (which stores only a Cognito `sub`, resolved to an email through Cognito;
+built-ins fall back to the definition's `_meta.publishedBy`). That read is allowed to fail — throttling,
+a record deleted in between — and the event is stored anyway with `enrichError`
+set, because a row with only a recordId is still a notification and a dropped row
+is a submission nobody hears about. Only the DynamoDB write may raise, which is
+what the rule's two retries are for. Storing also preserves history the Registry
+does not: it keeps a record's *current* status and one `statusReason`, overwritten
+on the next change.
+
+**"Needs review" is derived, never marked.** `registry_events.fold` treats a
+record's newest event as its state; a row is `actionable` only when it is that
+newest event and it is Pending Approval. "Newest" needs one care: EventBridge
+stamps `time` to the second, and the ERP's create-and-submit emits Draft and
+Pending Approval inside the same second, so a same-second tie is broken by the
+workflow's own order (Draft < Pending < Approved/Rejected < Deprecated) rather
+than by event id, which had left a real submission unhighlighted. An approval, rejection, deprecation or a
+new draft on the same record retires the highlight by itself, and an author who
+resubmits twice produces one highlight, not two. There is deliberately no "mark as
+read": a second source of truth about what is pending is how the panel and the
+queue would start disagreeing. Known limit: deletion emits no event, so a record
+deleted while pending stays flagged until its rows expire (30 days); Review then
+lands on an honest empty queue.
+
+**Console.** The Overview sub-tab of Integration Registry gains a *Registry
+activity* table (badge + bold on actionable rows, an info alert with the count,
+and the count on the Overview sub-tab label so it is visible from A2A and Skills
+too). *Review* on a SKILL row switches to Build → Skills and opens the review
+modal; on an AGENT row it switches to the A2A sub-tab. Either way the target table
+marks the matching row "From notification", so the admin lands on the line rather
+than at the top of a queue. The feed is polled at the tab level, not inside the
+panel, so one fetch serves both the table and the label; a review action refreshes
+it immediately rather than waiting for the next 30 s tick.
+
+**Deploy notes.** The rule's pattern does not name a registryId (at deploy time the
+admin Lambda's `REGISTRY_ID` is still the setup script's placeholder), so the Lambda
+filters; events for any other registry are logged and dropped. The rule target is
+the one grant on the admin Lambda that uses a resource-policy statement rather than
+a scheduler role, costing ~300 bytes of the 20 KB Lambda policy cap. Adding
+`REGISTRY_EVENTS_TABLE_NAME` to the CDK-declared environment is the kind of change
+that resets the setup-script variables (see the runbook's 排错表); the env was
+snapshotted and merged back by name after the deploy that introduced it.
 
 ---
 

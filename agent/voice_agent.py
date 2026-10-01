@@ -22,9 +22,11 @@ os.environ.setdefault("DISABLE_ADOT", "1")
 # lands on this process and triggers Python module init for everything below,
 # so the first real `/ws` handshake doesn't pay the strands.bidi import cost.
 from strands.experimental.bidi.agent import BidiAgent  # noqa: F401
-from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel  # noqa: F401
+try:  # strands >= 1.56 renamed and moved the class; see voice_session.py
+    from strands.experimental.bidi.models.bedrock import BedrockNovaSonicModel as BidiNovaSonicModel  # noqa: F401
+except ImportError:
+    from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel  # noqa: F401
 from strands.tools.mcp.mcp_client import MCPClient  # noqa: F401
-from mcp.client.streamable_http import streamablehttp_client  # noqa: F401
 
 import logging
 

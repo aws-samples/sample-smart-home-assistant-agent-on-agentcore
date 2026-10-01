@@ -24,6 +24,9 @@ import {
   A2ASkill,
 } from '../api/erpApi';
 import { useI18n } from '../i18n';
+import {
+  useResizableTables, WrapCell, TEXT_COL_MAX, W_STATUS, W_DATE, W_NAME, W_WIDE,
+} from './tableColumns';
 
 const NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const URL_RE = /^https?:\/\/.+/;
@@ -43,6 +46,7 @@ const emptyCard = (): A2ACard => ({
 });
 
 const A2AAgentsTab: React.FC = () => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const [records, setRecords] = useState<MyA2aRecord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -358,13 +362,15 @@ const A2AAgentsTab: React.FC = () => {
           loadingText={t('common.loading')}
           items={records}
           trackBy="recordId"
-          columnDefinitions={[
-            { id: 'name', header: t('table.name'), cell: (r) => r.name },
-            { id: 'description', header: t('table.description'), cell: (r) => r.description },
-            { id: 'endpoint', header: t('erp.a2a.list.colEndpoint'), cell: (r) => r.card.endpoint },
-            { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
+          {...resizable<MyA2aRecord>('erp-a2a', [
+            { id: 'name', width: W_NAME, header: t('table.name'), cell: (r) => r.name },
+            { id: 'description', header: t('table.description'),
+              width: TEXT_COL_MAX,
+              cell: (r) => <WrapCell>{r.description}</WrapCell> },
+            { id: 'endpoint', width: W_WIDE, header: t('erp.a2a.list.colEndpoint'), cell: (r) => r.card.endpoint },
+            { id: 'status', width: W_STATUS, header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
             {
-              id: 'updated',
+              id: 'updated', width: W_DATE,
               header: t('table.updated'),
               cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
             },
@@ -379,7 +385,7 @@ const A2AAgentsTab: React.FC = () => {
                 </SpaceBetween>
               ),
             },
-          ]}
+          ])}
           empty={
             <Box textAlign="center" padding="m">
               <b>{t('erp.a2a.list.empty')}</b>

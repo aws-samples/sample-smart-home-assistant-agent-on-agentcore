@@ -12,6 +12,7 @@ import { DashboardAbComparison, DashboardEvaluations, EvaluatorScore } from '../
 import { ChartTheme, seriesColor, DE_EMPHASIS, MAX_SERIES } from './palette';
 import { dayTick, pct } from './format';
 import { useI18n } from '../../i18n';
+import { useResizableTables, W_NUM, W_NAME } from '../tableColumns';
 
 interface Props {
   evaluations?: DashboardEvaluations;
@@ -38,6 +39,7 @@ const DRIFT_THRESHOLD = 0.1;
  * card, so an empty A/B state costs no wall space.
  */
 export function EvalPanel({ evaluations, abComparison, loading, theme, chartHeight }: Props) {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const evaluators = evaluations?.evaluators ?? [];
 
@@ -98,9 +100,9 @@ export function EvalPanel({ evaluations, abComparison, loading, theme, chartHeig
         loadingText={t('dashboard.loading')}
         items={evaluators}
         trackBy="name"
-        columnDefinitions={[
+        {...resizable<typeof evaluators[number]>('dashboard-evaluators', [
           {
-            id: 'name',
+            id: 'name', width: W_NAME,
             header: t('dashboard.eval.evaluator'),
             cell: (e) => (
               <SpaceBetween direction="horizontal" size="xxs">
@@ -110,12 +112,12 @@ export function EvalPanel({ evaluations, abComparison, loading, theme, chartHeig
             ),
           },
           {
-            id: 'average',
+            id: 'average', width: W_NUM,
             header: t('dashboard.eval.average'),
             cell: (e) => (e.isRatio ? pct(e.average) : e.average.toFixed(2)),
           },
           {
-            id: 'latest',
+            id: 'latest', width: W_NUM,
             header: t('dashboard.eval.latest'),
             cell: (e) => (e.isRatio ? pct(e.latest) : e.latest.toFixed(2)),
           },
@@ -142,7 +144,7 @@ export function EvalPanel({ evaluations, abComparison, loading, theme, chartHeig
             ),
             cell: driftCell,
           },
-        ]}
+        ])}
         empty={
           <Box textAlign="center" padding="m" color="text-body-secondary">
             {t('dashboard.noData')}
@@ -162,12 +164,12 @@ export function EvalPanel({ evaluations, abComparison, loading, theme, chartHeig
             variant="embedded"
             contentDensity="compact"
             items={abComparison.rows}
-            columnDefinitions={[
-              { id: 'variant', header: t('dashboard.eval.variant'), cell: (r) => r.variant },
-              { id: 'evaluator', header: t('dashboard.eval.evaluator'), cell: (r) => r.evaluator.replace('Builtin.', '') },
-              { id: 'average', header: t('dashboard.eval.average'), cell: (r) => pct(r.average) },
+            {...resizable<NonNullable<NonNullable<typeof abComparison>['rows']>[number]>('dashboard-eval-variants', [
+              { id: 'variant', width: W_NAME, header: t('dashboard.eval.variant'), cell: (r) => r.variant },
+              { id: 'evaluator', width: W_NAME, header: t('dashboard.eval.evaluator'), cell: (r) => r.evaluator.replace('Builtin.', '') },
+              { id: 'average', width: W_NUM, header: t('dashboard.eval.average'), cell: (r) => pct(r.average) },
               { id: 'n', header: t('dashboard.eval.samples'), cell: (r) => r.n },
-            ]}
+            ])}
           />
         ) : (
           <Box variant="p" color="text-body-secondary">

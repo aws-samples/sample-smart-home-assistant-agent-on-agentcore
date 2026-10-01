@@ -6,6 +6,7 @@ import { DashboardSatisfaction } from '../../api/adminApi';
 import { ChartTheme, seriesColor } from './palette';
 import { ChartTableToggle } from './ChartTableToggle';
 import { useI18n } from '../../i18n';
+import { W_NUM, W_BADGE } from '../tableColumns';
 
 interface Props {
   data?: DashboardSatisfaction;
@@ -85,6 +86,7 @@ export function SatisfactionCards({ data, theme, chartHeight }: Props) {
       )}
 
       <ChartTableToggle
+        tableId="dashboard-satisfaction-trend"
         chart={
           <LineChart
             height={chartHeight}
@@ -107,9 +109,9 @@ export function SatisfactionCards({ data, theme, chartHeight }: Props) {
         }
         items={trend}
         columns={[
-          { id: 'day', header: t('dashboard.token.xDay'), cell: (p) => p.day },
-          { id: 'up', header: '👍', cell: (p) => p.up },
-          { id: 'down', header: '👎', cell: (p) => p.down },
+          { id: 'day', width: W_BADGE, header: t('dashboard.token.xDay'), cell: (p) => p.day },
+          { id: 'up', width: W_NUM, header: '👍', cell: (p) => p.up },
+          { id: 'down', width: W_NUM, header: '👎', cell: (p) => p.down },
           {
             id: 'rate',
             header: t('dashboard.satisfaction.downRate'),

@@ -15,6 +15,7 @@ import {
   TenantEnvOverride, EntryEnvironmentMode, PerUserPromptWillBeMaskedError,
   CognitoUserInfo,
 } from '../../api/adminApi';
+import { useResizableTables, W_STATUS, W_EMAIL } from '../tableColumns';
 
 const MODE_OPTIONS: { value: EntryEnvironmentMode; labelKey: string }[] = [
   { value: 'default', labelKey: 'optimization.tenantEnv.modeDefault' },
@@ -29,6 +30,7 @@ function modeLabelKey(m: EntryEnvironmentMode): string {
 }
 
 export function EntryEnvironmentTable() {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const [items, setItems] = useState<TenantEnvOverride[]>([]);
   const [loading, setLoading] = useState(true);
@@ -131,12 +133,12 @@ export function EntryEnvironmentTable() {
       <Table
         loading={loading}
         items={items}
-        columnDefinitions={[
-          { id: 'email', header: t('optimization.tenantEnv.columnEmail'),
+        {...resizable('entry-environments', [
+          { id: 'email', width: W_EMAIL, header: t('optimization.tenantEnv.columnEmail'),
             cell: (i: TenantEnvOverride) => i.email },
-          { id: 'mode', header: t('optimization.tenantEnv.columnMode'),
+          { id: 'mode', width: W_STATUS, header: t('optimization.tenantEnv.columnMode'),
             cell: (i: TenantEnvOverride) => t(modeLabelKey(i.mode)) },
-          { id: 'updatedBy', header: t('optimization.tenantEnv.columnUpdatedBy'),
+          { id: 'updatedBy', width: W_EMAIL, header: t('optimization.tenantEnv.columnUpdatedBy'),
             cell: (i: TenantEnvOverride) => i.updatedBy || '—' },
           { id: 'actions', header: t('optimization.tenantEnv.columnActions'),
             cell: (i: TenantEnvOverride) => (
@@ -149,7 +151,7 @@ export function EntryEnvironmentTable() {
                 </Button>
               </SpaceBetween>
             ) },
-        ]}
+        ])}
       />
 
       <Modal

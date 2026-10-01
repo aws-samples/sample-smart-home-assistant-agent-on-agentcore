@@ -177,6 +177,37 @@ cp "$SCRIPT_DIR/shared/prompt-examples.json" \
    "$SCRIPT_DIR/chatbot/src/generated/prompt-examples.json"
 echo "    -> chatbot/src/generated"
 
+# ------------------------------------------------------------------------------
+# The demo Skill templates, for the Skill ERP's generator. Same shape of problem as
+# the example library above: the ERP publishes these ten skills and
+# cdk/lambda/admin-api/tests/test_skill_scan.py asserts the verdict each one is
+# supposed to scan to. One file, because a second copy would drift and the symptom
+# is finding out on screen that the half of the demo meant to be red went green.
+#
+# Copied rather than imported across the tree: skill-erp's tsconfig sets
+# rootDir=./src, so a relative import of ../../shared would not compile.
+# ------------------------------------------------------------------------------
+echo "==> Copying the demo Skill templates into the Skill ERP..."
+mkdir -p "$SCRIPT_DIR/skill-erp/src/generated"
+cp "$SCRIPT_DIR/shared/demo-skill-templates.json" \
+   "$SCRIPT_DIR/skill-erp/src/generated/demo-skill-templates.json"
+echo "    -> skill-erp/src/generated"
+
+# ------------------------------------------------------------------------------
+# The solution architecture diagram, for the admin console's Overview page.
+#
+# There used to be TWO copies of this PNG — screenshots/ and the console's own
+# src/assets/ — and "replace architecture diagram" (7285293) updated only the first.
+# The console then showed a diagram two months out of date, missing the orchestrator,
+# the sub-agent gateway and Optimization, with nothing to indicate it was stale.
+#
+# screenshots/ is the canonical one because README.md embeds that path.
+# ------------------------------------------------------------------------------
+echo "==> Copying the architecture diagram into the admin console..."
+cp "$SCRIPT_DIR/screenshots/architecture.drawio.png" \
+   "$SCRIPT_DIR/admin-console/src/assets/architecture.drawio.png"
+echo "    -> admin-console/src/assets"
+
 echo "==> Copying the device brief + catalog into the agent..."
 cp "$SCRIPT_DIR/shared/device_brief.py"    "$SCRIPT_DIR/agent/device_brief.py"
 cp "$SCRIPT_DIR/shared/device_catalog.py"  "$SCRIPT_DIR/agent/device_catalog.py"

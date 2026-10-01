@@ -52,9 +52,16 @@ from agent import (  # noqa: E402
 # voice_agent.py already — importing them here again is free and lets us
 # define a model subclass at module load time.
 from strands.experimental.bidi.agent import BidiAgent
-from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel
+try:  # strands >= 1.56 renamed and moved the class
+    from strands.experimental.bidi.models.bedrock import BedrockNovaSonicModel as BidiNovaSonicModel
+except ImportError:  # strands <= 1.52
+    from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel
 from strands.tools.mcp.mcp_client import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
+# NOTE (2026-09-18): the shared pyproject now pins strands 1.56. This module
+# IMPORTS under it (see the fallback above) but subclasses the Nova Sonic model
+# and reads its private completion-id state, which has not been verified against
+# 1.56. The voice runtime is still on its own earlier build; upgrading it needs a
+# real voice session, not just an import check.
 
 
 class _TranscriptIdTaggingModel(BidiNovaSonicModel):
@@ -640,7 +647,7 @@ async def handle_voice_session(
     mcp_client = None
     tools_list = []
     if GATEWAY_URL:
-        mcp_client = MCPClient(lambda: streamablehttp_client(GATEWAY_URL, headers=gw_headers or None))
+        mcp_client = MCPClient(url=GATEWAY_URL, headers=gw_headers or None)
 
     def _load_tools_sync() -> list:
         """Enter MCPClient and paginate list_tools. Sync helper so we can call

@@ -21,6 +21,7 @@ import {
 } from '../api/adminApi';
 import { PromptEditorCard } from './AdminConsole';
 import { useI18n } from '../i18n';
+import { useResizableTables, WrapCell, TEXT_COL_MAX, W_NAME } from './tableColumns';
 
 /**
  * One agent, with its prompt editable.
@@ -51,6 +52,7 @@ function editorRowsFor(agent: FleetAgent): number {
 }
 
 export function AgentDetailPage({ agent, onBack, cognitoUsers }: Props) {
+  const resizable = useResizableTables();
   const { t, language } = useI18n();
 
   const [scope, setScope] = useState('__global__');
@@ -208,15 +210,16 @@ export function AgentDetailPage({ agent, onBack, cognitoUsers }: Props) {
             contentDensity="compact"
             items={agent.skills}
             trackBy="id"
-            columnDefinitions={[
-              { id: 'id', header: t('agentDetail.skillId'), cell: (s) => s.id },
-              { id: 'name', header: t('agentDetail.skillName'), cell: (s) => s.name || s.id },
+            {...resizable<typeof agent.skills[number]>('agent-skills', [
+              { id: 'id', width: W_NAME, header: t('agentDetail.skillId'), cell: (s) => s.id },
+              { id: 'name', width: W_NAME, header: t('agentDetail.skillName'), cell: (s) => s.name || s.id },
               {
                 id: 'description',
                 header: t('agentDetail.skillDescription'),
-                cell: (s) => s.description || '--',
+                width: TEXT_COL_MAX,
+                cell: (s) => <WrapCell>{s.description || '--'}</WrapCell>,
               },
-            ]}
+            ])}
           />
         </Container>
       )}

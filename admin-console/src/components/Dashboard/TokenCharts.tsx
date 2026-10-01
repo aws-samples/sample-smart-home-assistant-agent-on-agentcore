@@ -6,6 +6,7 @@ import { ChartTheme, seriesColor } from './palette';
 import { ChartTableToggle } from './ChartTableToggle';
 import { compact, dayTick } from './format';
 import { useI18n } from '../../i18n';
+import { W_NUM, W_BADGE, W_NAME } from '../tableColumns';
 
 interface Props {
   spans?: DashboardSpans;
@@ -51,6 +52,7 @@ export function TokenTrend({ spans, loading, theme, chartHeight }: Props) {
 
   return (
     <ChartTableToggle
+      tableId="dashboard-tokens-daily"
       footer={
         showHorizon ? (
           <Box variant="small" color="text-body-secondary">
@@ -94,10 +96,10 @@ export function TokenTrend({ spans, loading, theme, chartHeight }: Props) {
       }
       items={trend}
       columns={[
-        { id: 'day', header: t('dashboard.token.xDay'), cell: (p) => p.day.slice(0, 10) },
-        { id: 'in', header: t('dashboard.token.input'), cell: (p) => p.inputTokens.toLocaleString() },
-        { id: 'out', header: t('dashboard.token.output'), cell: (p) => p.outputTokens.toLocaleString() },
-        { id: 'p95', header: 'TTFT P95', cell: (p) => `${p.ttftP95.toFixed(0)}ms` },
+        { id: 'day', width: W_BADGE, header: t('dashboard.token.xDay'), cell: (p) => p.day.slice(0, 10) },
+        { id: 'in', width: W_NUM, header: t('dashboard.token.input'), cell: (p) => p.inputTokens.toLocaleString() },
+        { id: 'out', width: W_NUM, header: t('dashboard.token.output'), cell: (p) => p.outputTokens.toLocaleString() },
+        { id: 'p95', width: W_NUM, header: 'TTFT P95', cell: (p) => `${p.ttftP95.toFixed(0)}ms` },
         { id: 'n', header: t('dashboard.token.calls'), cell: (p) => p.n },
       ]}
     />
@@ -118,6 +120,7 @@ export function TokenAttribution({ spans, loading, dim, theme, chartHeight }: At
 
   return (
     <ChartTableToggle
+      tableId="dashboard-tokens-by-dimension"
       chart={
         <BarChart
           horizontalBars
@@ -151,9 +154,9 @@ export function TokenAttribution({ spans, loading, dim, theme, chartHeight }: At
       }
       items={attribution}
       columns={[
-        { id: 'key', header: t(`dashboard.dim.${dim}`), cell: (r) => r.key },
-        { id: 'in', header: t('dashboard.token.input'), cell: (r) => r.inputTokens.toLocaleString() },
-        { id: 'out', header: t('dashboard.token.output'), cell: (r) => r.outputTokens.toLocaleString() },
+        { id: 'key', width: W_NAME, header: t(`dashboard.dim.${dim}`), cell: (r) => r.key },
+        { id: 'in', width: W_NUM, header: t('dashboard.token.input'), cell: (r) => r.inputTokens.toLocaleString() },
+        { id: 'out', width: W_NUM, header: t('dashboard.token.output'), cell: (r) => r.outputTokens.toLocaleString() },
         { id: 'sessions', header: t('dashboard.token.sessions'), cell: (r) => r.sessions },
       ]}
     />

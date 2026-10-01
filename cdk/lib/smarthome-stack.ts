@@ -12,6 +12,8 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as apigw from "aws-cdk-lib/aws-apigateway";
 import * as scheduler from "aws-cdk-lib/aws-scheduler";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 import * as path from "path";
 
@@ -558,6 +560,22 @@ export class SmartHomeStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // AWS Agent Registry record transitions, as delivered by the EventBridge rule
+    // below and enriched by the admin API. The Registry itself only keeps a record's
+    // CURRENT status plus one statusReason, overwritten on the next change; this is
+    // where "who submitted what, when, and what happened to it" survives long enough
+    // for an admin to see it. Keyed by registry so one query is the whole feed, and
+    // by time#eventId so a redelivered event overwrites itself. 30-day TTL, set by
+    // the writer.
+    const registryEventsTable = new dynamodb.Table(this, "RegistryEventsTable", {
+      tableName: "smarthome-registry-events",
+      partitionKey: { name: "registryId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "eventKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     // ========================
     // S3 - Skill Files (scripts, references, assets)
     // ========================
@@ -602,6 +620,7 @@ export class SmartHomeStack extends cdk.Stack {
         CODE_SESSIONS_TABLE_NAME: codeSessionsTable.tableName,
         RUNTIME_SESSIONS_TABLE_NAME: runtimeSessionsTable.tableName,
         FEEDBACK_TABLE_NAME: feedbackTable.tableName,
+        REGISTRY_EVENTS_TABLE_NAME: registryEventsTable.tableName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
@@ -611,6 +630,7 @@ export class SmartHomeStack extends cdk.Stack {
     codeSessionsTable.grantReadData(adminLambda);
     runtimeSessionsTable.grantReadWriteData(adminLambda);
     feedbackTable.grantReadWriteData(adminLambda);
+    registryEventsTable.grantReadWriteData(adminLambda);
 
     // ========================
     // Lambda - User Init (Cognito Post-Confirmation trigger)
@@ -1226,6 +1246,31 @@ export class SmartHomeStack extends cdk.Stack {
       resources: ["*"],
     }));
 
+    // The Skill scanner's semantic tier (cdk/lambda/admin-api/skill_scan.py, invoked
+    // from index.py `_semantic_judge`). Static pattern rules cannot see the risk that
+    // has no code signature at all — a skill whose prose collects far more than its
+    // description admits — so the scan reads the SKILL.md with a model as well.
+    //
+    // Guardrails would be the obvious alternative and is NOT available in us-west-2,
+    // where this deployment lives, so this is an InvokeModel call rather than a
+    // guardrail policy.
+    //
+    // Deliberately an IAM-only change: adding a CDK-DECLARED environment variable to
+    // this Lambda makes CloudFormation rewrite its whole Environment table, which wipes
+    // the ~15 variables the setup scripts patch in afterwards. The scanner reads the
+    // deployment's existing MODEL_ID instead of declaring one.
+    //
+    // Cross-region inference profiles are what is actually invocable for a current
+    // Claude model, and a profile fans the call out to the regional model ARNs, so both
+    // the profile and the foundation model have to be allowed.
+    adminLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["bedrock:InvokeModel"],
+      resources: [
+        `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+        `arn:aws:bedrock:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
     // Grant user-init Lambda access to KB docs bucket (create user folder on signup)
     userInitLambda.addEnvironment("KB_DOCS_BUCKET", kbDocsBucket.bucketName);
     kbDocsBucket.grantWrite(userInitLambda);
@@ -1762,6 +1807,34 @@ export class SmartHomeStack extends cdk.Stack {
         roleArn: schedulerRole.roleArn,
         input: JSON.stringify({ mode: "solar" }),
       },
+    });
+
+    // Registry record transitions into the admin API. AWS Agent Registry publishes
+    // every approval-workflow state change to the account's default bus; before this
+    // rule, a submission from the Skill ERP was only visible to an admin who happened
+    // to open the review modal or the A2A inventory. The handler
+    // (`ingest_registry_event`) enriches each event with one GetRegistryRecord and
+    // stores it in registryEventsTable; the console's Integration Registry tab polls
+    // the stored rows and links each pending one to its approval surface.
+    //
+    // The pattern does not name a registryId: at deploy time REGISTRY_ID is still the
+    // placeholder the setup script overwrites, so the Lambda does that filter. Only
+    // record events are matched (the detail-type prefix); registry lifecycle events
+    // carry nothing an admin acts on. Two retries, because the failure mode worth
+    // retrying — a throttled DynamoDB write — clears in seconds, and a dropped event
+    // is a submission nobody hears about.
+    //
+    // This is the one target on the admin Lambda that uses a resource-policy
+    // statement rather than a scheduler role, so it costs ~300 bytes of the 20 KB
+    // Lambda policy cap; `allowTestInvoke: false` above left room for it.
+    new events.Rule(this, "RegistryRecordEvents", {
+      ruleName: "smarthome-registry-record-events",
+      description: "AWS Agent Registry record state changes into the admin API for the console activity panel",
+      eventPattern: {
+        source: ["aws.agent-registry"],
+        detailType: events.Match.prefix("Registry Record State changed to"),
+      },
+      targets: [new targets.LambdaFunction(adminLambda, { retryAttempts: 2 })],
     });
 
     // The A2A revocation sweep. Registry status is enforced above the platform (the

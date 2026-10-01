@@ -124,6 +124,27 @@ const en: Record<string, string> = {
   'erp.a2a.validation.skills': 'At least one skill is required.',
   'erp.a2a.validation.skillId': 'Skill ID is invalid (a-z, 0-9, hyphens).',
   'erp.a2a.validation.skillName': 'Skill name is required.',
+
+  // The demo Skill generator (skill-erp/src/components/DemoSkillGenerator.tsx). The
+  // templates it publishes live in shared/demo-skill-templates.json; only the chrome
+  // around them is translated here.
+  'erp.demo.title': 'Demo skill generator',
+  'erp.demo.description': 'Publishes ten sample skills covering a spread of risk patterns, so the Admin Console has something to scan and approve.',
+  'erp.demo.generate': 'Generate 10 demo skills',
+  'erp.demo.register': 'Register to Registry',
+  'erp.demo.empty': 'Nothing generated yet. Generate the set to preview it before publishing.',
+  'erp.demo.warningTitle': 'These skills carry deliberately planted risks',
+  'erp.demo.warningBody': 'They exist to exercise the risk scanner: several contain hidden instructions, plaintext credentials, shell pipelines or an external instruction source. Publish them for a demo, and do not import them into a deployment anyone relies on.',
+  'erp.demo.colName': 'Skill',
+  'erp.demo.colType': 'Type',
+  'erp.demo.colRisk': 'Planted risk',
+  'erp.demo.colStatus': 'Publish result',
+  'erp.demo.semanticOnly': 'SEMANTIC ONLY',
+  'erp.demo.registering': 'Publishing to the Registry',
+  'erp.demo.progress': '{done} of {total} published',
+  'erp.demo.progressWithFailures': '{done} of {total} published, {failed} failed',
+  'erp.demo.registered': 'Submitted for approval',
+  'erp.demo.rerunHint': 'Registry record names are unique, so publishing the set a second time appends a short suffix rather than failing.',
 };
 
 export default en;

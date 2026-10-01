@@ -603,6 +603,46 @@ export async function getUserPermissions(userId: string): Promise<UserPermission
   return res.json();
 }
 
+/** Per-user skill policy: the GLOBAL skills this user does NOT get.
+ *
+ *  Skills are global UNION per-user on the agent side, so this list is the only
+ *  subtraction. Two global skills carry tools (browser-use -> browse_web,
+ *  code-interpreter -> execute_python), so disabling them here removes the tool. */
+export interface UserSkillPolicy {
+  userId: string;
+  disabledSkills: string[];
+  updatedAt?: string;
+}
+
+export async function getUserSkillPolicy(userId: string): Promise<UserSkillPolicy> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=skills`,
+    { headers }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to get skill policy (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function updateUserSkillPolicy(
+  userId: string,
+  disabledSkills: string[]
+): Promise<UserSkillPolicy> {
+  const headers = await authHeaders();
+  const res = await fetch(
+    `${getBaseUrl()}/users/${encodeURIComponent(userId)}/permissions?action=skills`,
+    { method: 'PUT', headers, body: JSON.stringify({ disabledSkills }) }
+  );
+  if (!res.ok) {
+    const body = await res.json();
+    throw new Error(body.error || `Failed to update skill policy (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function updateUserPermissions(
   userId: string,
   allowedTools: string[]
@@ -854,7 +894,15 @@ export async function reviewRegistryRecord(
   /** Approve despite a blocking conformance verdict. The override is written into the
    *  record's own `statusReason` server-side, so it survives the Lambda log. */
   force = false,
-): Promise<{ status: string; previousStatus: string; reviewedBy: string }> {
+): Promise<{
+  status: string;
+  previousStatus: string;
+  reviewedBy: string;
+  /** On a SKILL approval: what the scan said at the moment of the decision, or
+   *  `{verdict: 'NOT_SCANNED'}`. Non-blocking — it is recorded, not enforced. */
+  scan?: { verdict: string; score?: number; riskTier?: string; llmTier?: string;
+           scannedAt?: string; scannedBy?: string } | null;
+}> {
   const headers = await authHeaders();
   const res = await fetch(`${getBaseUrl()}/registry/records${force ? '?force=true' : ''}`, {
     method: 'POST',
@@ -870,6 +918,91 @@ export async function reviewRegistryRecord(
     throw new Error(body.error || `Failed to review record (${res.status})`);
   }
   return body;
+}
+
+// ---------------------------------------------------------------------------
+// Skill risk scanning
+//
+// What a reviewer had before this was a name, a description and a wall of SKILL.md.
+// That is not enough to approve on: a Skill runs with the importing user's privileges,
+// all of its content is instructions, and the dangerous parts are exactly the ones a
+// human reading quickly does not see — an HTML comment, a zero-width character, a URL
+// the agent is told to take its real orders from.
+//
+// The report is EVIDENCE, not a gate. Approve and Reject behave as they always did; a
+// FAIL does not block. What the scan changes is that the decision is now recorded next
+// to what the scan said at the time (server-side, in the record's `statusReason`).
+// ---------------------------------------------------------------------------
+
+export interface SkillScanFinding {
+  /** Local rule id, e.g. `SS06`. */
+  id: string;
+  /** Short rule name, e.g. `external-instruction-source`. */
+  rule: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  /** The OWASP Agentic Skills Top 10 id this maps to, e.g. `AST05`. */
+  ast: string;
+  detail: string;
+  remediation: string;
+  /** Excerpt with invisible characters rendered as `<U+200B>` — printing the raw match
+   *  would print nothing, which is precisely how that payload class hides. */
+  evidence: string;
+  /** `static`, `semantic`, or `static+semantic` when the semantic tier raised it. */
+  source: string;
+}
+
+export interface SkillScanReport {
+  recordId: string;
+  recordVersion?: string;
+  name?: string;
+  verdict: 'PASS' | 'WARN' | 'FAIL';
+  score: number;
+  riskTier: 'L0' | 'L1' | 'L2' | 'L3';
+  worstSeverity: string;
+  findings: SkillScanFinding[];
+  contentHash: string;
+  scannerVersion: string;
+  /** `ok`, `skipped`, or `unavailable: <reason>`. Surfaced in the UI rather than
+   *  swallowed: "the model was unreachable" must not read as "nothing was found". */
+  llmTier: string;
+  scannedAt: string;
+  scannedBy: string;
+  /** False when the report could not be written to DynamoDB. The report is still the
+   *  answer to the request; what is lost is the badge and the audit note. */
+  persisted?: boolean;
+  disclaimer?: string;
+}
+
+/** Scan one record. One per call: the semantic tier is a model round trip, and ten of
+ *  them in one request would sit against API Gateway's hard 29s integration timeout. */
+export async function scanSkillRecord(
+  recordId: string,
+  semantic = true,
+): Promise<SkillScanReport> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=skill-scan`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ recordId, semantic }),
+  });
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) {
+    throw new Error(body.error || `Failed to scan record (${res.status})`);
+  }
+  return body;
+}
+
+/** The latest stored report per record, so the queue can show a risk column without a
+ *  request per row. */
+export async function listSkillScans(): Promise<Record<string, SkillScanReport>> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=skill-scan`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to load scan reports (${res.status})`);
+  }
+  const data = await res.json();
+  return data.reports || {};
 }
 
 export interface ImportRegistryRecordsResult {
@@ -918,6 +1051,59 @@ export async function stopSession(sessionId: string, kind?: 'text' | 'voice'): P
     const body = await res.json().catch(() => ({} as any));
     throw new Error(body.error || `Failed to stop session (${res.status})`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Registry event notifications (Integration Registry -> Overview)
+// ---------------------------------------------------------------------------
+
+/** One AWS Agent Registry record transition, as stored by the admin API after
+ *  enrichment. `actionable` is computed server-side: true only when this is the
+ *  record's newest event AND it is Pending Approval, so an approval on the same
+ *  record retires the highlight without anyone marking it read. */
+export interface RegistryEvent {
+  eventId: string;
+  eventKey: string;
+  recordId: string;
+  recordArn: string;
+  transition: 'DRAFT' | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'DEPRECATED';
+  /** AGENT / SKILL / … from GetRegistryRecord; "" when the enrichment read failed. */
+  recordType: string;
+  name: string;
+  recordVersion: string;
+  description: string;
+  statusReason: string;
+  publishedBy: string;
+  occurredAt: string;
+  receivedAt: string;
+  /** Set when the admin API could not read the record at ingest time. The row is
+   *  still a notification; only its display fields are missing. */
+  enrichError?: string;
+  actionable: boolean;
+}
+
+export interface RegistryEventsResult {
+  events: RegistryEvent[];
+  pendingCount: number;
+  generatedAt: string;
+}
+
+/** Recent Registry record transitions, newest first. Polled while the Integration
+ *  Registry tab is open; a failure throws so the panel can say "could not read"
+ *  rather than "nothing happened". */
+export async function listRegistryEvents(): Promise<RegistryEventsResult> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=events`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list registry events (${res.status})`);
+  }
+  const data = await res.json();
+  return {
+    events: data.events || [],
+    pendingCount: data.pendingCount || 0,
+    generatedAt: data.generatedAt || '',
+  };
 }
 
 // ---------------------------------------------------------------------------

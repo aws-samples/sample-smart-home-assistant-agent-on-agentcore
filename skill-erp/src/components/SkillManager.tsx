@@ -21,7 +21,11 @@ import {
   MyRecord,
   CreateRecordInput,
 } from '../api/erpApi';
+import DemoSkillGenerator from './DemoSkillGenerator';
 import { useI18n } from '../i18n';
+import {
+  useResizableTables, WrapCell, TEXT_COL_MAX, W_STATUS, W_DATE, W_NAME,
+} from './tableColumns';
 
 const SKILL_NAME_RE = /^(?!-)(?!.*--)(?!.*-$)[a-z0-9-]{1,64}$/;
 
@@ -51,6 +55,7 @@ const emptyForm: FormData = {
 };
 
 const SkillManager: React.FC = () => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const [records, setRecords] = useState<MyRecord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -347,6 +352,10 @@ const SkillManager: React.FC = () => {
         </Container>
       )}
 
+      {/* Hidden while the form is open, so the author editing one skill is not looking
+          at a button that publishes ten more. */}
+      {!showForm && <DemoSkillGenerator onRegistered={load} />}
+
       {!showForm && (
         <Table
           header={
@@ -367,12 +376,14 @@ const SkillManager: React.FC = () => {
           loadingText={t('common.loading')}
           items={records}
           trackBy="recordId"
-          columnDefinitions={[
-            { id: 'name', header: t('table.name'), cell: (r) => r.name },
-            { id: 'description', header: t('table.description'), cell: (r) => r.description },
-            { id: 'status', header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
+          {...resizable<MyRecord>('erp-skills', [
+            { id: 'name', width: W_NAME, header: t('table.name'), cell: (r) => r.name },
+            { id: 'description', header: t('table.description'),
+              width: TEXT_COL_MAX,
+              cell: (r) => <WrapCell>{r.description}</WrapCell> },
+            { id: 'status', width: W_STATUS, header: t('table.status'), cell: (r) => renderStatus(r.status, r.statusReason) },
             {
-              id: 'updated',
+              id: 'updated', width: W_DATE,
               header: t('table.updated'),
               cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
             },
@@ -387,7 +398,7 @@ const SkillManager: React.FC = () => {
                 </SpaceBetween>
               ),
             },
-          ]}
+          ])}
           empty={
             <Box textAlign="center" padding="m">
               <b>{t('table.empty')}</b>

@@ -140,9 +140,27 @@ const SubAgentPolicyPage: React.FC<Props> = ({
     })),
   ], [users, t]);
 
+  /** Per-user scope has three states per sub-agent, and the key is the state:
+   *
+   *    absent           inherit the global default (whatever it is, now or later)
+   *    present, [...]   this user's own list, REPLACING global
+   *    present, []      blocked for this user, even though global grants it
+   *
+   *  The third one is the only way to take a globally granted sub-agent away from
+   *  one user, and it is exactly what a save used to throw away: `doSave` stripped
+   *  empty lists, so did the API, and the user kept the specialist. Found live on
+   *  2026-09-18 with a user whose row omitted an agent their token still carried. */
+  const isOverridden = (recordId: string) =>
+    scope === GLOBAL || Object.prototype.hasOwnProperty.call(draft, recordId);
+
+  /** The list a sub-agent's checkboxes show: the user's own when overridden,
+   *  otherwise the inherited global one. */
+  const shownSkills = (recordId: string): string[] =>
+    isOverridden(recordId) ? (draft[recordId] || []) : (globalGrants[recordId] || []);
+
   const toggle = (recordId: string, skillId: string) => {
     setDraft((prev) => {
-      const current = prev[recordId] || [];
+      const current = shownSkills(recordId);
       const next = current.includes(skillId)
         ? current.filter((s) => s !== skillId)
         : [...current, skillId].sort();
@@ -153,34 +171,57 @@ const SubAgentPolicyPage: React.FC<Props> = ({
     });
   };
 
-  const dirty = useMemo(
-    () => JSON.stringify(
-      Object.fromEntries(Object.entries(draft).filter(([, v]) => v.length)))
-      !== JSON.stringify(
-        Object.fromEntries(Object.entries(saved).filter(([, v]) => v.length))),
-    [draft, saved],
-  );
+  /** Start an override FROM the inherited list, so unticking narrows it. */
+  const overrideAgent = (recordId: string) => {
+    setDraft((prev) => ({ ...prev, [recordId]: [...(globalGrants[recordId] || [])] }));
+  };
+
+  /** Drop the override: back to inheriting global. */
+  const inheritAgent = (recordId: string) => {
+    setDraft((prev) => {
+      const next = { ...prev };
+      delete next[recordId];
+      return next;
+    });
+  };
+
+  /** Canonical form for comparison. Under GLOBAL an empty list means nothing, so
+   *  it is dropped; under a user it is a block and must survive. */
+  const canon = useCallback((g: Grants) => JSON.stringify(
+    Object.fromEntries(Object.entries(g)
+      .filter(([, v]) => scope !== GLOBAL || v.length)
+      .sort(([a], [b]) => a.localeCompare(b)))), [scope]);
+
+  const dirty = useMemo(() => canon(draft) !== canon(saved), [draft, saved, canon]);
 
   /** Whether saving would take access away from anyone.
    *
    *  Drives the confirmation, because the backend signs affected users out — group
    *  membership is in their token, so a revoke that did not force a refresh would
-   *  do nothing for up to an hour. */
+   *  do nothing for up to an hour.
+   *
+   *  Compared on EFFECTIVE access, not on the row: blocking an inherited sub-agent
+   *  adds a key to the row, yet the user loses the agent. */
   const narrowing = useMemo(() => {
-    for (const [recordId, before] of Object.entries(saved)) {
-      const after = draft[recordId] || [];
-      if (before.some((s) => !after.includes(s))) return true;
+    const before = scope === GLOBAL ? saved : effectiveGrants(globalGrants, saved);
+    const after = scope === GLOBAL ? draft : effectiveGrants(globalGrants, draft);
+    for (const [recordId, had] of Object.entries(before)) {
+      const has = after[recordId] || [];
+      if (had.some((s) => !has.includes(s))) return true;
     }
     return false;
-  }, [draft, saved]);
+  }, [draft, saved, globalGrants, scope]);
 
   const doSave = async () => {
     clearMessages();
     setConfirmNarrow(false);
     setSaving(true);
     try {
-      const cleaned = Object.fromEntries(
-        Object.entries(draft).filter(([, skills]) => skills.length));
+      // Under GLOBAL an empty list grants nothing and is dropped. Under a user it
+      // is a BLOCK and is sent as-is — see `isOverridden`.
+      const cleaned = scope === GLOBAL
+        ? Object.fromEntries(Object.entries(draft).filter(([, skills]) => skills.length))
+        : draft;
       const result = await updateUserA2APermissions(scope, cleaned);
       setSaved(draft);
       if (scope === GLOBAL) setGlobalGrants(draft);
@@ -299,6 +340,12 @@ const SubAgentPolicyPage: React.FC<Props> = ({
             </div>
           </FormField>
 
+          {scope !== GLOBAL && !loading && agents.length > 0 && (
+            <CloudscapeBox color="text-body-secondary" fontSize="body-s">
+              {t('subagent.overrideHint')}
+            </CloudscapeBox>
+          )}
+
           {loading ? (
             <CloudscapeBox textAlign="center" padding="l"><Spinner /></CloudscapeBox>
           ) : agents.length === 0 ? (
@@ -308,7 +355,8 @@ const SubAgentPolicyPage: React.FC<Props> = ({
           ) : (
             <div className="perm-a2a-list">
               {agents.map((agent) => {
-                const granted = draft[agent.recordId] || [];
+                const overridden = isOverridden(agent.recordId);
+                const granted = shownSkills(agent.recordId);
                 const open = !!expanded[agent.recordId];
                 return (
                   <div key={agent.recordId} className="perm-a2a-agent">
@@ -325,8 +373,35 @@ const SubAgentPolicyPage: React.FC<Props> = ({
                           .replace('{n}', String(granted.length))
                           .replace('{total}', String(agent.skills.length))}
                       </span>
-                      {granted.length > 0 && (
+                      {/* The state the KEY encodes, because the boxes alone cannot
+                          show it: an inherited agent and a blocked one both look
+                          like "ticks from somewhere else" or "no ticks". */}
+                      {scope !== GLOBAL && !overridden && (
+                        <Badge>{t('subagent.inherits')}</Badge>
+                      )}
+                      {scope !== GLOBAL && overridden && granted.length === 0 && (
+                        <Badge color="red">{t('subagent.blocked')}</Badge>
+                      )}
+                      {scope !== GLOBAL && overridden && granted.length > 0 && (
+                        <Badge color="blue">{t('subagent.replacesGlobal')}</Badge>
+                      )}
+                      {scope === GLOBAL && granted.length > 0 && (
                         <Badge color="green">{t('subagent.granted')}</Badge>
+                      )}
+                      {scope !== GLOBAL && (
+                        <span
+                          className="perm-a2a-override"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Button
+                            variant="inline-link"
+                            onClick={() => (overridden
+                              ? inheritAgent(agent.recordId)
+                              : overrideAgent(agent.recordId))}
+                          >
+                            {overridden ? t('subagent.useGlobal') : t('subagent.override')}
+                          </Button>
+                        </span>
                       )}
                     </div>
                     {open && (
@@ -336,6 +411,8 @@ const SubAgentPolicyPage: React.FC<Props> = ({
                             <input
                               type="checkbox"
                               checked={granted.includes(skill.id)}
+                              disabled={!overridden}
+                              title={overridden ? undefined : t('subagent.inheritsHint')}
                               onChange={() => toggle(agent.recordId, skill.id)}
                             />
                             <span className="perm-a2a-skill-id">{skill.id}</span>
@@ -364,30 +441,34 @@ const SubAgentPolicyPage: React.FC<Props> = ({
             </CloudscapeHeader>
           }
         >
-          {Object.keys(effective).filter((k) => (effective[k] || []).length).length === 0 ? (
-            <CloudscapeBox color="text-body-secondary">
-              {t('subagent.previewEmpty')}
-            </CloudscapeBox>
-          ) : (
-            <SpaceBetween size="xs">
-              {Object.entries(effective)
-                .filter(([, skills]) => skills.length)
-                .map(([recordId, skills]) => {
-                  const overridden = (draft[recordId] || []).length > 0;
-                  return (
-                    <div key={recordId}>
-                      <code>{agentName(recordId)}</code>{' → '}
-                      <code>[{skills.join(', ')}]</code>{'  '}
-                      {overridden ? (
-                        <Badge color="blue">{t('subagent.replacesGlobal')}</Badge>
-                      ) : (
-                        <Badge>{t('subagent.inheritedFromGlobal')}</Badge>
-                      )}
-                    </div>
-                  );
-                })}
-            </SpaceBetween>
-          )}
+          <SpaceBetween size="xs">
+            {Object.values(effective).every((skills) => !skills.length) && (
+              <CloudscapeBox color="text-body-secondary">
+                {t('subagent.previewEmpty')}
+              </CloudscapeBox>
+            )}
+            {/* A blocked agent stays in the list. Hiding `[]` made a block look like
+                the agent had never been granted, which is the confusion that let the
+                bug hide. */}
+            {Object.entries(effective)
+              .filter(([recordId, skills]) => skills.length || isOverridden(recordId))
+              .map(([recordId, skills]) => {
+                const overridden = isOverridden(recordId);
+                return (
+                  <div key={recordId}>
+                    <code>{agentName(recordId)}</code>{' → '}
+                    <code>[{skills.join(', ')}]</code>{'  '}
+                    {overridden && skills.length === 0 ? (
+                      <Badge color="red">{t('subagent.blocked')}</Badge>
+                    ) : overridden ? (
+                      <Badge color="blue">{t('subagent.replacesGlobal')}</Badge>
+                    ) : (
+                      <Badge>{t('subagent.inheritedFromGlobal')}</Badge>
+                    )}
+                  </div>
+                );
+              })}
+          </SpaceBetween>
         </Container>
       )}
 

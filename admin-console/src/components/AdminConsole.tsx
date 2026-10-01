@@ -23,6 +23,8 @@ import {
   CatalogModel,
   getUserPermissions,
   updateUserPermissions,
+  getUserSkillPolicy,
+  updateUserSkillPolicy,
   listMemoryActors,
   getMemoryRecords,
   getKBStatus,
@@ -37,6 +39,13 @@ import {
   RegistrySkill,
   reviewRegistryRecord,
   importRegistryRecords,
+  listRegistryEvents,
+  RegistryEvent,
+  RegistryEventsResult,
+  scanSkillRecord,
+  listSkillScans,
+  SkillScanReport,
+  SkillScanFinding,
   listA2aAgents,
   A2AAgentRecord,
   cardAuthSchemes,
@@ -117,8 +126,13 @@ import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
 import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
 import { DashboardSection } from './Dashboard/DashboardSection';
+import { RegistryActivityPanel } from './RegistryActivity/RegistryActivityPanel';
 import { AgentsPage } from './AgentsPage';
 import architectureDiagram from '../assets/architecture.drawio.png';
+import {
+  useResizableTables, WrapCell, TEXT_COL_MAX, LONG_TEXT_COL_MAX,
+  W_NUM, W_BADGE, W_STATUS, W_DATE, W_NAME, W_EMAIL, W_WIDE, W_XWIDE,
+} from './tableColumns';
 
 /**
  * Every routable tab, as a runtime value.
@@ -341,6 +355,7 @@ interface ModelsTabProps {
 }
 
 const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, setError, setSuccess }) => {
+  const resizable = useResizableTables();
   const [globalModelId, setGlobalModelId] = useState('');
   const [savedGlobalModelId, setSavedGlobalModelId] = useState('');
   const [globalVisionModelId, setGlobalVisionModelId] = useState('');
@@ -614,10 +629,10 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
         loadingText={t('models.loadingUsers')}
         items={users}
         trackBy="sub"
-        columnDefinitions={[
-          { id: 'email', header: t('models.colEmail'), cell: (u) => u.email || u.username },
+        {...resizable<CognitoUserInfo>('models', [
+          { id: 'email', width: W_EMAIL, header: t('models.colEmail'), cell: (u) => u.email || u.username },
           {
-            id: 'status',
+            id: 'status', width: W_STATUS,
             header: t('models.colStatus'),
             cell: (u) =>
               u.status === 'CONFIRMED' ? (
@@ -627,7 +642,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
               ),
           },
           {
-            id: 'model',
+            id: 'model', width: W_XWIDE,
             header: t('models.colModel'),
             cell: (u) => (
               <div style={{ minWidth: 260 }}>
@@ -652,7 +667,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
             ),
           },
           {
-            id: 'visionModel',
+            id: 'visionModel', width: W_XWIDE,
             header: t('models.colVisionModel'),
             cell: (u) => (
               <div style={{ minWidth: 240 }}>
@@ -684,7 +699,7 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
               </Button>
             ),
           },
-        ]}
+        ])}
         empty={
           <CloudscapeBox textAlign="center" padding="m">
             <b>{t('models.noUsers')}</b>
@@ -694,7 +709,6 @@ const ModelsTab: React.FC<ModelsTabProps> = ({ error, success, clearMessages, se
     </SpaceBetween>
   );
 };
-
 
 // ---------------------------------------------------------------------------
 // Scenarios Tab — every saved automation, across users
@@ -719,6 +733,7 @@ interface ScenariosTabProps {
 const ScenariosTab: React.FC<ScenariosTabProps> = ({
   error, success, clearMessages, setError, setSuccess,
 }) => {
+  const resizable = useResizableTables();
   const [rows, setRows] = useState<ScenarioRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -887,9 +902,9 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
         loadingText={t('scenarios.loading')}
         items={rows}
         trackBy={(row) => `${row.userId}#${row.scenarioId}`}
-        columnDefinitions={[
+        {...resizable<ScenarioRow>('scenarios', [
           {
-            id: 'name',
+            id: 'name', width: W_NAME,
             header: t('scenarios.colName'),
             cell: (row) => (
               <SpaceBetween size="xxs">
@@ -900,9 +915,9 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
               </SpaceBetween>
             ),
           },
-          { id: 'user', header: t('scenarios.colUser'), cell: (row) => row.userId },
+          { id: 'user', width: W_EMAIL, header: t('scenarios.colUser'), cell: (row) => row.userId },
           {
-            id: 'trigger',
+            id: 'trigger', width: W_STATUS,
             header: t('scenarios.colTrigger'),
             cell: (row) => (
               <SpaceBetween direction="horizontal" size="xxs">
@@ -917,26 +932,26 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
             // The cron AND its timezone. A bare "cron(0 15 ...)" is unreadable:
             // 15:00 UTC is 23:00 in Shanghai and 07:00 in Los Angeles, and the
             // zone is what tells them apart.
-            id: 'schedule',
+            id: 'schedule', width: W_DATE,
             header: t('scenarios.colSchedule'),
             cell: (row) => (row.scheduled
               ? <span><code>{row.cron}</code> {row.timezone ? `(${row.timezone})` : ''}</span>
               : <span style={{ opacity: 0.6 }}>{t('scenarios.noSchedule')}</span>),
           },
           {
-            id: 'actions',
+            id: 'actions', width: W_DATE,
             header: t('scenarios.colActions'),
             cell: (row) => row.actionCount,
           },
           {
-            id: 'active',
+            id: 'active', width: W_BADGE,
             header: t('scenarios.colActive'),
             cell: (row) => (row.isActive
               ? <StatusIndicator type="success">{t('scenarios.active')}</StatusIndicator>
               : <StatusIndicator type="stopped">{t('scenarios.inactive')}</StatusIndicator>),
           },
           {
-            id: 'lastRun',
+            id: 'lastRun', width: W_DATE,
             header: t('scenarios.colLastRun'),
             minWidth: 200,
             cell: (row) => (
@@ -949,7 +964,7 @@ const ScenariosTab: React.FC<ScenariosTabProps> = ({
             ),
           },
           { id: 'source', header: t('scenarios.colSource'), cell: (row) => row.source || '-' },
-        ]}
+        ])}
         selectionType="single"
         selectedItems={selected}
         onSelectionChange={({ detail }) => setSelected(detail.selectedItems)}
@@ -1391,6 +1406,7 @@ interface MemoriesTabProps {
 }
 
 const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, setSuccess, clearMessages }) => {
+  const resizable = useResizableTables();
   const [actors, setActors] = useState<ActorRow[]>([]);
   const [selectedActor, setSelectedActor] = useState<ActorRow | null>(null);
   const [records, setRecords] = useState<MemoryRecord[]>([]);
@@ -1473,9 +1489,9 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
           loadingText={t('memories.loadingActors')}
           items={actors}
           trackBy="actorId"
-          columnDefinitions={[
-            { id: 'email', header: t('memories.colEmail'), cell: (row) => row.email ?? '—', sortingField: 'email' },
-            { id: 'actorId', header: t('memories.colActorId'), cell: (row) => <code>{row.actorId}</code> },
+          {...resizable<ActorRow>('memory-actors', [
+            { id: 'email', width: W_EMAIL, header: t('memories.colEmail'), cell: (row) => row.email ?? '—', sortingField: 'email' },
+            { id: 'actorId', width: W_WIDE, header: t('memories.colActorId'), cell: (row) => <code>{row.actorId}</code> },
             {
               id: 'actions',
               header: t('memories.colActions'),
@@ -1486,7 +1502,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
                 </Button>
               ),
             },
-          ]}
+          ])}
           empty={
             <CloudscapeBox textAlign="center" padding="m">
               <b>{t('memories.noActors')}</b>
@@ -1525,9 +1541,9 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
           loadingText={t('memories.loadingMemories')}
           items={records}
           trackBy="id"
-          columnDefinitions={[
+          {...resizable<MemoryRecord>('memory-records', [
             {
-              id: 'type',
+              id: 'type', width: W_BADGE,
               header: t('memories.colType'),
               cell: (r) =>
                 r.type === 'facts' ? (
@@ -1539,15 +1555,17 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ error, success, setError, set
             {
               id: 'content',
               header: t('memories.colContent'),
-              cell: (r) => <span style={{ whiteSpace: 'normal' }}>{r.text}</span>,
-              maxWidth: 600,
+              // This cell's inline `whiteSpace: 'normal'` is where WrapCell came from:
+              // it wraps the long text without making the type and date columns wrap too.
+              cell: (r) => <WrapCell>{r.text}</WrapCell>,
+              width: LONG_TEXT_COL_MAX,
             },
             {
               id: 'created',
               header: t('memories.colCreated'),
               cell: (r) => (r.createdAt ? new Date(r.createdAt).toLocaleString() : '-'),
             },
-          ]}
+          ])}
           empty={
             <CloudscapeBox textAlign="center" padding="m">
               <b>{t('memories.noRecords')}</b>
@@ -1574,6 +1592,7 @@ interface KnowledgeBaseTabProps {
 const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
   error, success, setError, setSuccess, clearMessages, cognitoUsers,
 }) => {
+  const resizable = useResizableTables();
   const [scopes, setScopes] = useState<(string | KBScopeInfo)[]>([]);
   const [selectedScope, setSelectedScope] = useState('__shared__');
   const [documents, setDocuments] = useState<KBDocument[]>([]);
@@ -1807,10 +1826,10 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
         loadingText={t('files.loading')}
         items={documents}
         trackBy="key"
-        columnDefinitions={[
-          { id: 'name', header: t('kb.colName'), cell: (doc) => doc.name },
+        {...resizable<KBDocument>('kb-documents', [
+          { id: 'name', width: W_XWIDE, header: t('kb.colName'), cell: (doc) => doc.name },
           {
-            id: 'size',
+            id: 'size', width: W_NUM,
             header: t('kb.colSize'),
             cell: (doc) =>
               doc.size < 1024
@@ -1820,7 +1839,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
                   : `${(doc.size / 1048576).toFixed(1)} MB`,
           },
           {
-            id: 'modified',
+            id: 'modified', width: W_DATE,
             header: t('kb.colModified'),
             cell: (doc) => new Date(doc.lastModified).toLocaleDateString(),
           },
@@ -1830,7 +1849,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
             minWidth: 110,
             cell: (doc) => <Button onClick={() => handleDelete(doc.key)}>{t('kb.delete')}</Button>,
           },
-        ]}
+        ])}
         empty={
           <CloudscapeBox textAlign="center" padding="m">
             <b>{kbStatus === 'NOT_INITIALIZED' ? t('kb.notInitialized') : t('kb.noDocuments')}</b>
@@ -1846,9 +1865,9 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
           header={<CloudscapeHeader variant="h3">{t('kb.syncStatus')}</CloudscapeHeader>}
           items={syncJobs}
           trackBy="ingestionJobId"
-          columnDefinitions={[
+          {...resizable<KBSyncJob>('kb-sync-jobs', [
             {
-              id: 'status',
+              id: 'status', width: W_STATUS,
               header: t('kb.syncJobStatus'),
               cell: (job) =>
                 job.status === 'COMPLETE' ? (
@@ -1860,7 +1879,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
                 ),
             },
             {
-              id: 'started',
+              id: 'started', width: W_DATE,
               header: t('kb.syncJobStarted'),
               cell: (job) => (job.startedAt ? new Date(job.startedAt).toLocaleString() : '-'),
             },
@@ -1869,7 +1888,7 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
               header: t('kb.syncJobUpdated'),
               cell: (job) => (job.updatedAt ? new Date(job.updatedAt).toLocaleString() : '-'),
             },
-          ]}
+          ])}
         />
       )}
     </SpaceBetween>
@@ -1908,6 +1927,7 @@ interface OptimizationTabProps {
 const OptimizationTab: React.FC<OptimizationTabProps> = ({
   error, success, setError, setSuccess, cognitoUsers,
 }) => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   const [scope, setScope] = useState<string>('__global__');
   const [agentType, setAgentType] = useState<OptUiAgentType>('text');
@@ -2096,15 +2116,15 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
         <Table
           loading={loading}
           items={recs}
-          columnDefinitions={[
-            { id: 'id', header: t('optimization.col.name'), cell: (i: OptRecommendation) => i.recommendationId },
-            { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptRecommendation) => i.agentType },
-            { id: 'eval', header: t('optimization.col.evaluator'), cell: (i: OptRecommendation) => i.evaluatorArn.split('/').pop() || '' },
-            { id: 'status', header: t('optimization.col.status'), cell: (i: OptRecommendation) =>
+          {...resizable('opt-recommendations', [
+            { id: 'id', width: W_WIDE, header: t('optimization.col.name'), cell: (i: OptRecommendation) => i.recommendationId },
+            { id: 'agent', width: W_NAME, header: t('optimization.col.agent'), cell: (i: OptRecommendation) => i.agentType },
+            { id: 'eval', width: W_NAME, header: t('optimization.col.evaluator'), cell: (i: OptRecommendation) => i.evaluatorArn.split('/').pop() || '' },
+            { id: 'status', width: W_STATUS, header: t('optimization.col.status'), cell: (i: OptRecommendation) =>
               <StatusIndicator type={i.status === 'COMPLETED' ? 'success' : i.status === 'FAILED' ? 'error' : 'in-progress'}>{i.status}</StatusIndicator>
             },
-            { id: 'created', header: t('optimization.col.created'), cell: (i: OptRecommendation) => new Date(i.createdAt).toLocaleString() },
-            { id: 'applied', header: t('optimization.col.applied'), cell: (i: OptRecommendation) => i.appliedAt ? new Date(i.appliedAt).toLocaleString() : '—' },
+            { id: 'created', width: W_DATE, header: t('optimization.col.created'), cell: (i: OptRecommendation) => new Date(i.createdAt).toLocaleString() },
+            { id: 'applied', width: W_DATE, header: t('optimization.col.applied'), cell: (i: OptRecommendation) => i.appliedAt ? new Date(i.appliedAt).toLocaleString() : '—' },
             { id: 'actions', header: '', cell: (i: OptRecommendation) =>
               <SpaceBetween size="xs" direction="horizontal">
                 <Button onClick={async () => {
@@ -2118,7 +2138,7 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
                 }}>{t('optimization.delete')}</Button>
               </SpaceBetween>
             },
-          ]}
+          ])}
           empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.recsEmpty')}</CloudscapeBox>}
         />
       </Container>
@@ -2134,13 +2154,13 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
             <Table
               loading={loading}
               items={bundles}
-              columnDefinitions={[
-                { id: 'name', header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
-                { id: 'agent', header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
-                { id: 'src', header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
-                { id: 'latest', header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
+              {...resizable('opt-bundles', [
+                { id: 'name', width: W_NAME, header: t('optimization.col.bundle'), cell: (i: OptBundle) => i.bundleName },
+                { id: 'agent', width: W_NAME, header: t('optimization.col.agent'), cell: (i: OptBundle) => i.agentType },
+                { id: 'src', width: W_WIDE, header: t('optimization.col.sourceRec'), cell: (i: OptBundle) => i.sourceRecommendationId || '—' },
+                { id: 'latest', width: W_BADGE, header: t('optimization.col.latest'), cell: (i: OptBundle) => i.latestVersionId },
                 { id: 'created', header: t('optimization.col.created'), cell: (i: OptBundle) => new Date(i.createdAt).toLocaleString() },
-              ]}
+              ])}
               empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.bundlesEmpty')}</CloudscapeBox>}
             />
           </Container>
@@ -2168,17 +2188,17 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
           <Table
             loading={loading}
             items={tests}
-            columnDefinitions={[
-              { id: 'id', header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
-              { id: 'status', header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
+            {...resizable('opt-ab-tests', [
+              { id: 'id', width: W_WIDE, header: t('optimization.col.name'), cell: (i: OptABTestSummary) => i.testId },
+              { id: 'status', width: W_STATUS, header: t('optimization.col.status'), cell: (i: OptABTestSummary) =>
                 <StatusIndicator type={
                   i.executionStatus === 'RUNNING' ? 'in-progress' :
                   i.executionStatus === 'STOPPED' ? 'stopped' :
                   'pending'
                 }>{i.executionStatus}</StatusIndicator>
               },
-              { id: 'winner', header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
-              { id: 'auto', header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
+              { id: 'winner', width: W_NAME, header: t('optimization.col.winner'), cell: (i: OptABTestSummary) => i.winner ?? '—' },
+              { id: 'auto', width: W_DATE, header: t('optimization.col.autoStop'), cell: (i: OptABTestSummary) => new Date(i.autoStopAt).toLocaleString() },
               { id: 'actions', header: '', cell: (i: OptABTestSummary) =>
                 <SpaceBetween size="xs" direction="horizontal">
                   {i.executionStatus === 'RUNNING' && <Button onClick={async () => {
@@ -2187,7 +2207,7 @@ const OptimizationTab: React.FC<OptimizationTabProps> = ({
                   }}>{t('optimization.stop')}</Button>}
                 </SpaceBetween>
               },
-            ]}
+            ])}
             empty={<CloudscapeBox textAlign="center" padding="m">{t('optimization.abEmpty')}</CloudscapeBox>}
           />
         </Container>
@@ -2391,7 +2411,133 @@ interface RecommendationDetailDrawerProps {
   onApply: () => void;
 }
 
+/**
+ * A skill's risk scan report, rendered the same way wherever it is shown.
+ *
+ * Used by the approval queue (where it informs a decision) and by the Integration
+ * Registry's Skills drawer (where it is the record's risk posture). One component,
+ * because a reviewer who learns to read it in one place should not have to learn a
+ * second layout in the other.
+ *
+ * Three things this renders on purpose:
+ *
+ *   - Evidence, with invisible characters shown as `<U+200B>`. The scanner does that
+ *     substitution server-side; printing the raw match would print nothing, which is
+ *     exactly why that class of payload hides from a human reading the file.
+ *   - The OWASP AST id beside each finding, so a reviewer can take the taxonomy they
+ *     already have and look the category up.
+ *   - Whether the semantic tier actually ran. A static-only scan that presented
+ *     identically to a full one would overstate what was checked.
+ */
+const SkillScanReportView: React.FC<{ report: SkillScanReport }> = ({ report }) => {
+  const resizable = useResizableTables();
+  const { t } = useI18n();
+  const severityOrder = ['critical', 'high', 'medium', 'low', 'info'];
+  const sorted = [...(report.findings || [])].sort(
+    (a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity));
+  const indicator = (s: string) => (
+    s === 'critical' || s === 'high' ? 'error' : s === 'medium' ? 'warning' : 'info');
+
+  return (
+    <SpaceBetween size="m">
+      <SpaceBetween direction="horizontal" size="xs">
+        <Badge color={report.verdict === 'FAIL' ? 'red'
+          : report.verdict === 'WARN' ? 'blue' : 'green'}>
+          {`${report.verdict} · ${t('scan.score')} ${report.score} · ${report.riskTier}`}
+        </Badge>
+        {report.llmTier === 'ok'
+          ? <Badge color="green">{t('scan.tierBoth')}</Badge>
+          : <Badge color="grey">{t('scan.tierStaticOnly')}</Badge>}
+      </SpaceBetween>
+
+      <CloudscapeBox variant="small" color="text-body-secondary">
+        {t('scan.scannedAt')
+          .replace('{when}', report.scannedAt ? new Date(report.scannedAt).toLocaleString() : '—')
+          .replace('{who}', report.scannedBy || '—')
+          .replace('{version}', report.scannerVersion || '—')}
+      </CloudscapeBox>
+
+      {/* The semantic tier did not run. Said plainly, because a report that only ran
+          half of the checks and looks like a full one is worse than no report. */}
+      {report.llmTier !== 'ok' && (
+        <Alert type="warning" header={t('scan.semanticMissingTitle')}>
+          {t('scan.semanticMissingBody').replace('{reason}', report.llmTier || '—')}
+        </Alert>
+      )}
+
+      {sorted.length === 0 ? (
+        <Alert type="success" header={t('scan.noFindingsTitle')}>
+          {t('scan.noFindingsBody')}
+        </Alert>
+      ) : (
+        <Table
+          variant="embedded"
+          contentDensity="compact"
+          items={sorted}
+          trackBy="rule"
+          {...resizable<SkillScanFinding>('skill-scan-findings', [
+            {
+              id: 'severity', width: W_BADGE,
+              header: t('scan.colSeverity'),
+              minWidth: 110,
+              cell: (f: SkillScanFinding) => (
+                <StatusIndicator type={indicator(f.severity) as any}>
+                  {f.severity.toUpperCase()}
+                </StatusIndicator>
+              ),
+            },
+            {
+              id: 'rule', width: W_EMAIL,
+              header: t('scan.colRule'),
+              minWidth: 200,
+              cell: (f: SkillScanFinding) => (
+                <SpaceBetween size="xxxs">
+                  <CloudscapeBox><code>{f.id}</code> {f.rule}</CloudscapeBox>
+                  <SpaceBetween direction="horizontal" size="xxs">
+                    <Badge color="grey">{f.ast}</Badge>
+                    <Badge color={f.source.includes('semantic') ? 'blue' : 'grey'}>
+                      {f.source}
+                    </Badge>
+                  </SpaceBetween>
+                </SpaceBetween>
+              ),
+            },
+            {
+              id: 'detail',
+              header: t('scan.colDetail'),
+              width: LONG_TEXT_COL_MAX,
+              cell: (f: SkillScanFinding) => (
+                <SpaceBetween size="xxs">
+                  <CloudscapeBox><WrapCell>{f.detail}</WrapCell></CloudscapeBox>
+                  {!!f.evidence && (
+                    <pre className="skill-md-preview" style={{ margin: 0, maxHeight: 120 }}>
+                      {f.evidence}
+                    </pre>
+                  )}
+                  {!!f.remediation && (
+                    <CloudscapeBox variant="small" color="text-body-secondary">
+                      {t('scan.fix')} {f.remediation}
+                    </CloudscapeBox>
+                  )}
+                </SpaceBetween>
+              ),
+            },
+          ])}
+        />
+      )}
+
+      {/* Not decoration. Every public skill scanner tested in 2026 was bypassed inside
+          an hour, and a console that implies otherwise is selling the reviewer a
+          guarantee this cannot give them. */}
+      <CloudscapeBox variant="small" color="text-body-secondary">
+        {t('scan.disclaimer')}
+      </CloudscapeBox>
+    </SpaceBetween>
+  );
+};
+
 const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({ rec, onClose, onApply }) => {
+  const resizable = useResizableTables();
   const { t } = useI18n();
   return (
     <Modal visible size="large" header={`${t('optimization.recDetail')} — ${rec.recommendationId}`} onDismiss={onClose}>
@@ -2409,10 +2555,12 @@ const RecommendationDetailDrawer: React.FC<RecommendationDetailDrawerProps> = ({
         {rec.tools && rec.tools.length > 0 && (
           <Table
             items={rec.tools}
-            columnDefinitions={[
-              { id: 'name', header: 'Tool', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.toolName },
-              { id: 'desc', header: 'Recommended description', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.recommendedToolDescription },
-            ]}
+            {...resizable('opt-rec-tools', [
+              { id: 'name', width: W_NAME, header: 'Tool', cell: (i: { toolName: string; recommendedToolDescription: string }) => i.toolName },
+              { id: 'desc', header: 'Recommended description', width: LONG_TEXT_COL_MAX,
+                cell: (i: { toolName: string; recommendedToolDescription: string }) =>
+                  <WrapCell>{i.recommendedToolDescription}</WrapCell> },
+            ])}
           />
         )}
         {rec.errorMessage && <Alert type="error">{rec.errorMessage}</Alert>}
@@ -2436,7 +2584,17 @@ interface AdminConsoleProps {
   theme: 'light' | 'dark';
 }
 const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, theme }) => {
+  // Column widths are the reader's to set, and are remembered per table. See
+  // useResizableTables.ts for why they are stored per column id rather than positionally.
+  const resizable = useResizableTables();
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  // Per-user skill policy (Skills page, user scope): the global skills this user
+  // is denied. `globalSkillsForPolicy` is what the toggles list; the two disabled
+  // arrays are draft vs saved so the Save button knows when there is work.
+  const [globalSkillsForPolicy, setGlobalSkillsForPolicy] = useState<SkillItem[]>([]);
+  const [disabledSkills, setDisabledSkills] = useState<string[]>([]);
+  const [savedDisabledSkills, setSavedDisabledSkills] = useState<string[]>([]);
+  const [skillPolicySaving, setSkillPolicySaving] = useState(false);
   const [userIds, setUserIds] = useState<string[]>(['__global__']);
   const [selectedUserId, setSelectedUserId] = useState('__global__');
   const [isLoading, setIsLoading] = useState(false);
@@ -2546,6 +2704,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [pendingRecords, setPendingRecords] = useState<RegistryRecord[]>([]);
   const [reviewing, setReviewing] = useState('');
   const [rejectReason, setRejectReason] = useState<Record<string, string>>({});
+  // Risk scan reports, keyed by recordId. Loaded as one request with the modal so the
+  // queue can render a risk column without a round trip per row; individual rows are
+  // rescanned on demand and merged back in.
+  const [scanReports, setScanReports] = useState<Record<string, SkillScanReport>>({});
+  const [scanning, setScanning] = useState('');
+  const [scanAllProgress, setScanAllProgress] = useState<{ done: number; total: number } | null>(null);
+  const [scanDrawer, setScanDrawer] = useState<{ name: string; report: SkillScanReport } | null>(null);
 
   // User settings (model ID)
   const [modelId, setModelId] = useState('');
@@ -2561,6 +2726,28 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   // Integration Registry
   const [integrationsSubTab, setIntegrationsSubTab] =
     useState<'overview' | 'a2a' | 'skills'>('overview');
+  // Registry record transitions from EventBridge, via the admin API. Held at the tab
+  // level rather than inside the Overview panel because the pending count is also
+  // the Overview sub-tab's badge, which has to show while the admin is on A2A.
+  const [registryEvents, setRegistryEvents] = useState<RegistryEventsResult | null>(null);
+  const [registryEventsLoading, setRegistryEventsLoading] = useState(false);
+  const [registryEventsError, setRegistryEventsError] = useState('');
+  // The record a "Review" click came from. The target table marks that row so the
+  // admin lands on the right line of a queue rather than at the top of a page.
+  const [highlightRecordId, setHighlightRecordId] = useState('');
+
+  const loadRegistryEvents = useCallback(async () => {
+    setRegistryEventsLoading(true);
+    try {
+      setRegistryEvents(await listRegistryEvents());
+      setRegistryEventsError('');
+    } catch (err: any) {
+      // Keep the last good data on screen; the alert says the refresh failed.
+      setRegistryEventsError(err.message);
+    } finally {
+      setRegistryEventsLoading(false);
+    }
+  }, []);
   // Approved SKILL records. Separate from the Build -> Skills page, which shows what
   // is running; this shows what the registry has approved and who imported it.
   const [registrySkills, setRegistrySkills] = useState<RegistrySkill[]>([]);
@@ -2624,7 +2811,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   const [policyMode, setPolicyMode] = useState<'ENFORCE' | 'LOG_ONLY'>('ENFORCE');
   const [policyModeSaving, setPolicyModeSaving] = useState(false);
   const [permOriginal, setPermOriginal] = useState<string[]>([]);
-
+  // Whether the selected user has a `__permissions__` row at all. Without one the
+  // gateway serves them NO tools (Cedar default-deny, measured 2026-09-18), and
+  // the panel says so instead of pre-ticking tools they cannot call.
+  const [permHasRow, setPermHasRow] = useState(true);
 
   // File manager (shown when editing a skill)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([]);
@@ -2642,12 +2832,47 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     try {
       const items = await listSkills(selectedUserId);
       setSkills(items);
+      if (selectedUserId === '__global__') {
+        setGlobalSkillsForPolicy([]);
+        setDisabledSkills([]);
+        setSavedDisabledSkills([]);
+      } else {
+        // Under a user, the page also has to show what they INHERIT, because
+        // that is the only place the inherited part can be switched off.
+        const [globals, policy] = await Promise.all([
+          listSkills('__global__'),
+          getUserSkillPolicy(selectedUserId),
+        ]);
+        setGlobalSkillsForPolicy(globals);
+        setDisabledSkills(policy.disabledSkills || []);
+        setSavedDisabledSkills(policy.disabledSkills || []);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setIsLoading(false);
     }
   }, [selectedUserId]);
+
+  const skillPolicyDirty = useMemo(
+    () => JSON.stringify([...disabledSkills].sort()) !== JSON.stringify([...savedDisabledSkills].sort()),
+    [disabledSkills, savedDisabledSkills],
+  );
+
+  const handleSaveSkillPolicy = async () => {
+    clearMessages();
+    setSkillPolicySaving(true);
+    try {
+      const result = await updateUserSkillPolicy(selectedUserId, disabledSkills);
+      setDisabledSkills(result.disabledSkills || []);
+      setSavedDisabledSkills(result.disabledSkills || []);
+      setSuccess(t('skills.policySaved').replace('{user}', displayUserId(selectedUserId)));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSkillPolicySaving(false);
+    }
+  };
 
   const loadSettings = useCallback(async () => {
     try {
@@ -2836,16 +3061,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     try {
       const perms = await getUserPermissions(getActorId(user));
       const allowed = perms.allowedTools || [];
-      // If the user has no explicit permission record yet (empty list),
-      // default-allow every built-in tool per spec. Gateway-scanned tools
-      // stay unchecked by default — admins opt users in explicitly.
-      const initialAllowed = allowed.length === 0
-        ? gatewayTools.filter((t) => t.source === 'builtin').map((t) => t.name)
-        : allowed;
-      setPermOriginal(initialAllowed);
+      // Show what is STORED. This used to pre-tick every built-in tool for a user
+      // with no row ("default-allow per spec"), while the gateway — Cedar permits
+      // naming principal ids, default-deny otherwise — served that user nothing.
+      // A panel that shows access the platform refuses is worse than an empty one.
+      setPermHasRow(allowed.length > 0);
+      setPermOriginal(allowed);
       const selections: Record<string, boolean> = {};
       for (const tool of gatewayTools) {
-        selections[tool.name] = initialAllowed.includes(tool.name);
+        selections[tool.name] = allowed.includes(tool.name);
       }
       setUserToolSelections(selections);
     } catch (err: any) {
@@ -2863,6 +3087,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         .map(([name]) => name);
       await updateUserPermissions(getActorId(selectedPermUser), selectedTools);
       setPermOriginal(selectedTools);
+      setPermHasRow(selectedTools.length > 0);
 
       setSuccess(t('users.permsUpdated').replace('{user}', selectedPermUser.email || selectedPermUser.username || ''));
     } catch (err: any) {
@@ -2886,7 +3111,6 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     const orig = [...permOriginal].sort();
     return JSON.stringify(current) !== JSON.stringify(orig);
   })();
-
 
   const handleSaveSettings = async () => {
     clearMessages();
@@ -2999,11 +3223,48 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         })
         .catch((err) => setRegistrySkillsError(err.message))
         .finally(() => setRegistrySkillsLoading(false));
+      // The inventory's drawer shows each record's latest scan report. Loaded here as
+      // well as with the approval queue, because an admin can reach this page without
+      // ever opening that modal. A failure is not this page's problem — the drawer says
+      // "never scanned" and the rest of the inventory renders.
+      listSkillScans()
+        .then(setScanReports)
+        .catch(() => { /* the drawer falls back to "never scanned" */ });
     }
     if (activeTab === 'integrations' && integrationsSubTab === 'a2a') {
       void loadA2aInventory();
     }
   }, [activeTab, integrationsSubTab, loadA2aInventory]);
+
+  // Poll the Registry event feed while the Integration Registry tab is open. 30s
+  // matches how quickly an admin would notice anyway; the rule → Lambda → table hop
+  // is sub-second, so a submission shows within one poll. Leaving the tab stops it.
+  useEffect(() => {
+    if (activeTab !== 'integrations') return;
+    void loadRegistryEvents();
+    const id = window.setInterval(() => void loadRegistryEvents(), 30_000);
+    return () => window.clearInterval(id);
+  }, [activeTab, loadRegistryEvents]);
+
+  // The review modal closing is the end of a SKILL notification's journey; the
+  // highlight has no meaning after that. (Runs on mount too — clearing "" is free.)
+  useEffect(() => {
+    if (!showRegistryModal) setHighlightRecordId('');
+  }, [showRegistryModal]);
+
+  /** From a Registry activity row to the place its decision is made. SKILLs are
+   *  reviewed in the Build → Skills modal, AGENTs on the A2A sub-tab; both tables
+   *  mark the row whose recordId matches. */
+  const reviewFromRegistryEvent = (evt: RegistryEvent) => {
+    setHighlightRecordId(evt.recordId);
+    if (evt.recordType === 'SKILL') {
+      setActiveTab('skills');
+      void handleOpenRegistryModal();
+    } else if (evt.recordType === 'AGENT') {
+      setActiveTab('integrations');
+      setIntegrationsSubTab('a2a');
+    }
+  };
 
   const clearMessages = () => {
     setError('');
@@ -3036,7 +3297,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       setSuccess(t('integrations.a2a.review.done')
         .replace('{name}', record.name)
         .replace('{status}', out.status));
+      setHighlightRecordId('');
       await loadA2aInventory();
+      void loadRegistryEvents();
     } catch (err: any) {
       if (err instanceof A2AConformanceBlocked) {
         // Not an error message — a decision to put in front of the admin.
@@ -3147,17 +3410,89 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       // mind should not have to ask the author to republish — and a rejected
       // record that vanished from every screen was effectively unrecoverable
       // without the AWS console.
-      const [records, pending, rejected] = await Promise.all([
+      // The scan reports come along in the same pass: the reviewer's first question
+      // about a queued skill is now "what did the scan say", and answering it with a
+      // request per row would make the queue render in stages.
+      const [records, pending, rejected, reports] = await Promise.all([
         listRegistryRecords('APPROVED'),
         listRegistryRecords('PENDING_APPROVAL').catch(() => []),
         listRegistryRecords('REJECTED').catch(() => []),
+        listSkillScans().catch(() => ({} as Record<string, SkillScanReport>)),
       ]);
       setRegistryRecords(records);
       setPendingRecords([...pending, ...rejected]);
+      setScanReports(reports);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setRegistryLoading(false);
+    }
+  };
+
+  /**
+   * Is the stored report still about the record as it stands now?
+   *
+   * Compared on timestamps rather than on `recordVersion`, because editing a record
+   * through the Skill ERP does not pass `recordVersion` to UpdateRegistryRecord — the
+   * version stays put while the content changes, so a version check would call a stale
+   * report current. `updatedAt` moves on every edit, which is the signal we want.
+   *
+   * The scanner has its own, stronger check: a rescan compares content hashes and
+   * reports SS13 when they differ. This is the cheap client-side version, so the queue
+   * can mark a report stale without re-reading every record's content.
+   */
+  const scanIsStale = (record: RegistryRecord, report?: SkillScanReport) => {
+    if (!report || !report.scannedAt || !record.updatedAt) return false;
+    return new Date(record.updatedAt).getTime() > new Date(report.scannedAt).getTime();
+  };
+
+  const handleScan = async (recordId: string) => {
+    clearMessages();
+    setScanning(recordId);
+    try {
+      const report = await scanSkillRecord(recordId);
+      setScanReports((prev) => ({ ...prev, [recordId]: report }));
+      if (report.persisted === false) {
+        // The report is on screen either way; what was lost is the badge after a reload
+        // and the note that goes into statusReason on approval. Worth saying.
+        setError(t('scan.notPersisted'));
+      }
+      return report;
+    } catch (err: any) {
+      setError(err.message);
+      return null;
+    } finally {
+      setScanning('');
+    }
+  };
+
+  /**
+   * Scan the whole queue, one record at a time.
+   *
+   * Sequential and client-driven rather than a batch endpoint: each scan is a model
+   * round trip, and ten of them inside one request would sit against API Gateway's hard
+   * 29s integration timeout — the whole batch would fail because of the slowest record.
+   * This way a failure costs one row and the reviewer watches the rest arrive.
+   */
+  const handleScanAll = async () => {
+    clearMessages();
+    const targets = pendingRecords.map((r) => r.recordId);
+    setScanAllProgress({ done: 0, total: targets.length });
+    const failures: string[] = [];
+    for (const recordId of targets) {
+      try {
+        const report = await scanSkillRecord(recordId);
+        setScanReports((prev) => ({ ...prev, [recordId]: report }));
+      } catch (err: any) {
+        failures.push(`${recordId}: ${err.message}`);
+      }
+      setScanAllProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
+    }
+    setScanAllProgress(null);
+    if (failures.length) {
+      setError(t('scan.someFailed').replace('{errors}', failures.join('; ')));
+    } else {
+      setSuccess(t('scan.allDone').replace('{count}', String(targets.length)));
     }
   };
 
@@ -3183,9 +3518,19 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     setReviewing(recordId);
     try {
       const out = await reviewRegistryRecord(recordId, decision, reason);
+      // The scan verdict is echoed back because the server just wrote it into the
+      // record's statusReason. Saying so here is what tells the reviewer their decision
+      // was recorded against evidence — or, for "scan not run", against none.
+      const scanNote = out.scan
+        ? (out.scan.verdict === 'NOT_SCANNED'
+            ? ` · ${t('scan.approvedUnscanned')}`
+            : ` · ${t('scan.approvedWith')
+                .replace('{verdict}', out.scan.verdict)
+                .replace('{score}', String(out.scan.score ?? ''))}`)
+        : '';
       setSuccess(t('registry.reviewDone')
         .replace('{status}', out.status)
-        .replace('{by}', out.reviewedBy || ''));
+        .replace('{by}', out.reviewedBy || '') + scanNote);
       // Reload both lists: an approval moves a record from one to the other.
       const [approved, pending, rejected] = await Promise.all([
         listRegistryRecords('APPROVED'),
@@ -3194,6 +3539,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       ]);
       setRegistryRecords(approved);
       setPendingRecords([...pending, ...rejected]);
+      void loadRegistryEvents();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -3261,11 +3607,21 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 variant="footer"
                 headerText={t('overview.diagramToggle')}
               >
-                <img
-                  src={architectureDiagram}
-                  alt={t('overview.diagramAlt')}
-                  style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
-                />
+                {/* The white card is not decoration and is deliberately NOT
+                    theme-conditional. The PNG has a transparent background and dark
+                    ink, so it needs a light surface: in dark mode, rendered bare, the
+                    diagram's own labels would sit on near-black and the pale box fills
+                    would be the only readable part. Pinning one light surface means one
+                    asset serves both themes — a light and a dark export would be two
+                    files to keep in step, which is exactly how this diagram went stale
+                    in the first place. */}
+                <div style={{ background: '#ffffff', padding: 12, borderRadius: 8 }}>
+                  <img
+                    src={architectureDiagram}
+                    alt={t('overview.diagramAlt')}
+                    style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
+                  />
+                </div>
               </ExpandableSection>
             </SpaceBetween>
           </Container>
@@ -3304,10 +3660,10 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           loadingText={t('users.loadingUsers')}
           items={cognitoUsers}
           trackBy="sub"
-          columnDefinitions={[
-            { id: 'email', header: t('users.colEmail'), cell: (u) => u.email || u.username },
+          {...resizable<CognitoUserInfo>('identity-users', [
+            { id: 'email', width: W_EMAIL, header: t('users.colEmail'), cell: (u) => u.email || u.username },
             {
-              id: 'status',
+              id: 'status', width: W_STATUS,
               header: t('users.colStatus'),
               cell: (u) =>
                 u.status === 'CONFIRMED' ? (
@@ -3317,17 +3673,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 ),
             },
             {
-              id: 'groups',
+              id: 'groups', width: W_BADGE,
               header: t('users.colGroups'),
               cell: (u) => <GroupsCell groups={u.groups} t={t} />,
             },
             {
-              id: 'created',
+              id: 'created', width: W_DATE,
               header: t('identity.colCreated'),
               cell: (u) => (u.createdAt ? new Date(u.createdAt).toLocaleString() : '-'),
             },
             {
-              id: 'userId',
+              id: 'userId', width: W_WIDE,
               header: t('users.colUserId'),
               cell: (u) => <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>,
             },
@@ -3335,7 +3691,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               // Timezone and coordinates. Read-only here with an Edit button —
               // "UTC" shown for an unset zone is the truth, not a placeholder:
               // that is the zone their scenes are actually scheduled in.
-              id: 'place',
+              id: 'place', width: W_XWIDE,
               header: t('identity.colPlace'),
               minWidth: 200,
               cell: (u) => {
@@ -3393,7 +3749,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 );
               },
             },
-          ]}
+          ])}
           empty={<CloudscapeBox textAlign="center" padding="m"><b>{t('users.noUsers')}</b></CloudscapeBox>}
         />
         <Modal
@@ -3489,9 +3845,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 { id: 'ec2', name: 'EC2', status: 'planned', description: t('instanceType.ec2Desc') },
               ]}
               trackBy="id"
-              columnDefinitions={[
-                { id: 'name', header: t('instanceType.colName'), cell: (r) => r.name },
-                { id: 'description', header: t('instanceType.colDescription'), cell: (r) => r.description },
+              {...resizable<{ id: string; name: string; status: string; description: string }>('instance-types', [
+                { id: 'name', width: W_NAME, header: t('instanceType.colName'), cell: (r) => r.name },
+                { id: 'description', header: t('instanceType.colDescription'),
+                    width: TEXT_COL_MAX,
+                    cell: (r) => <WrapCell>{r.description}</WrapCell> },
                 {
                   id: 'status',
                   header: t('instanceType.colStatus'),
@@ -3502,7 +3860,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       <StatusIndicator type="pending">{t('instanceType.planned')}</StatusIndicator>
                     ),
                 },
-              ]}
+              ])}
             />
           </SpaceBetween>
         </Container>
@@ -3584,6 +3942,70 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         </Button>
       </SpaceBetween>
 
+      {/* Inherited global skills, with the per-user OFF switch. Skills are global
+          UNION per-user on the agent, so this is the only subtraction there is —
+          and two of these skills are tools (browser-use -> browse_web,
+          code-interpreter -> execute_python), which every user held with no lever
+          until this existed. */}
+      {selectedUserId !== '__global__' && !showForm && (
+        <Container
+          header={
+            <CloudscapeHeader
+              variant="h3"
+              description={t('skills.inheritedHint')}
+              counter={`(${globalSkillsForPolicy.length - disabledSkills.filter((n) =>
+                globalSkillsForPolicy.some((g) => g.skillName === n)).length}/${globalSkillsForPolicy.length})`}
+              actions={
+                <Button
+                  variant="primary"
+                  loading={skillPolicySaving}
+                  disabled={!skillPolicyDirty}
+                  onClick={handleSaveSkillPolicy}
+                >
+                  {t('skills.savePolicy')}
+                </Button>
+              }
+            >
+              {t('skills.inheritedTitle')}
+            </CloudscapeHeader>
+          }
+        >
+          {globalSkillsForPolicy.length === 0 ? (
+            <CloudscapeBox color="text-body-secondary">{t('skills.noGlobalSkills')}</CloudscapeBox>
+          ) : (
+            <Table
+              variant="embedded"
+              contentDensity="compact"
+              items={globalSkillsForPolicy}
+              trackBy="skillName"
+              {...resizable<SkillItem>('skills-inherited', [
+                { id: 'name', width: W_NAME, header: t('skills.colName'), cell: (g) => g.skillName },
+                { id: 'description', width: TEXT_COL_MAX, header: t('skills.colDescription'),
+                  cell: (g) => <WrapCell>{g.description}</WrapCell> },
+                { id: 'tools', width: W_WIDE, header: t('skills.colTools'),
+                  cell: (g) => (g.allowedTools || []).join(', ') || '-' },
+                {
+                  id: 'enabled', width: 200, header: t('skills.colEnabledForUser'),
+                  cell: (g) => {
+                    const on = !disabledSkills.includes(g.skillName);
+                    return (
+                      <Toggle
+                        checked={on}
+                        onChange={({ detail }) => setDisabledSkills((prev) => (detail.checked
+                          ? prev.filter((n) => n !== g.skillName)
+                          : [...prev, g.skillName]))}
+                      >
+                        {on ? t('skills.enabledForUser') : t('skills.disabledForUser')}
+                      </Toggle>
+                    );
+                  },
+                },
+              ])}
+            />
+          )}
+        </Container>
+      )}
+
       {/* Registry import modal */}
       {showRegistryModal && (
         <Modal
@@ -3617,8 +4039,25 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 here called it. */}
             {pendingRecords.length > 0 && (
               <Container header={
-                <CloudscapeHeader variant="h3" description={t('registry.reviewDesc')}
-                                  counter={`(${pendingRecords.length})`}>
+                <CloudscapeHeader
+                  variant="h3"
+                  description={t('registry.reviewDesc')}
+                  counter={`(${pendingRecords.length})`}
+                  actions={
+                    <Button
+                      iconName="search"
+                      onClick={handleScanAll}
+                      loading={!!scanAllProgress}
+                      disabled={!!scanning}
+                    >
+                      {scanAllProgress
+                        ? t('scan.scanningProgress')
+                            .replace('{done}', String(scanAllProgress.done))
+                            .replace('{total}', String(scanAllProgress.total))
+                        : t('scan.scanAll')}
+                    </Button>
+                  }
+                >
                   {t('registry.reviewTitle')}
                 </CloudscapeHeader>
               }>
@@ -3627,19 +4066,73 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   contentDensity="compact"
                   items={pendingRecords}
                   trackBy="recordId"
-                  columnDefinitions={[
-                    { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
+                  {...resizable<RegistryRecord>('registry-review-queue', [
                     {
-                      id: 'status',
+                      id: 'name', width: W_NAME, header: t('registry.colName'),
+                      cell: (r) => (r.recordId === highlightRecordId
+                        ? <SpaceBetween direction="horizontal" size="xs">
+                            <b>{r.name}</b>
+                            <Badge color="blue">{t('registryEvents.fromNotification')}</Badge>
+                          </SpaceBetween>
+                        : r.name),
+                    },
+                    {
+                      id: 'status', width: W_STATUS,
                       header: t('registry.colStatus'),
                       cell: (r) => (r.status === 'REJECTED'
                         ? <StatusIndicator type="error">{r.status}</StatusIndicator>
                         : <StatusIndicator type="pending">{r.status}</StatusIndicator>),
                     },
-                    { id: 'description', header: t('registry.colDescription'),
-                      cell: (r) => r.description },
                     {
-                      id: 'reason',
+                      // The reviewer's evidence, next to the decision it informs. Not a
+                      // gate: Approve stays enabled whatever this says, because the
+                      // scanner is one layer of defence with real false positives and a
+                      // reviewer who has read the findings may be right to overrule them.
+                      // What the approval records is what this column said at the time.
+                      id: 'risk', width: W_WIDE,
+                      header: t('scan.colRisk'),
+                      minWidth: 210,
+                      cell: (r) => {
+                        const report = scanReports[r.recordId];
+                        const stale = scanIsStale(r, report);
+                        return (
+                          <SpaceBetween direction="horizontal" size="xxs">
+                            {!report ? (
+                              <Badge>{t('scan.notScanned')}</Badge>
+                            ) : (
+                              <Link
+                                onFollow={(e) => {
+                                  e.preventDefault();
+                                  setScanDrawer({ name: r.name, report });
+                                }}
+                                href="#"
+                              >
+                                <Badge color={report.verdict === 'FAIL' ? 'red'
+                                  : report.verdict === 'WARN' ? 'blue' : 'green'}>
+                                  {`${report.verdict} ${report.score} · ${report.riskTier}`}
+                                </Badge>
+                              </Link>
+                            )}
+                            {stale && <Badge color="grey">{t('scan.stale')}</Badge>}
+                            {report && report.llmTier !== 'ok' && (
+                              <Badge color="grey">{t('scan.staticOnly')}</Badge>
+                            )}
+                            <Button
+                              variant="inline-link"
+                              loading={scanning === r.recordId}
+                              onClick={() => handleScan(r.recordId)}
+                            >
+                              {report ? t('scan.rescan') : t('scan.scan')}
+                            </Button>
+                          </SpaceBetween>
+                        );
+                      },
+                    },
+                    { id: 'description', header: t('registry.colDescription'),
+                      width: TEXT_COL_MAX,
+                      cell: (r) => <WrapCell>{r.description}</WrapCell> },
+                    {
+                      id: 'reason', width: W_WIDE,
                       header: t('registry.reviewReason'),
                       minWidth: 200,
                       // Required to reject: statusReason is the only feedback the
@@ -3674,7 +4167,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                         </SpaceBetween>
                       ),
                     },
-                  ]}
+                  ])}
                 />
               </Container>
             )}
@@ -3692,7 +4185,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               loadingText={t('registry.loading')}
               items={registryRecords}
               trackBy="recordId"
-              columnDefinitions={[
+              {...resizable<RegistryRecord>('registry-import', [
                 {
                   id: 'select',
                   header: '',
@@ -3707,15 +4200,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     />
                   ),
                 },
-                { id: 'name', header: t('registry.colName'), cell: (r) => r.name },
-                { id: 'description', header: t('registry.colDescription'), cell: (r) => r.description },
-                { id: 'version', header: t('registry.colVersion'), cell: (r) => r.recordVersion },
+                { id: 'name', width: W_NAME, header: t('registry.colName'), cell: (r) => r.name },
+                { id: 'description', header: t('registry.colDescription'),
+                  width: TEXT_COL_MAX,
+                  cell: (r) => <WrapCell>{r.description}</WrapCell> },
+                { id: 'version', width: W_NUM, header: t('registry.colVersion'), cell: (r) => r.recordVersion },
                 {
                   id: 'updated',
                   header: t('registry.colUpdated'),
                   cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleDateString() : '-'),
                 },
-              ]}
+              ])}
               empty={
                 <CloudscapeBox textAlign="center" padding="m">
                   <b>{t('registry.noApproved')}</b>
@@ -3726,6 +4221,27 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               }
             />
           </SpaceBetween>
+        </Modal>
+      )}
+
+      {/* The findings for one queued skill. A sibling of the import modal rather than a
+          child, so it stacks on top and dismissing it returns the reviewer to the queue
+          with their place intact. */}
+      {scanDrawer && (
+        <Modal
+          visible
+          size="large"
+          onDismiss={() => setScanDrawer(null)}
+          header={`${t('scan.reportFor')} ${scanDrawer.name}`}
+          footer={
+            <CloudscapeBox float="right">
+              <Button onClick={() => setScanDrawer(null)}>
+                {t('integrations.skills.close')}
+              </Button>
+            </CloudscapeBox>
+          }
+        >
+          <SkillScanReportView report={scanDrawer.report} />
         </Modal>
       )}
 
@@ -4006,16 +4522,18 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
           loadingText={t('skills.loading')}
           items={skills}
           trackBy={(s) => `${s.userId}:${s.skillName}`}
-          columnDefinitions={[
-            { id: 'name', header: t('skills.colName'), cell: (s) => s.skillName },
-            { id: 'description', header: t('skills.colDescription'), cell: (s) => s.description },
+          {...resizable<SkillItem>('skills', [
+            { id: 'name', width: W_NAME, header: t('skills.colName'), cell: (s) => s.skillName },
+            { id: 'description', header: t('skills.colDescription'),
+            width: TEXT_COL_MAX,
+            cell: (s) => <WrapCell>{s.description}</WrapCell> },
             {
-              id: 'tools',
+              id: 'tools', width: W_WIDE,
               header: t('skills.colTools'),
               cell: (s) => (s.allowedTools || []).join(', ') || '-',
             },
             {
-              id: 'updated',
+              id: 'updated', width: W_DATE,
               header: t('skills.colUpdated'),
               cell: (s) => (s.updatedAt ? new Date(s.updatedAt).toLocaleDateString() : '-'),
             },
@@ -4030,7 +4548,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 </SpaceBetween>
               ),
             },
-          ]}
+          ])}
           empty={
             <CloudscapeBox textAlign="center" padding="m">
               <b>{t('skills.noSkills')}</b>
@@ -4127,9 +4645,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
             // share the same sessionId (derived from the JWT sub). Compose a
             // key that includes kind so React diffing stays stable.
             trackBy={(s) => `${s.kind || 'text'}:${s.sessionId}`}
-            columnDefinitions={[
+            {...resizable<SessionInfo>('sessions', [
               {
-                id: 'userId',
+                id: 'userId', width: W_EMAIL,
                 header: t('sessions.colUserId'),
                 cell: (s) => (
                   <span title={s.userId}>
@@ -4138,12 +4656,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 ),
               },
               {
-                id: 'kind',
+                id: 'kind', width: W_BADGE,
                 header: t('sessions.colKind'),
                 cell: (s) => (s.kind === 'voice' ? t('sessions.kindVoice') : t('sessions.kindText')),
               },
               {
-                id: 'sessionId',
+                id: 'sessionId', width: W_WIDE,
                 header: t('sessions.colSessionId'),
                 cell: (s) => (
                   <span title={s.sessionId}>
@@ -4152,12 +4670,12 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 ),
               },
               {
-                id: 'lastActive',
+                id: 'lastActive', width: W_DATE,
                 header: t('sessions.colLastActive'),
                 cell: (s) => (s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '-'),
               },
               {
-                id: 'tokens7d',
+                id: 'tokens7d', width: W_NUM,
                 header: t('sessions.colTokens7d'),
                 // The agent is named next to the number when the split says which
                 // one it was. Until now every session's tokens were one figure
@@ -4204,7 +4722,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   </SpaceBetween>
                 ),
               },
-            ]}
+            ])}
             empty={
               <CloudscapeBox textAlign="center" padding="m">
                 <b>{t('sessions.noSessions')}</b>
@@ -4279,6 +4797,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               }
             >
               <SpaceBetween size="m">
+                {!permHasRow && (
+                  <Alert type="warning">{t('users.noPermsRow')}</Alert>
+                )}
                 {gatewayTools.length === 0 ? (
                   <CloudscapeBox textAlign="center" padding="m">
                     <b>{t('users.noTools')}</b>
@@ -4383,17 +4904,17 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
               loadingText={t('users.loadingUsers')}
               items={cognitoUsers}
               trackBy="sub"
-              columnDefinitions={[
-                { id: 'email', header: t('users.colEmail'), cell: (u) => u.email || u.username },
+              {...resizable<CognitoUserInfo>('users', [
+                { id: 'email', width: W_EMAIL, header: t('users.colEmail'), cell: (u) => u.email || u.username },
                 {
-                  id: 'userId',
+                  id: 'userId', width: W_WIDE,
                   header: t('users.colUserId'),
                   cell: (u) => (
                     <span title={u.sub}>{u.sub.length > 28 ? u.sub.slice(0, 28) + '...' : u.sub}</span>
                   ),
                 },
                 {
-                  id: 'status',
+                  id: 'status', width: W_STATUS,
                   header: t('users.colStatus'),
                   cell: (u) =>
                     u.status === 'CONFIRMED' ? (
@@ -4403,7 +4924,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     ),
                 },
                 {
-                  id: 'groups',
+                  id: 'groups', width: W_BADGE,
                   header: t('users.colGroups'),
                   cell: (u) => <GroupsCell groups={u.groups} t={t} />,
                 },
@@ -4420,7 +4941,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     </Button>
                   ),
                 },
-              ]}
+              ])}
               empty={
                 <CloudscapeBox textAlign="center" padding="m">
                   <b>{t('users.noUsers')}</b>
@@ -4436,10 +4957,19 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         <SpaceBetween size="l">
           <SegmentedControl
             selectedId={integrationsSubTab}
-            onChange={({ detail }) =>
-              setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a' | 'skills')}
+            onChange={({ detail }) => {
+              setHighlightRecordId('');
+              setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a' | 'skills');
+            }}
             options={[
-              { id: 'overview', text: t('integrations.sub.overview') },
+              {
+                id: 'overview',
+                // The pending count rides the label so a submission is visible from
+                // the A2A and Skills sub-tabs too, not only once Overview is open.
+                text: registryEvents && registryEvents.pendingCount > 0
+                  ? `${t('integrations.sub.overview')} · ${registryEvents.pendingCount}`
+                  : t('integrations.sub.overview'),
+              },
               { id: 'a2a', text: t('integrations.sub.a2a') },
               { id: 'skills', text: t('integrations.sub.skills') },
               { id: 'mcp', text: `${t('integrations.sub.mcp')} · ${t('integrations.comingSoon')}`, disabled: true },
@@ -4449,6 +4979,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
           {integrationsSubTab === 'overview' && (
             <SpaceBetween size="l">
+              <RegistryActivityPanel
+                data={registryEvents}
+                loading={registryEventsLoading}
+                error={registryEventsError}
+                onRefresh={() => void loadRegistryEvents()}
+                onReview={reviewFromRegistryEvent}
+              />
               <Table
                 header={
                   <CloudscapeHeader variant="h2" description={t('integrations.desc')}>
@@ -4462,9 +4999,11 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   { id: 'api', name: t('integrations.apiGateway'), description: t('integrations.apiDesc'), active: false },
                 ]}
                 trackBy="id"
-                columnDefinitions={[
-                  { id: 'type', header: t('integrations.colType'), cell: (i) => i.name },
-                  { id: 'description', header: t('integrations.colDescription'), cell: (i) => i.description },
+                {...resizable<{ id: string; name: string; description: string; active: boolean }>('integrations-overview', [
+                  { id: 'type', width: W_NAME, header: t('integrations.colType'), cell: (i) => i.name },
+                  { id: 'description', header: t('integrations.colDescription'),
+                    width: TEXT_COL_MAX,
+                    cell: (i) => <WrapCell>{i.description}</WrapCell> },
                   {
                     id: 'status',
                     header: t('integrations.colStatus'),
@@ -4475,7 +5014,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                         <StatusIndicator type="pending">{t('integrations.planned')}</StatusIndicator>
                       ),
                   },
-                ]}
+                ])}
               />
               <Container header={<CloudscapeHeader variant="h3">{t('integrations.roadmap')}</CloudscapeHeader>}>
                 <CloudscapeBox color="text-body-secondary">{t('integrations.roadmapDesc')}</CloudscapeBox>
@@ -4506,41 +5045,42 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 loadingText={t('integrations.skills.loading')}
                 items={registrySkills}
                 trackBy="recordId"
-                columnDefinitions={[
-                  { id: 'name', header: t('integrations.skills.col.name'), cell: (r) => r.name },
+                {...resizable<RegistrySkill>('registry-skills', [
+                  { id: 'name', width: W_NAME, header: t('integrations.skills.col.name'), cell: (r) => r.name },
                   {
                     id: 'description',
                     header: t('integrations.skills.col.description'),
-                    cell: (r) => r.description || '—',
+                    width: TEXT_COL_MAX,
+                    cell: (r) => <WrapCell>{r.description || '—'}</WrapCell>,
                   },
-                  { id: 'version', header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
+                  { id: 'version', width: W_NUM, header: t('integrations.skills.col.version'), cell: (r) => r.version || '—' },
                   {
                     // The endpoint lists every status, so this column is what
                     // separates a live skill from a DRAFT nobody submitted or a
                     // REJECTED one — which is exactly what an admin is after when
                     // a skill "is missing".
-                    id: 'status',
+                    id: 'status', width: W_STATUS,
                     header: t('integrations.skills.col.status'),
                     cell: (r) => (r.status === 'APPROVED'
                       ? <StatusIndicator type="success">{r.status}</StatusIndicator>
                       : <StatusIndicator type="pending">{r.status || '—'}</StatusIndicator>),
                   },
                   {
-                    id: 'publishedBy',
+                    id: 'publishedBy', width: W_EMAIL,
                     header: t('integrations.skills.col.publishedBy'),
                     cell: (r) => r.publishedBy || '—',
                   },
                   {
                     // The question an admin actually has about an approved skill.
-                    id: 'importedBy',
+                    id: 'importedBy', width: W_WIDE,
                     header: t('integrations.skills.col.importedBy'),
                     cell: (r) => (r.importedBy.length === 0
                       ? <Badge color="grey">{t('integrations.skills.notImported')}</Badge>
                       : <span>{r.importedBy.map(displayUserId).join(', ')}</span>),
                   },
-                  { id: 'license', header: t('integrations.skills.col.license'), cell: (r) => r.license || '—' },
+                  { id: 'license', width: W_NUM, header: t('integrations.skills.col.license'), cell: (r) => r.license || '—' },
                   {
-                    id: 'updated',
+                    id: 'updated', width: W_DATE,
                     header: t('integrations.skills.col.updated'),
                     cell: (r) => (r.updatedAt ? r.updatedAt.slice(0, 19).replace('T', ' ') : '—'),
                   },
@@ -4550,7 +5090,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     minWidth: 100,
                     cell: (r) => <Button onClick={() => setSkillDrawer(r)}>{t('integrations.skills.view')}</Button>,
                   },
-                ]}
+                ])}
                 empty={
                   <CloudscapeBox textAlign="center" padding="m">
                     <b>{t('integrations.skills.empty')}</b>
@@ -4616,6 +5156,24 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       )}
                     </div>
 
+                    {/* The record's risk posture, read-only. This page is the registry's
+                        inventory, and "what did the scan say about the thing that is
+                        live" is a question it should be able to answer without sending
+                        the admin back to the approval queue. Scanning happens there;
+                        nothing here re-runs it. */}
+                    <div>
+                      <b>{t('scan.sectionTitle')}</b>
+                      {scanReports[skillDrawer.recordId] ? (
+                        <CloudscapeBox padding={{ top: 'xs' }}>
+                          <SkillScanReportView report={scanReports[skillDrawer.recordId]} />
+                        </CloudscapeBox>
+                      ) : (
+                        <CloudscapeBox color="text-body-secondary" padding={{ top: 'xs' }}>
+                          {t('scan.neverScanned')}
+                        </CloudscapeBox>
+                      )}
+                    </div>
+
                     <div>
                       <b>SKILL.md</b>
                       {skillDrawer.skillMd ? (
@@ -4676,11 +5234,21 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 loadingText={t('common.loading')}
                 items={a2aAgents}
                 trackBy="recordId"
-                columnDefinitions={[
-                  { id: 'name', header: t('integrations.a2a.col.name'), cell: (r) => r.name },
-                  { id: 'description', header: t('integrations.a2a.col.description'), cell: (r) => r.description },
+                {...resizable<A2AAgentRecord>('integrations-a2a', [
                   {
-                    id: 'endpoint',
+                    id: 'name', width: W_NAME, header: t('integrations.a2a.col.name'),
+                    cell: (r) => (r.recordId === highlightRecordId
+                      ? <SpaceBetween direction="horizontal" size="xs">
+                          <b>{r.name}</b>
+                          <Badge color="blue">{t('registryEvents.fromNotification')}</Badge>
+                        </SpaceBetween>
+                      : r.name),
+                  },
+                  { id: 'description', header: t('integrations.a2a.col.description'),
+                    width: TEXT_COL_MAX,
+                    cell: (r) => <WrapCell>{r.description}</WrapCell> },
+                  {
+                    id: 'endpoint', width: W_WIDE,
                     header: t('integrations.a2a.col.endpoint'),
                     cell: (r) => (
                       <span title={r.card.url}>
@@ -4698,7 +5266,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // Declarative, and deliberately NOT the same question as the
                     // Authorizer column. This is the agent's own claim about how to
                     // authenticate to it; the door is its Runtime authorizer.
-                    id: 'auth',
+                    id: 'auth', width: W_BADGE,
                     header: t('integrations.a2a.col.auth'),
                     cell: (r) => {
                       const schemes = cardAuthSchemes(r.card);
@@ -4727,7 +5295,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // column did not exist, so a record knocked back to DRAFT by a
                     // version bump was indistinguishable from a healthy one here, and
                     // the only hint was the Access column's expiry badge.
-                    id: 'status',
+                    id: 'status', width: W_STATUS,
                     header: t('integrations.a2a.col.status'),
                     cell: (r) => (
                       <SpaceBetween direction="horizontal" size="xxs">
@@ -4743,7 +5311,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     ),
                   },
                   {
-                    id: 'tags',
+                    id: 'tags', width: W_BADGE,
                     header: t('integrations.a2a.col.tags'),
                     cell: (r) => {
                       const tags = r.card.tags || [];
@@ -4757,7 +5325,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       );
                     },
                   },
-                  { id: 'publishedBy', header: t('integrations.a2a.col.publishedBy'), cell: (r) => r.publishedBy || '—' },
+                  { id: 'publishedBy', width: W_EMAIL, header: t('integrations.a2a.col.publishedBy'), cell: (r) => r.publishedBy || '—' },
                   {
                     // Registry status and "can it be reached" are different
                     // questions and both belong here. A record edited back to DRAFT
@@ -4766,7 +5334,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // once. This column is what answers "why did access to the
                     // energy specialist disappear", which is the question that
                     // brings an admin to this page.
-                    id: 'access',
+                    id: 'access', width: W_BADGE,
                     header: t('integrations.a2a.col.access'),
                     cell: (r) => {
                       const remaining = r.graceRemainingSeconds;
@@ -4789,7 +5357,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     },
                   },
                   {
-                    id: 'accessReason',
+                    id: 'accessReason', width: W_WIDE,
                     header: t('integrations.a2a.col.accessReason'),
                     cell: (r) => r.grantableReason || '—',
                   },
@@ -4799,7 +5367,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     // people we offer it to. They are independent, and a record can
                     // read `approved` while nobody can call it — or while everybody
                     // can, which is the worse case and why `open` is red.
-                    id: 'authorizer',
+                    id: 'authorizer', width: W_STATUS,
                     header: t('integrations.a2a.col.authorizer'),
                     cell: (r) => {
                       const row = a2aConformance[r.recordId];
@@ -4830,7 +5398,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                     },
                   },
                   {
-                    id: 'lastUpdated',
+                    id: 'lastUpdated', width: W_DATE,
                     header: t('integrations.a2a.col.lastUpdated'),
                     cell: (r) => (r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'),
                   },
@@ -4870,7 +5438,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                       </SpaceBetween>
                     ),
                   },
-                ]}
+                ])}
                 empty={
                   <CloudscapeBox textAlign="center" padding="m">
                     <b>{t('integrations.a2a.empty')}</b>
@@ -5316,11 +5884,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
             }
             items={items}
             trackBy="id"
-            columnDefinitions={[
-              { id: 'name', header: t('guardrails.colGuardrail'), cell: (i) => i.name },
-              { id: 'description', header: t('guardrails.colDescription'), cell: (i) => i.description },
+            {...resizable<typeof items[number]>('guardrails', [
+              { id: 'name', width: W_NAME, header: t('guardrails.colGuardrail'), cell: (i) => i.name },
+              { id: 'description', header: t('guardrails.colDescription'),
+                width: TEXT_COL_MAX,
+                cell: (i) => <WrapCell>{i.description}</WrapCell> },
               { id: 'action', header: t('guardrails.colAction'), minWidth: 220, cell: (i) => i.action },
-            ]}
+            ])}
           />
         );
       })()}

@@ -25,6 +25,7 @@ import agent_registry as registry_ns
 import model_catalog  # live Bedrock model catalog; see model_catalog.py
 import chat_history  # Memory events -> a renderable transcript; see chat_history.py
 import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.py
+import registry_events  # Registry EventBridge events -> console activity; see registry_events.py
 # Copied from shared/ by scripts/01-install-deps.sh. The actor id is a Memory
 # namespace component, so reading a transcript back requires naming the actor
 # exactly as the agent named it when writing — a second sanitizer that differs by
@@ -32,6 +33,7 @@ import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.
 import memory_actor
 import subagent_policy  # A2A grant intent -> Cognito groups; see subagent_policy.py
 import a2a_conformance  # does a sub-agent's authorizer match its card? see that module
+import skill_scan  # is this Skill safe enough to approve? see that module
 import a2a_manifest  # the contract we publish to third-party agent teams
 import a2a_runtimes  # a card's url -> the AgentCore Runtime behind it
 
@@ -80,6 +82,12 @@ agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION
 # client above. The old namespace stops serving Registry on 2026-09-17.
 registry_control = boto3.client(registry_ns.REGISTRY_CLIENT, region_name=REGION)
 cognito_client = boto3.client("cognito-idp", region_name=REGION)
+# The Skill scanner's semantic tier. Nothing else in this Lambda invokes a model — the
+# model catalogue above is read-only on purpose — so this client exists for that one
+# call. Guardrails would be the obvious alternative and is NOT available in us-west-2,
+# where this deployment lives (CreatePolicy answers AccessDeniedException, which reads
+# like an entitlement problem and is regional).
+bedrock_runtime = boto3.client("bedrock-runtime", region_name=REGION)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=REGION)
 logs_client = boto3.client("logs", region_name=REGION)
 
@@ -1269,17 +1277,17 @@ def update_user_permissions(event):
     # Determine which tools need policy rebuild.
     #
     # The SYMMETRIC difference — only tools whose membership actually changed for
-    # this user. It was the union, which is wrong in a way that is invisible until
-    # it is not: a tool with no Cedar policy is allow-all (measured — the tools
-    # gateway runs in ENFORCE mode with zero policies and serves all six tools),
-    # and rebuilding materialises a permit naming only the users who hold the tool
-    # in DynamoDB. Just 14 of 40 users have a `__permissions__` row here, so
-    # granting ONE new tool to ONE user would have created permits for the six
-    # device tools and revoked them from the other 26 — reported as a successful
-    # save of an unrelated grant.
+    # this user. A tool present in both old and new cannot need a new policy: the
+    # policy is derived from every user holding it, and that set did not change.
+    # Rebuilding the unchanged ones is a wasted, throttle-prone control-plane call
+    # per tool per save.
     #
-    # A tool present in both old and new cannot need a new policy: the policy is
-    # derived from every user holding it, and that set did not change.
+    # On what an ABSENT policy means, two measurements: with ZERO policies on the
+    # engine this gateway served all six tools (2026-08); with policies present, a
+    # user named in no permit gets `tools/list` = [] (2026-09-18, throwaway user
+    # with no `__permissions__` row). Every tool carries a permit today, so "no
+    # row" means "no tools", and the Tool Policy page shows exactly that instead
+    # of pre-ticking built-ins the gateway refuses.
     affected_tools = set(old_tools) ^ set(new_tools)
 
     if not GATEWAY_ID:
@@ -1472,6 +1480,73 @@ def _resolve_ddb_user_key(user_id: str) -> str:
     return user_id
 
 
+# ---------------------------------------------------------------------------
+# Per-user skill policy: the skills a user does NOT get.
+#
+# Skills are global UNION per-user (`agent.load_skills_from_dynamodb`), which had
+# no way to take a global skill away from one user. Two global skills are not
+# prose: `browser-use` registers browse_web and `code-interpreter` registers
+# execute_python, so every user held both with no admin lever. Stored as one row:
+#   userId = <email> | skillName = "__skill_policy__" | disabledSkills = [name, ...]
+# and read by the agent AFTER the merge (agent/skill_policy.py). Same route and
+# `?action=` dispatch as the A2A grants, for the same 20 KB resource-policy reason.
+# ---------------------------------------------------------------------------
+
+_SKILL_POLICY_SK = "__skill_policy__"
+
+
+def get_user_skill_policy(event):
+    """GET /users/{userId}/permissions?action=skills -> {disabledSkills: [...]}."""
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    ddb_key = _resolve_ddb_user_key(user_id)
+    item = table.get_item(
+        Key={"userId": ddb_key, "skillName": _SKILL_POLICY_SK}).get("Item") or {}
+    raw = item.get("disabledSkills") or []
+    disabled = sorted({str(s) for s in raw}) if isinstance(raw, (set, list, tuple)) else []
+    return response(200, {
+        "userId": user_id,
+        "disabledSkills": disabled,
+        "updatedAt": item.get("updatedAt", ""),
+    })
+
+
+def update_user_skill_policy(event):
+    """PUT /users/{userId}/permissions?action=skills  body: {disabledSkills: [...]}.
+
+    An empty list deletes the row. Refused for `__global__`: the global scope IS the
+    baseline, so a global disable list would only be a slower way to delete the
+    skill. Keyed the way the agent reads per-user rows (email), like A2A grants.
+    """
+    path_params = event.get("pathParameters") or {}
+    user_id = unquote(path_params.get("userId", ""))
+    if not user_id:
+        return response(400, {"error": "userId is required"})
+    if user_id == GLOBAL_SCOPE:
+        return response(400, {"error": "a disable list has no meaning for __global__; "
+                                       "delete the global skill instead"})
+    body = json.loads(event.get("body") or "{}")
+    raw = body.get("disabledSkills", [])
+    if not isinstance(raw, list):
+        return response(400, {"error": "disabledSkills must be a list"})
+    disabled = sorted({str(s).strip() for s in raw if str(s).strip()})
+    ddb_key = _resolve_ddb_user_key(user_id)
+    ts = now_iso()
+    if disabled:
+        table.put_item(Item={
+            "userId": ddb_key,
+            "skillName": _SKILL_POLICY_SK,
+            "disabledSkills": disabled,
+            "updatedAt": ts,
+            "updatedBy": _caller_id(event),
+        })
+    else:
+        table.delete_item(Key={"userId": ddb_key, "skillName": _SKILL_POLICY_SK})
+    return response(200, {"userId": user_id, "disabledSkills": disabled, "updatedAt": ts})
+
+
 def get_user_a2a_permissions(event):
     """GET /users/{userId}/permissions?action=a2a — return a user's A2A grants
     plus the full catalog of APPROVED A2A agents so the UI renders in one round
@@ -1552,7 +1627,17 @@ def update_user_a2a_permissions(event):
 
     Body: {"a2aGrants": {recordId: [skillId,...], ...}}. Empty map deletes the
     row. Validates every recordId is APPROVED + A2A and every skillId is in the
-    card. Returns 400 on validation error, 200 on success."""
+    card. Returns 400 on validation error, 200 on success.
+
+    An EMPTY skill list is kept, not dropped. `effective_grants` reads
+    `{agent: []}` as "no skills on this sub-agent for this user", and that entry is
+    the only way to take a globally granted sub-agent away from one user, because
+    per-user grants replace global per sub-agent and an ABSENT key inherits. This
+    handler used to strip empty lists as noise, so the narrowing every layer below
+    it was built to honour could not be saved: measured live on 2026-09-18, a user
+    whose row omitted appliance-maintenance carried all four of its groups in the
+    token and the A2A gateway admitted them with a 200.
+    """
     path_params = event.get("pathParameters") or {}
     user_id = unquote(path_params.get("userId", ""))
     if not user_id:
@@ -1563,16 +1648,14 @@ def update_user_a2a_permissions(event):
     grants_in = body.get("a2aGrants", {})
     if not isinstance(grants_in, dict):
         return response(400, {"error": "a2aGrants must be an object"})
-    # Normalise values to lists of strings.
+    # Normalise values to sorted lists of strings. `[]` stays — see the docstring.
     grants: dict = {}
     for rid, skills in grants_in.items():
         if not isinstance(rid, str) or not rid:
             return response(400, {"error": f"invalid recordId: {rid!r}"})
         if not isinstance(skills, list):
             return response(400, {"error": f"skills for {rid} must be a list"})
-        clean = [str(s) for s in skills if str(s).strip()]
-        if clean:
-            grants[rid] = sorted(set(clean))
+        grants[rid] = sorted({str(s) for s in skills if str(s).strip()})
 
     # Validate each recordId against the approved catalog.
     catalog = {c["recordId"]: c for c in _fetch_grantable_a2a_cards()}
@@ -1590,6 +1673,10 @@ def update_user_a2a_permissions(event):
             )
     if errors:
         return response(400, {"error": "validation failed", "details": errors})
+
+    # What this user could reach before the write, so a lost grant can be told
+    # apart from a rearranged one. Read BEFORE the put, or before == after.
+    lost_access = _effective_access_lost(ddb_key, grants)
 
     ts = now_iso()
     if grants:
@@ -1611,12 +1698,42 @@ def update_user_a2a_permissions(event):
     # successful and change nothing the platform can see.
     sync = _materialise_a2a_grants(user_id, ddb_key, catalog)
 
+    # The materialiser signs a user out only when it REMOVED a membership. A grant
+    # inherited from global was never a membership — it is injected into the claim
+    # at token issue — so blocking it here removes nothing, and without this the
+    # user keeps the specialist until their token expires. That is the revocation
+    # that silently does nothing for an hour, which this page promises not to have.
+    if (lost_access and ddb_key != GLOBAL_SCOPE and COGNITO_USER_POOL_ID
+            and user_id not in (sync.get("signedOut") or [])):
+        if subagent_policy.force_token_refresh(
+                cognito_client, COGNITO_USER_POOL_ID, user_id):
+            sync.setdefault("signedOut", []).append(user_id)
+
     return response(200, {
         "userId": user_id,
         "a2aGrants": grants,
         "updatedAt": ts,
         "groupSync": sync,
     })
+
+
+def _effective_access_lost(ddb_key: str, new_intent: dict) -> bool:
+    """Would `new_intent` leave this user able to reach LESS than they can now?
+
+    Compares EFFECTIVE access — global merged with the user's own row, per-user
+    replacing global per sub-agent — not the row alone. A row that gains an entry
+    `{agent: []}` grows, yet the user loses that agent; only the effective view
+    sees it. Global scope always answers False: narrowing the global default has
+    never signed everyone out, and that fan-out is not this function's to add.
+    """
+    if ddb_key == GLOBAL_SCOPE:
+        return False
+    global_intent = subagent_policy.read_intent(table, GLOBAL_SCOPE)
+    before = subagent_policy.effective_grants(
+        global_intent, subagent_policy.read_intent(table, ddb_key))
+    after = subagent_policy.effective_grants(global_intent, new_intent)
+    return any(set(skills) - set(after.get(rid, []))
+               for rid, skills in before.items())
 
 
 def _record_card_names(catalog: dict) -> dict[str, str]:
@@ -3225,7 +3342,40 @@ def review_registry_record(event):
             reason = (f"{reason} [conformance override: {gate['severity']}]"
                       if reason else f"[conformance override: {gate['severity']}]")
 
-    stamped = f"{reason or decision} (by {reviewer})" if reviewer else (reason or decision)
+    # ---- the scan, as evidence rather than as a gate -----------------------
+    # Approving an unscanned or FAIL-scanned skill is allowed: the scanner is one layer
+    # of defence in depth, it has false positives, and a reviewer who has read the
+    # findings may well be right to overrule them. What is NOT allowed is losing what
+    # they were looking at. `statusReason` is the only field the Registry keeps "why"
+    # in, so the verdict goes in beside the decision — otherwise "approved" cannot
+    # later be told apart from "approved without looking", and the audit trail this
+    # feature exists to produce would stop at the moment it mattered.
+    scan_summary = None
+    if decision == "approve" and not _is_agent_record(current):
+        try:
+            latest = _load_latest_scan(record_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not read the scan of %s: %s", record_id, exc)
+            latest = None
+        if latest:
+            scan_summary = {
+                "verdict": latest.get("verdict", ""),
+                "score": latest.get("score"),
+                "riskTier": latest.get("riskTier", ""),
+                "llmTier": latest.get("llmTier", ""),
+                "scannedAt": latest.get("scannedAt", ""),
+                "scannedBy": latest.get("scannedBy", ""),
+            }
+        else:
+            scan_summary = {"verdict": "NOT_SCANNED"}
+
+    note = ""
+    if scan_summary:
+        note = (" [scan not run]" if scan_summary["verdict"] == "NOT_SCANNED"
+                else f" [scan {scan_summary['verdict']} {scan_summary.get('score')}]")
+
+    base = f"{reason or decision}{note}"
+    stamped = f"{base} (by {reviewer})" if reviewer else base
 
     try:
         if decision == "approve":
@@ -3291,7 +3441,10 @@ def review_registry_record(event):
                           # Present on an AGENT approval even when it passed, so the
                           # console can surface an INFO (e.g. "still enumerates skill
                           # groups") that did not block.
-                          "conformance": gate})
+                          "conformance": gate,
+                          # Present on a SKILL approval: what the scan said at the
+                          # moment of the decision, or {"verdict": "NOT_SCANNED"}.
+                          "scan": scan_summary})
 
 
 def _is_agent_record(detail: dict) -> bool:
@@ -3352,6 +3505,402 @@ def _caller_identity(event) -> str:
     claims = (event.get("requestContext", {})
               .get("authorizer", {}).get("claims", {}))
     return claims.get("email") or claims.get("cognito:username") or claims.get("sub", "")
+
+
+# ---------------------------------------------------------------------------
+# Registry event notifications (EventBridge -> here -> DynamoDB -> console)
+#
+# AWS Agent Registry emits a record's state transitions to the account's default
+# bus. Before this, the two approval surfaces in the console (the Skills review
+# modal, the A2A inventory) only revealed a new submission to whoever happened to
+# open them. The rule in the CDK stack points those events at this Lambda; the
+# handler enriches each with one GetRegistryRecord and stores it, and the console's
+# Integration Registry tab polls the stored rows. The which-rows-need-a-decision
+# logic is in registry_events.fold, shared with its tests.
+# ---------------------------------------------------------------------------
+
+REGISTRY_EVENTS_TABLE_NAME = os.environ.get("REGISTRY_EVENTS_TABLE_NAME",
+                                            "smarthome-registry-events")
+# Long enough that "who approved what last month" is still answerable, short enough
+# that the table never needs housekeeping.
+REGISTRY_EVENT_TTL_SECONDS = 30 * 24 * 3600
+# One registry, 30 days: a hundred rows is more history than the panel can show.
+REGISTRY_EVENTS_PAGE = 100
+
+
+def _registry_events_table():
+    return dynamodb.Table(REGISTRY_EVENTS_TABLE_NAME)
+
+
+def _record_publisher(record_id: str, record_type: str, detail: dict | None) -> str:
+    """Who published this record, as an email where one can be had.
+
+    The Skill ERP writes one ownership row per record into the skills table —
+    `__erp_owner__` / `<recordId>` for skills, `__erp_owner__` / `a2a:<recordId>`
+    for agents — and that row carries only the Cognito `sub` (measured against every
+    row in the deployment: no email, no recordType, which is also why the
+    `_scan_*_ownership_map` helpers match nothing). So: read the row directly, use
+    an email if one is ever stored, otherwise resolve the sub through Cognito the
+    way `_resolve_ddb_user_key` does, and show the bare sub if that fails. Built-in
+    skills have no ownership row at all; they say who published them in the
+    definition's `_meta`, the same field `skill-list` falls back to.
+
+    Best-effort throughout: a failure here costs one column, never the row.
+    """
+    if not record_id:
+        return ""
+    if record_type == registry_ns.RECORD_TYPE_AGENT:
+        sort_key = f"a2a:{record_id}"
+    else:
+        sort_key = record_id
+    try:
+        row = table.get_item(
+            Key={"userId": "__erp_owner__", "skillName": sort_key}).get("Item") or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("registry event: owner row lookup failed for %s: %s",
+                       record_id, exc)
+        row = {}
+    email = row.get("ownerEmail") or ""
+    if email:
+        return email
+    sub = row.get("ownerSub") or ""
+    if sub:
+        return _resolve_ddb_user_key(sub)
+    if record_type == registry_ns.RECORD_TYPE_SKILL and detail:
+        try:
+            definition_raw, _ = registry_ns.read_skill_definition(detail)
+            meta = (json.loads(definition_raw) or {}).get("_meta") or {} if definition_raw else {}
+            return meta.get("publishedBy", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("registry event: could not read _meta for %s: %s",
+                           record_id, exc)
+    return ""
+
+
+def ingest_registry_event(event):
+    """Store one Registry record transition from EventBridge.
+
+    Invoked by the `smarthome-registry-record-events` rule, so there is no HTTP
+    envelope and the return value is only read by the Lambda console. Two rules:
+
+      - Not ours (another source, a registry lifecycle event, another registry)
+        is dropped with a log line and WITHOUT raising, because raising makes
+        EventBridge retry something that will never be accepted.
+      - The enrichment read may fail — throttling, a record deleted between the
+        event and now — and the event is stored anyway with `enrichError` set. A
+        row with only a recordId is still a notification; a dropped row is a
+        submission the admin never hears about.
+
+    Only `put_item` is allowed to raise: a storage failure is exactly what the
+    rule's retries are for.
+    """
+    parsed = registry_events.parse_event(event)
+    if not parsed:
+        logger.info("registry event: ignored %s / %s",
+                    event.get("source"), event.get("detail-type"))
+        return {"skipped": "not a registry record event"}
+    if parsed["registryId"] != REGISTRY_ID:
+        logger.info("registry event: ignored registry %s (ours is %s)",
+                    parsed["registryId"], REGISTRY_ID)
+        return {"skipped": "other registry"}
+
+    summary = registry_events.summarize_record({})
+    detail = None
+    enrich_error = ""
+    try:
+        detail = registry_control.get_registry_record(
+            registryId=REGISTRY_ID, recordId=parsed["recordId"])
+        summary = registry_events.summarize_record(detail)
+    except Exception as exc:  # noqa: BLE001
+        enrich_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("registry event: GetRegistryRecord failed for %s: %s",
+                       parsed["recordId"], exc)
+
+    now = int(time.time())
+    item = {
+        **parsed,
+        **summary,
+        "eventKey": registry_events.event_key(parsed["occurredAt"], parsed["eventId"]),
+        "receivedAt": datetime.now(timezone.utc).isoformat(),
+        "publishedBy": _record_publisher(parsed["recordId"], summary["recordType"], detail),
+        "enrichError": enrich_error,
+        "ttl": now + REGISTRY_EVENT_TTL_SECONDS,
+    }
+    _registry_events_table().put_item(Item=item)
+    logger.info("registry event: stored %s %s %s", item["transition"],
+                item["recordType"] or "?", item["recordId"])
+    return {"stored": item["eventKey"]}
+
+
+def list_registry_events(event):
+    """GET /registry/records?action=events — recent transitions, newest first,
+    with `actionable` on the rows an admin still has to decide.
+
+    Reads only the stored rows, never the Registry: this is polled every 30s
+    while the Integration Registry tab is open. A read failure is a 502 rather
+    than an empty list, for the reason every other registry route gives — the
+    console must not render "nothing happened" for "could not find out".
+    """
+    if not REGISTRY_ID or REGISTRY_ID == "PLACEHOLDER_SET_BY_SETUP_SCRIPT":
+        return response(500, {"error": "REGISTRY_ID not configured"})
+    from boto3.dynamodb.conditions import Key
+    try:
+        resp = _registry_events_table().query(
+            KeyConditionExpression=Key("registryId").eq(REGISTRY_ID),
+            ScanIndexForward=False,
+            Limit=REGISTRY_EVENTS_PAGE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("registry events: query failed: %s", exc)
+        return response(502, {"error": f"cannot read registry events: {exc}"})
+    rows = []
+    for item in resp.get("Items", []):
+        row = {k: v for k, v in item.items() if k not in ("ttl", "registryId")}
+        rows.append(row)
+    folded = registry_events.fold(rows)
+    folded["generatedAt"] = datetime.now(timezone.utc).isoformat()
+    return response(200, folded)
+
+
+# ---------------------------------------------------------------------------
+# Skill risk scanning (GET / POST /registry/records?action=skill-scan)
+#
+# What a reviewer had before this: a name, a description, and a wall of SKILL.md. That
+# is not enough to approve on. A Skill runs with the importing user's privileges, its
+# whole content is instructions, and the dangerous parts are the ones a human reading
+# quickly does not see — an HTML comment, a zero-width character, a URL the agent is
+# told to take its real orders from.
+#
+# So: one click produces a report with evidence, and the report is the reviewer's
+# evidence rather than a gate. Approve and Reject behave exactly as they did. The only
+# thing the review path gained is that the decision is now recorded next to whatever
+# the scan said at the time (see `review_registry_record`).
+#
+# Reports are keyed per (recordId, recordVersion) rather than overwritten, because
+# "this version was scanned, the next one was not" is the question AST07 (update drift)
+# is about, and an overwriting store cannot answer it.
+# ---------------------------------------------------------------------------
+
+SCAN_OWNER_KEY = "__skill_scan__"
+SCAN_SK_PREFIX = "scan#"
+
+# The deployment's default model, not a knob of its own. Two reasons, in order:
+#
+#   - A CDK-DECLARED environment variable on this Lambda makes CloudFormation rewrite
+#     the whole Environment table, which wipes the ~15 variables the setup scripts patch
+#     in afterwards (measured 2026-08-15). Declaring nothing keeps that blast radius at
+#     zero.
+#   - A variable read but never set is a feature that silently does nothing, which is
+#     what tests/test_env_contract.py exists to prevent. `MODEL_ID` is already in the
+#     contract, so reusing it means the judge follows the deployment's model rather than
+#     an unset override nobody knows about.
+SKILL_SCAN_MODEL_ID = model_catalog.DEFAULT_MODEL_ID
+
+
+def _scan_sort_key(record_id: str, record_version: str) -> str:
+    return f"{SCAN_SK_PREFIX}{record_id}#{record_version or '-'}"
+
+
+def _scan_payload_from_record(detail: dict) -> dict:
+    """GetRegistryRecord response -> the scanner's input. No extra reads needed."""
+    definition_raw, skill_md = registry_ns.read_skill_definition(detail)
+    description_fm, _body, allowed_tools, metadata = _parse_skill_md(skill_md)
+    license_name = ""
+    compatibility = ""
+    try:
+        sd = json.loads(definition_raw) if definition_raw else {}
+        meta = sd.get("_meta") or {}
+        license_name = meta.get("license", "") or ""
+        compatibility = meta.get("compatibility", "") or ""
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "name": detail.get("displayName") or detail.get("name", ""),
+        "description": detail.get("description") or description_fm,
+        "skillMd": skill_md or "",
+        "allowedTools": allowed_tools,
+        "license": license_name,
+        "compatibility": compatibility,
+        "metadata": metadata,
+        "recordVersion": detail.get("recordVersion", "") or "",
+    }
+
+
+def _parse_semantic_findings(text: str) -> list:
+    """Pull the findings array out of the judge's reply.
+
+    Raises on anything unparseable, and the raise is the point: `skill_scan.scan`
+    turns it into `llmTier: unavailable` so the report says the semantic tier did not
+    run. Returning [] here instead would make an unreadable answer indistinguishable
+    from a clean one, which is exactly the confusion this whole feature exists to remove.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object in the model's reply")
+    data = json.loads(text[start:end + 1])
+    findings = data.get("findings")
+    if not isinstance(findings, list):
+        raise ValueError("the reply has no findings array")
+    return findings
+
+
+def _semantic_judge(prompt: str) -> list:
+    resp = bedrock_runtime.converse(
+        modelId=SKILL_SCAN_MODEL_ID,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        # Deterministic, because a reviewer comparing two runs of the same skill should
+        # not have to wonder whether the difference is the skill or the sampling.
+        inferenceConfig={"maxTokens": 2000, "temperature": 0},
+    )
+    parts = (resp.get("output", {}).get("message", {}).get("content") or [])
+    return _parse_semantic_findings("".join(p.get("text", "") for p in parts))
+
+
+def _load_latest_scan(record_id: str) -> dict | None:
+    """The most recent report for a record, across versions."""
+    items = []
+    kwargs = {
+        "KeyConditionExpression": Key("userId").eq(SCAN_OWNER_KEY)
+        & Key("skillName").begins_with(f"{SCAN_SK_PREFIX}{record_id}#"),
+    }
+    while True:
+        resp = table.query(**kwargs)
+        items.extend(resp.get("Items") or [])
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    if not items:
+        return None
+    items.sort(key=lambda i: str(i.get("scannedAt", "")), reverse=True)
+    return items[0]
+
+
+def scan_skill_record(event):
+    """POST /registry/records?action=skill-scan  body: {recordId, semantic?: bool}
+
+    One record per call, deliberately. The semantic tier is a model round trip, and ten
+    of them in one request would sit against API Gateway's hard 29s integration timeout;
+    the console loops with a progress indicator instead, so a slow or failed scan of one
+    record does not cost the other nine.
+    """
+    if not REGISTRY_ID:
+        return response(500, {"error": "REGISTRY_ID not configured"})
+
+    body = json.loads(event.get("body") or "{}")
+    record_id = (body.get("recordId") or "").strip()
+    if not record_id:
+        return response(400, {"error": "recordId is required"})
+    want_semantic = str(body.get("semantic", True)).lower() not in ("false", "0", "no")
+
+    try:
+        detail = registry_control.get_registry_record(
+            registryId=REGISTRY_ID, recordId=record_id)
+    except Exception as e:  # noqa: BLE001
+        return response(404, {"error": f"no such record: {e}"})
+
+    if _is_agent_record(detail):
+        # An AGENT record has no SKILL.md to read, and it already has its own check.
+        # Answering with an empty report would read as "scanned, nothing found".
+        return response(400, {
+            "error": "this record is an A2A agent, not a skill. Its equivalent check is "
+                     "action=a2a-conformance, which is a gate on approval.",
+        })
+
+    payload = _scan_payload_from_record(detail)
+    if not payload["skillMd"]:
+        return response(422, {
+            "error": "the record carries no SKILL.md, so there is nothing to scan. A "
+                     "record with no readable content should not be approved either.",
+        })
+
+    previous = _load_latest_scan(record_id)
+    report = skill_scan.scan(
+        payload, previous=previous,
+        llm=_semantic_judge if want_semantic else None)
+
+    record_version = payload["recordVersion"]
+    scanned_at = now_iso()
+    scanned_by = _caller_identity(event)
+    item = {
+        "userId": SCAN_OWNER_KEY,
+        "skillName": _scan_sort_key(record_id, record_version),
+        "recordId": record_id,
+        "recordVersion": record_version,
+        "skillLabel": payload["name"],
+        "verdict": report["verdict"],
+        "score": report["score"],
+        "riskTier": report["riskTier"],
+        "worstSeverity": report["worstSeverity"],
+        "findings": report["findings"],
+        "contentHash": report["contentHash"],
+        "scannerVersion": report["scannerVersion"],
+        "llmTier": report["llmTier"],
+        "scannedAt": scanned_at,
+        "scannedBy": scanned_by,
+    }
+    try:
+        table.put_item(Item=item)
+    except Exception as e:  # noqa: BLE001
+        # The report is still the answer to this request. Losing the row costs the
+        # badge on the queue and the audit note, not the reviewer's evidence.
+        logger.warning("could not persist the scan of %s: %s", record_id, e)
+        report["persisted"] = False
+
+    logger.info("scanned skill %s: %s (score %s, llm %s) by %s",
+                record_id, report["verdict"], report["score"], report["llmTier"],
+                scanned_by)
+    return response(200, {
+        **report,
+        "recordId": record_id,
+        "recordVersion": record_version,
+        "name": payload["name"],
+        "scannedAt": scanned_at,
+        "scannedBy": scanned_by,
+    })
+
+
+# The keys the console needs per record. `findings` is included: the queue's drawer
+# would otherwise need a second round trip per record to show anything useful, and ten
+# records' findings are a few kilobytes.
+_SCAN_SUMMARY_KEYS = (
+    "recordId", "recordVersion", "verdict", "score", "riskTier", "worstSeverity",
+    "findings", "contentHash", "scannerVersion", "llmTier", "scannedAt", "scannedBy",
+)
+
+
+def list_skill_scans(_event):
+    """GET /registry/records?action=skill-scan — the latest report per record.
+
+    One query over one partition, so the console can render a risk column for the whole
+    queue without a request per row.
+    """
+    latest: dict[str, dict] = {}
+    kwargs = {
+        "KeyConditionExpression": Key("userId").eq(SCAN_OWNER_KEY)
+        & Key("skillName").begins_with(SCAN_SK_PREFIX),
+    }
+    try:
+        while True:
+            resp = table.query(**kwargs)
+            for item in resp.get("Items", []):
+                rid = item.get("recordId") or ""
+                if not rid:
+                    continue
+                held = latest.get(rid)
+                if not held or str(item.get("scannedAt", "")) > str(held.get("scannedAt", "")):
+                    latest[rid] = item
+            if "LastEvaluatedKey" not in resp:
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as e:  # noqa: BLE001
+        return response(500, {"error": f"could not read the scan reports: {e}"})
+
+    reports = {
+        rid: {k: item.get(k) for k in _SCAN_SUMMARY_KEYS if k in item}
+        for rid, item in latest.items()
+    }
+    return response(200, {"reports": reports})
 
 
 def import_registry_records(event):
@@ -4429,6 +4978,10 @@ def _dispatch(event, context):
     # event by hand.
     if event.get("task") == "a2a-sweep":
         return sweep_a2a_revocations(event)
+    # A Registry record transition from the EventBridge rule. Same idea: keyed on
+    # the event's own `source`, so the trigger is greppable and a test can build it.
+    if event.get("source") == registry_events.SOURCE and "detail-type" in event:
+        return ingest_registry_event(event)
 
     method = event.get("httpMethod", "")
     resource = event.get("resource", "")
@@ -4510,6 +5063,8 @@ def _dispatch(event, context):
             return get_user_a2a_permissions(event)
         if action == "a2a-reconcile":
             return reconcile_a2a_grants(event)
+        if action == "skills":
+            return get_user_skill_policy(event)
         return get_user_permissions(event)
     if resource == "/users/{userId}/permissions" and method == "PUT":
         action = (event.get("queryStringParameters") or {}).get("action")
@@ -4517,6 +5072,8 @@ def _dispatch(event, context):
             return update_user_a2a_permissions(event)
         if action == "a2a-reconcile":
             return repair_a2a_grants(event)
+        if action == "skills":
+            return update_user_skill_policy(event)
         return update_user_permissions(event)
 
     # Skill routes — also carry agent-prompt traffic on the {userId}/{skillName}
@@ -4609,6 +5166,10 @@ def _dispatch(event, context):
             return list_a2a_grants_for_record(event)
         if action == "skill-list":
             return list_registry_skills(event)
+        if action == "skill-scan":
+            return list_skill_scans(event)
+        if action == "events":
+            return list_registry_events(event)
         if action == "fleet":
             return list_agent_fleet(event)
         if action == "scenarios":
@@ -4641,6 +5202,9 @@ def _dispatch(event, context):
         # reports the same diff without applying it.
         if action == "a2a-gateway-reconcile":
             return reconcile_a2a_gateway_targets(event)
+        # Writes a report row, so POST. The GET above reads the stored reports back.
+        if action == "skill-scan":
+            return scan_skill_record(event)
         return review_registry_record(event)
     if resource == "/registry/import" and method == "POST":
         return import_registry_records(event)
