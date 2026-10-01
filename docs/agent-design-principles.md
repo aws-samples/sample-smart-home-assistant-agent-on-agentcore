@@ -1,7 +1,8 @@
 # Agent design principles
 
 Everything here was learned by deploying this system and measuring it. Each
-principle cites the code that implements it and the number or bug that produced it.
+principle cites the code that implements it (by file and symbol, so the citation
+survives edits) and the number or bug that produced it.
 Where a principle contradicts what we expected, the measurement is given and the
 expectation is named — those are the entries worth reading first.
 
@@ -17,8 +18,9 @@ instructed).
 
 ### 1.1 A tool that reaches per-user data must be a factory, never a list
 
-`a2a-agent-registry/common/server.py:316` builds the tools per request from the
-verified caller. Building them once at startup pins whichever user arrived first,
+`a2a-agent-registry/common/server.py` builds the tools per request from the
+verified caller — `tools_factory(caller)` in the request path, with the reasoning in
+the module docstring. Building them once at startup pins whichever user arrived first,
 and every later request acts as them.
 
 This is the failure mode to internalise: it does not error, it does not log, and
@@ -31,15 +33,25 @@ fill is a parameter a prompt injection can fill.
 
 ### 1.2 Authorisation belongs on the server, even when the client already filters
 
-`X-A2A-Allowed-Skills` was parsed and ignored for a while. The Admin Console's
-per-skill checkboxes trimmed the orchestrator's tool list, so the feature *looked*
-enforced — but anything holding the shared m2m token could call any skill on any
-agent. `enforce_allowed_skills` (`common/server.py:143`) now refuses, and refuses a
-request with **no** header rather than waving it through: an unauthenticated
-omission must never be more permissive than an explicit grant.
+The grant used to arrive as `X-A2A-Allowed-Skills`, a header the *client* set, and
+for a while it was parsed and ignored. The Admin Console's per-skill checkboxes
+trimmed the orchestrator's tool list, so the feature *looked* enforced — but anything
+holding the shared m2m token could call any skill on any agent. Enforcing that header
+would not have been enough either: a client-asserted grant can be widened by sending
+a longer header.
 
-`smoke_test.py` runs eight negative cases alongside the eight positive ones. A
-passing positive test says nothing about whether a control exists.
+A grant is now a Cognito group on the user's own idToken, read from the signed
+`cognito:groups` claim. The sub-agent Runtime's authorizer refuses a caller with no
+group for that agent before the container is entered, and the container re-derives
+the skill subset from the same verified claim (`skills_from_claims`) and refuses an
+empty one (`enforce_allowed_skills`, both in `common/server.py`). Empty means *no
+grant*, never "unrestricted": an omission must never be more permissive than an
+explicit grant.
+
+`a2a-agent-registry/smoke_test.py` runs negative cases — a signed-in user with no
+grant, a grant held on a different agent — alongside a positive probe per agent,
+and reports a negative it cannot set up as SKIPPED rather than as a pass. A passing
+positive test says nothing about whether a control exists.
 
 ### 1.3 Refuse *as the agent*, not with a 500
 
@@ -51,7 +63,7 @@ malfunction.
 ### 1.4 Assertions the model could make, the harness should make instead
 
 Every specialist's reply is prefixed server-side with `⟦A2A:<domain>⟧`
-(`common/server.py:278`). It began as a prompt instruction, and measured: the same
+(`common/server.py` `_marker_prefixing_agent`). It began as a prompt instruction, and measured: the same
 model emits it reliably when answering from its prompt and drops it after a tool
 call, where the last thing in context is a tool result to summarise. Instructing
 harder moved nothing.
@@ -75,7 +87,7 @@ that no code change produced.
 
 ### 1.6 An instrument needs its own correctness check
 
-`_impossible()` (`measure-baseline.py:380`) rejects any row where the container
+`_impossible()` (`scripts/measure-baseline.py`) rejects any row where the container
 claims more time than the client waited, and refuses to archive the run.
 
 It exists because the warm-mode turn boundary was wrong twice. Using the client
@@ -95,7 +107,7 @@ is already running`, which was caught, counted as an endpoint failure, and shown
 the user as "A2A agent call failed" — blaming a healthy specialist and tripping its
 circuit breaker after three.
 
-`_run_on_loop` (`agent/tools/a2a.py:408`) submits with
+`_run_on_loop` (`agent/tools/a2a.py`) submits with
 `run_coroutine_threadsafe` to a loop on its own thread. **Measured: 51.1s → 17.2s
 (-66%)** on a three-domain request (`scripts/ab-parallel-delegation.py`).
 
@@ -108,7 +120,7 @@ full reset, so a still-broken endpoint re-opens on its next failure. A breaker s
 returns "A2A agent unavailable" rather than "call failed", so the model says the
 specialist was never asked instead of implying it answered badly.
 
-### 1.9 Measure before optimising — two of our four latency phases were wrong
+### 1.9 Measure before optimising — only one of six expectations survived
 
 | Phase | Expected | Measured |
 |---|---|---|
@@ -119,8 +131,9 @@ specialist was never asked instead of implying it answered badly.
 | S5 stream the A2A hop | TTFT 30s → single digits | **impossible**; prose can't precede the tool result |
 | chunk the 90d spans query | long window needs slicing | **3.2s of a 22s budget**; nothing to win |
 
-Prompt caching cuts billed input tokens from 15,839 to 329 and is worth having —
-but it is a **cost** optimisation, and calling it a latency one would have been a
+Prompt caching cuts billed input tokens by ~98% (15,839 → 329 per call in the
+side-by-side run at a ~15.6k-token prefix; see §2.5 for the live-runtime CloudWatch
+figure) and is worth having — but it is a **cost** optimisation, and calling it a latency one would have been a
 claim the numbers do not support. Prewarming was dropped outright.
 
 The last row is the cheapest lesson on the list: widening the dashboard to 90 days
@@ -151,12 +164,20 @@ The countermeasure is a test that pins the decision rather than the code: one
 `start_query` per query regardless of window length. A future "optimisation" back
 into slices now fails a test instead of a dashboard.
 
+**Building the instrument first is not process hygiene.** S2, S3 and S4 all move the
+same number; without a fixed method of measuring it, no change could be attributed
+afterwards — only claimed.
+
 ### 1.10 One shared memory, and only one writer
 
-All eight specialists read the user's AgentCore Memory
-(`common/memory.py:153`) under actor-partitioned namespaces with no agent
-dimension: "prefers warm light" is a fact about the *user*, not about whichever
-agent heard it. Writing stays the orchestrator's alone, because only it holds the
+All eight specialists read the one AgentCore Memory the orchestrator writes
+(`common/memory.py` `retrieve_memory`, namespaces from `namespaces_for`), under
+actor-partitioned namespaces with no agent dimension: "prefers warm light" is a fact
+about the *user*, not about whichever agent heard it. Partitioned per agent, the
+lighting agent could not use a preference the user told the orchestrator, which is
+the whole point of sharing.
+
+Writing stays the orchestrator's alone, because only it holds the
 conversation — a specialist sees one self-contained instruction, so anything it
 wrote would return as a context-free half-sentence forever, and eight concurrent
 writers would hand the summarizer an interleaved transcript of a conversation none
@@ -169,15 +190,28 @@ not merely undone.**
 
 ### 1.11 The identity must survive every hop, verified at each one
 
-The m2m token in `Authorization` proves *a service* is calling and has no `sub`. The
-end user rides in `X-SuperApp-User-Token` and the specialist **re-verifies** it
-independently (signature via JWKS, issuer, audience, `token_use`, expiry) rather
-than trusting the hop, then opens the Gateway with it so Cedar evaluates the real
-user. The runtime holds no device permissions of its own.
+The orchestrator sends the end user's own Cognito idToken in `Authorization` —
+no service token, no second header. The AgentCards have pointed at the
+`smarthome-a2a-gw` gateway since 2026-08-15, whose Cedar policy adds a per-agent
+kill switch; the sub-agent Runtime's `customJWTAuthorizer` then matches the
+`cognito:groups` claim against that agent's grant group before the container is
+entered; and the specialist **re-verifies** the token independently (signature via
+JWKS, issuer, audience, `token_use`, expiry — `common/user_identity.py`) rather than
+trusting the hop, derives its skills from the same claim (§1.2), then opens the
+tools Gateway with it so Cedar evaluates the real user. The runtime holds no device
+permissions of its own. The orchestrator's session id is not a credential and
+travels separately, in the A2A message metadata (`shared/a2a_session.py`).
 
-A custom header is silently stripped unless the Runtime declares
-`requestHeaderConfiguration.requestHeaderAllowlist` — the first regression run
-failed with "header is missing" on a request that had definitely sent it.
+**Header allowlist (still applies, on every Runtime hop).** A header the Runtime
+does not declare in `requestHeaderConfiguration.requestHeaderAllowlist` is silently
+stripped before the container sees it. Measured on the sub-agent Runtimes: with
+`Authorization` absent from the allowlist, a fully granted user's request was
+admitted by the authorizer and reached the container with no bearer at all, so the
+container refused — the platform said yes and the container said no, which reads
+like a container bug. The orchestrator's own Runtime is `AWS_IAM`, cannot allowlist
+`Authorization`, and has the same requirement for
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken`, the header the chatbot uses to
+forward the idToken.
 
 ### 1.12 Scheduled actions should be authorised like typed ones
 
@@ -256,14 +290,14 @@ cheapest permanent fix is usually to make the outputs differ.
 A specialist's first event-loop cycle existed only to call `discover_devices`. The
 call is cheap (~0.2s); the LLM turn wrapped around it is not — 1.0-1.3s of the ~7s
 the specialist took. The catalog is static, so the orchestrator states the relevant
-devices up front (`shared/device_brief.py:234`). **Measured -1.64s (-10%)**,
+devices up front (`shared/device_brief.py` `delegation_context`). **Measured -1.64s (-10%)**,
 winning all four A/B pairs.
 
 ### 2.2 Trimming means *relevance and shape*, not just truncation
 
 The full discovery payload is ~1,800 tokens. Pasting it in would have removed a
 round trip and added 1,800 tokens to every delegated prompt — moving the cost, not
-removing it. So the brief filters by relevance (rooms and categories the request
+removing it, which is exactly the trap the spec named. So the brief filters by relevance (rooms and categories the request
 mentions) **and** by shape (one line per device; only the bounds a model cannot
 guess — ranges, enum values, segment counts). Result: 99-210 tokens, 5-11% of the
 payload it replaces.
@@ -272,7 +306,7 @@ payload it replaces.
 
 Retrieved memory is wrapped in a section that says it is context about the user,
 explicitly **not** part of the current request, and that the current request wins
-on conflict (`common/memory.py:206`). Unlabelled, those lines read as instructions:
+on conflict (`common/memory.py` `memory_prompt_section`). Unlabelled, those lines read as instructions:
 a specialist asked to dim the bedroom would apply a remembered ocean effect because
 the prompt appeared to ask for it.
 
@@ -289,13 +323,17 @@ would report a brightness nobody told it.
 
 The orchestrator's prefix — system prompt (~1.6k tokens), routing table (~1.7k),
 eleven governed skills (~4.3k), ~20 tool schemas — is ~10.5k tokens, identical
-every call. With a cache point: **29,644 → 9 billed input tokens** on the live
-runtime.
+every call. With a cache point, measured on the live runtime via CloudWatch:
+**`InputTokenCount` 29,644 → 9**, with 10,512 tokens written to and 20,988 read from
+cache. That is a window total over several calls, so it is not the same measurement
+as the per-call 15,839 → 329 in §1.9 (taken in the side-by-side latency run); both
+show the same ~98% cut.
 
 Cache hits need an **exact** prefix match, so static content goes first and
 per-request content last. `strategy="auto"` rather than a hardcoded cache point,
-because the model is per-user configurable and auto degrades with a warning instead
-of failing every turn for a user on an unsupported model.
+because the model is per-user configurable: auto checks whether the model supports
+caching and degrades with a warning if not, where a hardcoded cache point would fail
+**every** turn for a user on an unsupported model.
 
 ### 2.6 Not every prefix is worth caching
 
@@ -336,15 +374,21 @@ defines it and assert the derivation.**
 
 ### 3.1 Route by tool name, not by described category
 
-The routing table (`agent/agent.py:A2A_DELEGATION_RULES`) maps a request shape to a
-**literal tool name**. It used to describe categories and let the model infer.
+The routing table maps a request shape to a **literal tool name**. It is generated
+per user, per turn, from that user's grants and the granted AgentCards
+(`agent/a2a_prompt.py` `build_routing_table`, wrapped by `build_delegation_rules` in
+`agent/agent.py` between a hand-written preamble and epilogue), so granting a
+sub-agent is enough to make it routable — no prompt edit, no redeploy. It started as
+a hand-written table that described categories and let the model infer.
 `agent/tests/test_delegation_rules.py` derives every valid tool name from the
-AgentCards and fails if the prompt routes to one that does not exist — it found two
-deployed skills the table never mentioned (`inspect_devices`, `tariff_analysis`) on
-its first run.
+AgentCards and fails if the prompt names one that does not exist — against the
+hand-written table, it found two deployed skills the table never mentioned
+(`inspect_devices`, `tariff_analysis`) on its first run.
 
-Without that test a renamed skill leaves the prompt pointing at a missing tool, and
-the model falls back to its own knowledge with no error anywhere.
+Generating the table removed that drift for the rows; the test still guards the
+hand-written guidance around them, which names tools too. Without it a renamed skill
+leaves the prompt pointing at a missing tool, and the model falls back to its own
+knowledge with no error anywhere.
 
 ### 3.2 A tool's description outranks the system prompt about that tool
 
@@ -388,7 +432,7 @@ something and changes nothing, which reads as the feature silently not working.
 The prompt states that independent specialists run concurrently, so asking two in
 one turn costs about as long as one, and that serialising them doubles the wait for
 nothing. Given only "you may call several tools", the model tends to wait for each
-reply before asking the next — which is the slow arm of the S4 A/B above.
+reply before asking the next — which is the slow arm of the S4 A/B (§1.7, 51.1s).
 
 ### 3.6 Route by subject, not by phrasing
 
@@ -413,7 +457,8 @@ per-user override appends. Read per request with **no caching** — a TTL would 
 saved edit look ignored for as long as it lasted, which is indistinguishable from
 the bug governance removes. Failure is asymmetric on purpose: an unreadable table
 falls back to the shipped prompt, because refusing to answer over a throttled
-governance read is worse than using the perfectly good prompt in the image.
+governance read is worse than using the perfectly good prompt in the image; and an
+override that can be read always wins.
 
 `cdk/lambda/admin-api/tests/test_prompt_defaults_mirror.py` fails when a shipped
 prompt changes without regenerating the console's mirror, so the "reset to default"

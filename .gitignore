@@ -155,3 +155,9 @@ admin-console/src/assets/architecture.drawio.png
 # The conclusions that mattered are inlined in docs/agent-design-principles*.md and
 # docs/architecture-and-design.md instead, so they survive without the raw runs.
 docs/measurements/
+
+# Latency benchmark harnesses (vision-latency-test/ and voice-latency-test/).
+# Development-phase tooling tied to one deployment; their conclusions are
+# inlined in docs/architecture-and-design.md.
+vision-latency-test/
+voice-latency-test/

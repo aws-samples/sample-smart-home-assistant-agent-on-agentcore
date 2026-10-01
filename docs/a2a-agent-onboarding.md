@@ -149,8 +149,9 @@ agent,原有授权不会跟过去。
 - **改一张已 APPROVED 的卡会把记录打回 `DRAFT`**,需要重新审批。授权不会丢:撤销扫描给
   in-flight 记录留了一个重新审批窗口(manifest 的 `lifecycle.reapprovalGraceSeconds`,
   默认 1 小时)。
-- **`DEPRECATED` 是终态,且记录会从 API 上消失** —— 只能重建,而重建会得到新的 recordId,
-  原有授权全部失效。想临时停用请用 `reject`(可以再批准),**不要用 `deprecate`**。
+- **`DEPRECATED` 是终态** —— 之后任何状态变更都会失败。记录**不会**消失(2026-08-24 复测):
+  它仍以 `status=DEPRECATED` 列出,`GetRegistryRecord` 也照常返回;要清掉它得
+  `delete_registry_record`。恢复只能重建,而重建会得到新的 recordId,原有授权全部失效。想临时停用请用 `reject`(可以再批准),**不要用 `deprecate`**。
 - **改卡名 = 发一个新 agent。** 工具名、group 名、按 recordId 存的授权会同时变或失配。
   这条工具兜不住,需要你自己有版本纪律。
 

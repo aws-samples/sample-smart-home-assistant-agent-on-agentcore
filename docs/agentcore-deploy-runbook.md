@@ -52,6 +52,25 @@
 
 ## 0. 环境准备 (演示前 10 分钟做完)
 
+> **代码包不在 git 里。** `logs/` 已被 gitignore,下文的 `logs/agentcore-deploy-demo/...`
+> 两个包需要先在**仓库根目录**刷新一遍:
+>
+> ```bash
+> # 在仓库根目录执行
+> ./venv/bin/python scripts/export-deploy-demo.py           # 刷新 logs/agentcore-deploy-demo/ 与 logs/agentcore-deploy-demo.tar.gz
+> ./venv/bin/python scripts/export-deploy-demo.py --check   # 只报告漂移, 不写文件
+> ```
+>
+> 它把仓库里的共享代码(`a2a-agent-registry/common/`、`shared/memory_actor.py`、
+> `shared/agent_registry.py`)和两个包的 `demo-config.json`(来自 `cdk-outputs.json` +
+> `agentcore-state.json`)重新拷进包里。**demo 专属代码(`main.py`、`register_record.py`、
+> `publish_skill.py` 等)只存在于包里**:目录不存在时脚本会直接退出并提示先解开
+> `logs/agentcore-deploy-demo.tar.gz`,缺文件时拒绝写出。
+>
+> 下文所有 `cd logs/agentcore-deploy-demo/...` 都是**相对仓库根目录**;本文也会被拷进包根
+> (`logs/agentcore-deploy-demo/agentcore-deploy-runbook.md`),从那里读时去掉
+> `logs/agentcore-deploy-demo/` 前缀即可。
+
 ```bash
 # 1) CLI 与依赖
 agentcore --version                 # 期望 >= 0.26
@@ -66,16 +85,22 @@ aws configure get region            # 应为 us-west-2
 python3 -c "import boto3;print('agent-registry-control' in boto3.Session().get_available_services())"
 # False 就升级: pip install -U 'boto3>=1.43.67'
 
-# 4) 两个包的配置是否指向同一套环境
-cat demo-config.json
+# 4) 两个包的配置是否指向同一套环境(在仓库根目录执行;
+#    agent 包多出 userPool / chatbotUrl 几个字段, 其余共同字段应一致)
+cat logs/agentcore-deploy-demo/demo-agent-air-quality/demo-config.json \
+    logs/agentcore-deploy-demo/demo-skill-indoor-air-report/demo-config.json
 ```
 
 演示前的健康检查(确认基座是活的):
 
 ```bash
-cd logs/agentcore-deploy-demo/demo-skill-indoor-air-report
-python publish_skill.py --list      # 应列出 10 条已批准的内建 skill
+cd logs/agentcore-deploy-demo/demo-skill-indoor-air-report   # 相对仓库根目录
+python publish_skill.py --list      # 列出 registry 里所有 SKILL 记录(任意状态)
 ```
+
+其中应至少有 9 条 `APPROVED` 的内建 skill(`agent/skills/` 下每个目录一条,由
+`scripts/publish-builtin-skills.py` 发布);Skill ERP 发布过的记录(任意状态)也会出现,
+所以总数通常比 9 多(2026-08-14 的基线是 10 条 SKILL 记录)。
 
 能列出来说明: 凭据、区域、registryId、boto3 版本四件事全对。这一条命令是整场演示
 最省时间的前置检查。
@@ -84,7 +109,7 @@ python publish_skill.py --list      # 应列出 10 条已批准的内建 skill
 
 ## Flow A — A2A Sub-Agent 部署流程
 
-工作目录: `logs/agentcore-deploy-demo/demo-agent-air-quality/`。演示的 agent 是 `air-quality-agent`
+工作目录: `logs/agentcore-deploy-demo/demo-agent-air-quality/`(相对仓库根目录)。演示的 agent 是 `air-quality-agent`
 (室内空气质量顾问, prompt-only)。
 
 ### A1. 本地调试 (2 分钟)
@@ -152,16 +177,10 @@ python deploy_runtime.py
                            ← 推出"授了哪几个 skill"
 ```
 
-**2026-08-15 起: `card.json` 里加 skill 不再需要重跑 `deploy_runtime.py`。**
-以前需要,而且这是 day-2 最烦的一个耦合:门口那份列表把每个 skill 枚举进 `CONTAINS_ANY`,
-而它**没有通配符**,于是被授了新 skill 的用户在门口被拒、没有任何日志。
-
-那份枚举**换不来任何门禁强度** —— 门口只要命中任意一个就放行,而容器随后用同一个 claim
-做同样的"至少一个"判断(`enforce_allowed_skills`)。所以门口收成一个稳定的 agent 级 group,
-强度不变,耦合消失。
-
-**仍然需要重跑 `deploy_runtime.py` 的:改 `card.json` 的 `name`。** group 名按卡名编,
-改名对每个执行点都是一个新 agent,旧授权不会跟过去。
+**`card.json` 里加 skill 不需要重跑 `deploy_runtime.py`;改 `card.json` 的 `name` 需要**
+(group 名按卡名编, 改名对每个执行点都是一个新 agent, 旧授权不会跟过去)。为什么门口只认一个
+agent 级 group、`CONTAINS_ANY` 没有通配符意味着什么, 见接入契约
+[§3.1 两层授权](a2a-agent-onboarding.md#31-两层授权读同一个-claim-的不同部分)。
 
 ### A3. 注册到 Registry, 用新 version (1 分钟)
 
@@ -191,22 +210,12 @@ python register_record.py --record-version 0.1.0 --approve
 
 ### A5.5 核对 authorizer 与卡是否一致 (1 分钟, 2026-08-15 新增)
 
-**这一步是整条流程里最容易被跳过、也最容易静默出错的一步。**
+**这一步是整条流程里最容易被跳过、也最容易静默出错的一步。** 注册只让 agent **被发现**;
+**能不能被调用**由它自己 Runtime 的 authorizer 决定, 而 authorizer 配错在两个方向上都是静默的
+(太松: 谁都能调; 太紧: 已授权的人被 401) —— 两种情况下状态列都显示 `approved`。
+两个方向的症状表见接入契约 [§3.3](a2a-agent-onboarding.md#33-两个方向的静默失败)。
 
-注册一条 APPROVED 的卡只让 agent **被发现**:控制台列出它、编排器给它注册工具、委派提示词
-里出现它 —— 全部从 Registry 派生, 上游不需要改任何代码。**能不能被调用**是由 agent
-**自己 Runtime 的 authorizer** 决定的, 而那份配置在部署这个 runtime 的人手里。
-
-两个方向都会静默出错:
-
-| 配错的方式 | 后果 | 你会看到什么 |
-| --- | --- | --- |
-| `customClaims` 缺失或写松 | 池子里**任何**登录用户都能调它的全部 skill | 什么都看不到, 一切正常工作 |
-| pool / audience 配错 | 已授权用户被拒(401) | 编排器照样注册工具, 模型调用后返回 `A2A agent call failed: ...` 然后道歉 |
-
-两种情况下 A2A Agents 页的状态列都显示 `approved` —— 它读的是 Registry 状态, 不是 authorizer。
-
-所以看那一页**新增的 `Authorizer` 列**:
+演示时看 A2A Agents 页的 **`Authorizer` 列**:
 
 - `Matches card` —— 一致
 - `Too permissive`(红)—— 有人能调到他不该调的
@@ -223,32 +232,27 @@ curl -s -H "Authorization: $ID_TOKEN" \
 别人自己部署的 runtime 用这个打印应有配置(和检查用的是同一个函数, 不会分叉):
 
 ```bash
-./venv/bin/python scripts/a2a-authorizer-contract.py --card air-quality/card.json
+# 在仓库根目录执行(scripts/ 在仓库里, card.json 在代码包里)
+./venv/bin/python scripts/a2a-authorizer-contract.py \
+  --card logs/agentcore-deploy-demo/demo-agent-air-quality/air-quality/card.json
 ./venv/bin/python scripts/a2a-authorizer-contract.py --record-id <recordId> --format cli
 ```
 
-**2026-08-15 起这不只是报告 —— 它是审批门。** 不合规的 AGENT 记录批不过去,审批返回
-409 并附上具体 finding 和要跑的命令。哪些拦:
-
-| 严重度 | 含义 | 审批 |
-| --- | --- | --- |
-| `open` | 有人能调到他不该调的 | **拦** |
-| `closed` | 已授权的人被拒 | **拦** |
-| `info` | Runtime 读不到(别的账号),或 authorizer 还在用旧的 per-skill 列表 | 放行, 报告 |
-
-`info` 不拦是刻意的:"读不到"不等于"配错了",而"还在用旧列表"的 runtime **今天能用**。
-把能用的东西报成红色,是让检查被忽略的最快方式。平台管理员可以 `?force=true` 强批,
-会写进记录的 `statusReason` 留痕。
+**这不只是报告 —— 它是审批门。** `open` / `closed` 两类不合规的 AGENT 记录批不过去
+(审批返回 409 并附上 finding 和要跑的命令), `info` 放行只报告; 平台管理员可以
+`?force=true` 强批并在 `statusReason` 留痕。严重度表与 `info` 为什么不拦, 见接入契约
+[§5 审批门](a2a-agent-onboarding.md#5-系统怎么检查你--而且这是审批门)。
 
 **加 skill 之后不再需要重跑这一步**(见 A2)。改卡名才需要。
 
-第三方接入的完整契约见 `docs/a2a-agent-onboarding.md`,里面第一步就是从 Admin Console
-的 **「平台契约」** 按钮复制 manifest,而不是手抄任何值。
+第三方接入的完整契约见 [`a2a-agent-onboarding.md`](a2a-agent-onboarding.md),里面第一步就是从
+Admin Console 的 **「平台契约」** 按钮复制 manifest,而不是手抄任何值。
 
 ### A6. 授权给用户 (2 分钟)
 
-**构建 → 工具策略** → 选用户 → **管理权限** → 滚到 **A2A 智能体** → 展开
-`air-quality-agent` → 勾 `ventilation_plan` → **保存权限**。
+**构建 → 子 Agent 策略**(`#/subAgentPolicy`)→ **范围**选用户(或「全局默认(所有用户)」)→
+展开 `air-quality-agent` → 勾 `ventilation_plan` → **保存授权**。
+(2026-08-12 起 A2A 授权从「工具策略 → 管理权限」里搬出来成了独立页面。)
 
 后台做两件事: DynamoDB 里写 `a2aGrants`(按 recordId 存), 并落成**两个** Cognito
 group(不存在会自动建):
@@ -256,8 +260,9 @@ group(不存在会自动建):
 - `a2a-air-quality-agent` —— 门钥匙, Runtime authorizer 匹配的就是它
 - `a2a-air-quality-agent.ventilation_plan` —— 容器用它判断"授了哪几个 skill"
 
-取消所有勾选(而不是删掉整行)会存成一个**空 skill 列表**, 那是"这个 agent 上什么都没授"
-的显式表达 —— 此时**连门钥匙都不发**, 用户在门口就被 401, 而不是进门再被容器拒。
+在用户范围下, 对某个 agent 点「为该用户单独配置」再取消所有勾选(而不是「恢复继承全局」),
+会存成一个**空 skill 列表**, 那是"这个 agent 上对该用户什么都不授"的显式表达(也是收回
+全局授权的唯一方式) —— 此时**连门钥匙都不发**, 用户在门口就被 401, 而不是进门再被容器拒。
 
 ```bash
 aws cognito-idp admin-list-groups-for-user --region us-west-2 \
@@ -298,7 +303,7 @@ EOF
 首次 10–30 秒(取 token + 解析 AgentCard)。铁证在日志里:
 
 ```bash
-RT_ID=$(jq -r '.runtimeId' agentcore-state.json)     # 主 text agent
+RT_ID=$(jq -r '.runtimeId' agentcore-state.json)     # 主 text agent; 在仓库根目录执行(该文件在仓库根)
 aws logs filter-log-events \
   --log-group-name /aws/bedrock-agentcore/runtimes/${RT_ID}-DEFAULT \
   --region us-west-2 --start-time $(($(date +%s)*1000 - 600000)) \
@@ -388,23 +393,25 @@ python teardown.py
 先删 Registry 记录再删 Runtime: 记录还在而 Runtime 已删, 持有授权的用户调用会在传输层
 拿到 404, 看起来像网络问题。Cognito 的 grant group 不再需要手工清 —— 记录一消失,
 撤销扫描下一轮(≤5 分钟)就会把对应的 group 从持有者身上摘掉。要立刻生效就在
-**管理权限** 里取消勾选, 或直接跑一次扫描。
+**子 Agent 策略** 里取消勾选, 或直接跑一次扫描。
 
 > **不要用 `deprecate` 当"临时停用"。** 2026-08-15 实测: `DEPRECATED` 是**终态**,
 > `UpdateRegistryRecordStatus` 对它的任何目标状态都返回
 > `Cannot update registry record in DEPRECATED status (terminal state)`, 包括回到
-> APPROVED; **而且记录会直接从 API 上消失** —— `GetRegistryRecord` 返回
-> `ResourceNotFoundException`, 任何 status 过滤都查不到它。恢复只能重建, 而重建会得到
+> APPROVED。记录**不会消失**(2026-08-24 复测): `ListRegistryRecords` 仍以
+> `status=DEPRECATED` 列出它, `GetRegistryRecord` 也照常返回, 不会 `ResourceNotFoundException`;
+> 真正把它清掉的是 `delete_registry_record`。恢复只能重建, 而重建会得到
 > **新的 recordId**, 于是所有按 recordId 存的授权全部失效, 要逐条迁到新 id。
 >
 > 想可逆地停用请用 `reject`(`REJECTED` → `APPROVED` 是通的), 或者直接改授权。
-> Admin Console 现在会在 deprecate 之前弹一次确认说明这件事。
+> Admin Console 的审批界面不提供 deprecate 按钮(前端 `handleReview` 为它预置了一次不可逆
+> 确认框, 但目前没有入口调用它)。
 
 ---
 
 ## Flow B — Skill 发布流程
 
-工作目录: `logs/agentcore-deploy-demo/demo-skill-indoor-air-report/`。
+工作目录: `logs/agentcore-deploy-demo/demo-skill-indoor-air-report/`(相对仓库根目录)。
 
 ### B1. 本地写 + 自检 (1 分钟)
 
@@ -492,26 +499,18 @@ skill 的升版和 agent 有一个关键差别: **两个存储是解耦的。** 
 | 状态 | 已 APPROVED 的会被**打回 DRAFT** | 新记录从 DRAFT 开始 |
 | 适合 | Agent(授权按 recordId 存)、想"一个东西一行" | 要保留可回滚的版本历史 |
 
-配套的 API 形状(两边都容易写错):
+两个脚本已经处理掉的 API 形状坑, 演示时一句话带过即可:
 
-- `CreateRegistryRecord` 返回 **`recordArn`, 不是 `recordId`** —— 读 `recordId` 会拿到
-  `None` 并存下去, 之后那条记录"看起来创建了但找不到"。
-- `UpdateRegistryRecord` 把 **每一层**都包进 `optionalValue`(union / 每个 descriptor /
-  每个字段), 而 `recordVersion` 和 `name` 是裸字符串。只包最外层是那种"看起来对了但
-  不对"的改法, 而且失败方式不统一: SKILL 会抛 `ParamValidationError`(还算响亮),
-  别的可能被接受然后忽略。用 `agent_registry.as_update_descriptors()`, 别手写。
-- `description` 在 Create 里是裸字符串, 在 Update 里是 `{"optionalValue": "..."}`。
-- 记录处于 `CREATING` / `UPDATING` 时任何 Update / Delete 都会被拒
-  ("cannot be modified while in CREATING state") —— 两个脚本里都有 `wait_settled`。
+- `CreateRegistryRecord` 返回 **`recordArn`, 不是 `recordId`**(读 `recordId` 会存下 `None`)。
+- `UpdateRegistryRecord` 把**每一层**都包进 `optionalValue`(`description` 也是), 而
+  `recordVersion` / `name` 是裸字符串 —— 用 `agent_registry.as_update_descriptors()`, 别手写。
+  为什么只包外层会让重部署悄悄换掉 recordId, 见架构文档
+  [Deploy path](architecture-and-design.md#deploy-path)。
+- 记录处于 `CREATING` / `UPDATING` 时 Update / Delete 被拒 —— 脚本里有 `wait_settled`。
 
-状态机比 enum 看起来窄:
-
-```
-DRAFT ──submit──> PENDING_APPROVAL ──update status──> APPROVED
-  └──> DEPRECATED (终态)                    REJECTED ──> APPROVED (审批人可反悔)
-```
-
-对 `DRAFT` 直接置 `APPROVED` 报 "Invalid status transition"。
+状态机: `DRAFT` 必须先 submit 到 `PENDING_APPROVAL` 才能 `APPROVED`(直接置位报
+"Invalid status transition"), `REJECTED → APPROVED` 可逆, `DEPRECATED` 是终态。实测的完整
+转移表见架构文档 [Skill review](architecture-and-design.md#skill-review-approve--reject--deprecate)。
 
 ---
 
@@ -561,16 +560,17 @@ setup 脚本变量被重置的那类变更(见下表最后一行)。部署前先
 | 注册好了、控制台显示 `approved`, 但**谁都调不到** | authorizer 的 pool / audience 不是本部署的 | A2A Agents 页看 `Authorizer` 列(`Callers refused`), 用 `a2a-authorizer-contract.py` 打印应有配置 |
 | 注册好了, 但**没授权的人也能调** | authorizer 没配 `customClaims`, 授权层等于不存在 | 同上, `Authorizer` 列会显示 `Too permissive`(红) |
 | 全局授权在 `admin-list-groups-for-user` 里看不到 | 2026-08-15 起全局授权由 token trigger 注入 claim, 不落 membership | 正常状态; 解 idToken 看 `cognito:groups`, 或看控制台 reconcile 页的 claim-injected 一行 |
-| `deprecate` 之后想恢复, 一切操作都被拒 | `DEPRECATED` 是终态且记录会从 API 消失 | 只能重建记录 → 新 recordId → 把授权逐条迁过去。临时停用请用 `reject` |
+| `deprecate` 之后想恢复, 一切操作都被拒 | `DEPRECATED` 是终态(记录仍以 `DEPRECATED` 列出, 但无法再变更状态; 要清掉用 `delete_registry_record`) | 只能重建记录 → 新 recordId → 把授权逐条迁过去。临时停用请用 `reject` |
 | Skill ERP 提交了, 「Registry 动态」面板 30 秒后还是空的 | 规则没匹配(看 `list-rules`), 或 admin Lambda 的 `REGISTRY_ID` 是 PLACEHOLDER 导致事件被当作"别的 registry"丢弃(日志 `ignored registry`), 或面板显示的是黄色"读取失败"而不是空 | 按上一节三步查; 面板把"读不到"和"没有事件"分开显示, 先看是哪一种 |
-| 一次 `cdk deploy` 之后 sweep 报 `registryId failed to satisfy constraint` | admin Lambda 的 `REGISTRY_ID` 被重置成 PLACEHOLDER(**改了 CDK 声明的 environment 才会触发**, 只改代码不会) | 按名字合并恢复环境变量, 再跑 `scripts/check-registry-wiring.py` 确认 exit 0 |
+| 一次 `cdk deploy` 之后 sweep 报 `registryId failed to satisfy constraint` | admin Lambda 的 `REGISTRY_ID` 被重置成 PLACEHOLDER(**改了 CDK 声明的 environment 才会触发**, 只改代码不会) | 按名字合并恢复环境变量, 再跑 `scripts/check-registry-wiring.py` 确认 exit 0。完整核对步骤见[管理员手册 §11.8](admin_manual_管理员使用手册.md#11-其他重要事项) |
 
 ---
 
 ## 演示期间发现并已修复的两个 bug (Skill ERP)
 
-准备这份演示时在 `cdk/lambda/skill-erp-api` 里发现两处真实缺陷, **已修复并实测**,
-未部署(改的是 Lambda 代码, 需要重新 `cdk deploy` 才会生效):
+准备这份演示时在 `cdk/lambda/skill-erp-api` 里发现两处真实缺陷, 修复已在提交
+`f0a81e9`(2026-08-14)中合入; 该提交记录了当时已部署到 `smarthome-skill-erp-api` 并通过
+Skill ERP 界面实测。改的是 Lambda 代码, 新环境需要 `cdk deploy` 才带上它:
 
 1. **"编辑我已发布的记录"必然 500。** `update_my_record` / `update_my_a2a` 传的是
    `description=<裸字符串>` + Create 形状的 `descriptors`, 而 Update 要求
@@ -597,8 +597,8 @@ setup 脚本变量被重置的那类变更(见下表最后一行)。部署前先
 
 实测结果(打真实 registry, 用完即删): create 与 update 都返回 200/201、无
 `submitWarning`、状态 `PENDING_APPROVAL`、内容确实被改写、`optionalValue` 没有漏进
-数据里。所以现在 Skill ERP 的编辑按钮和 `publish_skill.py` 两条路都可以演示 ——
-**前提是先重新部署 Lambda**。
+数据里。所以 Skill ERP 的编辑按钮和 `publish_skill.py` 两条路都可以演示 ——
+**前提是目标环境的 `smarthome-skill-erp-api` 是 `f0a81e9` 之后部署的**(不确定就先 `cdk deploy`)。
 
 ---
 

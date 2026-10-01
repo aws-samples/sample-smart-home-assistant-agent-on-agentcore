@@ -53,15 +53,15 @@ The Smart Home Assistant Agent is a full-stack application that demonstrates AI-
 
 | Subsystem | Technology | Purpose |
 |-----------|-----------|---------|
-| Device Simulator | React + TypeScript + Cloudscape + MQTT + Cognito | Per-user authenticated visual simulation of 4 smart home devices; each user sees only their own scope via `smarthome/<userSub>/...` topics |
+| Device Simulator | React + TypeScript + Cloudscape + MQTT + Cognito | Per-user authenticated visual simulation of the device fleet declared in `shared/device-catalog.json` (12 devices across 3 rooms); each user sees only their own scope via `smarthome/<userSub>/<deviceId>/...` topics |
 | Chatbot | React + TypeScript + Cloudscape + HTTP POST | Natural-language interface to the AI agent. Fully Cloudscape-native UI (including bubbles/input), renders agent replies as markdown, supports image attachments (≤3 images, ≤20 MB each) that route to a vision model |
-| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Kimi-2.5 default; per-user Bedrock model override) | Text chat via `POST /invocations`; wraps per-user MCP tools (control_device, discover_devices, query_knowledge_base) to inject the validated `user_id`; image turns bypass the text model and return the vision model's caption |
+| AI Agent (text) | Strands Agent on AgentCore Runtime `smarthome` (Claude Sonnet 4.6 `us.anthropic.claude-sonnet-4-6` default; per-user Bedrock model override, e.g. Kimi K2.5) | Text chat via `POST /invocations`; wraps per-user MCP tools (control_device, discover_devices, query_knowledge_base) to inject the validated `user_id`; image turns bypass the text model and return the vision model's caption |
 | AI Agent (voice) | Strands BidiAgent on AgentCore Runtime `smarthomevoice` (Nova Sonic) | Bi-directional voice streaming via `/ws`; finalized transcripts persisted to the same AgentCore Memory the text agent uses |
 | AI Agent (vision) | Claude Haiku 4.5 default (per-user multimodal model override) via Bedrock Converse | Captions uploaded images; captions injected as prior assistant messages so the text agent can answer follow-up questions |
 | AI Agent (browser) | `browser-use` + AgentCore Browser Tool (`aws.browser.v1`) driven by the text agent's `browse_web` Strands tool | Live web automation when the user asks something that needs a real site (product search, news, Wikipedia). Chatbot renders the live DCV stream + a Take/Release Control button; per-step screenshots land in the agent session's `/mnt/workspace/<sid>/browser/` (see §9.11). |
 | AI Agent (code) | `code-interpreter` + AgentCore Code Interpreter (`aws.codeinterpreter.v1`) driven by the text agent's `execute_python` Strands tool | Live Python execution for data analysis, optimization, simulation, and charting over smart-home telemetry. Chatbot's right-side panel auto-opens a "CodeInterpreter" tab rendering each block's code + streamed stdout/stderr + inline matplotlib charts; charts land in `/mnt/workspace/<sid>/code/` (see §9.14). |
 | Tool Access | AgentCore Gateway (MCP Server) + Lambda + curated Strands built-ins | Device discovery, command routing, KB query, and device control via MCP. Built-in Strands/AgentCore tools (`http_request`, `file_write`, etc.) also surfaced for admin per-user policy and for reference skills. |
-| AI Agents (specialists) | 7 independent AgentCore Runtimes reached over the A2A protocol | Domain specialists the orchestrator delegates to: device control, lighting effects, knowledge QA, scene orchestration, security, energy, appliance maintenance. Each carries the caller's verified identity to the same Gateway, so Cedar evaluates the real end user (see §9.13). |
+| AI Agents (specialists) | 8 independent AgentCore Runtimes reached over the A2A protocol | Domain specialists the orchestrator delegates to: device control, lighting effects, knowledge QA, task management (stored scenes and routines), security, energy, appliance maintenance, live scene sync. Each carries the caller's verified identity to the same Gateway, so Cedar evaluates the real end user (see §9.13). |
 | Task management | task-management A2A agent + `smarthome-scenarios` table + EventBridge Scheduler + `smarthome-scenario-runner` Lambda | Turns a described routine into a stored scene (trigger + device actions) and executes it on time **as the owner, through the Gateway**, so a scheduled command is authorised exactly like a hand-typed one. Five trigger kinds: clock time in the owner's timezone, sunrise/sunset from their coordinates, device state, sensor threshold, and one-tap manual (see §9.17). |
 | Live scene sync | scene-sync A2A agent + the simulator's screen/music props | Drives a room in real time — backlight following the picture, lights on the beat — and waits on the reported Bluetooth link instead of assuming a pairing succeeded. Holds device tools and no table, the mirror of task-management (see §9.17). |
 | Admin Console | React + TypeScript + Cloudscape + REST API | Agent Harness Control Center with AWS-Console-style left-nav: Discover (Overview, **Agents**, Integration Registry), Build (Models, Skills, Prompt, Tool Policy, Memories, Knowledge Base, Identity), Deploy (Instance Type, Sessions), Assess (Agent Guardrails, Observability, Evaluations, Optimization). Supports light/dark themes. |
@@ -141,7 +141,7 @@ User (Chatbot, logged in — idToken carries Cognito sub)
     |
     | "Turn on the LED matrix to rainbow mode"
     v
-AgentCore Runtime (HTTP POST /invocations) --> Strands Agent (Kimi K2.5)
+AgentCore Runtime (HTTP POST /invocations) --> Strands Agent (Claude Sonnet 4.6 default)
                                        |
                                        | Agent wraps control_device / discover_devices so the
                                        | JWT-validated `sub` is injected as `user_id` before
@@ -159,12 +159,12 @@ AgentCore Runtime (HTTP POST /invocations) --> Strands Agent (Kimi K2.5)
                                        | iot-data:Publish scoped to the caller's sub.
                                        v
                                 AWS IoT Core
-                                Topic: smarthome/<userSub>/led_matrix/command
+                                Topic: smarthome/<userSub>/living-led-1/command
                                        |
                                        | MQTT over WebSocket (SigV4)
                                        v
                                 Device Simulator (Browser, same signed-in user)
-                                LedMatrix component receives:
+                                the catalog-rendered LED matrix component receives:
                                 {"action":"setMode","mode":"rainbow"}
 ```
 
@@ -185,12 +185,12 @@ AgentCore Runtime --> Strands Agent (activates all-devices-on skill)
                                        v
                                 iot-discovery Lambda
                                        |
-                                       | Returns device list with powerOn/powerOff commands
+                                       | Returns the device catalog (deviceId, room, capabilities, actions)
                                        v
                                 Agent receives device list
                                        |
                                        | 2. For each device (sequentially, 5s apart):
-                                       |    MCP call: control_device(device_type, powerOn command)
+                                       |    MCP call: control_device(device_id, setPower command)
                                        v
                                 iot-control Lambda --> IoT Core --> Device Simulator
 ```
@@ -245,11 +245,11 @@ MqttClient.ts
     v
 AWS IoT Core
     |
-    | 5. Subscribe (scoped to the signed-in user's own sub) to:
-    |      smarthome/<userSub>/led_matrix/command
-    |      smarthome/<userSub>/rice_cooker/command
-    |      smarthome/<userSub>/fan/command
-    |      smarthome/<userSub>/oven/command
+    | 5. Subscribe (scoped to the signed-in user's own sub), one topic per
+    |    catalog device (shared/device-catalog.json):
+    |      smarthome/<userSub>/<deviceId>/command
+    |      e.g. smarthome/<userSub>/living-led-1/command
+    |           smarthome/<userSub>/kitchen-oven-1/command
     v
 Each device component receives
 commands and updates its UI state
@@ -381,7 +381,7 @@ Internet
 | Cognito Unauth Role | iot:Connect, Subscribe, Receive, Publish | `*` (IoT Core) |
 | Cognito Auth Role | iot:Connect, Subscribe, Receive, Publish | `*` (IoT Core) |
 | iot-control Lambda | iot:Publish | `arn:...:topic/smarthome/*` |
-| iot-discovery Lambda | (none) | Returns mock device list |
+| iot-discovery Lambda | (none) | Returns the device catalog (`shared/device-catalog.json`) |
 | admin-api Lambda | dynamodb:* | `arn:...:table/smarthome-skills` |
 | admin-api Lambda | dynamodb:Scan, GetItem, UpdateItem, DeleteItem | `arn:...:table/smarthome-runtime-sessions` |
 | admin-api Lambda | dynamodb:PutItem, Scan | `arn:...:table/smarthome-feedback` (write a vote, aggregate for the dashboard) |
@@ -390,7 +390,7 @@ Internet
 | admin-api Lambda | bedrock-agentcore:ListActors, ListMemoryRecords | `*` (AgentCore Memory) |
 | admin-api Lambda | bedrock-agentcore:Create/Get/Update/Delete Policy* | `*` (policy engine + gateway management) |
 | admin-api Lambda | iam:PassRole, iam:PutRolePolicy | AgentCore roles |
-| AgentCore Runtime Role | bedrock:InvokeModel | Kimi-2.5 model |
+| AgentCore Runtime Role | bedrock:InvokeModel (+ WithResponseStream / WithBidirectionalStream) | `*` (default Claude Sonnet 4.6, per-user overrides, vision and Nova Sonic models) |
 | AgentCore Runtime Role | dynamodb:Query, GetItem, Scan | `arn:...:table/smarthome-skills` |
 | AgentCore Runtime Role | dynamodb:PutItem, UpdateItem | `arn:...:table/smarthome-runtime-sessions` (records each per-login session) |
 
@@ -420,19 +420,19 @@ Browser
         |-> clientId: "device-sim-{random}"
         |-> keepAlive: 30s
         |-> auto-reconnect with re-subscribe, refresh every 45min
-        |-> subscribes to:  smarthome/<userSub>/{led_matrix,rice_cooker,fan,oven}/command
+        |-> subscribes to:  smarthome/<userSub>/<deviceId>/command  (one per catalog device)
 ```
 
 **Note on the browser SDK:** The aws-iot-device-sdk-v2 has different APIs for Node.js and browser bundles. The browser build exports `auth.StaticCredentialProvider` (not `auth.AwsCredentialsProvider.newStatic()`). TypeScript uses `(auth as any).StaticCredentialProvider` since the Node.js type definitions don't include the browser API.
 
 **Key design decisions:**
 - **Authenticated access required**: The device simulator gates on Cognito sign-in. The unauthenticated Identity Pool role exists as a CDK remnant but the new client never uses it.
-- **Per-user MQTT topics**: All subscriptions and publishes use `smarthome/<userSub>/<device>/command`. Each user's browser sees only their own simulated devices.
+- **Per-user MQTT topics**: All subscriptions and publishes use `smarthome/<userSub>/<deviceId>/command` (and `/state` for reported state). Each user's browser sees only their own simulated devices.
 - **IoT AttachPolicy at login**: `ensureIotPolicyAttached()` runs on sign-in before the MQTT client starts. It attaches the `smarthome-device-sim-client` IoT policy (CDK-managed) to the user's Cognito identity ID. This is AWS's documented workaround for authenticated Cognito users getting `Connection refused: Not authorized` when trying to use MQTT over WebSockets.
-- **Singleton MQTT client**: All 4 device components share one `MqttClient` instance to avoid multiple WebSocket connections.
+- **Singleton MQTT client**: All device components share one `MqttClient` instance to avoid multiple WebSocket connections.
 - **All devices off by default**: Every device starts in the powered-off state when the page loads.
-- **Auto-power-on**: Setting a mode, speed, temperature, or color via MQTT automatically powers on the device (e.g., `setMode` on LED Matrix also sets `power: true`), so the agent doesn't need to send a separate `setPower` command.
-- **Layout**: LED Matrix occupies the left column; Rice Cooker, Fan, and Oven stack compactly on the right.
+- **Auto-power-on**: Setting a mode, speed, temperature, or color via MQTT automatically powers on the device (declared per action as `implies` in `shared/device-catalog.json`, e.g. `setSpeed` implies `power: true`), so the agent doesn't need to send a separate `setPower` command.
+- **Layout**: one card per catalog device in a packed dashboard grid (`dashboard-grid`), labelled with its room.
 
 #### Theming: never reference Cloudscape's own CSS variables from app CSS
 
@@ -484,53 +484,46 @@ Per-user isolation has two layers:
 
 ### 6.2 Device Components
 
-Each device component follows the same pattern:
+The fleet is declared once in `shared/device-catalog.json` — 12 devices across 3
+rooms (living room, bedroom, kitchen): a light strip, a bedroom light, a fan, a
+plug, a temperature/humidity sensor, an LED matrix, a rice cooker, a humidifier,
+an air purifier, an ice maker, a TV backlight and an oven. Each entry carries a
+`deviceId` of the form `{room}-{type}-{seq}` (e.g. `living-led-1`), which is both
+the MQTT topic segment and the agent's handle for the device, plus the
+`capabilities` (typed, bounded) and `actions` (wire action name → capability it
+writes, with `implies` side effects such as `setSpeed` implying `power: true`).
+The same file drives three consumers: the simulator renders a card per entry,
+`iot-control` validates (and clamps) commands against it, and `iot-discovery`
+returns it to the agent.
 
-```typescript
-// 1. Local state management
-const [power, setPower] = useState(false);
+Every component shares one state hook, `useDeviceState(device, userSub)`
+(`device-simulator/src/state/useDeviceState.ts`), which subscribes to
+`smarthome/{userSub}/{deviceId}/command`, applies the action through the
+catalog's `actions` map, and reports the resulting state back on
+`smarthome/{userSub}/{deviceId}/state`. A UI click and an agent command take the
+same path out.
 
-// 2. MQTT subscription on mount
-useEffect(() => {
-  const mqtt = MqttClient.getInstance();
-  const handler = (topic, payload) => {
-    switch (payload.action) {
-      case 'setPower': setPower(payload.power); break;
-      // ...
-    }
-  };
-  mqtt.subscribe('smarthome/{device}/command', handler);
-  return () => mqtt.unsubscribe(topic, handler);
-}, []);
+`App.tsx` chooses a component by shape rather than by device:
 
-// 3. Visual rendering based on state
-return <div>...</div>;
-```
+| Shape | Component | Devices |
+|-------|-----------|---------|
+| Read-only capabilities | `SensorDevice.tsx` | sensor |
+| Has `color` or `segments` | `LightDevice.tsx` (shared effect engine in `devices/effects.ts`, `requestAnimationFrame` loop; strip = 30 segments, matrix = 16x16 = 256, bulb = 1) | light strip, bedroom light, LED matrix, TV backlight |
+| `fan` | `Fan.tsx` | fan |
+| `oven` | `Oven.tsx` | oven |
+| `rice_cooker` | `RiceCooker.tsx` | rice cooker |
+| Anything else | `GenericDevice.tsx` (toggle / level meter / button row generated from capabilities) | plug, humidifier, air purifier, ice maker |
 
-#### LED Matrix (LedMatrix.tsx)
+`DeviceCard.tsx` is the shared card shell (title, room, status dot). The TV
+backlight additionally drives the `MediaSync.tsx` screen-and-speaker panel (§9.19).
 
-The LED matrix is a 16x16 grid (256 pixels) rendered as individual `<div>` elements. Each pixel has independent color and glow effects.
+#### Fan (Fan.tsx)
 
-**Animation System:**
-- Uses `requestAnimationFrame` for 60fps rendering
-- Each frame computes 256 pixel colors based on the current mode and tick counter
-- Color computation is mode-specific:
-
-| Mode | Algorithm |
-|------|-----------|
-| Rainbow | HSL hue shifts based on position + time |
-| Breathing | Radial sine wave with color fade |
-| Chase | Diagonal trail with rotating hue |
-| Sparkle | Random pixels at 8% probability + ambient background |
-| Fire | Bottom-up heat gradient with perlin-like noise |
-| Ocean | Dual sine waves in blue-cyan range |
-| Aurora | Multi-sine curtain effect with vertical fade |
-| Solid | Uniform color with brightness scaling |
-
-**Performance considerations:**
-- `useCallback` memoizes the frame generator to avoid re-creating closures
-- Pixel glow (`box-shadow`) only applied when pixel is lit
-- CSS `transition: background-color 0.15s` smooths color changes between frames
+CSS-animated spinning fan. Speed is an integer `0-8` from the catalog
+(`capabilities.speed.max`); the spin duration is computed from the ratio
+`speed / maxSpeed` rather than a per-step table, so the visual and the
+Lambda's clamp agree. Oscillation adds a secondary `fan-osc` animation (4s
+ease-in-out oscillation).
 
 #### Rice Cooker (RiceCooker.tsx)
 
@@ -541,20 +534,8 @@ The LED matrix is a 16x16 grid (256 pixels) rendered as individual `<div>` eleme
 | keep_warm | Maintains 65C after cooking completes |
 | done | Shows "DONE" on display |
 
-Cook times per mode: White Rice 20min, Brown Rice 30min, Porridge 15min, Steam 10min.
-
-#### Fan (Fan.tsx)
-
-CSS-animated spinning fan with 4 blades. Speed maps to animation duration:
-
-| Speed | Label | CSS Duration |
-|-------|-------|-------------|
-| 0 | Off | stopped |
-| 1 | Low | 3.0s |
-| 2 | Medium | 1.5s |
-| 3 | High | 0.6s |
-
-Oscillation adds a secondary `fan-osc` animation (4s ease-in-out oscillation).
+`cooking`, `mode` and `keep_warm` are catalog-backed; the four-way status above
+is local and derived.
 
 #### Oven (Oven.tsx)
 
@@ -629,18 +610,21 @@ This approach avoids baking environment-specific values into the webpack bundle,
 
 ### 7.2 Message Architecture
 
-The chatbot communicates with the AgentCore Runtime via HTTP POST through the **dedicated optimization gateway** (target-based A/B routing — see §8.12). The gateway forwards each request to one of two named runtime endpoints (`control` or `treatment`) on the smarthome runtime:
+The chatbot communicates with the AgentCore Runtime via HTTP POST. Which entry it uses is chosen per user by the tenant's entry environment (`getTenantMode(userId)`, see §8.13):
 
 ```
-Browser --HTTP POST--> Optimization Gateway --[gateway target] --> Strands Agent (Kimi K2.5)
-                          (smarthome-control                       \-> Vision model when images present
-                           or smarthome-treatment)
+default     Browser --HTTP POST (SSE)--> smarthome runtime ----------------> Strands Agent (Claude Sonnet 4.6 default)
+ab-targets  Browser --HTTP POST--> Optimization Gateway --[gateway target]--> smarthome runtime
+                                     (smarthome-control or smarthome-treatment)
+ab-bundles  Browser --HTTP POST--> bundles runtime (separate runtime ARN)
+                                                       \-> Vision model when images present (all modes)
 ```
 
 **HTTP POST Invocation:**
-- Endpoint: `https://{opt-gw-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/smarthome-control/invocations` (always — the URL doesn't change with the A/B toggle state; the gateway routes by `gatewayFilter` + active A/B test config). When the optimization gateway URL isn't yet configured (transitional `config.js` from a pre-redesign deploy) the chatbot falls back to direct runtime invocation at `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations`.
-- Authentication: AWS SigV4 (service `bedrock-agentcore`), signed in the browser with temporary credentials from the Cognito Identity Pool authenticated role. The role needs `bedrock-agentcore:InvokeGateway` on the optimization gateway ARN (granted by `setup-agentcore.py`).
-- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}-{Date.now()}` — used by the gateway for sticky variant assignment during A/B tests.
+- Endpoint (`default`, and the fallback whenever the selected mode's config field is empty): direct runtime invocation at `https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encodedArn}/invocations`. Text turns set `"stream": true` in the body and the runtime replies with SSE progress events instead of a JSON body (§9.20).
+- Endpoint (`ab-targets` only): the **dedicated optimization gateway** (target-based A/B routing — see §8.12), `https://{opt-gw-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/smarthome-control/invocations`; the gateway routes to the `control` or `treatment` runtime endpoint by `gatewayFilter` + active A/B test config. The two A/B modes keep the JSON (non-streaming) path, because neither is guaranteed to pass a streaming body through unbuffered.
+- Authentication: AWS SigV4 (service `bedrock-agentcore`), signed in the browser with temporary credentials from the Cognito Identity Pool authenticated role. For `ab-targets` the role needs `bedrock-agentcore:InvokeGateway` on the optimization gateway ARN (granted by `setup-agentcore.py`).
+- Session ID: `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: user-session-{cognito-sub}-{Date.now()}` — also used by the optimization gateway for sticky variant assignment during A/B tests.
 - User ID: Passed in the POST body as `userId`.
 - Gateway idToken passthrough: `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken: {cognito_idToken}` header, forwarded by the runtime to the agent and re-wrapped as `Bearer` on the **tools** gateway MCP client (per-user Cedar evaluation).
 - CORS: Fully supported.
@@ -669,7 +653,7 @@ Browser --HTTP POST--> Optimization Gateway --[gateway target] --> Strands Agent
 ```
 
 - `images` is optional. When present it must be a list of ≤3 objects; oversize or wrong-type items are rejected client-side before send (≤20 MB raw per image; `image/png|jpeg|webp|gif`).
-- When `images` is present the payload is handled by the agent's vision bypass path (see §8.11); Kimi is not called.
+- When `images` is present the payload is handled by the agent's vision bypass path (see §8.11); the text model is not called.
 
 **Server -> Client (Response):**
 ```json
@@ -699,7 +683,7 @@ render without horizontal clipping. See §9.11 for the full design.
 - **Chat history**: Held in React state (not persisted). Refreshing the page clears chat history.
 - **Session ID**: Fixed per user, derived from `cognito:sub` UUID. Sent via `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. Same user always gets the same runtime session.
 - **User ID**: User's email extracted from JWT and sent in the POST body as `userId`. Used for per-user skill loading, model selection, and session tracking.
-- **AgentCore Memory**: Provides conversation persistence across sessions via semantic, summary, and preference extraction strategies.
+- **AgentCore Memory**: Provides conversation persistence across sessions via semantic, summary, user preference, and episodic extraction strategies.
 
 ---
 
@@ -711,15 +695,17 @@ The agent is a Strands Agent deployed to Amazon Bedrock AgentCore Runtime via Co
 
 | Property | Value |
 |----------|-------|
-| Foundation Model | `moonshotai.kimi-k2.5` (Kimi K2.5 via Bedrock) |
+| Foundation Model | `us.anthropic.claude-sonnet-4-6` (Claude Sonnet 4.6 via its cross-region inference profile; `MODEL_ID` env, default in `agent/agent.py` and `scripts/setup-agentcore.py` `DEFAULT_MODEL_ID`). Other Bedrock models, e.g. `moonshotai.kimi-k2.5`, are per-user overrides (§8.8) |
 | Runtime Framework | Strands Agents SDK + `bedrock-agentcore` Python package |
-| Packaging | CodeZip (Python 3.13, managed runtime — no Docker) |
+| Packaging | CodeZip (Python 3.14, `PYTHON_3_14` managed runtime — no Docker) |
 | Endpoints | `/invocations` (POST), `/ping` (health) on port 8080 |
 | App Framework | `BedrockAgentCoreApp` from `bedrock-agentcore` |
-| Memory | AgentCore Memory with semantic, summary, and user preference strategies |
+| Memory | AgentCore Memory with semantic, summary, user preference, and episodic strategies |
 
 **System instruction:**
-> You are a smart home assistant that controls devices in the user's home. You can control: LED Matrix, Rice Cooker, Fan, and Oven. Be helpful, concise, and confirm actions taken. Suggest creative lighting scenes, cooking presets, and comfort settings. Use what you remember about the user's preferences to personalize your responses. Never fabricate tool results — if a tool call fails or is rejected, report the failure honestly to the user.
+> You are a smart home assistant. [...] Device control — turn devices on/off, set brightness, colour, mode, speed or temperature. Call discover_devices for the fleet and its valid parameters; never recite devices from memory. [...]
+
+Abridged; the full hardcoded text is `SYSTEM_PROMPT` in `agent/agent.py` (capabilities list, scope rules, A2A routing rules — see §8.10). The prompt deliberately names no devices: the fleet comes from `discover_devices`, which returns `shared/device-catalog.json`.
 
 ### 8.2 AgentCore Memory
 
@@ -976,7 +962,8 @@ The following diagram shows the complete lifecycle of a single user request as i
                     |      SYSTEM_PROMPT if both     |
                     |      rows are empty.           |
                     |  10. Create Strands Agent with: |
-                    |      - BedrockModel (Kimi K2.5) |
+                    |      - BedrockModel (MODEL_ID / |
+                    |        per-user override)       |
                     |      - MCP tools                |
                     |      - Skills plugin            |
                     |      - Session manager          |
@@ -1223,7 +1210,9 @@ which is why the static prompt/skills/tools come first and per-request content
 (the governed override, the user's memory, the JSON-output rules) is appended
 last.
 
-The A2A specialists deliberately do **not** cache — see §9.13 for the measurement.
+The A2A specialists deliberately do **not** cache — see [Delegation latency, measured](#delegation-latency-measured)
+in §9.13 for why. The same cost-not-latency lesson is stated as a principle in
+[agent-design-principles §2.5](agent-design-principles.md#25-cache-what-repeats-and-know-what-caching-buys).
 
 **These numbers are Anthropic-specific.** They were measured with explicit Anthropic
 cache points via `CacheConfig(strategy="auto")` on `bedrock-runtime`, and the default
@@ -1405,13 +1394,13 @@ A stale mirror is *worse* than a missing one — "Revert to Default" would insta
 
 **Cross-reference to AgentCore Optimization.** Each editor card renders an info Alert "Optimization Suggestions (AgentCore Optimization)" with a link "Open in Optimization tab →" that deep-links to `#/optimization`. The optimization workflow (recommendations, configuration bundles, A/B tests) is documented in §8.12 — applying a recommendation writes back into the same `__prompt_text__` / `__prompt_voice__` rows this section describes, so the two tabs share storage and an applied recommendation immediately becomes the effective prompt for subsequent invocations.
 
-**Image-awareness clause (text prompt).** The hardcoded text `SYSTEM_PROMPT` contains an `IMAGES IN THIS CONVERSATION:` section that tells Kimi image descriptions are injected into the conversation history as prior assistant messages (written by the vision bypass path in §8.11). Without this clause Kimi would respond to follow-up questions about past uploads by denying image access or fabricating contents. Admins editing the global prompt must keep this section when overriding, or follow-up turns referring to earlier images will regress.
+**Image-awareness clause (text prompt).** The hardcoded text `SYSTEM_PROMPT` contains an `IMAGES IN THIS CONVERSATION:` section that tells the text model image descriptions are injected into the conversation history as prior assistant messages (written by the vision bypass path in §8.11). Without this clause the text model would respond to follow-up questions about past uploads by denying image access or fabricating contents. Admins editing the global prompt must keep this section when overriding, or follow-up turns referring to earlier images will regress.
 
 ---
 
 ### 8.11 Image Input (Vision Bypass Path)
 
-Image turns use a dedicated path that bypasses Kimi entirely: the runtime calls a vision model (Claude Haiku 4.5) to caption the uploaded images and returns the description straight to the chatbot. This keeps latency low (one model call instead of two) and keeps Kimi's tool-calling / KB / skills loop focused on text.
+Image turns use a dedicated path that bypasses the text model entirely: the runtime calls a vision model (Claude Haiku 4.5) to caption the uploaded images and returns the description straight to the chatbot. This keeps latency low (one model call instead of two) and keeps the text model's tool-calling / KB / skills loop focused on text.
 
 ```
 POST /invocations
@@ -1421,7 +1410,7 @@ POST /invocations
               ▼
   handle_invocation (agent/agent.py)
               │
-              ├── payload.images present? ── no ──► invoke_agent() → Kimi K2.5
+              ├── payload.images present? ── no ──► invoke_agent() → text model
               │                                    (normal text path)
               │
               └── yes: vision bypass
@@ -1445,19 +1434,19 @@ POST /invocations
                      │
                      ├─ 3. PERSIST exchange to AgentCore Memory (short-term event):
                      │    (user_prompt, USER) + (haiku_description, ASSISTANT), each
-                     │    wrapped in the Strands SessionMessage envelope so Kimi's
-                     │    session manager can deserialize them on the next text turn.
+                     │    wrapped in the Strands SessionMessage envelope so the text
+                     │    agent's session manager can deserialize them on the next text turn.
                      │    Metadata carries a fingerprint per image (mime/bytes/sha16)
                      │    and image_N_path pointing to the session-storage file.
                      │
                      └─ 4. Return {"response": caption_text + warnings, "status": "success"}
 ```
 
-**Why bypass Kimi.** Measured in `vision-latency-test/` (30 rounds × 2 models × 3 image counts), the bypass path lands at p50 ≈ 3.3 s (Haiku, 1 image, cold) / 2.0 s (Nova Lite, 1 image, cold). Routing the same turn through Kimi after pre-captioning would roughly double that (two LLM hops plus an extra token-pricing cost on Kimi for the long description).
+**Why bypass the text model.** Measured with a local latency harness (not shipped in the repo; 30 rounds × 2 models × 3 image counts), the bypass path lands at p50 ≈ 3.3 s (Haiku, 1 image, cold) / 2.0 s (Nova Lite, 1 image, cold). Routing the same turn through the text model after pre-captioning would roughly double that (two LLM hops plus an extra token-pricing cost on the text model for the long description). The measurement was taken when the text model was Kimi K2.5.
 
 **Model swap.** `VISION_MODEL_ID` is captured at module-load (so each container version is pinned to one vision model) and resolved via Bedrock `Converse` for whichever multimodal model the operator prefers. Tested paths: Claude Haiku 4.5 (default — stronger OCR / fine-detail) and Amazon Nova Lite (~1.7× faster, lower cost, lighter detail). Swapping is an `update_agent_runtime` env-var patch — no source-code change and no `agentcore deploy`. The update rolls a new container version; subsequent sessions start on the new model.
 
-**Memory envelope.** Because the Strands `AgentCoreMemoryConverter` writes and reads events as JSON-serialized `SessionMessage` dicts, the vision bypass must mirror that format exactly. Plain-text events cause `JSONDecodeError` in `list_messages()` and silently drop the entire short-term history for the session, leaving Kimi with no memory of uploaded images. `agent/agent.py:_persist_vision_turn` serializes each message as `{"message": {"role": "...", "content": [{"text": "..."}]}, "message_id": N, "redact_message": null, "created_at": "...", "updated_at": "..."}` so later text turns round-trip cleanly.
+**Memory envelope.** Because the Strands `AgentCoreMemoryConverter` writes and reads events as JSON-serialized `SessionMessage` dicts, the vision bypass must mirror that format exactly. Plain-text events cause `JSONDecodeError` in `list_messages()` and silently drop the entire short-term history for the session, leaving the text model with no memory of uploaded images. `agent/agent.py:_persist_vision_turn` serializes each message as `{"message": {"role": "...", "content": [{"text": "..."}]}, "message_id": N, "redact_message": null, "created_at": "...", "updated_at": "..."}` so later text turns round-trip cleanly.
 
 **Per-session filesystem.** The runtime is configured with `filesystemConfigurations=[{sessionStorage: {mountPath: "/mnt/workspace"}}]` (set by `scripts/setup-agentcore.py`). Every `runtimeSessionId` gets an isolated writable volume at `/mnt/workspace/<session_id>/` that survives across invocations within the same session. The layout:
 
@@ -1791,7 +1780,10 @@ Cognito User Pool
 
 IoT Endpoint (Custom Resource)
   +-> iot-control Lambda (env: IOT_ENDPOINT) — validates & publishes MQTT commands
-  +-> iot-discovery Lambda — returns available devices (mock)
+  +-> iot-discovery Lambda — returns the device catalog (shared/device-catalog.json)
+  +-> iot-query Lambda — current device state + sensor history (query_device_state, query_sensor_history)
+  +-> iot-history-ingest Lambda — IoT rule target that stores reported state/history
+  +-> nav-deeplink Lambda — navigate_to_page deep links
   +-> Device Simulator config.js
 
 DynamoDB Table (smarthome-skills)
@@ -1808,8 +1800,8 @@ Admin API (API Gateway + Lambda)
   +-> CRUD endpoints for skill management (all spec fields)
   +-> File management endpoints (presigned URL upload/download, list, delete)
 
-S3 Buckets + CloudFront (x3)
-  +-> Device Simulator, Chatbot, Admin Console
+S3 Buckets + CloudFront (x4)
+  +-> Device Simulator, Chatbot, Admin Console, Skill ERP
   +-> BucketDeployment (static assets)
   +-> Custom Resource (config.js injection)
 ```
@@ -1821,19 +1813,31 @@ AgentCore Gateway (MCP Server)
   +-> Policy Engine: SmartHomeUserPermissions (ENFORCE mode)
   +-> Lambda Target: SmartHomeDeviceControl (iot-control Lambda + tool schema)
   +-> Lambda Target: SmartHomeDeviceDiscovery (iot-discovery Lambda + tool schema)
+  +-> Lambda Target: SmartHomeKnowledgeBase (kb-query Lambda + tool schema)
+  +-> Lambda Target: SmartHomeDeviceQuery (iot-query Lambda; added by setup-agentcore.py via API)
+  +-> Lambda Target: SmartHomeNavigation (nav-deeplink Lambda; added by setup-agentcore.py via API)
 
 AgentCore Runtime
-  +-> CodeZip (Python 3.13, agent code from S3)
+  +-> CodeZip (Python 3.14, agent code from S3)
   +-> BedrockAgentCoreApp (Strands Agent)
-  +-> JWT Auth (Cognito User Pool)
-  +-> requestHeaderAllowlist: ["Authorization"] (propagate user JWT to agent)
+  +-> Auth: AWS_IAM (SigV4; agentcore.json carries no JWT authorizer)
+  +-> requestHeaderAllowlist: ["X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken"]
+  |     (carries the user idToken to the agent; `Authorization` cannot be allowlisted under AWS_IAM)
   +-> Env: AGENTCORE_GATEWAY_{NAME}_URL, MEMORY_SMARTHOMEMEMORY_ID, MODEL_ID, SKILLS_TABLE_NAME
 
 AgentCore Memory (managed by agentcore CLI: `agentcore add memory`)
   +-> SEMANTIC strategy (fact extraction)
   +-> SUMMARIZATION strategy (session summaries)
   +-> USER_PREFERENCE strategy (preference learning)
+  +-> EPISODIC strategy (ordered account of what happened)
   +-> Env var auto-set: MEMORY_SMARTHOMEMEMORY_ID
+```
+
+Created outside that stack by `setup-agentcore.py` / `a2a-agent-registry` scripts via the control-plane API:
+```
+smarthome-websearch-gw (us-east-1, CUSTOM_JWT) -> Target: SmartHomeWebSearch (web-search connector)
+smarthome-a2a-gw (scripts/setup-a2a-gateway.py) -> one target per A2A specialist runtime (§9.13)
+Optimization gateway + bundles runtime (A/B entry environments, §8.12 / §8.13)
 ```
 
 **Why two stacks?** AgentCore resources cannot be created via CDK for two reasons:
@@ -1852,7 +1856,7 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
 - Gateway auth should be `CUSTOM_JWT` for per-user tool control. The runtime is `AWS_IAM` (SigV4) because CUSTOM_JWT on the Runtime's `/ws` endpoint is not reliable today; the chatbot forwards the idToken in the custom header `X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken` (allowlisted via `requestHeaderAllowlist` in `UpdateAgentRuntime`), and the agent re-wraps it as `Bearer` on the gateway MCP client. `Authorization` **cannot** be allowlisted under AWS_IAM — `UpdateAgentRuntime` rejects it.
 - The `agentcore` CLI sets gateway URL env vars as `AGENTCORE_GATEWAY_{GATEWAYNAME}_URL` (not `AGENTCORE_GATEWAY_URL`); agent code must auto-detect the pattern
 - `agentcore deploy` drops custom `environmentVariables` set in `agentcore.json` — must patch them post-deploy via `update_agent_runtime` boto3 API (requires passing `agentRuntimeArtifact`, `roleArn`, `networkConfiguration`, and `authorizerConfiguration` alongside). CLI-managed env vars like `MEMORY_<NAME>_ID` and `AGENTCORE_GATEWAY_<NAME>_URL` are preserved.
-- **`requestHeaderConfiguration` round-trip pitfall.** `get_agent_runtime` returns the allowlist as the top-level field `requestHeaderAllowlist`, but `update_agent_runtime` expects it nested under `requestHeaderConfiguration={"requestHeaderAllowlist": [...]}`. A naïve round-trip that re-passes the top-level value **silently drops the allowlist**, which strips the custom auth header at the edge proxy → the agent sees `context.request_headers = None` → MCP gateway returns 401. Any helper that calls `UpdateAgentRuntime` (latency-probe nonce bumper, `enable-welcome.py`, session redeploy helpers) must read from either location and always wrap back into the nested form. See `voice-latency-test/force-cold.py` + `enable-welcome.py` for the correct pattern.
+- **`requestHeaderConfiguration` round-trip pitfall.** `get_agent_runtime` returns the allowlist as the top-level field `requestHeaderAllowlist`, but `update_agent_runtime` expects it nested under `requestHeaderConfiguration={"requestHeaderAllowlist": [...]}`. A naïve round-trip that re-passes the top-level value **silently drops the allowlist**, which strips the custom auth header at the edge proxy → the agent sees `context.request_headers = None` → MCP gateway returns 401. Any helper that calls `UpdateAgentRuntime` (latency-probe nonce bumpers, welcome-message toggles, session redeploy helpers) must read from either location and always wrap back into the nested form. `scripts/restore-text-runtime-config.py` is the in-repo example of the correct pattern.
 - `agentcore add memory --name <Name> --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC` adds memory as a project resource deployed via the same CFN stack; the CLI auto-sets `MEMORY_<NAME>_ID` env var on the runtime
 - ⚠️ **`.agentcore-project/smarthome/app/smarthome/` is a COPY of `agent/`, not a
   link, and `agentcore deploy` packages whatever is sitting in it.** Only
@@ -1868,17 +1872,12 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
   specialists ignoring a prompt (which had genuinely happened an hour earlier for a
   different reason), and prompt caching not working through AgentCore.
 
-  **So the full sequence for an orchestrator change is three commands, not one:**
-
-  ```bash
-  ./venv/bin/python scripts/sync-agent-code.py          # or --check to just detect
-  cd .agentcore-project/smarthome && agentcore deploy -y && cd -
-  ./venv/bin/python scripts/restore-text-runtime-config.py
-  ```
-
+  So an orchestrator change is three commands, not one: `sync-agent-code.py`,
+  `agentcore deploy`, `restore-text-runtime-config.py`. The exact sequence and the
+  manual diff check are in the admin manual
+  [§2 (§2.5)](admin_manual_管理员使用手册.md#2-agent-代码快速部署);
   `sync-agent-code.py --check` exits 1 on a stale copy, so a deploy wrapper or CI
-  can fail rather than ship one. Diagnosis by hand:
-  `diff -rq --exclude=tests --exclude=__pycache__ agent .agentcore-project/smarthome/app/smarthome`.
+  can fail rather than ship one.
 - ⚠️ **A warm container keeps running the old code.** Independent of the above: the
   runtime updated at 06:36 and a 06:38 turn still executed the previous version,
   showing zero cache activity on correctly deployed code. Force a **new**
@@ -1889,14 +1888,14 @@ The `agentcore` CLI solves both by using its own CDK stack with the native `AWS:
   the A2A/table env vars, `protocolConfiguration`, the header allowlist and the
   `/mnt/workspace` mount. Without the A2A vars the orchestrator registers **no**
   `a2a_*` tools and answers every specialist question itself — silently. Measured
-  on real deploys during this work: 12 vars restored each time. That count drops to
-  10 once A2A runs through the Gateway (§9.13), since `A2A_M2M_SECRET_ARN` and
-  `A2A_COGNITO_TOKEN_URL` no longer exist — the same reasoning that makes routing
-  through the gateway worth the extra hop.
+  on real deploys during this work: 12 vars restored each time. The m2m vars
+  (`A2A_M2M_SECRET_ARN`, `A2A_COGNITO_*`) went away with the user-idToken model
+  (§9.13); the script's `env_wanted` is the current list, so check by name, not
+  by count.
 
 ### 9.2 Deployment Architecture
 
-`deploy.sh` is a thin wrapper that runs 7 split scripts under `scripts/0[1-7]-*.sh` in order. Each split script is independently runnable and prints the AWS resources it creates at the top — handy for debugging or re-running a single step after a partial failure.
+`deploy.sh` is a thin wrapper that runs 7 split scripts under `scripts/0[1-7]-*.sh` in order. Each split script is independently runnable and prints the AWS resources it creates at the top — handy for debugging or re-running a single step after a partial failure. The diagram below is what each step builds and why it is ordered that way; the operator procedures (minimal redeploy, the three commands a manual `agentcore deploy` needs) are in the admin manual [§2](admin_manual_管理员使用手册.md#2-agent-代码快速部署), and the end-to-end demo walkthrough is in [agentcore-deploy-runbook.md](agentcore-deploy-runbook.md).
 
 ```
 deploy.sh (one-click wrapper)
@@ -1917,13 +1916,15 @@ deploy.sh (one-click wrapper)
     |           CloudFormation: SmartHomeAssistantStack
     |           -> Cognito (User Pool, Identity Pool, admin group, admin user)
     |           -> IoT Things + endpoint
-    |           -> Lambda (iot-control, iot-discovery, admin-api, kb-query, user-init)
+    |           -> Lambda (iot-control, iot-discovery, iot-query, iot-history-ingest,
+    |              nav-deeplink, admin-api, kb-query, user-init, pre-token,
+    |              skill-erp-api, scenario-runner)
     |           -> DynamoDB smarthome-skills
     |           -> S3 (smarthome-skill-files, smarthome-kb-docs)
     |           (S3 Vector bucket + index created later in step 6 by setup-agentcore.py)
     |           -> Bedrock Knowledge Base + S3 data source (Cohere multilingual)
     |           -> API Gateway with Cognito authorizer
-    |           -> S3 + CloudFront for each of the 3 frontends
+    |           -> S3 + CloudFront for each of the 4 frontends (incl. Skill ERP)
     |           -> Outputs written to cdk-outputs.json
     |
     +---> [5/7] scripts/05-fix-cognito.sh
@@ -1936,7 +1937,7 @@ deploy.sh (one-click wrapper)
     |           |
     |           +---> agentcore create --name smarthome --defaults
     |           +---> Replace default agent code with agent/
-    |           |     Patch agentcore.json (entrypoint, JWT auth, env vars)
+    |           |     Patch agentcore.json (entrypoint, env vars; no JWT authorizer -> AWS_IAM)
     |           |     Seed aws-targets.json (required for CLI deploy)
     |           +---> agentcore add memory --name SmartHomeMemory
     |           |     --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC
@@ -1947,6 +1948,12 @@ deploy.sh (one-click wrapper)
     |           |     (iot-discovery Lambda + discover_devices tool schema)
     |           +---> agentcore add gateway-target SmartHomeKnowledgeBase
     |           |     (kb-query Lambda + query_knowledge_base tool schema)
+    |           +---> (after deploy, via control-plane API)
+    |           |     gateway-target SmartHomeDeviceQuery (iot-query Lambda:
+    |           |       query_device_state, query_sensor_history)
+    |           |     gateway-target SmartHomeNavigation (nav-deeplink Lambda:
+    |           |       navigate_to_page)
+    |           |     smarthome-websearch-gw (us-east-1) + target SmartHomeWebSearch
     |           +---> agentcore add evaluator + online-eval
     |           +---> agentcore deploy -y --verbose
     |           |     CloudFormation: AgentCore-smarthome-default
@@ -1955,8 +1962,9 @@ deploy.sh (one-click wrapper)
     |           +---> Initialize KB (S3 Vector bucket + index, Bedrock KB, S3 data source,
     |           |     default __shared__/ + admin@/ folders)
     |           +---> Patch runtime env vars (MODEL_ID, AWS_REGION, SKILLS_TABLE_NAME)
-    |           +---> Patch runtime: requestHeaderAllowlist: ["Authorization"]
-    |           |     (propagate user JWT to agent for gateway auth)
+    |           +---> Patch runtime: AWS_IAM auth + requestHeaderAllowlist:
+    |           |     ["X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken"]
+    |           |     (carries the user idToken to the agent for gateway auth)
     |           +---> Patch admin Lambda env vars (AGENT_RUNTIME_ARN, GATEWAY_ID,
     |           |     SKILL_FILES_BUCKET, COGNITO_USER_POOL_ID)
     |           +---> Patch user-init Lambda env vars (GATEWAY_ID, KB_DOCS_BUCKET)
@@ -2165,7 +2173,7 @@ in addition to the standard `AdminCreateUser` / `AdminListGroupsForUser`
 
 ### 9.5 Per-User Tool Permission Management
 
-Administrators can control which tools each user is allowed to invoke via the Admin Console's **Tool Policy** tab (previously labelled "Tool Access"; same page, renamed in the side-nav).
+Administrators can control which tools each user is allowed to invoke via the Admin Console's **Tool Policy** tab (previously labelled "Tool Access"; same page, renamed in the side-nav). The click-path, the demo links and the post-save status check an operator runs are in the admin manual, [§4.2](admin_manual_管理员使用手册.md#42-c-端用户权限配置运维管理员操作路径) and [§4.5](admin_manual_管理员使用手册.md#45-全局授权与按用户收回skill--工具--子-agent); this section is the model behind them and the canonical account of the silent `UPDATE_FAILED` pitfall.
 
 Two sources of tools are listed side-by-side, each tagged with a Cloudscape `Badge`:
 
@@ -2484,7 +2492,9 @@ has neither `aud` nor `email`.
 consumes that header for the authorizer and does **not** pass it to the container
 unless it is allowlisted. Measured: a granted user's request reached the container
 with no bearer at all, so `resolve_caller` found nothing to read claims from and fell
-back to the legacy header path, refusing with "X-A2A-Allowed-Skills is missing". The
+back to what was then the migration-era legacy header path, refusing with
+"X-A2A-Allowed-Skills is missing" (that fallback has since been removed; a request
+with no verifiable user token is now simply refused). The
 platform said yes and the container said no, which reads like a container bug. This is
 the same allowlist trap already recorded for the forwarded user token in §9.13 — now
 hit twice, from opposite directions.
@@ -2819,7 +2829,7 @@ BedrockAgentCoreApp (Starlette-based, uvicorn+websockets)
     v
 Nova Sonic (amazon.nova-2-sonic-v1:0) bi-directional streaming
     v
-MCP Gateway → iot-control Lambda → IoT Core (`smarthome/<device>/command`)
+MCP Gateway → iot-control Lambda → IoT Core (`smarthome/<userSub>/<deviceId>/command`)
     v
 Device Simulator (browser) receives MQTT messages, updates UI state
 ```
@@ -3007,8 +3017,8 @@ Python function that uses the still-live `MCPClient` to:
 2. Parse the JSON device list (shape tolerance in `_extract_devices`).
 3. For each device, call `SmartHomeDeviceControl___control_device` with the
    `powerOn` template from discovery.
-4. Return a one-sentence summary (`"Turned on 4 devices: LED Matrix, Rice
-   Cooker, Fan, Oven."`) — Nova Sonic reads it and speaks it.
+4. Return a one-sentence summary (`"Turned on N devices: LED Matrix, Fan, ..."`)
+   — Nova Sonic reads it and speaks it.
 
 From Nova Sonic's perspective this is exactly one tool call per turn. Per-
 user Cedar policy still applies because all calls go through the same MCP
@@ -3076,11 +3086,9 @@ runtime's health/protocol handshake — an earlier commit on this branch
 pivoted back to `BedrockAgentCoreApp`.
 
 **Startup-latency budget.** Measured against the deployed voice runtime
-with the Playwright harness in `voice-latency-test/` (Tokyo /
-ap-northeast-1, N=100, 2026-04-26). The solution folder has one-click
-runners, raw JSONL data, and aggregate markdown reports — see
-`voice-latency-test/README.md` and `voice-latency-test/test-modes.md` for
-protocol details and how to reproduce.
+with a local Playwright harness (Tokyo / ap-northeast-1, N=100,
+2026-04-26). The harness, its raw JSONL data and aggregate reports are
+local-only and not shipped in the repo; the numbers below are its results.
 
 Two scenarios, each measured independently:
 
@@ -3130,8 +3138,9 @@ behind the login that the user was already sitting through.
 (~5.7 s) is an AgentCore-managed cost we can't drive down from app code.
 To keep latency below today's 1.1 s P50 at the user's perceived click →
 audio point, warmup needs to reliably fire **before** the click —
-i.e. the current post-login fan-out must keep working. See `voice-latency-test/`
-for the harness to re-validate this after any chatbot or runtime change.
+i.e. the current post-login fan-out must keep working. Re-validate this
+with a latency harness (the one used above is local-only) after any chatbot
+or runtime change.
 
 **Login warmup fires in parallel to both runtimes.** `ChatInterface.tsx`
 fetches a single idToken + Identity-Pool-creds pair, then issues two
@@ -3315,7 +3324,14 @@ docs** — this API has contradicted them repeatedly in this project:
 DRAFT             -> PENDING_APPROVAL | DEPRECATED | DRAFT      (NOT REJECTED)
 PENDING_APPROVAL  -> APPROVED | REJECTED
 REJECTED          -> APPROVED                                   (reversible)
+APPROVED          -> DRAFT          on any record update (needs re-approval)
+DEPRECATED        -> (nothing)      terminal; still listed until DeleteRegistryRecord
 ```
+
+This is the one copy of the state machine in this document; the A2A record
+lifecycle in §9.13 refers back here. The third-party consequences (re-approval
+grace window, "reject, don't deprecate") are in
+[a2a-agent-onboarding §4](a2a-agent-onboarding.md#4-卡本身的约束).
 
 So rejecting a DRAFT record fails, and the API's message is a bare list of enum
 members — "PENDING_APPROVAL, DEPRECATED, DRAFT, UPDATING" — which does not tell an
@@ -3385,15 +3401,14 @@ queue would start disagreeing. Known limit: deletion emits no event, so a record
 deleted while pending stays flagged until its rows expire (30 days); Review then
 lands on an honest empty queue.
 
-**Console.** The Overview sub-tab of Integration Registry gains a *Registry
-activity* table (badge + bold on actionable rows, an info alert with the count,
-and the count on the Overview sub-tab label so it is visible from A2A and Skills
-too). *Review* on a SKILL row switches to Build → Skills and opens the review
-modal; on an AGENT row it switches to the A2A sub-tab. Either way the target table
-marks the matching row "From notification", so the admin lands on the line rather
-than at the top of a queue. The feed is polled at the tab level, not inside the
-panel, so one fetch serves both the table and the label; a review action refreshes
-it immediately rather than waiting for the next 30 s tick.
+**Console.** The *Registry activity* table on Integration Registry → Overview is
+described from the operator side in the admin manual
+[§8.7](admin_manual_管理员使用手册.md#87-registry-动态面板不用再手动刷新待审批队列).
+Two design choices behind it: *Review* lands on the matching row (marked "From
+notification") rather than the top of a queue, and the feed is polled at the tab
+level, not inside the panel, so one fetch serves both the table and the pending
+count on the sub-tab label; a review action refreshes it immediately rather than
+waiting for the next 30 s tick.
 
 **Deploy notes.** The rule's pattern does not name a registryId (at deploy time the
 admin Lambda's `REGISTRY_ID` is still the setup script's placeholder), so the Lambda
@@ -3522,8 +3537,11 @@ write surface was a section inside the Users → Manage Permissions modal, which
 had no way to express a global default. Grants live in the skills table under a
 reserved sort key `__a2a_permissions__` — the row carries
 `a2aGrants = Map<String, List<String>>` (recordId → skillId list).
-`__global__` and per-user rows merge at agent runtime, with per-user
-winning on the same recordId. The Admin API reuses
+These rows are the admin's **intent**: saving merges `__global__` and the
+per-user row (per-user winning on the same recordId) and materialises the
+result as Cognito group memberships / the `cognito:groups` token claim
+(§9.5.1). The agent does not read the rows at runtime — it reads the claim
+off the user's token. The Admin API reuses
 `/users/{userId}/permissions?action=a2a` and
 `/registry/records?action=a2a-grants&recordId=X` to stay under the admin
 Lambda's 20 KB resource-policy cap.
@@ -3540,801 +3558,16 @@ are in the same payload, and failing the whole call would hide those too. A
 catalog failure also suppresses the stale-grant filter, so one Registry error
 cannot look like a mass revocation.
 
-### 9.13 A2A Specialist Agents & Text Agent A2A Client
-
-The text agent calls downstream A2A agents as a standard **A2A client**:
-JSON-RPC `message/send` against AgentCore Runtime's native A2A protocol mode
-(port 9000, `/` mount). The upstream orchestrator and each downstream
-specialist are independent AgentCore Runtimes.
-
-Since 2026-08-12 the call carries **one token — the end user's own idToken** — and
-each specialist's Runtime authorizes it directly.
-
-Since 2026-08-15 it goes **through a dedicated inbound gateway**,
-`smarthome-a2a-gw`, with one A2A `passthrough` target per specialist and
-`JWT_PASSTHROUGH` outbound so the user's token arrives unchanged. The AgentCards
-carry the gateway URL; the orchestrator routes on `card.url` and knows nothing about
-the topology, so rolling back is `scripts/cutover-a2a-cards.py --to runtime`.
-
-Measured over the hop before cutting over (`scripts/probe-a2a-gateway.py`):
-`cognito:groups` is still enforced by each specialist's own authorizer — a user
-narrowed to no grant gets **401** — per-user identity still resolves in the
-container, the propagated session id still arrives, the span-level join still works
-(13 orchestrator spans and 13 specialist spans under one `session.id`), and the
-latency delta is inside noise (±0.1s on a ~4.8s call).
-
-What the gateway adds is a Cedar **per-agent `forbid`**: an all-users deny that
-takes effect on the next request, which a claim-based grant cannot do because a
-claim only changes when a token does. Verified: the forbidden agent answers `403 …
-[Policy evaluation denied due to Forbid_energy_optimization]` while every other
-target still answers 200.
-
-What it does **not** add is guardrails — see §9.13.2.
-
-#### 9.13.1 Registered is discoverable; the authorizer decides callable
-
-Registering an APPROVED card is the **only** integration step for discovery: the
-console lists the agent, the orchestrator registers `a2a_*` tools for it, the
-delegation prompt names it, and its system prompt becomes governable — all derived
-from the Registry, with no code change or redeploy anywhere upstream. Someone who
-knows nothing about this deployment can get that far.
-
-They cannot get further without two of its values. Authorization happens at the
-sub-agent's OWN Runtime authorizer: `discoveryUrl` must be this pool, `allowedAudience`
-must carry this app client, and `customClaims` must match the card's door group under
-`CONTAINS_ANY`. That configuration lives with whoever deployed the runtime, and until
-2026-08-15 nothing checked it.
-
-Both ways of getting it wrong are silent and they fail in opposite directions: no
-`customClaims` and every authenticated user of the pool reaches every skill; a wrong
-pool or audience and granted users get 401 while the orchestrator still offers the
-tool, so the model apologises. The Integration Registry page reads Registry STATUS, so
-it shows `approved` either way.
-
-Closed by three things that share one rule (`shared/a2a_conformance.py`):
-
-- `GET /registry/records?action=a2a-conformance` resolves each card's URL back to its
-  runtime — through the gateway target when the card points at the gateway — reads the
-  authorizer and reports findings by direction. The A2A Agents page renders it as an
-  **Authorizer** column: *Too permissive* (red) / *Callers refused* (amber).
-- **It is also the approval gate.** An AGENT record whose worst finding is `open` or
-  `closed` cannot be approved (409, with the findings and the command that fixes them).
-  `info` passes, and that boundary is deliberate: an unreadable runtime in another
-  account, and a still-coupled-but-working pre-migration authorizer, are both states a
-  platform admin must be able to approve. A gate that reddened working runtimes would
-  be switched off. `?force=true` overrides and writes the override into the record's own
-  `statusReason`.
-- `scripts/a2a-authorizer-contract.py` prints the config an agent SHOULD be deployed
-  with, from the same function, so what is checked and what is handed out cannot
-  drift. The contract for third parties is `docs/a2a-agent-onboarding.md`.
-
-#### 9.13.2 Why the gateway cannot carry guardrails, and where Cedar stops
-
-Two limits, both measured, both worth stating because each looks like a
-configuration problem and is not:
-
-- **Gateway guardrails cannot filter A2A at all.** In us-west-2 `CreatePolicy` with
-  a guardrails block fails `AccessDeniedException: Guardrails policies are not
-  enabled for this account`, which is regional rather than an entitlement. And even
-  in a supported region, Cedar dataPaths cannot traverse arrays, so nothing can read
-  an A2A message's text at `params.message.parts[i].text`. Content filtering for a
-  specialist has to be `ApplyGuardrail` inside its own container.
-- **Cedar cannot do per-user authorization here.** The generated schema gives
-  `AgentCore::OAuthUser` no `groups` and no `claims` attribute (probed 2026-08-15),
-  so a policy cannot read the caller's `cognito:groups`. Its only per-user lever is
-  an explicit `principal.id` list. So the gateway's permit is deliberately broad —
-  the analyzer calls it "Overly Permissive" and is right — and authorization stays
-  at each specialist's runtime authorizer, one layer down, on a signed claim.
-
-#### Why each of these is an agent and not a skill
-
-Three of the eight — `energy-optimization`, `home-security`,
-`appliance-maintenance` — were prompt-only until 2026-08-12. They shipped a
-`system_prompt.md` and no `tools.py`, so they read nothing. That made them the
-weakest part of the design, and the criticism is exact: an agent that reads nothing
-returns the same answer to every user, so a reviewable skill document would have
-been cheaper *and* better. The energy agent's prompt even said "state the
-assumptions you used", which is an instruction to invent the numbers — two runs of
-the same question gave two different figures and neither could be checked.
-
-All eight now ship a `tools.py`, and each of the three runs a chain that no single
-tool call collapses:
-
-| Agent | Chain | Why a tool or skill cannot do it |
-|---|---|---|
-| `energy-optimization` | `discover_devices` → `query_device_state` → `query_sensor_history` (a week) → `power_reference` → per-device arithmetic → rank | The ranking depends on the *user's* fleet and its measured state; the arithmetic needs a rated-draw table and an intermediate result per device |
-| `home-security` | `discover_devices` → `query_device_state` → `query_sensor_history` → `search_advisories` (domain-filtered) → correlate → rank by exposure | Correlating a live fleet against *currently published* advisories changes as the web changes, so it cannot be precomputed into a document |
-| `appliance-maintenance` | `discover_devices` → `query_sensor_history` (slope) → `query_device_state` → `query_knowledge_base` (documented threshold) → date per appliance | Two sources cross-referenced per appliance: the measurement sets the date, the manual sets the threshold |
-
-Each also gained one skill that names the whole chain — `usage_audit`,
-`advisory_review`, `service_forecast` — so 18 published skills became **21**.
-
-`common/power_profile.py` holds rated watts per device type plus the rates, because
-`shared/device-catalog.json` carries capabilities and not watts: nothing else in the
-system needed them. They are labelled rated representative values rather than
-measurements, and the agent is required to say so — a fabricated precise answer and
-a labelled estimate are different things to a user deciding whether to rewire a
-room. A smart plug reports `unknown_load`, so the agent asks what is plugged in
-instead of assuming a wattage.
-
-**Only the security agent reaches web search.** `deploy.py` hands out
-`WEBSEARCH_GATEWAY_URL` to whichever `tools.py` names `WEB_SEARCH`, so the roster
-and the wiring cannot drift; `GatewaySession` opens a second MCP client only when
-asked, and an unreachable us-east-1 degrades to a fleet-only assessment rather than
-failing the request. Advisory searches are restricted server-side to standards
-bodies, national CERTs and protocol vendors, because a security finding sourced from
-a content farm reads exactly as authoritative in a summary.
-
-**Two things this cost, both worth recording.**
-
-*Model tier.* Both agents ran on Nova Lite. The new chains are long enough that Nova
-Lite emitted a `<thinking>` block and stopped without concluding — the tools had
-been called and the answer never arrived. Both moved to Claude Haiku 4.5, matching
-`home-security`. Making a task harder means re-checking the model that has to do it.
-
-*Output hygiene.* The same runs leaked `<thinking>` tags into the reply and emitted
-the marker token twice. All three prompts now forbid both explicitly and say that a
-reply which is only a status update about what the agent is *about to do* is a
-failed turn.
-
-**Verified live after the change.** `advisory_review` named real device ids
-(`living-sensor-1`, `living-plug-1`, `living-purifier-1`), searched the restricted
-domains, cited URLs with dates, and correctly reported that no advisory on those
-sources is **not** the same as safe. `usage_audit` priced the real fleet using the
-profile table's own figures (oven 2400 W × 0.35 duty at $0.16/kWh), labelled them as
-estimates, and reported the closed simulator as unknown rather than as zero.
-`service_forecast` reported "no readings recorded in the past week" instead of
-inventing a slope — which is the honest answer while the simulator is closed, and is
-the reason a service-date demo needs the device simulator running.
-
-**A Gateway HTTP passthrough hop was designed in and then dropped.** The reason for
-it was to unify authentication: A2A ran its own Cognito m2m flow in parallel with the
-JWT the agent already forwards to the gateway for MCP tools. Moving authorization
-into the user's own token achieved that unification *without* the hop, so the hop
-would have bought centralised egress and gateway-level observability at the price of
-a round trip and eight targets to keep in step with the roster. What the passthrough
-spike did establish, kept here because it is not obvious and cost real time:
-
-- `{"http":{"passthrough":{"endpoint":..., "protocolType":"A2A"}}}` works, and
-  `A2A` targets get a default schema automatically.
-- `http.agentcoreRuntime` (just a runtime ARN) also exists and is a neater fit for an
-  AgentCore Runtime, but forwarding to the invocations URL returned
-  `404 UnknownOperationException`; the `passthrough` shape forwarded correctly.
-- A target's `metadataConfiguration.allowedRequestHeaders` defaults to **only**
-  `x-amzn-bedrock-agentcore-policy-session-id`. Any custom header is stripped unless
-  listed. That is a *second* header allowlist behind the Runtime's own, and both
-  default to dropping — see the Runtime one below, which bit this design for real.
-- Outbound defaults to `JWT_PASSTHROUGH`. Under the old m2m model that was the one
-  option that could not work (the specialists' `allowedClients` held the m2m client,
-  so they answered `401 Missing Authentication Token`); under the current model it
-  would be the correct default. The option flipped from wrong to right without the
-  gateway config changing, which is worth remembering before reading old notes.
-- `CALLER_IAM_CREDENTIALS` is unavailable regardless: it needs an `AWS_IAM` or
-  `AUTHENTICATE_ONLY` gateway and this one is `CUSTOM_JWT`.
-
-**What the switch deleted.** `agent/tools/a2a_auth.py`, `A2A_M2M_SECRET_ARN`,
-`A2A_COGNITO_TOKEN_URL`, `A2A_COGNITO_SCOPE`, the Secrets Manager read on the invoke
-path, and both custom headers (`X-A2A-Allowed-Skills`, `X-SuperApp-User-Token`). The
-env-var count `restore-text-runtime-config.py` puts back went from 12 to **10**,
-measured on the live restore — three fewer things a deploy can silently strip.
-
-`build_a2a_tools` needed almost no change, because it already passed an explicit
-endpoint into `_local_agent_card(card_dict, endpoint_url)`; the AgentCard's own `url`
-was being overwritten anyway. What changed is the key: grants now arrive keyed on the
-AgentCard **name** rather than a Registry recordId, because that is what a grant group
-encodes and what the sub-agent knows itself as.
-
-**Eight specialist agents** live under
-[`a2a-agent-registry/`](../a2a-agent-registry/README.md). The roster is a
-single table in `common/agents.py`; deploy, teardown, demo-reset and the smoke
-test all import it, because four copies were survivable at three agents and a
-roster edit that missed one failed at a different stage each time.
-
-| Name | Skills | Model | Gateway tools |
-|------|--------|-------|---------------|
-| `energy-optimization-agent` | `estimate_savings`, `tariff_analysis` | Nova Lite | — |
-| `home-security-agent` | `risk_assessment`, `incident_response` | Claude Haiku 4.5 | — |
-| `appliance-maintenance-agent` | `maintenance_schedule`, `troubleshoot` | Nova Lite | — |
-| `device-control-agent` | `inspect_devices`, `orchestrate_devices`, `resolve_capability` | Claude Haiku 4.5 | control / discover / state / history |
-| `light-effect-agent` | `compose_effect`, `effect_from_description` | Claude Haiku 4.5 | control / discover / state |
-| `knowledge-qa-agent` | `answer_from_docs`, `troubleshoot_from_docs` | Nova Lite | knowledge base |
-| `task-management-agent` | `compose_scenario`, `manage_scenario`, `suggest_automation` | Claude Haiku 4.5 | — (own DynamoDB table) |
-| `scene-sync-agent` | `music_feast`, `video_feast` | Claude Haiku 4.5 | `discover_devices`, `query_device_state`, `control_device` |
-
-The first three are prompt-only advisors. The rest reach real backends, which
-is what forced the identity and enforcement work below.
-
-Every reply carries a marker token (`⟦A2A:<domain>⟧`) so an orchestrator, an
-operator or a test can confirm which specialist answered. The marker is applied
-**server-side, on the result** — not left to the model. It used to be added only
-for tool-using agents on the grounds that a prompt-only agent emits it reliably
-from its `system_prompt.md`; that stopped being true when prompts became
-admin-editable, because a global override *replaces* the shipped prompt and the
-instruction leaves with it. `_MarkedResult` returns the text unchanged when it
-already starts with the marker, so unconditional prefixing cannot double it.
-
-**Layout:**
-```
-a2a-agent-registry/
-├── common/
-│   ├── agents.py          # the roster — single source of truth
-│   ├── server.py          # A2AServer + per-request executor + skill enforcement
-│   ├── gateway_tools.py   # shared MCP-as-the-user plumbing
-│   ├── user_identity.py   # forwarded idToken verification (JWKS)
-│   └── governed_prompt.py # admin-editable prompt resolution
-├── <agent>/               # card.json + system_prompt.md [+ tools.py]
-├── deploy.py              # independent deployer (no local Docker)
-├── smoke_test.py          # all agents + negative authorisation cases
-└── verify_governed_prompt.py
-```
-
-#### Identity: two tokens, because one cannot answer both questions
-
-> **Superseded — read §9.13.1 and §9.13.3 for the mechanism in force.** This
-> subsection describes the two-token hop as it was built, and it is kept because the
-> reasoning below is why the replacement looks the way it does. What changed: there is
-> now **one** credential, the end user's own idToken, and the grant is the
-> `cognito:groups` claim on it. The m2m client_credentials token is gone, and so is
-> `X-A2A-Allowed-Skills` as an authorization input — the container derives the granted
-> skills from the same signed claim, which a caller cannot widen.
->
-> The retired mechanism outlived its use in one place worth naming: every AgentCard
-> went on advertising an OAuth2 `client_credentials` scheme in its `securitySchemes`,
-> which is what a caller reads to decide what to send. Nothing enforced it and our own
-> orchestrator never read it, so it cost us nothing and would have cost a third party
-> their first day. The manifest now publishes the correct declaration as
-> `card.securitySchemes` and `a2a_preflight` reports a card that disagrees.
-
-The `Authorization` header carries an OAuth2 **client_credentials** m2m token
-(Cognito app client `smarthome-a2a-m2m`, scope `a2a-server/invoke`). Every
-downstream Runtime validates it with `customJWTAuthorizer`. That token proves *an
-authorised service is calling* and nothing else — it has no `sub`. The token is
-now minted by the Gateway from a token-vault credential provider rather than by
-the agent from a Secrets Manager secret; what arrives at the specialist is
-unchanged, which is why the specialists needed no edit.
-
-A specialist that touches a user's devices needs the **end user**, so the
-caller's idToken rides in its own header, `X-SuperApp-User-Token` — the same
-split the main runtime uses with
-`X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken`. The sub-agent
-**re-verifies** it independently (signature via JWKS, issuer, audience,
-`token_use == "id"`, expiry with 60s leeway) rather than trusting the hop, then
-opens the tools Gateway with it so **Cedar evaluates the real end user**. The
-runtime itself holds no device permissions.
-
-> A custom header is silently stripped unless the Runtime declares
-> `requestHeaderConfiguration.requestHeaderAllowlist`. The first regression run
-> failed with "header is missing" on a request that had definitely sent it.
-> `deploy.py` sets the allowlist on every A2A runtime.
-
-#### Skill enforcement is server-side
-
-`X-A2A-Allowed-Skills` used to be parsed into request state and ignored, which
-made per-skill authorisation purely client-side: the Admin Console's checkboxes
-trimmed the orchestrator's tool list, but anything holding the shared m2m token
-could call any skill on any agent. It is now **enforced** in
-`common/server.py` — a request whose grant excludes every skill the agent
-publishes is refused, and a request with no header at all is refused rather than
-waved through.
-
-The refusal is returned *as the agent*, not raised: the orchestrator shows the
-tool result to its own model, and a refusal it can read and relay beats an
-opaque 500.
-
-#### Tools are a factory, never a list
-
-A tool that reaches a per-user backend must carry that user's identity, and the
-identity is per **request**. Building tools once at startup would pin whichever
-user arrived first and every later request would act as them — a silent
-cross-user escalation that looks like a working agent. So `run_agent` takes a
-`tools_factory(caller)` and the per-request executor rebuilds the Strands Agent
-for each call. Agent construction measures well under a millisecond, which is
-nothing beside the LLM call behind it.
-
-`user_id` is closed over from the verified `CallerIdentity` and appears in **no**
-model-facing signature — a parameter the model can fill is a parameter a prompt
-injection can fill. `test_agents_roster.py` parses each `tools.py` with `ast` and
-fails if any `@strands_tool` declares one.
-
-#### Admin-governed prompts
-
-A specialist's prompt used to be whatever `system_prompt.md` said in the image
-it was built from, so retuning one meant a redeploy — backwards, since a
-specialist is exactly what an operator wants to adjust without shipping a
-container. `common/governed_prompt.py` resolves it per request:
-
-```
-global override  -> replaces the shipped prompt entirely
-per-user override -> appended to whatever the global step produced
-neither          -> the shipped system_prompt.md
-```
-
-Keyed by **AgentCard name** (`__prompt_light-effect-agent__`), the one
-identifier the console, the Registry record and the running container each
-derive independently. Read per request with no caching: a TTL would make a saved
-edit look ignored for as long as it lasted, which is indistinguishable from the
-bug this removes.
-
-Failure is asymmetric on purpose. An unreadable table falls back to the shipped
-prompt, because refusing to answer over a throttled governance read is worse
-than using the perfectly good prompt compiled into the image; a readable
-override always wins.
-
-#### Latency
-
-Three measured costs on the delegation path, all removed (§4.4 of the spec).
-Delegated turns went from a 39.3s mean to 31.2s — **21% faster**, consistent
-across five comparable prompts, with fast paths unchanged at ~16s.
-
-| Was | Now |
-|-----|-----|
-| `A2ACardResolver.get_agent_card()` — a full HTTP round trip whose only used field, `card.url`, was overwritten on the next line | AgentCard built locally from the Registry record `build_a2a_tools` already holds; falls back to fetching if the record cannot produce a valid card |
-| `asyncio.run` per call, which **closes** the loop it creates — two delegations could not overlap or share a connection pool | one event loop for the process, driven with `run_until_complete` |
-| bare `timeout=60`, no retry, no breaker — one sick specialist cost every turn a full minute | connect 5s / read 55s, plus a per-endpoint breaker that opens after 3 consecutive failures for 60s |
-
-Tiered timeouts because an unreachable agent should fail in a second while one
-that is thinking has an LLM turn behind it; a single number could not express
-both. After the cooldown exactly **one** probe is let through rather than a full
-reset, so a still-broken endpoint re-opens on its next failure. A breaker skip
-returns `"A2A agent unavailable"` rather than `"call failed"`, so the model says
-the specialist was never asked instead of implying it answered badly.
-
-`streaming=False` on the A2A hop stays, and the reason is now measured rather
-than assumed. Streaming the sub-agent's tokens cannot improve
-time-to-first-prose, because the orchestrator cannot write its answer until the
-tool it just called returns. Timed against `Agent.stream_async`:
-
-```
-+0.00s  init_event_loop
-+1.88s  messageStart          <- first token of the turn
-+1.88s  tool_use_stream       <- and it is a TOOL CALL, naming the specialist
-+2.16s  message (toolUse complete)
-+8.13s  first text delta      <- the first PROSE, after the tool returned
-```
-
-So the floor is the specialist's own latency however the hop is transported, and
-pushing its tokens upstream would deliver text the orchestrator has not finished
-reasoning about into a UI with nowhere to put it.
-
-What *is* available early is the specialist's **name**, at 1.88s. The
-orchestrator therefore streams **tool lifecycle** instead of tokens — see
-§9.20 — which replaces ~31s of motionless "thinking…" with "asking the Home
-Security specialist…". The marker stays applied to the result rather than the
-stream, unchanged.
-
-#### 9.13.3 The door asks one question, so it stopped enumerating skills
-
-Group names encode `(agent, skill)`, and the authorizer's `CONTAINS_ANY` list used to
-carry every one of an agent's. Measured against what each enforcement point actually
-decides, that was redundant in one direction and expensive in the other:
-
-| | reads | decides | passes when |
-| --- | --- | --- | --- |
-| Runtime authorizer (the door) | `cognito:groups` | may this caller reach this agent | ANY listed group is held |
-| `common/server.py` (the container) | the same signed claim | which skills were granted | the derived subset is non-empty |
-
-`CONTAINS_ANY` passes on any single group, and `enforce_allowed_skills` refuses only an
-EMPTY subset — so both were answering *"is there any grant on this agent"*. The
-enumeration added no authorization. What it added was a coupling: no wildcard means a
-skill added to a card left its grantees refused at the door, with no log line, until
-somebody redeployed that runtime.
-
-So since 2026-08-15 the door matches ONE stable group, `a2a-<cardName>`, constant for
-the agent's lifetime. Per-skill groups keep doing the job only they can do — telling
-the container which skills a caller holds. A caller holding the door key and no skill
-group passes the door and is refused inside, which is what keeps the coarse door
-honest: it authorizes reaching the agent, never a skill.
-
-**The migration has an order, and reversing it locks every user out.** The grant side
-(`subagent_policy.wanted_groups`, so both the admin API's materialiser and the
-pre-token trigger) must emit `a2a-<agent>` and be backfilled BEFORE any authorizer
-requires it. `scripts/migrate-a2a-door-groups.py` refuses to flip an agent whose door
-group does not yet exist in the pool, and `--rollback` restores the enumeration —
-reversible because granted users hold both shapes. Measured on the live deployment: 10
-door-key memberships backfilled across 3 per-user scopes, global grants needing none
-(the trigger computes them per token), then 8 authorizers flipped with the acceptance
-gate still passing all five checks including **401 for an ungranted caller**.
-
-Two consequences worth holding on to:
-
-- Conformance reports a skill-group-only authorizer as `info`, not `closed`. Such a
-  runtime works; it is merely still coupled. Reporting it red would be false, and a red
-  row an operator cannot reproduce is how a check earns being ignored.
-- A revocation sweep must decode the door key. `parse_group` answers None for it (no
-  separator), so a sweep built on that would strip every skill group off a deprecated
-  agent's holders, leave the one group that opens the door, and report success —
-  `agent_of_group` exists for this.
-
-#### 9.13.4 The interface is three things; everything else is derived
-
-The goal an independent A2A team needs is that its only contract with this platform is
-(1) an inbound endpoint accepting our users' idTokens, (2) an AGENT record with a
-conformant card, and (3) our approval and granting. Approval and granting stay here on
-purpose — otherwise an agent could grant itself — and accepting our Cognito pool is
-inherent to sharing users. Everything else is derived from (2):
-
-| was a cross-team step | now |
-| --- | --- |
-| hand-copying `discoveryUrl` / app client / registry id | `?action=a2a-manifest`, and a **Platform manifest** button on the A2A Agents page. GENERATED from `a2a_conformance` / `a2a_groups` / `a2a_session`, so what we publish cannot drift from what we check — a test substitutes a real card name into the published template and asserts the real checker finds nothing |
-| a platform engineer adding a gateway `passthrough` target | `?action=a2a-gateway-reconcile`, driven from the Registry. Matched by RUNTIME, never by target name — the eight built-in targets are named `light-effect` while their cards say `light-effect-agent`, so name matching would call all eight missing and duplicate them. Orphans are reported, never deleted: an orphaned target is dead weight, not an open door (the sweep closes access), and deleting one would break any card still pointing at it |
-| adding a runtime ARN to `DASHBOARD_EXTRA_RUNTIME_ARNS` | derived from APPROVED records, unioned with the env var (which still carries the voice and bundles runtimes, having no Registry record). Never returns a SHORTER list on failure — it serves the last known one, because a silently shorter allowlist is the exact failure it exists to prevent |
-| "does my agent actually work, and is it actually closed?" | `scripts/a2a-delegation-smoke.py`, asserting BOTH directions. Only the positive one is visible in normal use: a test that checks admission alone passes just as happily against an agent with no `customClaims` at all |
-
-The gateway URL in the manifest is **derived**, not read from an environment variable —
-first from a record already routed through it, else by gateway name. This Lambda's
-script-patched env has been wiped by `cdk deploy` more than once (§9.2), and the failure
-mode for a published contract is the worst kind: a third party configures against a
-blank or stale value we handed them.
-
-### Delegation latency, measured
-
-`scripts/measure-baseline.py` takes a comparable baseline, writing runs to
-`docs/measurements/` (gitignored — a baseline only compares against another from the
-same deployment). The numbers below are cold-session means over 10 fixed prompts ×
-3 repeats, measured 2026-08-11 on Claude Opus 4.6, and are kept here rather than in
-that directory precisely so the conclusion survives without the raw run:
-
-| Group | wall | platform | server | llm | tool (the A2A hop) | harness |
-|-------|------|----------|--------|-----|--------------------|---------|
-| fast (15) | 17.3s | 7.3s | 10.0s | 5.9s | 1.3s | 2.9s |
-| delegated (15) | 31.3s | 7.0s | 24.3s | 10.0s | 11.5s | 2.9s |
-
-**`platform` is the surprise: ~7s of every turn is spent inside AgentCore before
-this container is entered.** A session id the runtime has never seen costs ~7s; a
-reused one ~0.4s. A "16s fast path" is therefore roughly 8s of agent work behind
-8s of platform session creation, and any report quoting `wall` alone credits the
-platform's cold start to the harness — in both directions. `--compare` refuses to
-diff a warm run against a cold one for exactly that reason.
-
-Three optimisations act on the numbers above:
-
-| Change | Effect | Harness |
-|--------|--------|---------|
-| **Device brief on delegation** — the orchestrator names the relevant devices, so the specialist skips its opening `discover_devices` cycle (`shared/device_brief.py`) | **-1.64s (-10%)** on the specialist's turn, winning 4/4 A/B pairs | `scripts/ab-delegation-brief.py` |
-| **Parallel delegation** — the shared event loop moved onto its own thread, so independent delegations genuinely overlap | **51.1s → 17.2s (-66%)** on a three-domain request | `scripts/ab-parallel-delegation.py` |
-| **Prompt caching** on the orchestrator's ~10.5k-token prefix | billed input tokens **29,644 → 9**; latency **2%** (noise) | CloudWatch `CacheReadInputTokenCount` |
-
-Two proposals were dropped on measurement. **Prewarming** buys nothing: after
-100+ minutes idle — far past the 900s session timeout — a specialist's first call
-was ~0.3s slower than its warm calls (energy 8.52s vs 8.39s, security 9.65s vs
-9.28s), because AgentCore keeps these runtimes hot. And **caching the
-sub-agents' prefixes** would cost more than it saves: they measure 362-4,211 mean
-input tokens with minima as low as 71, below the model-specific checkpoint
-minimum (a 2,817-token Haiku call with a cache point returned `cacheRead=0,
-cacheWrite=0`), and the prefix varies per request anyway because the governed
-override and the user's memory are appended. Cache **writes** bill at 1.25×, so
-enabling it there is 25% more per delegation for zero hits.
-
-> **The bug worth knowing about.** The device brief took three deploys. The first
-> two rewrote the specialists' system prompts to say "use the supplied list, do
-> not call `discover_devices`" — and the specialists kept calling it. The brief
-> was demonstrably arriving (sub-agent input tokens rose 2,521 → 3,428) and the
-> new prompt was live. The cause was `discover_devices`' own docstring, which
-> still opened with *"Call this FIRST, every time."* **A tool's description
-> outranks the system prompt about that tool**, and nothing was visible in any
-> reply: the answers stayed correct and the optimisation simply never happened.
-> `common/tests/test_discover_guidance.py` now asserts the two halves agree.
-
-### Read-only shared Memory
-
-All eight specialists retrieve from the Memory the orchestrator writes
-(`common/memory.py`), under the same actor-partitioned namespaces
-(`/users/{actor}/facts`, `/users/{actor}/preferences`) with **no agent
-dimension** — "prefers warm light" is a fact about the user, not about whichever
-agent heard it. The actor id comes from `shared/memory_actor.py`, one function
-copied into every container: two containers that sanitized the same user
-differently would each get a working, private, half-empty memory, and the symptom
-("the sub-agent never remembers what I told the main agent") reads as a retrieval
-bug rather than a naming one.
-
-**Writing stays the orchestrator's alone**, because only it holds the
-conversation. A specialist receives one self-contained delegated instruction, so
-anything it wrote would return as a context-free half-sentence on every future
-retrieval, and eight concurrent writers would hand the SUMMARIZATION strategy an
-interleaved transcript of a conversation none of them had. Enforced by IAM rather
-than by intent: `A2ASharedMemoryRead` grants `bedrock-agentcore:RetrieveMemoryRecords`
-and nothing else, so an edit that tried to write fails instead of quietly
-poisoning the memory.
-
-`/summaries/{actor}/{sessionId}` is deliberately **not** read: AgentCore assigns
-runtimeSessionId per runtime and the A2A hop does not propagate the
-orchestrator's, so a specialist cannot name the session whose summary it wants and
-would be reading its own empty namespace.
-
-The retrieved lines are framed as context about the user, explicitly not part of
-the current request, with the current request winning on conflict. Unlabelled they
-read as instructions — a specialist asked to dim the bedroom would apply a
-remembered ocean effect because the prompt appeared to ask for it.
-
-> `AgentCard` validates types, not emptiness: `AgentCard(name="", url="")`
-> constructs happily and would be sent only to be rejected at the far end. The
-> local builder refuses on the two fields that must be real.
-
-#### Orchestrator routing
-
-`A2A_DELEGATION_RULES` is appended to the system prompt whenever a user has A2A
-grants. It used to describe *categories* of work ("domain expertise the tools
-cannot supply") and list the specialists last, at item 6 of the capability list —
-which also **contradicted** the list, since that claimed
-`query_knowledge_base` for documentation questions, exactly what knowledge-QA
-exists to answer. Whichever section the model read last won.
-
-The rules now name tools explicitly, in a table from what the user asked to the
-exact `a2a_<agent>_<skill>` to call, and state that they OVERRIDE the capability
-list. Routing is on the **subject**: "what modes does the LED matrix support" is
-documentation even though it names a device; "turn the matrix off every night" is
-an automation even though turning things off is normally the orchestrator's own
-job. Single-device actions stay local — delegating a light switch adds seconds
-for nothing.
-
-**That table is generated, not written.** It was hand-maintained until 2026-08-12,
-which meant granting a new specialist on the SubAgent Policy page registered its
-tools but left the prompt unaware of them, so the model kept answering from its own
-knowledge. The rows are now built at request time from each granted AgentCard
-skill's name, description and examples — the same source the tool descriptions
-already use (`a2a.py:246`) — while the static preamble above (delegation costs
-seconds, a match makes the call mandatory, route on subject) stays hand-written.
-Granting is therefore sufficient: no prompt edit, no code change, no redeploy.
-
-The cost is that row quality now depends on what specialist authors write in their
-cards. The judgement calls the hand-written table carried, such as documentation
-questions outranking the device name they mention, do not emerge from a skill
-description on their own, which is what `test_delegation_rules.py` and the
-delegation evals have to hold. Prompt caching is unaffected: the prefix is still
-byte-identical across one user's turns, with each distinct grant set occupying its
-own cache entry.
-
-`agent/tests/test_delegation_rules.py` derives every valid tool name from the
-AgentCards and fails if the prompt routes to one that does not exist. It found
-two deployed skills the table never mentioned (`inspect_devices`,
-`tariff_analysis`) on its first run. A renamed skill would otherwise leave the
-prompt pointing at a missing tool, and the model would fall back to its own
-knowledge with no error anywhere.
-
-The rules also state the **cost model**, not just the routing: independent
-specialists run concurrently, so asking two in one turn costs about as long as one,
-and serialising them doubles the wait for nothing. Given only "you may call several
-tools", the model tends to wait for each reply before asking the next — which is
-the 51.1s arm of the parallel-delegation A/B in §9.13. Only a genuinely dependent
-step (one specialist needs another's *answer*) is serialised, and the prompt names
-the two cases: a feast the user then wants saved, and an automation containing a
-lighting effect.
-
-**What each delegated message carries.** `agent/tools/a2a.py` appends a device
-brief mechanically, from `shared/device_brief.py` — the relevant devices for this
-request with their ids and the capability bounds a specialist cannot guess
-(ranges, enum values, segment counts). Appended by the *tool* rather than
-requested in the prompt, because a latency fix that depends on the model
-remembering to include device details every time is a fix that works unevenly.
-
-Trimmed twice, and the second cut is the point: filtering by relevance alone would
-still hand over the full 12-device capability table (~1,800 tokens), removing a
-round trip and adding a large prompt — moving the cost rather than removing it.
-One line per device brings it to 99-210 tokens, 5-11% of the payload it replaces.
-The brief is a **hint**: `discover_devices` stays available, the prompt says when
-to use it anyway (no list, the device missing, the list contradicting the request),
-and it states plainly that the brief carries **no live state**, since it is built
-from the static catalog and a specialist that assumed otherwise would report a
-brightness nobody told it.
-
-**Measuring routing.** `scripts/probe-routing.py` reads the runtime's own
-`gen_ai.tool.name` spans, which is the only direct record of which tool ran.
-Three things it got wrong first, each of which made correct behaviour look like
-six product bugs:
-
-- `userId` in the payload becomes `actor_id` and A2A grants are keyed on it.
-  Omitted, it defaults to `"default"`, which `load_user_a2a_permissions` skips —
-  so **no** `a2a_*` tool is registered and every delegation "fails".
-- That key is the **email**. The chatbot sends `email or username or sub`, and
-  the Admin Console resolves sub → email when writing grants
-  (`_resolve_ddb_user_key`), so probing with the sub reads a row that does not
-  exist.
-- The `⟦A2A:…⟧` marker is on the **sub-agent's** reply. The orchestrator
-  summarises rather than pasting it through, so a correctly delegated turn
-  usually shows no marker. Scanning reply text reported six false misses twice
-  over.
-
-#### Deploy path
-
-`python a2a-agent-registry/deploy.py` runs the `agentcore` CLI
-(`agentcore create --protocol A2A`), deploys via CodeBuild (no local Docker),
-then patches each Runtime with env vars, the CUSTOM_JWT authorizer,
-`serverProtocol: A2A` and the header allowlist — the CLI drops all of these
-during `agentcore deploy`. It also copies `shared/` into the code root, because
-a sub-agent that validates a device command or a scene has to agree with the
-Lambdas exactly; a second copy of "what speeds does the fan accept" is a copy
-that will disagree.
-
-IAM is granted per agent and narrowly:
-
-| Inline policy | Grants | Which agents |
-|---------------|--------|--------------|
-| `A2AM2MSecretRead` | `secretsmanager:GetSecretValue` on the m2m secret. **Removed from the orchestrator** once A2A moved behind the Gateway — the Gateway holds that credential now. Still present on the specialists for their own inbound validation | all |
-| `A2APromptTableRead` | `dynamodb:GetItem` on `smarthome-skills` | all |
-| `A2ASharedMemoryRead` | `bedrock-agentcore:RetrieveMemoryRecords` on the shared Memory — **and nothing else**, so a future edit that tried to write fails rather than quietly poisoning it (§9.13) | all |
-| `A2AScenariosTableAccess` | read/write on `smarthome-scenarios` + its indexes | task-management only |
-
-Separate policy **names** on purpose: `put_role_policy` replaces a document, so
-sharing one name means whichever step runs last wins and the other grant
-vanishes silently.
-
-> ⚠️ **`UpdateRegistryRecord` wraps every level in `optionalValue`; `Create` takes
-> it bare.** Measured from the botocore service model, not guessed: the union, each
-> descriptor **and** each field.
->
-> ```
-> create  {"a2aAgentCard": {"data": "<json>"}}
-> update  {"optionalValue": {"a2aAgentCard": {"optionalValue":
->             {"data": {"optionalValue": "<json>"}}}}}
-> ```
->
-> This matters because `deploy.py` treats **any** update failure as "delete the
-> record and recreate it", and that path succeeds — so a redeploy reported success
-> while minting a **new recordId**, and `a2aGrants` in every `__a2a_permissions__`
-> row is keyed by recordId. The visible symptom is a user whose skills were granted
-> yesterday having no `a2a_*` tools today, with nothing in any log.
->
-> It shipped twice. The first fix wrapped only the outer level — which looks right —
-> so the very next deploy recreated the record and voided the grants again.
-> `_as_update_descriptors()` now converts the whole tree, and
-> `common/tests/test_registry_update_shape.py` validates the result against the live
-> service model *and* asserts the plausible wrong shape is genuinely rejected.
->
-> If grants ever look mysteriously empty after a redeploy, compare the recordIds in
-> `__a2a_permissions__` against
-> `aws agent-registry-control list-registry-records --registry-id <id>`.
-
-Supports `--agent <name>` for partial deploys and `--only` / `--skip` step
-filtering. `./deploy.sh` does **not** deploy the specialists — the base system
-stays minimal and A2A is an opt-in second stage.
-
-#### Registry record lifecycle
-
-| Actor | What it does | Status after |
-|-------|--------------|--------------|
-| `deploy.py` step 6 | creates/updates the AGENT record with the real invocation URL, then submits for approval | `PENDING_APPROVAL` |
-| Admin Console → Skills → *Add from Registry* | approve / reject / deprecate (§9.8) | `APPROVED` / `REJECTED` |
-| `shared/agent_registry.approve_record` | submits first when still DRAFT, since DRAFT cannot go straight to APPROVED | `APPROVED` |
-
-Running `--only registry` before `--only deploy,persist` renders a card before
-`invocationUrl` exists, and `build_a2a_tools` then skips the record with a
-one-line warning. Hit twice during development; run the steps in order.
-
-**Feature flag.** The orchestrator registers A2A tools only when
-`A2A_M2M_SECRET_ARN`, `A2A_COGNITO_TOKEN_URL` and `REGISTRY_ID` are all present.
-Missing any → the invoke path skips A2A entirely, so the base system works with
-zero A2A setup. `deploy.py --only patch-text-agent` writes them, and also
-appends every A2A runtime ARN to the admin Lambda's
-`DASHBOARD_EXTRA_RUNTIME_ARNS` so the ops dashboard sees their tokens (§9.15).
-
-#### Cross-service facts, all measured on the deployment
-
-- **Port 9000, mount `/`** for A2A — differs from HTTP agents (8080,
-  `/invocations`) and MCP agents (8000, `/mcp`).
-- **`agentcore deploy` resets custom runtime config.** It clears
-  `environmentVariables`, `protocolConfiguration`, `authorizerConfiguration`,
-  `requestHeaderConfiguration` and `filesystemConfigurations`. Every deploy path
-  captures a baseline first and restores after. Losing the header allowlist is
-  the dangerous one: the chatbot's auth token would be silently stripped, every
-  Gateway call would 401, and the runtime would answer a bare 500.
-- **`agentcore.json` gets rewritten.** A deploy turned `runtimes` into
-  `harnesses` and then demanded a `harness.json` this project has never had.
-  CodeZip additionally requires `runtimeVersion` (`PYTHON_3_14`) and a
-  `codeLocation`; the working A2A projects are the reference for the right shape.
-- **`agentcore` CLI 0.26.0 rejects a bare `--defaults`** — it needs
-  `--framework Strands --model-provider Bedrock --memory none --build CodeZip
-  --language Python`.
-- **`a2a-sdk` is pinned below 1.0.** Strands `A2AServer` and
-  `bedrock_agentcore.runtime.a2a.build_a2a_app` both expect
-  `a2a.server.apps.A2AStarletteApplication`, which only exists on the 0.3.x
-  line. Declared in both `pyproject.toml` and `requirements.txt` because the two
-  deploy paths read different files.
-- **`call_tool_sync` returns an `MCPToolResult` TypedDict**, so the payload is
-  `result["content"][i]["text"]`, not `result.content[i].text`. Handling only the
-  attribute form left the model reading a stringified Python dict — technically
-  the data, practically unusable.
-- **`ListRegistryRecords` returns `registryRecords`, not `records`.**
-- **Registry left the `bedrock-agentcore` namespace at GA.** All record calls use
-  the `agent-registry-control` client and the `agent-registry:` IAM prefix;
-  Runtime, Gateway, Identity and workload identities did **not** move. The
-  predicted silent failure happened exactly as written: after migration the agent
-  said "I have no device-control specialist" and answered from its own tools —
-  only the log showed `not authorized to perform: agent-registry:GetRegistryRecord`.
-- **The two namespaces hold DISJOINT sets of registries**, and this is the trap
-  that outlives the migration. A GA registry id is invisible to
-  `bedrock-agentcore-control` and vice versa, so `GetRegistry` →
-  `ResourceNotFoundException` does **not** establish that an id is dead — it says
-  the same thing for a live id read through the wrong namespace. Measured:
-  `Zuy3YNKrPQ5uwE9t` is READY with 8 agent records under `agent-registry-control`
-  and a 404 under `bedrock-agentcore-control`. One id was "corrected" to a legacy
-  registry on the strength of that 404 — it holds 5 records but only 3 of type
-  AGENT, and the catalog lists only agents — and the resulting short catalog was
-  then attributed to two unrelated causes (§1.13.1 of the design principles). `scripts/check-registry-wiring.py` compares all four `REGISTRY_ID`
-  consumers and names the namespace explicitly.
-- **A registry's status is `READY`, never `ACTIVE`.** The enum is
-  CREATING/READY/UPDATING/CREATE_FAILED/UPDATE_FAILED/DELETING/DELETE_FAILED —
-  disjoint from the RECORD statuses (DRAFT/PENDING_APPROVAL/APPROVED/...) in the
-  same service, so conflating them raises nothing. `setup-agentcore.py` polled for
-  `ACTIVE`, so its wait could only ever exhaust all 15 attempts and fall through:
-  30s per deploy, behaviourally identical to no wait, and a CREATE_FAILED registry
-  passed straight through it. Now it breaks on leaving CREATING/UPDATING and warns
-  when the settled status is not READY. Locked by
-  `shared/tests/test_registry_status.py`, which reads the enum out of the botocore
-  model rather than restating it.
-
-**Observability.** The A2A runtimes are ADOT-instrumented and tag spans with
-`service.name = {runtimeName}.DEFAULT`, so their tokens flow into the span groups
-and into the dashboard's service-name allowlist (§9.15). Two caveats:
-
-- **A sub-agent stamps its own session id** — a bare UUID, not the
-  orchestrator's `user-session-*`. AgentCore assigns `runtimeSessionId` per
-  runtime and the A2A hop does not propagate it, so a delegated turn's tokens
-  land under a session the runtime-sessions table has no row for. Per-**agent**
-  totals are correct; per-**turn** attribution across a delegation is not
-  available without passing the session id over A2A.
-- **Upstream evaluation measures the caller, not the callee.** An A2A call
-  appears in the orchestrator's session as a `tool_use`/`tool_result` span pair,
-  which grades whether the orchestrator *chose and used* the delegate correctly —
-  not the delegate's own answer. A delegate that writes state would want its own
-  online-eval config; `_ensure_online_eval_config` in `setup-agentcore.py` is
-  reusable, keyed on the A2A runtime's log group + service name.
-
-**Regression gate.** `smoke_test.py` exercises all seven agents plus six
-negative authorisation cases (missing / empty / foreign skills header, and a
-missing user token against each tool-using agent). An agent added to the roster
-without a probe prompt fails *that* agent and continues — it used to raise
-`KeyError` and take every other agent's result with it, so one missing entry read
-as a total outage.
-
-**Flow:**
-
-```
-┌───── Chatbot (user) ─────────────────────────────────────────┐
-│  "Give the light strip a calm ocean feel"                    │
-└────────────────────┬─────────────────────────────────────────┘
-                     │  POST /invocations
-                     │  X-Amzn-…-Custom-AuthToken: <user idToken>
-                     ▼
-┌───── smarthome orchestrator (Strands on AgentCore) ──────────┐
-│ invoke_agent():                                               │
-│   1. load __a2a_permissions__ (global + per-user merge)        │
-│   2. per (recordId, skillId): GetRegistryRecord → AgentCard   │
-│      register a2a_<agent>_<skill>, endpoint + user token       │
-│      PINNED in the closure (never a model parameter)          │
-│   3. routing rules name the tool; LLM calls it                │
-│        M2MTokenProvider → client_credentials JWT (~1h TTL)     │
-└────────────────────┼─────────────────────────────────────────┘
-                     │ A2A JSON-RPC message/send  (one shared loop)
-                     │ Authorization:        Bearer <m2m JWT>
-                     │ X-A2A-Allowed-Skills: compose_effect,…   ← ENFORCED
-                     │ X-SuperApp-User-Token: <user idToken>     ← re-verified
-                     ▼
-┌───── light-effect-agent Runtime (protocol=A2A, :9000, /) ────┐
-│  CUSTOM_JWT authorizer → Cognito discovery URL                │
-│  resolve_caller(): verify idToken, enforce skill grant         │
-│  governed_prompt: global/user override or shipped prompt       │
-│  tools_factory(caller) → GatewaySession(Bearer caller token)   │
-│  str(result) = "⟦A2A:light-effect⟧ …"   (marker on the RESULT) │
-└────────────────────┼─────────────────────────────────────────┘
-                     │ MCP call_tool, as the USER
-                     ▼
-        tools Gateway → Cedar (per-user) → iot-control → MQTT
-```
-
 ### 9.10 Remote Shell Commands per Session
 
 Every row in the Admin Console's Sessions tab carries a **Remote Shell**
 button that opens a modal running a shell command inside the targeted
 AgentCore Runtime container and streaming stdout/stderr back live —
 functionally an SSH-style debug console for the `smarthome` and
-`smarthomevoice` runtimes.
-
-**Example-command chips.** The modal includes a row of one-click example
-commands useful for agent-runtime ops: list uploaded images under
-`/mnt/workspace/`, dump loaded skills, show memory/disk usage, list
-running processes, print agent env vars, tail recent logs, print
-Python + installed packages. Clicking a chip drops the command into the
-textarea so admins can tweak it before running.
+`smarthomevoice` runtimes. How to use it, and the commands worth running, are
+in the admin manual: [§9 Session 调试与 Remote Shell](admin_manual_管理员使用手册.md#9-session-调试与-remote-shell)
+and [§9.2 Remote Shell 示例](admin_manual_管理员使用手册.md#92-remote-shell-示例).
+This section covers how it is built and what it trusts.
 
 **Commands are wrapped in `bash -c`.** The runtime's
 `InvokeAgentRuntimeCommand` execs the command directly (no shell), so shell
@@ -4342,7 +3575,7 @@ syntax — pipes, `&&`, redirects (`2>/dev/null`), globs — arrives as literal
 `argv` and fails (e.g. `ls -la /mnt/skills/ 2>/dev/null && echo --- && ...`
 made `ls` choke with `unrecognized option '---'`). `agentcoreCommand.ts`
 therefore wraps every command in `bash -c '<command>'` with POSIX-safe
-single-quoting before sending it, so the example chips and any admin-typed
+single-quoting before sending it, so the modal's example-command chips and any admin-typed
 shell one-liners run as intended — the same trick
 `chatbot/src/api/workspaceFiles.ts` uses for its `ls`/`base64` probes.
 
@@ -4398,18 +3631,13 @@ and other admin-only actions live on an `admin`-group role.
 - `runtimeSessionId` must be at least 33 characters (the Sessions tab
   already uses Cognito `sub` UUIDs = 36 chars).
 
-**UX details.**
-- Runtime selector (Text/Voice) defaults to the clicked row's `kind`
-  but is overridable so admins can debug the voice container from a text
-  session's row.
-- Output pane renders a limited ANSI subset: reset, bold, 30-37 / 90-97
-  foreground colors. Unknown sequences (cursor moves, 256-color, etc.) are
-  stripped silently. Stderr chunks carry a red CSS class.
-- Modal-local command history (last 20 commands, deduped, most-recent-
-  first) resets on close. Copy button strips ANSI and writes the plain
-  text to clipboard.
-- The SDK module (~100 KB minified) is lazy-imported on modal open so it
-  never loads for admins who don't use the feature.
+**Rendering and loading.** The output pane renders a limited ANSI subset
+(reset, bold, 30-37 / 90-97 foreground colors); unknown sequences (cursor
+moves, 256-color) are stripped silently rather than mis-rendered. The SDK
+module (~100 KB minified) is lazy-imported on modal open so it never loads
+for admins who don't use the feature. The runtime selector defaults to the
+clicked row's `kind` but is overridable, so the voice container can be
+debugged from a text session's row.
 
 ### 9.11 Browser Use — Live Agent Web Automation
 
@@ -4580,7 +3808,7 @@ the agent's surface area without reading docs:
 **Skill auto-trigger.** `agent/skills/browser-use/SKILL.md`'s
 `description` frontmatter explicitly enumerates trigger phrasings ("look
 up", "search on X", "check current", "find online", product searches,
-news headlines, current prices) so Kimi invokes `browse_web` without the
+news headlines, current prices) so the text model invokes `browse_web` without the
 user naming the tool. The skill is included in the default seed list;
 per-user overrides in `Admin Console → Skills` can remove or rename it.
 
@@ -4666,6 +3894,809 @@ Memory's long-term summaries — keyed on `actor_id = sub`, not
 Warmup requests additionally send `X-Amzn-Trace-Id: Root=...;Sampled=0`
 so the short-circuit `__warmup__` turn is not sampled into the span group
 alongside the real agent turns.
+
+### 9.13 A2A Specialist Agents & Text Agent A2A Client
+
+The text agent calls downstream A2A agents as a standard **A2A client**:
+JSON-RPC `message/send` against AgentCore Runtime's native A2A protocol mode
+(port 9000, `/` mount). The upstream orchestrator and each downstream
+specialist are independent AgentCore Runtimes.
+
+Since 2026-08-12 the call carries **one token — the end user's own idToken** — and
+each specialist's Runtime authorizes it directly.
+
+Since 2026-08-15 it goes **through a dedicated inbound gateway**,
+`smarthome-a2a-gw`, with one A2A `passthrough` target per specialist and
+`JWT_PASSTHROUGH` outbound so the user's token arrives unchanged. The AgentCards
+carry the gateway URL; the orchestrator routes on `card.url` and knows nothing about
+the topology, so rolling back is `scripts/cutover-a2a-cards.py --to runtime`.
+
+Measured over the hop before cutting over (`scripts/probe-a2a-gateway.py`):
+`cognito:groups` is still enforced by each specialist's own authorizer — a user
+narrowed to no grant gets **401** — per-user identity still resolves in the
+container, the propagated session id still arrives, the span-level join still works
+(13 orchestrator spans and 13 specialist spans under one `session.id`), and the
+latency delta is inside noise (±0.1s on a ~4.8s call).
+
+What the gateway adds is a Cedar **per-agent `forbid`**: an all-users deny that
+takes effect on the next request, which a claim-based grant cannot do because a
+claim only changes when a token does. Verified: the forbidden agent answers `403 …
+[Policy evaluation denied due to Forbid_energy_optimization]` while every other
+target still answers 200.
+
+What it does **not** add is guardrails — see §9.13.2.
+
+#### 9.13.1 Registered is discoverable; the authorizer decides callable
+
+Registering an APPROVED card is the **only** integration step for discovery: the
+console lists the agent, the orchestrator registers `a2a_*` tools for it, the
+delegation prompt names it, and its system prompt becomes governable — all derived
+from the Registry, with no code change or redeploy anywhere upstream. Someone who
+knows nothing about this deployment can get that far.
+
+They cannot get further without two of its values. Authorization happens at the
+sub-agent's OWN Runtime authorizer: `discoveryUrl` must be this pool, `allowedAudience`
+must carry this app client, and `customClaims` must match the card's door group under
+`CONTAINS_ANY`. That configuration lives with whoever deployed the runtime, and until
+2026-08-15 nothing checked it.
+
+Both ways of getting it wrong are silent and they fail in opposite directions (too
+permissive, or granted callers refused), and Registry STATUS reads `approved` either
+way. The authorizer contract, the two failure directions and the approval-gate
+severities (`open` / `closed` block, `info` passes) are owned by the third-party
+contract: [§3 inbound authorizer](a2a-agent-onboarding.md#3-你必须配的runtime-的-inbound-authorizer),
+[§3.3 两个方向的静默失败](a2a-agent-onboarding.md#33-两个方向的静默失败) and
+[§5 审批门](a2a-agent-onboarding.md#5-系统怎么检查你--而且这是审批门).
+
+The design point is that check, gate and hand-out share one rule
+(`shared/a2a_conformance.py`): `GET /registry/records?action=a2a-conformance` reads
+each runtime's authorizer (through the gateway target when the card points there) and
+reports by direction (the A2A Agents page's **Authorizer** column: *Too permissive* /
+*Callers refused*), approval refuses an AGENT record on the same findings (409;
+`?force=true` overrides and is recorded in the record's `statusReason`), and
+`scripts/a2a-authorizer-contract.py` prints the config an agent SHOULD be deployed with
+from the same function, so what is checked and what is handed out cannot drift. `info`
+passing is deliberate: an unreadable cross-account runtime and a still-coupled but
+working authorizer are states an admin must be able to approve, and a gate that
+reddened working runtimes would be switched off.
+
+#### 9.13.2 Why the gateway cannot carry guardrails, and where Cedar stops
+
+Two limits, both measured, both worth stating because each looks like a
+configuration problem and is not:
+
+- **Gateway guardrails cannot filter A2A at all.** In us-west-2 `CreatePolicy` with
+  a guardrails block fails `AccessDeniedException: Guardrails policies are not
+  enabled for this account`, which is regional rather than an entitlement. And even
+  in a supported region, Cedar dataPaths cannot traverse arrays, so nothing can read
+  an A2A message's text at `params.message.parts[i].text`. Content filtering for a
+  specialist has to be `ApplyGuardrail` inside its own container.
+- **Cedar cannot do per-user authorization here.** The generated schema gives
+  `AgentCore::OAuthUser` no `groups` and no `claims` attribute (probed 2026-08-15),
+  so a policy cannot read the caller's `cognito:groups`. Its only per-user lever is
+  an explicit `principal.id` list. So the gateway's permit is deliberately broad —
+  the analyzer calls it "Overly Permissive" and is right — and authorization stays
+  at each specialist's runtime authorizer, one layer down, on a signed claim.
+
+#### Why each of these is an agent and not a skill
+
+Three of the eight — `energy-optimization`, `home-security`,
+`appliance-maintenance` — were prompt-only until 2026-08-12. They shipped a
+`system_prompt.md` and no `tools.py`, so they read nothing. That made them the
+weakest part of the design, and the criticism is exact: an agent that reads nothing
+returns the same answer to every user, so a reviewable skill document would have
+been cheaper *and* better. The energy agent's prompt even said "state the
+assumptions you used", which is an instruction to invent the numbers — two runs of
+the same question gave two different figures and neither could be checked.
+
+All eight now ship a `tools.py`, and each of the three runs a chain that no single
+tool call collapses:
+
+| Agent | Chain | Why a tool or skill cannot do it |
+|---|---|---|
+| `energy-optimization` | `discover_devices` → `query_device_state` → `query_sensor_history` (a week) → `power_reference` → per-device arithmetic → rank | The ranking depends on the *user's* fleet and its measured state; the arithmetic needs a rated-draw table and an intermediate result per device |
+| `home-security` | `discover_devices` → `query_device_state` → `query_sensor_history` → `search_advisories` (domain-filtered) → correlate → rank by exposure | Correlating a live fleet against *currently published* advisories changes as the web changes, so it cannot be precomputed into a document |
+| `appliance-maintenance` | `discover_devices` → `query_sensor_history` (slope) → `query_device_state` → `query_knowledge_base` (documented threshold) → date per appliance | Two sources cross-referenced per appliance: the measurement sets the date, the manual sets the threshold |
+
+Each also gained one skill that names the whole chain — `usage_audit`,
+`advisory_review`, `service_forecast` — so 18 published skills became **21**.
+
+`common/power_profile.py` holds rated watts per device type plus the rates, because
+`shared/device-catalog.json` carries capabilities and not watts: nothing else in the
+system needed them. They are labelled rated representative values rather than
+measurements, and the agent is required to say so — a fabricated precise answer and
+a labelled estimate are different things to a user deciding whether to rewire a
+room. A smart plug reports `unknown_load`, so the agent asks what is plugged in
+instead of assuming a wattage.
+
+**Only the security agent reaches web search.** `deploy.py` hands out
+`WEBSEARCH_GATEWAY_URL` to whichever `tools.py` names `WEB_SEARCH`, so the roster
+and the wiring cannot drift; `GatewaySession` opens a second MCP client only when
+asked, and an unreachable us-east-1 degrades to a fleet-only assessment rather than
+failing the request. Advisory searches are restricted server-side to standards
+bodies, national CERTs and protocol vendors, because a security finding sourced from
+a content farm reads exactly as authoritative in a summary.
+
+**Two things this cost, both worth recording.**
+
+*Model tier.* Both agents ran on Nova Lite. The new chains are long enough that Nova
+Lite emitted a `<thinking>` block and stopped without concluding — the tools had
+been called and the answer never arrived. Both moved to Claude Haiku 4.5, matching
+`home-security`. Making a task harder means re-checking the model that has to do it.
+
+*Output hygiene.* The same runs leaked `<thinking>` tags into the reply and emitted
+the marker token twice. All three prompts now forbid both explicitly and say that a
+reply which is only a status update about what the agent is *about to do* is a
+failed turn.
+
+**Verified live after the change.** `advisory_review` named real device ids
+(`living-sensor-1`, `living-plug-1`, `living-purifier-1`), searched the restricted
+domains, cited URLs with dates, and correctly reported that no advisory on those
+sources is **not** the same as safe. `usage_audit` priced the real fleet using the
+profile table's own figures (oven 2400 W × 0.35 duty at $0.16/kWh), labelled them as
+estimates, and reported the closed simulator as unknown rather than as zero.
+`service_forecast` reported "no readings recorded in the past week" instead of
+inventing a slope — which is the honest answer while the simulator is closed, and is
+the reason a service-date demo needs the device simulator running.
+
+**A Gateway HTTP passthrough hop was designed in, dropped, and then reinstated.**
+The original reason for it was to unify authentication: A2A ran its own Cognito m2m
+flow in parallel with the JWT the agent already forwards to the gateway for MCP
+tools. Moving authorization into the user's own token (2026-08-12) achieved that
+unification *without* the hop, so at that point the hop would only have bought
+centralised egress and gateway-level observability at the price of a round trip and
+eight targets to keep in step with the roster, and it was dropped. It came back on
+2026-08-15 for a reason the token cannot supply: a Cedar per-agent `forbid` that
+takes effect on the next request. Since then every card points at
+`smarthome-a2a-gw` (`scripts/setup-a2a-gateway.py`, cut over with
+`scripts/cutover-a2a-cards.py`; see the top of §9.13), the measured latency delta is
+inside noise, and the eight targets are reconciled from the Registry
+(`?action=a2a-gateway-reconcile`, §9.13.4). What the passthrough spike established,
+kept here because it is not obvious and cost real time:
+
+- `{"http":{"passthrough":{"endpoint":..., "protocolType":"A2A"}}}` works, and
+  `A2A` targets get a default schema automatically.
+- `http.agentcoreRuntime` (just a runtime ARN) also exists and is a neater fit for an
+  AgentCore Runtime, but forwarding to the invocations URL returned
+  `404 UnknownOperationException`; the `passthrough` shape forwarded correctly.
+- A target's `metadataConfiguration.allowedRequestHeaders` defaults to **only**
+  `x-amzn-bedrock-agentcore-policy-session-id`. Any custom header is stripped unless
+  listed. That is a *second* header allowlist behind the Runtime's own, and both
+  default to dropping — see the Runtime one below, which bit this design for real.
+- Outbound defaults to `JWT_PASSTHROUGH`. Under the old m2m model that was the one
+  option that could not work (the specialists' `allowedClients` held the m2m client,
+  so they answered `401 Missing Authentication Token`); under the current model it
+  is the correct setting, and it is what `smarthome-a2a-gw` uses. The option flipped from wrong to right without the
+  gateway config changing, which is worth remembering before reading old notes.
+- `CALLER_IAM_CREDENTIALS` is unavailable regardless: it needs an `AWS_IAM` or
+  `AUTHENTICATE_ONLY` gateway and this one is `CUSTOM_JWT`.
+
+**What the switch deleted.** `agent/tools/a2a_auth.py`, `A2A_M2M_SECRET_ARN`,
+`A2A_COGNITO_TOKEN_URL`, `A2A_COGNITO_SCOPE`, the Secrets Manager read on the invoke
+path, and both custom headers (`X-A2A-Allowed-Skills`, `X-SuperApp-User-Token`). The
+env-var count `restore-text-runtime-config.py` puts back went from 12 to **10**,
+measured on the live restore — three fewer things a deploy can silently strip.
+
+`build_a2a_tools` needed almost no change, because it already passed an explicit
+endpoint into `_local_agent_card(card_dict, endpoint_url)`; the AgentCard's own `url`
+was being overwritten anyway. What changed is the key: grants now arrive keyed on the
+AgentCard **name** rather than a Registry recordId, because that is what a grant group
+encodes and what the sub-agent knows itself as.
+
+**Eight specialist agents** live under
+[`a2a-agent-registry/`](../a2a-agent-registry/README.md). The roster is a
+single table in `common/agents.py`; deploy, teardown, demo-reset and the smoke
+test all import it, because four copies were survivable at three agents and a
+roster edit that missed one failed at a different stage each time.
+
+| Name | Skills | Model | Gateway tools |
+|------|--------|-------|---------------|
+| `energy-optimization-agent` | `estimate_savings`, `tariff_analysis` | Nova Lite | — |
+| `home-security-agent` | `risk_assessment`, `incident_response` | Claude Haiku 4.5 | — |
+| `appliance-maintenance-agent` | `maintenance_schedule`, `troubleshoot` | Nova Lite | — |
+| `device-control-agent` | `inspect_devices`, `orchestrate_devices`, `resolve_capability` | Claude Haiku 4.5 | control / discover / state / history |
+| `light-effect-agent` | `compose_effect`, `effect_from_description` | Claude Haiku 4.5 | control / discover / state |
+| `knowledge-qa-agent` | `answer_from_docs`, `troubleshoot_from_docs` | Nova Lite | knowledge base |
+| `task-management-agent` | `compose_scenario`, `manage_scenario`, `suggest_automation` | Claude Haiku 4.5 | — (own DynamoDB table) |
+| `scene-sync-agent` | `music_feast`, `video_feast` | Claude Haiku 4.5 | `discover_devices`, `query_device_state`, `control_device` |
+
+The first three are prompt-only advisors. The rest reach real backends, which
+is what forced the identity and enforcement work below.
+
+Every reply carries a marker token (`⟦A2A:<domain>⟧`) so an orchestrator, an
+operator or a test can confirm which specialist answered. The marker is applied
+**server-side, on the result** — not left to the model. It used to be added only
+for tool-using agents on the grounds that a prompt-only agent emits it reliably
+from its `system_prompt.md`; that stopped being true when prompts became
+admin-editable, because a global override *replaces* the shipped prompt and the
+instruction leaves with it. `_MarkedResult` returns the text unchanged when it
+already starts with the marker, so unconditional prefixing cannot double it.
+
+**Layout:**
+```
+a2a-agent-registry/
+├── common/
+│   ├── agents.py          # the roster — single source of truth
+│   ├── server.py          # A2AServer + per-request executor + skill enforcement
+│   ├── gateway_tools.py   # shared MCP-as-the-user plumbing
+│   ├── user_identity.py   # forwarded idToken verification (JWKS)
+│   └── governed_prompt.py # admin-editable prompt resolution
+├── <agent>/               # card.json + system_prompt.md [+ tools.py]
+├── deploy.py              # independent deployer (no local Docker)
+├── smoke_test.py          # all agents + negative authorisation cases
+└── verify_governed_prompt.py
+```
+
+#### Identity: two tokens, because one cannot answer both questions
+
+> **Superseded — read §9.13.1 and §9.13.3 for the mechanism in force.** This
+> subsection describes the two-token hop as it was built, and it is kept because the
+> reasoning below is why the replacement looks the way it does. What changed: there is
+> now **one** credential, the end user's own idToken, and the grant is the
+> `cognito:groups` claim on it. The m2m client_credentials token is gone, and so is
+> `X-A2A-Allowed-Skills` as an authorization input — the container derives the granted
+> skills from the same signed claim, which a caller cannot widen.
+>
+> The retired mechanism outlived its use in one place worth naming: every AgentCard
+> went on advertising an OAuth2 `client_credentials` scheme in its `securitySchemes`,
+> which is what a caller reads to decide what to send. Nothing enforced it and our own
+> orchestrator never read it, so it cost us nothing and would have cost a third party
+> their first day. The manifest now publishes the correct declaration as
+> `card.securitySchemes` and `a2a_preflight` reports a card that disagrees.
+
+*As built (retired):* the `Authorization` header carried an OAuth2
+**client_credentials** m2m token (Cognito app client `smarthome-a2a-m2m`, scope
+`a2a-server/invoke`), validated by every downstream Runtime's
+`customJWTAuthorizer`. That token proved *an authorised service is calling* and
+nothing else — it had no `sub`. A specialist that touches a user's devices needs
+the **end user**, so the caller's idToken rode in its own header,
+`X-SuperApp-User-Token` — the same split the main runtime uses with
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-AuthToken`. Neither the m2m token nor that
+header is accepted any more.
+
+*What carried over unchanged:* the sub-agent **re-verifies** the user's idToken
+independently (signature via JWKS, issuer, audience, `token_use == "id"`, expiry
+with 60s leeway) rather than trusting the hop — today that token is the
+`Authorization` bearer itself — then opens the tools Gateway with it so **Cedar
+evaluates the real end user**. The runtime itself holds no device permissions.
+
+> A header is silently stripped unless the Runtime declares
+> `requestHeaderConfiguration.requestHeaderAllowlist`. The first regression run
+> failed with "header is missing" on a request that had definitely sent it. Today
+> the header that must be allowlisted is `Authorization` (§9.5.1);
+> `deploy.py` sets the allowlist on every A2A runtime.
+
+#### Skill enforcement is server-side
+
+`X-A2A-Allowed-Skills` used to be parsed into request state and ignored, which
+made per-skill authorisation purely client-side: the Admin Console's checkboxes
+trimmed the orchestrator's tool list, but anything holding the shared m2m token
+could call any skill on any agent. Skill grants are now **enforced** in
+`common/server.py` (`resolve_caller` → `skills_from_claims` →
+`enforce_allowed_skills`), derived from the verified `cognito:groups` claim on the
+user's own token — a request whose grant excludes every skill the agent publishes
+is refused, and a request with no verifiable user token is refused rather than
+waved through. The client-asserted header is no longer read.
+
+The refusal is returned *as the agent*, not raised: the orchestrator shows the
+tool result to its own model, and a refusal it can read and relay beats an
+opaque 500.
+
+#### Tools are a factory, never a list
+
+A tool that reaches a per-user backend must carry that user's identity, and the
+identity is per **request**. Building tools once at startup would pin whichever
+user arrived first and every later request would act as them — a silent
+cross-user escalation that looks like a working agent. So `run_agent` takes a
+`tools_factory(caller)` and the per-request executor rebuilds the Strands Agent
+for each call. Agent construction measures well under a millisecond, which is
+nothing beside the LLM call behind it.
+
+`user_id` is closed over from the verified `CallerIdentity` and appears in **no**
+model-facing signature — a parameter the model can fill is a parameter a prompt
+injection can fill. `test_agents_roster.py` parses each `tools.py` with `ast` and
+fails if any `@strands_tool` declares one.
+
+#### Admin-governed prompts
+
+A specialist's prompt used to be whatever `system_prompt.md` said in the image
+it was built from, so retuning one meant a redeploy — backwards, since a
+specialist is exactly what an operator wants to adjust without shipping a
+container. `common/governed_prompt.py` resolves it per request:
+
+```
+global override  -> replaces the shipped prompt entirely
+per-user override -> appended to whatever the global step produced
+neither          -> the shipped system_prompt.md
+```
+
+Keyed by **AgentCard name** (`__prompt_light-effect-agent__`), the one
+identifier the console, the Registry record and the running container each
+derive independently. Read per request with no caching: a TTL would make a saved
+edit look ignored for as long as it lasted, which is indistinguishable from the
+bug this removes.
+
+Failure is asymmetric on purpose. An unreadable table falls back to the shipped
+prompt, because refusing to answer over a throttled governance read is worse
+than using the perfectly good prompt compiled into the image; a readable
+override always wins.
+
+#### Latency
+
+Three measured costs on the delegation path, all removed (§4.4 of the spec).
+Delegated turns went from a 39.3s mean to 31.2s — **21% faster**, consistent
+across five comparable prompts, with fast paths unchanged at ~16s.
+
+| Was | Now |
+|-----|-----|
+| `A2ACardResolver.get_agent_card()` — a full HTTP round trip whose only used field, `card.url`, was overwritten on the next line | AgentCard built locally from the Registry record `build_a2a_tools` already holds; falls back to fetching if the record cannot produce a valid card |
+| `asyncio.run` per call, which **closes** the loop it creates — two delegations could not overlap or share a connection pool | one event loop for the process (since moved onto its own thread so delegations overlap — see [Delegation latency, measured](#delegation-latency-measured)) |
+| bare `timeout=60`, no retry, no breaker — one sick specialist cost every turn a full minute | connect 5s / read 55s, plus a per-endpoint breaker that opens after 3 consecutive failures for 60s |
+
+The timeouts are tiered because an unreachable agent should fail in a second while
+one that is thinking has an LLM turn behind it; after the cooldown exactly one probe
+is let through, and a breaker skip reports "unavailable" rather than "call failed".
+The reasoning is in [agent-design-principles §1.8](agent-design-principles.md#18-tiered-timeouts-and-a-breaker-that-distinguishes-unavailable-from-wrong).
+
+`streaming=False` on the A2A hop stays, and the reason is now measured rather
+than assumed. Streaming the sub-agent's tokens cannot improve
+time-to-first-prose, because the orchestrator cannot write its answer until the
+tool it just called returns. Timed against `Agent.stream_async`:
+
+```
++0.00s  init_event_loop
++1.88s  messageStart          <- first token of the turn
++1.88s  tool_use_stream       <- and it is a TOOL CALL, naming the specialist
++2.16s  message (toolUse complete)
++8.13s  first text delta      <- the first PROSE, after the tool returned
+```
+
+So the floor is the specialist's own latency however the hop is transported, and
+pushing its tokens upstream would deliver text the orchestrator has not finished
+reasoning about into a UI with nowhere to put it.
+
+What *is* available early is the specialist's **name**, at 1.88s. The
+orchestrator therefore streams **tool lifecycle** instead of tokens — see
+§9.20 — which replaces ~31s of motionless "thinking…" with "asking the Home
+Security specialist…". The marker stays applied to the result rather than the
+stream, unchanged.
+
+#### 9.13.3 The door asks one question, so it stopped enumerating skills
+
+Group names encode `(agent, skill)`, and the authorizer's `CONTAINS_ANY` list used to
+carry every one of an agent's. Measured against what each enforcement point actually
+decides, that was redundant in one direction and expensive in the other:
+
+| | reads | decides | passes when |
+| --- | --- | --- | --- |
+| Runtime authorizer (the door) | `cognito:groups` | may this caller reach this agent | ANY listed group is held |
+| `common/server.py` (the container) | the same signed claim | which skills were granted | the derived subset is non-empty |
+
+`CONTAINS_ANY` passes on any single group, and `enforce_allowed_skills` refuses only an
+EMPTY subset — so both were answering *"is there any grant on this agent"*. The
+enumeration added no authorization. What it added was a coupling: no wildcard means a
+skill added to a card left its grantees refused at the door, with no log line, until
+somebody redeployed that runtime.
+
+So since 2026-08-15 the door matches ONE stable group, `a2a-<cardName>`, constant for
+the agent's lifetime. Per-skill groups keep doing the job only they can do — telling
+the container which skills a caller holds. A caller holding the door key and no skill
+group passes the door and is refused inside, which is what keeps the coarse door
+honest: it authorizes reaching the agent, never a skill.
+
+**The migration has an order, and reversing it locks every user out.** The grant side
+(`subagent_policy.wanted_groups`, so both the admin API's materialiser and the
+pre-token trigger) must emit `a2a-<agent>` and be backfilled BEFORE any authorizer
+requires it. `scripts/migrate-a2a-door-groups.py` refuses to flip an agent whose door
+group does not yet exist in the pool, and `--rollback` restores the enumeration —
+reversible because granted users hold both shapes. Measured on the live deployment: 10
+door-key memberships backfilled across 3 per-user scopes, global grants needing none
+(the trigger computes them per token), then 8 authorizers flipped with the acceptance
+gate still passing all five checks including **401 for an ungranted caller**.
+
+Two consequences worth holding on to:
+
+- Conformance reports a skill-group-only authorizer as `info`, not `closed`. Such a
+  runtime works; it is merely still coupled. Reporting it red would be false, and a red
+  row an operator cannot reproduce is how a check earns being ignored.
+- A revocation sweep must decode the door key. `parse_group` answers None for it (no
+  separator), so a sweep built on that would strip every skill group off a deprecated
+  agent's holders, leave the one group that opens the door, and report success —
+  `agent_of_group` exists for this.
+
+#### 9.13.4 The interface is three things; everything else is derived
+
+The goal an independent A2A team needs is that its only contract with this platform is
+(1) an inbound endpoint accepting our users' idTokens, (2) an AGENT record with a
+conformant card, and (3) our approval and granting. Approval and granting stay here on
+purpose — otherwise an agent could grant itself — and accepting our Cognito pool is
+inherent to sharing users. Everything else is derived from (2):
+
+| was a cross-team step | now |
+| --- | --- |
+| hand-copying `discoveryUrl` / app client / registry id | `?action=a2a-manifest`, and a **Platform manifest** button on the A2A Agents page. GENERATED from `a2a_conformance` / `a2a_groups` / `a2a_session`, so what we publish cannot drift from what we check — a test substitutes a real card name into the published template and asserts the real checker finds nothing |
+| a platform engineer adding a gateway `passthrough` target | `?action=a2a-gateway-reconcile`, driven from the Registry. Matched by RUNTIME, never by target name — the eight built-in targets are named `light-effect` while their cards say `light-effect-agent`, so name matching would call all eight missing and duplicate them. Orphans are reported, never deleted: an orphaned target is dead weight, not an open door (the sweep closes access), and deleting one would break any card still pointing at it |
+| adding a runtime ARN to `DASHBOARD_EXTRA_RUNTIME_ARNS` | derived from APPROVED records, unioned with the env var (which still carries the voice and bundles runtimes, having no Registry record). Never returns a SHORTER list on failure — it serves the last known one, because a silently shorter allowlist is the exact failure it exists to prevent |
+| "does my agent actually work, and is it actually closed?" | `scripts/a2a-delegation-smoke.py`, asserting BOTH directions. Only the positive one is visible in normal use: a test that checks admission alone passes just as happily against an agent with no `customClaims` at all |
+
+The gateway URL in the manifest is **derived**, not read from an environment variable —
+first from a record already routed through it, else by gateway name. This Lambda's
+script-patched env has been wiped by `cdk deploy` more than once (§9.2), and the failure
+mode for a published contract is the worst kind: a third party configures against a
+blank or stale value we handed them.
+
+#### Delegation latency, measured
+
+`scripts/measure-baseline.py` takes a comparable baseline, writing runs to
+`docs/measurements/` (gitignored — a baseline only compares against another from the
+same deployment). The numbers below are cold-session means over 10 fixed prompts ×
+3 repeats, measured 2026-08-11 on Claude Opus 4.6, and are kept here rather than in
+that directory precisely so the conclusion survives without the raw run:
+
+| Group | wall | platform | server | llm | tool (the A2A hop) | harness |
+|-------|------|----------|--------|-----|--------------------|---------|
+| fast (15) | 17.3s | 7.3s | 10.0s | 5.9s | 1.3s | 2.9s |
+| delegated (15) | 31.3s | 7.0s | 24.3s | 10.0s | 11.5s | 2.9s |
+
+**`platform` is the surprise: ~7s of every turn is spent inside AgentCore before
+this container is entered** (a never-seen session id costs ~7s, a reused one ~0.4s),
+so quoting `wall` alone misattributes the platform's cold start to the harness, and
+`--compare` refuses to diff a warm run against a cold one. Why `platform` is a
+first-class column: [agent-design-principles §1.5](agent-design-principles.md#15-latency-is-not-one-number--separate-what-you-own-from-what-you-rent).
+
+Three optimisations act on the numbers above:
+
+| Change | Effect | Harness |
+|--------|--------|---------|
+| **Device brief on delegation** — the orchestrator names the relevant devices, so the specialist skips its opening `discover_devices` cycle (`shared/device_brief.py`) | **-1.64s (-10%)** on the specialist's turn, winning 4/4 A/B pairs | `scripts/ab-delegation-brief.py` |
+| **Parallel delegation** — the shared event loop moved onto its own thread, so independent delegations genuinely overlap | **51.1s → 17.2s (-66%)** on a three-domain request | `scripts/ab-parallel-delegation.py` |
+| **Prompt caching** on the orchestrator's ~10.5k-token prefix ([§8.7.1](#871-prompt-caching)) | billed input tokens **29,644 → 9**; latency **2%** (noise) | CloudWatch `CacheReadInputTokenCount` |
+
+Two proposals were dropped on measurement (the full expected-vs-measured list is
+[agent-design-principles §1.9](agent-design-principles.md#19-measure-before-optimising--only-one-of-six-expectations-survived)).
+**Prewarming** buys nothing: after 100+ minutes idle — far past the 900s session
+timeout — a specialist's first call was ~0.3s slower than its warm calls (energy
+8.52s vs 8.39s, security 9.65s vs 9.28s), because AgentCore keeps these runtimes
+hot. And **caching the sub-agents' prefixes** would cost more than it saves: mean
+prefixes of 362-4,211 tokens (minima as low as 71) sit below the checkpoint minimum,
+the prefix varies per request, and cache writes bill at 1.25×, so it would be 25%
+more per delegation for zero hits — measurements in
+[agent-design-principles §2.6](agent-design-principles.md#26-not-every-prefix-is-worth-caching).
+
+> **The bug worth knowing about.** The device brief took three deploys: the
+> specialists' prompts said "do not call `discover_devices`" and they kept calling
+> it, because the tool's own docstring still said *"Call this FIRST, every time."*
+> A tool's description outranks the system prompt about that tool, and nothing was
+> visible in any reply. `common/tests/test_discover_guidance.py` now asserts the two
+> halves agree; the full account is
+> [agent-design-principles §3.2](agent-design-principles.md#32-a-tools-description-outranks-the-system-prompt-about-that-tool).
+
+#### Read-only shared Memory
+
+All eight specialists retrieve from the Memory the orchestrator writes
+(`common/memory.py`), under the same actor-partitioned namespaces
+(`/users/{actor}/facts`, `/users/{actor}/preferences`) with **no agent
+dimension** — "prefers warm light" is a fact about the user, not about whichever
+agent heard it. The actor id comes from `shared/memory_actor.py`, one function
+copied into every container: two containers that sanitized the same user
+differently would each get a working, private, half-empty memory, and the symptom
+("the sub-agent never remembers what I told the main agent") reads as a retrieval
+bug rather than a naming one.
+
+**Writing stays the orchestrator's alone**, because only it holds the
+conversation. A specialist receives one self-contained delegated instruction, so
+anything it wrote would return as a context-free half-sentence on every future
+retrieval, and eight concurrent writers would hand the SUMMARIZATION strategy an
+interleaved transcript of a conversation none of them had. Enforced by IAM rather
+than by intent: `A2ASharedMemoryRead` grants `bedrock-agentcore:RetrieveMemoryRecords`
+and nothing else, so an edit that tried to write fails instead of quietly
+poisoning the memory.
+
+`/summaries/{actor}/{session}` **is** read as well (`namespaces_for` in
+`common/memory.py`). It was long documented as unreadable on the reasoning that the
+A2A hop did not propagate a session id, but the session component of that namespace
+is the stable memory session id `mem-{actor}` (`shared/memory_actor.memory_session_id`),
+not a runtime session id, so a specialist derives it from the actor it already has.
+
+The retrieved lines are framed as context about the user, explicitly not part of
+the current request, with the current request winning on conflict. Unlabelled they
+read as instructions — a specialist asked to dim the bedroom would apply a
+remembered ocean effect because the prompt appeared to ask for it.
+
+> `AgentCard` validates types, not emptiness: `AgentCard(name="", url="")`
+> constructs happily and would be sent only to be rejected at the far end. The
+> local builder refuses on the two fields that must be real.
+
+#### Orchestrator routing
+
+`A2A_DELEGATION_RULES` is appended to the system prompt whenever a user has A2A
+grants. It used to describe *categories* of work ("domain expertise the tools
+cannot supply") and list the specialists last, at item 6 of the capability list —
+which also **contradicted** the list, since that claimed
+`query_knowledge_base` for documentation questions, exactly what knowledge-QA
+exists to answer. Whichever section the model read last won.
+
+The rules now name tools explicitly, in a table from what the user asked to the
+exact `a2a_<agent>_<skill>` to call, and state that they OVERRIDE the capability
+list. Routing is on the **subject**: "what modes does the LED matrix support" is
+documentation even though it names a device; "turn the matrix off every night" is
+an automation even though turning things off is normally the orchestrator's own
+job. Single-device actions stay local — delegating a light switch adds seconds
+for nothing.
+
+**That table is generated, not written.** It was hand-maintained until 2026-08-12,
+which meant granting a new specialist on the SubAgent Policy page registered its
+tools but left the prompt unaware of them, so the model kept answering from its own
+knowledge. The rows are now built at request time from each granted AgentCard
+skill's name, description and examples — the same source the tool descriptions
+already use (`_make_skill_tool` in `agent/tools/a2a.py`; the rows are built by
+`build_delegation_rules` in `agent/agent.py`) — while the static preamble above (delegation costs
+seconds, a match makes the call mandatory, route on subject) stays hand-written.
+Granting is therefore sufficient: no prompt edit, no code change, no redeploy.
+
+The cost is that row quality now depends on what specialist authors write in their
+cards. The judgement calls the hand-written table carried, such as documentation
+questions outranking the device name they mention, do not emerge from a skill
+description on their own, which is what `test_delegation_rules.py` and the
+delegation evals have to hold. Prompt caching is unaffected: the prefix is still
+byte-identical across one user's turns, with each distinct grant set occupying its
+own cache entry.
+
+`agent/tests/test_delegation_rules.py` derives every valid tool name from the
+AgentCards and fails if the prompt routes to one that does not exist. It found
+two deployed skills the table never mentioned (`inspect_devices`,
+`tariff_analysis`) on its first run. A renamed skill would otherwise leave the
+prompt pointing at a missing tool, and the model would fall back to its own
+knowledge with no error anywhere.
+
+The rules also state the **cost model**, not just the routing: independent
+specialists run concurrently, so asking two in one turn costs about as long as one,
+and serialising them doubles the wait for nothing. Given only "you may call several
+tools", the model tends to wait for each reply before asking the next — which is
+the 51.1s arm of the parallel-delegation A/B in [Delegation latency, measured](#delegation-latency-measured). Only a genuinely dependent
+step (one specialist needs another's *answer*) is serialised, and the prompt names
+the two cases: a feast the user then wants saved, and an automation containing a
+lighting effect.
+
+**What each delegated message carries.** `agent/tools/a2a.py` appends a device
+brief mechanically, from `shared/device_brief.py` — the relevant devices for this
+request with their ids and the capability bounds a specialist cannot guess
+(ranges, enum values, segment counts). Appended by the *tool* rather than
+requested in the prompt, because a latency fix that depends on the model
+remembering to include device details every time is a fix that works unevenly.
+
+Trimmed twice, and the second cut is the point: filtering by relevance alone would
+still hand over the full 12-device capability table (~1,800 tokens), removing a
+round trip and adding a large prompt — moving the cost rather than removing it.
+One line per device brings it to 99-210 tokens, 5-11% of the payload it replaces.
+The brief is a **hint**: `discover_devices` stays available, the prompt says when
+to use it anyway (no list, the device missing, the list contradicting the request),
+and it states plainly that the brief carries **no live state**, since it is built
+from the static catalog and a specialist that assumed otherwise would report a
+brightness nobody told it.
+
+**Measuring routing.** `scripts/probe-routing.py` reads the runtime's own
+`gen_ai.tool.name` spans, which is the only direct record of which tool ran.
+Three things it got wrong first, each of which made correct behaviour look like
+six product bugs:
+
+- `userId` in the payload becomes `actor_id`, and when this was written A2A grants
+  were read from DynamoDB keyed on it. Omitted, it defaulted to `"default"`, which
+  the grant loader skipped — so **no** `a2a_*` tool was registered and every
+  delegation "failed". (Grants now come from the `cognito:groups` claim on the
+  forwarded token, so a probe must send a real user's idToken; `userId` still keys
+  per-user skills, model and memory.)
+- That key is the **email**. The chatbot sends `email or username or sub`, and
+  the Admin Console resolves sub → email when writing grants
+  (`_resolve_ddb_user_key`), so probing with the sub reads a row that does not
+  exist.
+- The `⟦A2A:…⟧` marker is on the **sub-agent's** reply. The orchestrator
+  summarises rather than pasting it through, so a correctly delegated turn
+  usually shows no marker. Scanning reply text reported six false misses twice
+  over.
+
+#### Deploy path
+
+`python a2a-agent-registry/deploy.py` runs the `agentcore` CLI
+(`agentcore create --protocol A2A`), deploys via CodeBuild (no local Docker),
+then patches each Runtime with env vars, the CUSTOM_JWT authorizer,
+`serverProtocol: A2A` and the header allowlist — the CLI drops all of these
+during `agentcore deploy`. It also copies `shared/` into the code root, because
+a sub-agent that validates a device command or a scene has to agree with the
+Lambdas exactly; a second copy of "what speeds does the fan accept" is a copy
+that will disagree.
+
+IAM is granted per agent and narrowly:
+
+| Inline policy | Grants | Which agents |
+|---------------|--------|--------------|
+| ~~`A2AM2MSecretRead`~~ | *Retired with the m2m model.* It granted `secretsmanager:GetSecretValue` on the m2m secret; nothing on the A2A path reads a secret now, because the only credential is the end user's idToken | none |
+| `A2APromptTableRead` | `dynamodb:GetItem` on `smarthome-skills` | all |
+| `A2ASharedMemoryRead` | `bedrock-agentcore:RetrieveMemoryRecords` on the shared Memory — **and nothing else**, so a future edit that tried to write fails rather than quietly poisoning it (§9.13) | all |
+| `A2AScenariosTableAccess` | read/write on `smarthome-scenarios` + its indexes | task-management only |
+
+Separate policy **names** on purpose: `put_role_policy` replaces a document, so
+sharing one name means whichever step runs last wins and the other grant
+vanishes silently.
+
+> ⚠️ **`UpdateRegistryRecord` wraps every level in `optionalValue`; `Create` takes
+> it bare.** Measured from the botocore service model, not guessed: the union, each
+> descriptor **and** each field.
+>
+> ```
+> create  {"a2aAgentCard": {"data": "<json>"}}
+> update  {"optionalValue": {"a2aAgentCard": {"optionalValue":
+>             {"data": {"optionalValue": "<json>"}}}}}
+> ```
+>
+> This matters because `deploy.py` treats **any** update failure as "delete the
+> record and recreate it", and that path succeeds — so a redeploy reported success
+> while minting a **new recordId**, and `a2aGrants` in every `__a2a_permissions__`
+> row is keyed by recordId. The visible symptom is a user whose skills were granted
+> yesterday having no `a2a_*` tools today, with nothing in any log.
+>
+> It shipped twice. The first fix wrapped only the outer level — which looks right —
+> so the very next deploy recreated the record and voided the grants again.
+> `_as_update_descriptors()` now converts the whole tree, and
+> `common/tests/test_registry_update_shape.py` validates the result against the live
+> service model *and* asserts the plausible wrong shape is genuinely rejected.
+>
+> If grants ever look mysteriously empty after a redeploy, compare the recordIds in
+> `__a2a_permissions__` against
+> `aws agent-registry-control list-registry-records --registry-id <id>`.
+
+Supports `--agent <name>` for partial deploys and `--only` / `--skip` step
+filtering. `./deploy.sh` does **not** deploy the specialists — the base system
+stays minimal and A2A is an opt-in second stage.
+
+#### Registry record lifecycle
+
+| Actor | What it does | Status after |
+|-------|--------------|--------------|
+| `deploy.py` step 6 | creates/updates the AGENT record with the real invocation URL, then submits for approval | `PENDING_APPROVAL` |
+| Admin Console → Skills → *Add from Registry* | approve / reject / deprecate (transitions: [§9.8 Skill review](#skill-review-approve--reject--deprecate)) | `APPROVED` / `REJECTED` |
+| `shared/agent_registry.approve_record` | submits first when still DRAFT, since DRAFT cannot go straight to APPROVED | `APPROVED` |
+
+Running `--only registry` before `--only deploy,persist` renders a card before
+`invocationUrl` exists, and `build_a2a_tools` then skips the record with a
+one-line warning. Hit twice during development; run the steps in order.
+
+**Feature flag.** The orchestrator registers A2A tools only when `REGISTRY_ID` is
+present **and** the turn carries a user token whose `cognito:groups` claim holds at
+least one grant (`grants_from_user_token`, `agent/a2a_grants.py`). Missing either → the
+invoke path skips A2A entirely, so the base system works with zero A2A setup.
+`deploy.py --only patch-text-agent` writes `REGISTRY_ID`, and also
+appends every A2A runtime ARN to the admin Lambda's
+`DASHBOARD_EXTRA_RUNTIME_ARNS` so the ops dashboard sees their tokens (§9.15).
+
+#### Cross-service facts, all measured on the deployment
+
+- **Port 9000, mount `/`** for A2A — differs from HTTP agents (8080,
+  `/invocations`) and MCP agents (8000, `/mcp`).
+- **`agentcore deploy` resets custom runtime config.** It clears
+  `environmentVariables`, `protocolConfiguration`, `authorizerConfiguration`,
+  `requestHeaderConfiguration` and `filesystemConfigurations`. Every deploy path
+  captures a baseline first and restores after. Losing the header allowlist is
+  the dangerous one: the chatbot's auth token would be silently stripped, every
+  Gateway call would 401, and the runtime would answer a bare 500.
+- **`agentcore.json` gets rewritten.** A deploy turned `runtimes` into
+  `harnesses` and then demanded a `harness.json` this project has never had.
+  CodeZip additionally requires `runtimeVersion` (`PYTHON_3_14`) and a
+  `codeLocation`; the working A2A projects are the reference for the right shape.
+- **`agentcore` CLI 0.26.0 rejects a bare `--defaults`** — it needs
+  `--framework Strands --model-provider Bedrock --memory none --build CodeZip
+  --language Python`.
+- **`a2a-sdk` is pinned below 1.0.** Strands `A2AServer` and
+  `bedrock_agentcore.runtime.a2a.build_a2a_app` both expect
+  `a2a.server.apps.A2AStarletteApplication`, which only exists on the 0.3.x
+  line. Declared in both `pyproject.toml` and `requirements.txt` because the two
+  deploy paths read different files.
+- **`call_tool_sync` returns an `MCPToolResult` TypedDict**, so the payload is
+  `result["content"][i]["text"]`, not `result.content[i].text`. Handling only the
+  attribute form left the model reading a stringified Python dict — technically
+  the data, practically unusable.
+- **`ListRegistryRecords` returns `registryRecords`, not `records`.**
+- **Registry left the `bedrock-agentcore` namespace at GA.** All record calls use
+  the `agent-registry-control` client and the `agent-registry:` IAM prefix;
+  Runtime, Gateway, Identity and workload identities did **not** move. The
+  predicted silent failure happened exactly as written: after migration the agent
+  said "I have no device-control specialist" and answered from its own tools —
+  only the log showed `not authorized to perform: agent-registry:GetRegistryRecord`.
+- **The two namespaces hold DISJOINT sets of registries**, and this is the trap
+  that outlives the migration. A GA registry id is invisible to
+  `bedrock-agentcore-control` and vice versa, so `GetRegistry` →
+  `ResourceNotFoundException` does **not** establish that an id is dead — it says
+  the same thing for a live id read through the wrong namespace. Measured:
+  `Zuy3YNKrPQ5uwE9t` is READY with 8 agent records under `agent-registry-control`
+  and a 404 under `bedrock-agentcore-control`. One id was "corrected" to a legacy
+  registry on the strength of that 404 — it holds 5 records but only 3 of type
+  AGENT, and the catalog lists only agents — and the resulting short catalog was
+  then attributed to two unrelated causes (§1.13.1 of the design principles). `scripts/check-registry-wiring.py` compares all four `REGISTRY_ID`
+  consumers and names the namespace explicitly.
+- **A registry's status is `READY`, never `ACTIVE`.** The enum is
+  CREATING/READY/UPDATING/CREATE_FAILED/UPDATE_FAILED/DELETING/DELETE_FAILED —
+  disjoint from the RECORD statuses (DRAFT/PENDING_APPROVAL/APPROVED/...) in the
+  same service, so conflating them raises nothing. `setup-agentcore.py` polled for
+  `ACTIVE`, so its wait could only ever exhaust all 15 attempts and fall through:
+  30s per deploy, behaviourally identical to no wait, and a CREATE_FAILED registry
+  passed straight through it. Now it breaks on leaving CREATING/UPDATING and warns
+  when the settled status is not READY. Locked by
+  `shared/tests/test_registry_status.py`, which reads the enum out of the botocore
+  model rather than restating it.
+
+**Observability.** The A2A runtimes are ADOT-instrumented and tag spans with
+`service.name = {runtimeName}.DEFAULT`, so their tokens flow into the span groups
+and into the dashboard's service-name allowlist (§9.15). Two caveats:
+
+- **The orchestrator's session id crosses the hop** (since 2026-08-15,
+  `shared/a2a_session.py`). It travels twice: on the platform header
+  `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`, which makes AgentCore adopt it as
+  the sub-agent's `runtimeSessionId` (so it lands on the sub-agent's spans), and in
+  the A2A message metadata under `orchestratorSessionId`, the only copy the
+  sub-agent's own code can read. Before that, a sub-agent stamped a bare UUID and
+  per-**turn** attribution across a delegation was impossible; verified live, one
+  delegated turn now reports orchestrator and specialist tokens under a single
+  `session.id`. Ids shorter than AgentCore's 33-character minimum (e.g. warmup
+  turns) are not forwarded.
+- **Upstream evaluation measures the caller, not the callee.** An A2A call
+  appears in the orchestrator's session as a `tool_use`/`tool_result` span pair,
+  which grades whether the orchestrator *chose and used* the delegate correctly —
+  not the delegate's own answer. A delegate that writes state would want its own
+  online-eval config; `_ensure_online_eval_config` in `setup-agentcore.py` is
+  reusable, keyed on the A2A runtime's log group + service name.
+
+**Regression gate.** `smoke_test.py` exercises all eight agents plus negative
+authorisation cases (a valid user token with no grant, and a token granted on one
+agent presented to another), each of which is a way authorization could fail open
+that a positive probe cannot detect. An agent added to the roster
+without a probe prompt fails *that* agent and continues — it used to raise
+`KeyError` and take every other agent's result with it, so one missing entry read
+as a total outage.
+
+**Flow:**
+
+```
+┌───── Chatbot (user) ─────────────────────────────────────────┐
+│  "Give the light strip a calm ocean feel"                    │
+└────────────────────┬─────────────────────────────────────────┘
+                     │  POST /invocations
+                     │  X-Amzn-…-Custom-AuthToken: <user idToken>
+                     ▼
+┌───── smarthome orchestrator (Strands on AgentCore) ──────────┐
+│ invoke_agent():                                               │
+│   1. grants_from_user_token(): cognito:groups on the user's    │
+│      idToken → {agentCardName: [skillId, …]}  (REGISTRY_ID set)│
+│   2. cards_by_name(): APPROVED Registry records → AgentCards  │
+│      register a2a_<agent>_<skill>; endpoint = card.url,        │
+│      user token + session id PINNED in the closure            │
+│      (never model parameters)                                 │
+│   3. routing rules name the tool; LLM calls it                │
+└────────────────────┼─────────────────────────────────────────┘
+                     │ A2A JSON-RPC message/send  (one shared loop)
+                     │ Authorization: Bearer <user idToken>   ← the only credential
+                     │ X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: <orchestrator sid>
+                     │ body metadata.orchestratorSessionId:  <orchestrator sid>
+                     ▼
+┌───── smarthome-a2a-gw (AgentCore Gateway, CUSTOM_JWT) ───────┐
+│  Cedar: broad permit + optional per-agent forbid (kill switch)│
+│  one `passthrough` target per specialist, outbound            │
+│  JWT_PASSTHROUGH → the user's token arrives unchanged         │
+└────────────────────┼─────────────────────────────────────────┘
+                     ▼
+┌───── light-effect-agent Runtime (protocol=A2A, :9000, /) ────┐
+│  CUSTOM_JWT authorizer: this pool, allowedAudience, and       │
+│    customClaims cognito:groups CONTAINS_ANY [a2a-<cardName>]  │
+│    (no grant → 401 before our code runs)                      │
+│  resolve_caller(): re-verify idToken, derive granted skills   │
+│    from the same claim, enforce_allowed_skills                │
+│  governed_prompt: global/user override or shipped prompt       │
+│  tools_factory(caller) → GatewaySession(Bearer caller token)   │
+│  str(result) = "⟦A2A:light-effect⟧ …"   (marker on the RESULT) │
+└────────────────────┼─────────────────────────────────────────┘
+                     │ MCP call_tool, as the USER
+                     ▼
+        tools Gateway → Cedar (per-user) → iot-control → MQTT
+```
 
 ### 9.14 Code Interpreter — Live Agent Code Execution
 
@@ -5108,14 +5139,13 @@ the **same SigV4 `/invocations` path the chatbot uses**, so the resulting spans,
 tokens, sessions and evaluation scores are indistinguishable from real usage.
 
 ```bash
-export SIM_USER_PASSWORD='SomeStrong#Pass1'
-python3 scripts/simulate-users.py setup      # 9 personas, idempotent
-python3 scripts/simulate-users.py run        # light tier, ~3.5 min
-python3 scripts/simulate-users.py run --heavy
-python3 scripts/simulate-users.py run --days-back 45   # spread votes for 60d/90d views
-python3 scripts/simulate-users.py status
-python3 scripts/simulate-users.py teardown --yes
+python3 scripts/simulate-users.py setup && python3 scripts/simulate-users.py run
 ```
+
+(`SIM_USER_PASSWORD` must be exported first.) The pre-demo procedure, all four subcommands and their flags, what to check
+afterwards and a troubleshooting table are in the admin manual
+[§10.3](admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做). This
+section covers why the harness is shaped the way it is.
 
 **Personas.** Each is a different tenant profile on purpose, so the dashboard's
 attribution charts show several real rows instead of collapsing into one bucket
@@ -5206,7 +5236,11 @@ A **scene** is a trigger plus a list of device actions: *when this happens, put
 these devices in these states*. The task-management A2A agent writes them,
 an EventBridge Scheduler-driven Lambda executes them, and the Admin Console can
 list them. All three share `shared/scenarios.py`, so what gets validated at write
-time is what gets executed.
+time is what gets executed. This section is the design; the operator view
+(reconciling schedules, testing a scene without waiting for its time, export/import)
+is in the admin manual [§9.6](admin_manual_管理员使用手册.md#96-场景联动与定时自动化),
+whose credential subsection summarises
+[The credential, and why it is a real tradeoff](#the-credential-and-why-it-is-a-real-tradeoff) below.
 
 #### Live scenes are a different agent
 
@@ -5387,10 +5421,10 @@ minutes all afternoon.
 **Schedules are reconciled, not incrementally updated.** `sync_schedules` lists
 what Scheduler holds, works out what the table says it should hold, and fixes the
 difference — so a scene deleted while the admin API was erroring cannot leave an
-orphan schedule firing forever for a row that no longer exists. Times are
-scheduled in **UTC**: nothing in the schema records a timezone yet, and a guessed
-offset would fire a scene at a time the user never named and be much harder to
-notice than a consistent UTC one.
+orphan schedule firing forever for a row that no longer exists. Time triggers
+carry the owner's IANA zone in `ScheduleExpressionTimezone` (see the trigger
+five-tuple above); only solar schedules are pinned to UTC, because their cron is
+already an absolute UTC instant.
 
 #### The credential, and why it is a real tradeoff
 
@@ -5457,11 +5491,11 @@ other way, and the alert caught a live instance of exactly that on its first run
 | `variant` | the bundles runtime — the orchestrator's image with `ENABLE_BUNDLE_HOOK=1`, reached only in `ab-bundles` mode. Listing it as a second orchestrator would overstate the fleet; hiding it would make its token spend unattributable |
 | `tool` | the navigation DeepLink — a Gateway Lambda target, not an agent, but one of the seven entities in the architecture and an operator looking for it should find it here |
 
-Clicking a row opens the agent's detail page: card metadata, published skills,
-live metrics, and its **prompt**, in the same `PromptEditorCard` the Prompt tab
-uses so the two screens cannot drift on what "Revert to Default" or the additive
-per-user scope mean (§8.10). `tool` and `variant` rows explain why they have no
-prompt instead of showing a dead editor.
+The per-agent detail page edits the agent's prompt with the same
+`PromptEditorCard` the Prompt tab uses, so the two screens cannot drift on what
+"Revert to Default" or the additive per-user scope mean (§8.10). The page-by-page
+usage, and what to do about a `No runtime` row, are in the admin manual
+[§9.5](admin_manual_管理员使用手册.md#95-agents-页--机队总览与逐个-agent-治理).
 
 > `smarthome_bundles` initially classified as a second orchestrator *and*
 > collided on `agentId`, which would have given two rows one trackBy key and one
@@ -5590,7 +5624,7 @@ then one `answer`.
 ```
 
 So the user reads "asking the Home Security specialist…" at 12s rather than
-nothing until 45s. §9.13 explains why streaming *tokens* cannot beat that.
+nothing until 45s. [§9.13 Latency](#latency) explains why streaming *tokens* cannot beat that.
 
 Opt-in because the response **type** changes: returning a generator makes
 `BedrockAgentCoreApp` emit `text/event-stream`, and an existing caller doing
@@ -5779,51 +5813,63 @@ them would 403 and the chatbot would show a button that appears to do nothing.
 
 **Endpoint:** `https://{gateway-id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp`
 
-**Authorization:** NONE (only called internally by the runtime)
+**Authorization:** `CUSTOM_JWT` (Cognito User Pool). The agent forwards the end user's idToken as `Bearer`; the Policy Engine evaluates Cedar per-user permit policies against it (§9.5).
 
 The gateway exposes device control tools via MCP protocol. The Strands Agent connects as an MCP client to discover available tools and their schemas, then invokes them to control devices.
 
 **Lambda Targets:**
-- `control_device(device_type, command)` — Send a control command to a smart home device (via `iot-control` Lambda)
-- `discover_devices()` — List available smart home devices with their types, actions, and power-on/off commands (via `iot-discovery` Lambda)
+- `control_device(device_id, command)` — Send a control command to one catalog device (via `iot-control` Lambda). `device_type` is still accepted for existing skills and the voice agent's power-on loop and resolves to the first device of that type.
+- `discover_devices()` — Return the device catalog: each device's id, type, room, capabilities (ranges, enums, units), actions and power-on/off commands (via `iot-discovery` Lambda)
+- `query_device_state` / `query_sensor_history` — current reported state and a metric over a time window (via `iot-query` Lambda, target `SmartHomeDeviceQuery`)
+- `navigate_to_page` — app deep links (via `nav-deeplink` Lambda, target `SmartHomeNavigation`)
+- `query_knowledge_base` — enterprise KB retrieval (via `kb-query` Lambda, target `SmartHomeKnowledgeBase`)
 
 ### 10.3 iot-discovery Lambda Response Format
 
 **MCP tool response (via AgentCore Gateway):**
 ```json
 {
+  "userId": "<caller sub>",
   "devices": [
     {
-      "thingName": "smarthome-led_matrix",
+      "deviceId": "living-led-1",
       "deviceType": "led_matrix",
       "displayName": "LED Matrix",
+      "room": "living",
+      "roomName": "Living Room",
+      "connectivity": "wifi",
+      "capabilities": {"power": {"type": "boolean"}, "mode": {"type": "enum", "values": ["rainbow", "..."]}, "...": {}},
       "actions": ["setPower", "setMode", "setBrightness", "setColor"],
+      "readOnly": false,
       "powerOn": {"action": "setPower", "power": true},
       "powerOff": {"action": "setPower", "power": false}
     }
   ],
-  "count": 4
+  "count": 12
 }
 ```
 
-Currently returns a mock list of 4 devices. In production, this would query IoT Core `listThings` to return user-specific devices.
+Returns `shared/device-catalog.json` (copied next to the Lambda at build time by `scripts/01-install-deps.sh`) via `device_catalog.discovery_payload()`. The list is the same for every user; the caller's `sub` is echoed back.
 
 ### 10.4 iot-control Lambda Response Format
 
 **MCP tool response (via AgentCore Gateway):**
 ```json
 {
-  "message": "Command sent to led_matrix",
+  "message": "Command sent to LED Matrix",
+  "deviceId": "living-led-1",
   "device": "led_matrix",
   "command": {"action": "setMode", "mode": "rainbow"},
-  "topic": "smarthome/led_matrix/command"
+  "topic": "smarthome/<userSub>/living-led-1/command"
 }
 ```
+
+Out-of-range integers are clamped rather than rejected; the published command is the normalised copy and a `warnings` list is added so the agent can tell the user what it adjusted.
 
 **Error response:**
 ```json
 {
-  "error": "Invalid action 'xyz' for led_matrix. Valid: ['setMode', 'setPower', 'setBrightness', 'setColor']"
+  "error": "Invalid action 'xyz' for living-led-1. Valid: setPower, setMode, setBrightness, setColor"
 }
 ```
 
@@ -5866,31 +5912,33 @@ Currently returns a mock list of 4 devices. In production, this would query IoT 
 
 ### 11.1 Topic Hierarchy
 
-All device topics are now **per-user scoped**. `<userSub>` is the Cognito User Pool `sub` (UUID) of the signed-in user. The device simulator publishes and subscribes only under its own prefix, and the `iot-control` Lambda only publishes to the caller's prefix — derived from the agent-wrapped tool argument, not from anything the LLM can forge.
+All device topics are now **per-user scoped** and **per-device addressed**. `<userSub>` is the Cognito User Pool `sub` (UUID) of the signed-in user; `<deviceId>` is the catalog id from `shared/device-catalog.json` (`{room}-{type}-{seq}`). The device simulator publishes and subscribes only under its own prefix, and the `iot-control` Lambda only publishes to the caller's prefix — derived from the agent-wrapped tool argument, not from anything the LLM can forge.
 
 ```
 smarthome/
 └── <userSub>/
-    ├── led_matrix/command    # Commands to that user's LED matrix
-    ├── rice_cooker/command   # Commands to that user's rice cooker
-    ├── fan/command           # Commands to that user's fan
-    └── oven/command          # Commands to that user's oven
+    └── <deviceId>/           # e.g. living-led-1, living-fan-1, kitchen-oven-1
+        ├── command           # agent -> device (published by iot-control)
+        ├── state             # device -> IoT rule -> DynamoDB (reported state)
+        └── history           # device -> IoT rule -> iot-history-ingest Lambda (sensor samples)
 ```
 
 See §6.1 (Device Simulator MQTT Connection) and §8.3 (Tool Access via Gateway) for how `<userSub>` propagates from the browser's Cognito session and from the agent's validated idToken.
 
 ### 11.2 Command Message Schemas
 
-#### LED Matrix (`smarthome/<userSub>/led_matrix/command`)
+`shared/device-catalog.json` is authoritative for every device's actions, required parameters and bounds; the four device types below are examples. Integer parameters are clamped to the catalog range.
+
+#### LED Matrix (`smarthome/<userSub>/living-led-1/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
 | `setPower` | `power`: boolean | `{"action":"setPower","power":true}` |
-| `setMode` | `mode`: rainbow, breathing, chase, sparkle, fire, ocean, aurora | `{"action":"setMode","mode":"rainbow"}` |
+| `setMode` | `mode`: rainbow, breathing, chase, sparkle, fire, ocean, aurora, solid | `{"action":"setMode","mode":"rainbow"}` |
 | `setBrightness` | `brightness`: 0-100 | `{"action":"setBrightness","brightness":75}` |
 | `setColor` | `color`: hex string | `{"action":"setColor","color":"#FF00FF"}` |
 
-#### Rice Cooker (`smarthome/<userSub>/rice_cooker/command`)
+#### Rice Cooker (`smarthome/<userSub>/kitchen-cooker-1/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
@@ -5898,20 +5946,21 @@ See §6.1 (Device Simulator MQTT Connection) and §8.3 (Tool Access via Gateway)
 | `stop` | (none) | `{"action":"stop"}` |
 | `keepWarm` | `enabled`: boolean | `{"action":"keepWarm","enabled":true}` |
 
-#### Fan (`smarthome/<userSub>/fan/command`)
+#### Fan (`smarthome/<userSub>/living-fan-1/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
 | `setPower` | `power`: boolean | `{"action":"setPower","power":true}` |
-| `setSpeed` | `speed`: 0 (off), 1 (low), 2 (medium), 3 (high) | `{"action":"setSpeed","speed":2}` |
+| `setSpeed` | `speed`: 0-8 (0 = off) | `{"action":"setSpeed","speed":2}` |
+| `setMode` | `mode`: normal, natural, sleep, auto | `{"action":"setMode","mode":"natural"}` |
 | `setOscillation` | `enabled`: boolean | `{"action":"setOscillation","enabled":true}` |
 
-#### Oven (`smarthome/<userSub>/oven/command`)
+#### Oven (`smarthome/<userSub>/kitchen-oven-1/command`)
 
 | Action | Parameters | Example |
 |--------|-----------|---------|
 | `setPower` | `power`: boolean | `{"action":"setPower","power":true}` |
-| `setMode` | `mode`: bake, broil, convection | `{"action":"setMode","mode":"bake"}` |
+| `setMode` | `mode`: bake, broil, convection, preheat | `{"action":"setMode","mode":"bake"}` |
 | `setTemperature` | `temperature`: 200-500 (Fahrenheit) | `{"action":"setTemperature","temperature":375}` |
 
 ---
@@ -5924,7 +5973,7 @@ The iot-control Lambda returns structured error responses:
 
 ```python
 # MCP tool error response
-{"error": "Invalid action 'xyz' for led_matrix. Valid: ['setMode', 'setPower', 'setBrightness', 'setColor']"}
+{"error": "Invalid action 'xyz' for living-led-1. Valid: setPower, setMode, setBrightness, setColor"}
 ```
 
 The agent receives error responses via MCP and can:
@@ -6002,13 +6051,13 @@ Both apps use content-hash filenames for cache busting via CloudFront.
 | **Cognito Identity Pool (authenticated role)** for chatbot | Exchanges the User Pool idToken for temporary AWS creds so the browser can SigV4-sign Runtime calls; the unauthenticated role keeps its IoT-only scope for the device simulator |
 | **AgentCore Gateway (MCP)** for tool access | Standard MCP protocol for tool discovery and invocation; decouples agent from tool implementation |
 | **Strands Agents SDK** | Python-native agent framework with skill system, MCP client support, and BedrockAgentCoreApp integration |
-| **Kimi K2.5** model (`moonshotai.kimi-k2.5`) | User requirement; available via Bedrock model access |
-| **Claude Haiku 4.5** for image captioning (default `VISION_MODEL_ID`) | Native multimodal on Bedrock Converse, strong OCR / fine-detail, same IAM footprint as Kimi. Latency bench (`vision-latency-test/`) vs Nova Lite: Haiku p50 3.3–5.4 s, Nova Lite p50 2.0–3.2 s depending on image count; the choice is env-flag-driven so operators can pick by workload |
+| **Claude Sonnet 4.6** default text model (`us.anthropic.claude-sonnet-4-6`) | Invoked through its cross-region inference profile (the bare id is not on-demand invocable); other Bedrock models such as Kimi K2.5 (`moonshotai.kimi-k2.5`) remain available as per-user overrides |
+| **Claude Haiku 4.5** for image captioning (default `VISION_MODEL_ID`) | Native multimodal on Bedrock Converse, strong OCR / fine-detail, same IAM footprint as the text model. Latency bench (local harness, not shipped) vs Nova Lite: Haiku p50 3.3–5.4 s, Nova Lite p50 2.0–3.2 s depending on image count; the choice is env-flag-driven so operators can pick by workload |
 | **CDK over CloudFormation/SAM** | TypeScript type safety, higher-level constructs, better developer experience |
 | **Two-stack deploy** (CDK + agentcore CLI) | CDK JS SDK lacks AgentCore client; `agentcore` CLI has native `AWS::BedrockAgentCore::Runtime` support |
-| **CodeZip** (not Docker) for agent | No Docker required; `agentcore` CLI packages Python code as zip, uses managed Python 3.13 runtime |
+| **CodeZip** (not Docker) for agent | No Docker required; `agentcore` CLI packages Python code as zip, uses managed Python 3.14 runtime |
 | **config.js injection** | Decouples build from deployment environment |
-| **requestAnimationFrame** for LED | 60fps rendering without setInterval timing issues |
+| **requestAnimationFrame** for lights | 60fps rendering without setInterval timing issues |
 
 ---
 
@@ -6021,7 +6070,7 @@ Both apps use content-hash filenames for cache busting via CloudFront.
 | AgentCore Gateway | Managed scaling | MCP server with Lambda targets, scales automatically |
 | Lambda | Concurrent executions | 1,000 default, auto-scales |
 | IoT Core | Per-account | 500,000 connections default |
-| Bedrock (Kimi-2.5) | Per-model throttling | Dependent on Kimi-2.5 quota |
+| Bedrock (text model, Claude Sonnet 4.6 default) | Per-model throttling | Dependent on the selected model's quota (cross-region inference profile for the default) |
 | Bedrock vision (Haiku 4.5 / Nova Lite) | Per-model throttling | Called only on image turns; one retry on Throttling/ServiceUnavailable before falling back to a placeholder reply |
 | Session storage `/mnt/workspace` | Per session | Managed by AgentCore; evicted when the session closes. One directory per `runtimeSessionId`, fully isolated across sessions |
 | Cognito | Per-region | 40 req/sec default for auth APIs |

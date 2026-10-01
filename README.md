@@ -2,7 +2,7 @@
 
 > **Agent Harness 管理平台**，以智能家居场景为示例，展示如何在 AWS AgentCore 上构建完整的 Agent 运维管控体系：技能编排、模型选择、工具权限（per-user Cedar 策略）、**企业知识库**、外部集成、会话监控、长期记忆查看和质量评估。
 
-基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台按 **Discover / Build / Deploy / Assess** 四个阶段组织 17 个页面，覆盖 Agent 全生命周期，其中 Overview 页内置 **Agent 运维统计大屏**（实时健康、Token 成本归因、评估漂移、版本发布状态）。**Skill ERP** 网站让普通用户可以自助发布技能到 **AWS Agent Registry**，审批通过后一键导入到技能目录。
+基于 AWS AgentCore Runtime/Memory/Gateway 构建的 AI 智能家居控制系统。用户可以通过聊天机器人用**自然语言文字**或**实时语音对讲**（Nova Sonic 双向流式）控制模拟 IoT 设备（LED 矩阵灯、电饭煲、风扇、烤箱）。管理控制台按 **Discover / Build / Deploy / Assess** 四个阶段组织 18 个页面，覆盖 Agent 全生命周期，其中 Overview 页内置 **Agent 运维统计大屏**（实时健康、Token 成本归因、评估漂移、版本发布状态）。**Skill ERP** 网站让普通用户可以自助发布技能到 **AWS Agent Registry**，审批通过后一键导入到技能目录。
 
 > **实现原理、架构图、协议细节** 请参见 [`docs/architecture-and-design.md`](docs/architecture-and-design.md)。本 README 专注于**部署和使用**。
 
@@ -11,14 +11,15 @@
 九个 Agent(一个编排器 + 八个 A2A 专家)跑在各自的 AgentCore Runtime 上。真正值得看的
 不是拓扑,而是**哪些设计是被实测和线上故障逼出来的**。完整版见
 [`docs/agent-design-principles-zh.md`](docs/agent-design-principles-zh.md),每条都配
-file:line 与数字;这里只列最反直觉的五条。
+代码位置(文件 + 符号名)与数字;这里只列最反直觉的五条。
 
 **1. 会碰用户数据的 tool 必须是工厂,不能是列表。** 启动时建一次 tool 列表会把第一个
 到达的用户钉死在后续每个请求上 —— 不报错、不打日志,Agent 照样流畅回答。这是一个长得
-像"系统正常"的跨用户数据泄漏。`common/server.py:316` 按请求重建;`user_id` 从闭包里
+像"系统正常"的跨用户数据泄漏。`common/server.py` 按请求重建(`tools_factory(caller)`);`user_id` 从闭包里
 来,**不出现在任何模型可见的签名里** —— 模型能填的参数,prompt injection 就能填。
 
-**2. 一半的"性能优化"实测方向是错的。** Spec 5 四条延迟优化,两条被自己的测量推翻:
+**2. 多数"性能优化"的预期实测方向是错的。** Spec 5 四个延迟阶段里只有 S2(委派时带设备清单,-10%)
+符合预期,下面这些预期都被自己的测量推翻:
 
 | 预期 | 实测 |
 |---|---|
@@ -144,7 +145,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 
 > **注册 ≠ 有管理员权限。** 本控制台只对 `admin` 组成员开放。新注册的账号能登录，但会看到"访问被拒绝"，需要联系管理员把你加入 `admin` 组（Admin Console → Build → Identity 页的 `Make Admin`，或 `aws cognito-idp admin-add-user-to-group`）。在此之前可以直接使用**聊天机器人** —— 所有终端用户功能（智能家居对话、设备控制、知识库问答）都不需要管理员权限。注册页和"访问被拒绝"页都给出了聊天机器人的直达链接。
 
-左侧导航按 Agent 生命周期分成四段，共 17 个页面：
+左侧导航按 Agent 生命周期分成四段，共 18 个页面：
 
 | 分段 | 页面 | 能做什么 |
 |------|------|---------|
@@ -155,6 +156,7 @@ pip install strands-agents strands-agents-builder bedrock-agentcore boto3 mcp py
 | Build | **Skills** | 编辑/删除技能（完整 [Agent Skills 规范](https://agentskills.io/specification) 字段）；技能目录文件管理（S3 预签名 URL）；全局 + 按用户覆盖。**新技能只能从 AWS Agent Registry 导入已批准记录** —— 控制台不再本地创建技能，统一由 Registry 注册与审批 |
 | Build | **Prompt** | 编辑文字/语音 agent 的 system prompt（全局默认 + 按用户追加），运行时叠加拼接 |
 | Build | **Tool Policy** | 按用户配置可调用的工具（Cedar 策略）；内置工具与 Gateway 工具并列并用 Badge 区分；ENFORCE / LOG_ONLY 切换。每个 Gateway 工具旁列出**谁在用它** —— 撤掉 `control_device` 会同时停掉聊天指令、定时场景和两个子 Agent |
+| Build | **子 Agent 策略（SubAgent Policy）** | 按 skill 授权 A2A 专家 Agent（`#/subAgentPolicy`）：范围选「全局默认（所有用户）」或某个用户，展开 agent 勾选 skill 后保存。授权落成 Cognito 组 / token claim，用户**重新登录**后生效；在用户范围下单独配置成空列表即可把全局授权从该用户身上收回 |
 | Build | **Memories** | 查看每个用户的长期记忆（事实 + 偏好 + 情景，来自 AgentCore Memory 的四种内置策略） |
 | Build | **Knowledge Base** | 上传文档到企业知识库（PDF、TXT、MD、DOCX、CSV 等）；一键触发 Bedrock KB 向量化同步；按用户隔离 |
 | Build | **Identity** | 已注册用户表，**以及全部用户管理**：新增用户、提权/降权、删除（原先在 Overview，已统一收敛到此处；不能对自己降权或删除） |
@@ -213,9 +215,9 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
 
 **这不是"多几个 agent"而已 —— 关键在于身份没有在委派时丢掉：**
 
-- `Authorization` 头里是共享的 m2m token，它只能证明"某个被授权的服务在调用"，**没有 `sub`**。
-- 用户的 idToken 走**单独的 `X-SuperApp-User-Token` 头**，子 Agent **独立重新验签**（JWKS / issuer / audience / 过期），再用它开 Gateway —— 所以 **Cedar 评估的是真实终端用户**。子 Agent 自己没有任何设备权限。
-- `X-A2A-Allowed-Skills` 现在是**服务端强制**的。以前它只被解析进 request state 就放过去了，等于 per-skill 授权完全在客户端 —— 任何拿到 m2m token 的人都能调任意 agent 的任意 skill。
+- 编排器把**用户自己的 idToken** 放在 `Authorization` 头里发出，没有服务 token、也没有第二个 header。AgentCard 从 2026-08-15 起指向 `smarthome-a2a-gw` 网关。
+- 授权就是 token 里签名过的 `cognito:groups` claim（Cognito 组 `a2a-<agent>` / `a2a-<agent>.<skill>`）：子 Agent Runtime 的 authorizer 在进容器**之前**就拒绝没有该 Agent 授权组的调用方，容器再从同一个 claim 推导 skill 子集（`common/server.py` `skills_from_claims`），为空就拒绝。调用方无法自己放宽授权 —— 旧的客户端自报 `X-A2A-Allowed-Skills` header 已经删除。
+- 子 Agent **独立重新验签**（JWKS / issuer / audience / 过期），再用同一个 token 开 Gateway —— 所以 **Cedar 评估的是真实终端用户**。子 Agent 自己没有任何设备权限。session id 不是凭证，走 A2A 消息的 metadata。
 
 其他要点：
 
@@ -225,9 +227,9 @@ Skill ERP 是面向**普通终端用户**的技能发布站点（不要求 `admi
   cd a2a-agent-registry
   python deploy.py                              # 全量
   python deploy.py --agent light-effect          # 只部署一个
-  python smoke_test.py                           # 8 个 agent + 6 个负向鉴权用例
+  python smoke_test.py                           # 8 个 agent 的正向探测 + 负向鉴权用例
   ```
-- Admin 在 **Admin Console → Users → Manage Permissions → A2A Agents** 区块按用户按 skill 授权；主 Agent 在下一次调用时加载。**未授权的 skill 根本不会注册**，模型看不见也就无法被 prompt injection 诱导去调用。
+- Admin 在 **Admin Console → Build → 子 Agent 策略（SubAgent Policy）** 按 skill 授权（全局或按用户）；用户**重新登录**拿到新 token 后，主 Agent 在下一次调用时加载。**未授权的 skill 根本不会注册**，模型看不见也就无法被 prompt injection 诱导去调用。
 - **每个子 Agent 的 prompt 可以在 Admin Console → Agents → 详情页单独编辑**，保存后下一次请求即生效，不需要重新部署容器。
 - 委派一轮约 30 秒（直接回答约 15 秒）—— A2A 这一跳不走流式，所以主 Agent 在专家答完之前不会输出任何内容。这一点写在运维大屏的 TTFT 说明里，不是藏起来。
 - 完整部署流程、测试提示词和逐步演示指南见 [`a2a-agent-registry/README.md`](a2a-agent-registry/README.md)。
@@ -321,7 +323,7 @@ Chatbot 输入框左侧的图标打开右侧抽屉：**67 条示例、19 个能�
 |---|---|
 | 委派时带上相关设备清单（省掉子 Agent 开场那次 `discover_devices`） | **-1.64s（-10%）**，四对 A/B 全胜 |
 | 并行委派（event loop 移到自己的线程） | 三域请求 **51.1s → 17.2s（-66%）** |
-| Prompt caching（编排器约 10.5k token 的固定前缀） | 计费 input token **29,644 → 9**；延迟 2%（噪声内）|
+| Prompt caching（编排器约 10.5k token 的固定前缀） | 计费 input token **29,644 → 9**（线上 CloudWatch `InputTokenCount`，窗口合计）；延迟 2%（噪声内）|
 | 委派进度流 | 首个可见信号 **31s → 12s** |
 
 > **报数字要分清哪部分不是你的。** 24.3s 平均耗时里约 **7.1s 花在 AgentCore 里、还没进容器**：全新 session id 约 7s，复用约 0.4s。只报总耗时会把平台冷启动记在 harness 账上。
@@ -359,31 +361,9 @@ python3 scripts/simulate-users.py status      # 查看现有模拟用户及其�
 python3 scripts/simulate-users.py teardown --yes
 ```
 
-9 个 persona 各带不同的模型、租户模式和场景侧重，这样大屏的成本归因图表才会出现多行真实数据、而不是全塞进一个桶：
+9 个 persona 各带不同的模型、租户模式和场景侧重(含八个专家 Agent 的委派),走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径,所以 span、Token、会话和评估分与真实流量无法区分;跑完还会投**真实的**赞/踩票(标 `source="sim"`)。一切限定在 `simuser+` 邮箱前缀内,`teardown` 不可能误删真实用户。跑完等两三分钟再看大屏(CloudWatch 摄取延迟 + 5 分钟缓存)。
 
-| persona | 模型 | 租户模式 | 覆盖 |
-|---|---|---|---|
-| `alice` | Opus 4.6 | default | 四类设备控制、设备发现、一键全开 |
-| `bob` | Sonnet 4.6 | default | 企业知识库、天气查询、拒答 |
-| `carol` | Haiku 4.5 | ab-bundles | 多轮记忆延续、用户反馈 |
-| `dave` | Kimi K2.5 | ab-targets | code-interpreter 数据分析（heavy） |
-| `erin` | Sonnet 4.5 | default | browser-use 网页操作（heavy）、拒答、模糊指令 |
-| `frank` | Sonnet 4.6 | default | **灯效 + 场景联动专家** |
-| `grace` | Haiku 4.5 | ab-bundles | **任务管理（含日出日落触发）、多设备编排** |
-| `henry` | Opus 4.6 | ab-targets | **能耗优化 + 家庭安全专家** |
-| `iris` | Sonnet 4.5 | default | **家电维护、文档问答、三专家并发委派** |
-
-后四个补的是一个真实缺口：**在此之前八个专家 Agent 一个都没有流量**，所以大屏「按 Agent 运行时」归因无从归因，演示也演不出委派。对话内容来自 Chatbot 那份同样的 `shared/prompt-examples.json`，所以「演示覆盖了什么」和「界面上能点到什么」不会各说一套。
-
-测试用户通过 Cognito 登录、走与聊天机器人**完全相同**的 SigV4 `/invocations` 路径，所以产生的 span、Token、会话和评估分与真实流量无法区分。跑完还会按各自的满意度倾向投**真实的**赞/踩票（标 `source="sim"`，大屏注明占比）。
-
-> **`--days-back` 只能移动本脚本自己写的行**（反馈投票）。span 和评估分的时间戳由 AgentCore 写、无法伪造，所以 90 天视图里今天之前的曲线本来就是稀疏的 —— 那是真实情况。填满它就得往真实遥测里注入假数据。
-
-> **安全边界**：一切都限定在 `simuser+` 邮箱前缀内，代码里有 guard 对其他邮箱直接抛异常，所以 `teardown` 不可能误删真实用户。
->
-> 跑完等两三分钟再看大屏 —— CloudWatch 有摄取延迟，且大屏有 5 分钟缓存（点刷新可强制重算）。
-
-**完整演示前 runbook**(含排障、跑完该检查什么)见 [管理员手册 §10.3](docs/admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做);实现细节见 [`scripts/sim/README.md`](scripts/sim/README.md) 与[架构文档 §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation)。
+**persona 清单、参数、跑完该检查什么与排障**见 [管理员手册 §10.3](docs/admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做);实现细节见 [`scripts/sim/README.md`](scripts/sim/README.md) 与[架构文档 §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation)。
 
 ---
 
@@ -460,7 +440,7 @@ window.__CONFIG__ = {
 ```bash
 source venv/bin/activate
 export AWS_REGION=us-west-2
-export MODEL_ID=moonshotai.kimi-k2.5
+export MODEL_ID=us.anthropic.claude-sonnet-4-6   # 默认值，可省略
 cd agent && python agent.py  # http://localhost:8080
 ```
 
@@ -476,7 +456,7 @@ curl -X POST http://localhost:8080/invocations \
 
 ## 配置与自定义
 
-- **更换 LLM**：管理控制台 Models 页签按用户/全局覆盖，无需重新部署；或编辑 `agent/agent.py` / 设置 `MODEL_ID` 环境变量修改默认值（默认 `moonshotai.kimi-k2.5`）
+- **更换 LLM**：管理控制台 Models 页签按用户/全局覆盖，无需重新部署；或编辑 `agent/agent.py` / 设置 `MODEL_ID` 环境变量修改默认值（默认 `us.anthropic.claude-sonnet-4-6`）
 - **更换语音欢迎语**：编辑 `scripts/setup-agentcore.py` 中的 Polly 文案/Voice，重跑步骤 6
 - **自定义域名**：在 `cdk/lib/smarthome-stack.ts` 中为 CloudFront 分发加 `domainNames` + ACM 证书
 
@@ -514,7 +494,7 @@ curl -X POST http://localhost:8080/invocations \
 
 ## Voice Agent 启动延迟测试
 
-项目根目录的 `voice-latency-test/` 是一个**自包含**的 Playwright 测试方案，用于测量 Voice Agent 从点击按钮到听到首帧回应的延迟。`deploy.sh` 完成后直接可用，不需要额外配置——脚本会自动从 `cdk-outputs.json` + `agentcore-state.json` 读取 Chatbot URL、Voice Runtime ARN 和 region。
+Voice Agent 从点击按钮到听到首帧回应的延迟，是用一套 Playwright 测试方案（`voice-latency-test/`）测出来的。**这套方案是本地开发用的测量工具，不包含在仓库里**（`voice-latency-test/` 和 `vision-latency-test/` 都已 gitignore），这里只保留它的测试设计与结论。
 
 两种测试模式：
 
@@ -523,13 +503,7 @@ curl -X POST http://localhost:8080/invocations \
 | `run-session-cold.sh` | 老用户回来点语音（测服务端 Python worker 冷启动）| ~18 s | ~30 min |
 | `run-fresh-login.sh` | 新用户登录后立即点语音（测端到端用户旅程 + 前端优化）| ~60 s | ~100 min |
 
-```bash
-cd voice-latency-test
-npm install && npx playwright install chromium    # 仅首次
-./run-session-cold.sh                              # 或 ./run-fresh-login.sh
-```
-
-输出写入 `voice-latency-test/results/`（原始 JSONL + 聚合 markdown 报告）。详细协议、两种模式的完整对比、以及已实施的 16 项延迟优化清单见 `voice-latency-test/README.md` 和 `voice-latency-test/test-modes.md`。
+两种模式的区别在于是否包含登录：session-cold 只测服务端 Python worker 冷启动，fresh-login 测端到端用户旅程（含前端优化）。详细协议、两种模式的完整对比、以及已实施的 16 项延迟优化清单记录在这套本地工具自带的文档里，未随仓库发布。
 
 ---
 
@@ -564,15 +538,8 @@ cd cdk && npx cdk destroy --all --force
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → 账号已经达到 AWS Agent Registry 的默认配额（5）。如果该账号已经有名为 `SmartHomeSkillsRegistry` 的 Registry，部署脚本会自动复用；否则需在 AWS Service Quotas 控制台申请提额，或删除不用的 Registry。
 - **`boto3 ... is below the required 1.43.67`** → venv 中的 boto3 过旧。1.43.67 是首个包含 `agent-registry` / `agent-registry-control` 两个 service 的版本（AWS Agent Registry 于 2026-08-06 GA 时迁到该命名空间）。重跑 `scripts/01-install-deps.sh`（会自动升级），或 `pip install --upgrade boto3`。
 - **Skill ERP 新建技能后卡在 DRAFT 状态** → 表示 `SubmitRegistryRecordForApproval` 在记录仍处于 `CREATING` 时被调用。最新 Lambda 会轮询 `GetRegistryRecord` 直到状态脱离 `CREATING` 再提交，更新 Lambda 代码即可（重跑 `scripts/04-cdk-deploy.sh` 或 `aws lambda update-function-code`）。
-- **Tool Policy → Manage Permissions 里没有可授权的 A2A Agent（或只有 3 个）** → 跑 `./venv/bin/python scripts/check-registry-wiring.py`。它比对 admin Lambda、Skill ERP Lambda、orchestrator runtime 和 `agentcore-state.json` 四处的 `REGISTRY_ID`，再确认该 registry 为 READY 且有已批准记录。最常见的原因是用了**旧 `bedrock-agentcore` namespace** 的 id —— 两个 namespace 各持有一套互不可见的 registry，同一个 id 在另一边必然 404，所以单看 `GetRegistry` 报错**不能**断定 id 失效。修法是重跑 `scripts/setup-agentcore.py`；`REGISTRY_ID` 在模块导入时读取，需强制冷启动。现在读取失败会返回 `catalogError`，控制台直接显示原因而不是一个空列表。
-- **⚠️ 跑过 `cdk deploy` 之后：Tool Policy 里一个 Gateway 工具都不显示 / Optimization 认不出子 Agent / `/optimization/*` 报 ConfigurationError** → admin Lambda 的环境变量被重置了。CDK 声明 15 个（内联 8 + `addEnvironment` 7），另外 12 个（`GATEWAY_ID`、`MEMORY_ID`、`VOICE_AGENT_RUNTIME_ARN`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、`KB_ID`、`OPTIMIZATION_*`、eval/AB 的 ARN 等）由 `setup-agentcore.py` 在部署后补写，而 CloudFormation 里 `environment` 是整张表，所以一旦 CFN 更新这张表就会把它们抹掉，**且全程没有任何报错**。
->
-> **2026-08-15 修正了触发条件**：不是「任何一次 `cdk deploy`」。同一天连着四次 `cdk deploy`，前三次(只改了 Lambda 代码和 IAM)**一个变量都没丢**，第四次给 admin Lambda **新增了一个 CDK 声明的**环境变量(`COGNITO_APP_CLIENT_ID`),立刻丢了 15 个、另有 2 个回到 `PLACEHOLDER`。也就是说:**改声明的 environment 才会触发**,只改代码不会。这解释了为什么它「有时候不发生」——而那恰恰是最危险的地方,因为它让人以为问题已经不存在了。部署前先存一份:
-> ```bash
-> aws lambda get-function-configuration --function-name smarthome-admin-api \
->   --query "Environment.Variables" --output json > /tmp/admin-env-before.json
-> ```
-`REGISTRY_ID` 和 `AGENT_RUNTIME_ARN` 比「丢掉」更麻烦：CDK 声明它们的值是 `PLACEHOLDER_SET_BY_SETUP_SCRIPT`，重置后它们**还在**、总数也正常，值却是占位符。修复：重跑 `python scripts/setup-agentcore.py`，再 `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。核对要**按名字**而不是按个数（新增一个变量总数就变了）：`aws lambda get-function-configuration --function-name smarthome-admin-api --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"` 不能有 null，且 `scripts/check-registry-wiring.py` 要 exit 0。
+- **Build → 子 Agent 策略（SubAgent Policy）里没有可授权的 A2A Agent（或只有 3 个）** → 跑 `./venv/bin/python scripts/check-registry-wiring.py`(比对四处 `REGISTRY_ID` 并确认 registry 为 READY 且有已批准记录)。最常见的原因是用了**旧 `bedrock-agentcore` namespace** 的 id —— 同一个 id 在另一个 namespace 里必然 404,所以单看 `GetRegistry` 报错**不能**断定 id 失效。修法是重跑 `scripts/setup-agentcore.py` 并强制冷启动;详见[管理员手册 §11.11](docs/admin_manual_管理员使用手册.md#11-其他重要事项)。
+- **⚠️ 跑过 `cdk deploy` 之后：Tool Policy 里一个 Gateway 工具都不显示 / Optimization 认不出子 Agent / `/optimization/*` 报 ConfigurationError** → admin Lambda 里由 `setup-agentcore.py` 补写的环境变量被重置了(只有**改了 CDK 声明的 environment** 的那次部署才会触发,只改代码不会;`REGISTRY_ID` 会变回 `PLACEHOLDER`,所以要按名字和值核对,不能按个数)。修复:重跑 `python scripts/setup-agentcore.py`,再 `cd a2a-agent-registry && python deploy.py --only patch-text-agent`,最后 `scripts/check-registry-wiring.py` 要 exit 0。预防、核对命令和症状表见[管理员手册 §11.8](docs/admin_manual_管理员使用手册.md#11-其他重要事项)。
 
 ### 前端相关
 
@@ -640,10 +607,10 @@ cd cdk && npx cdk destroy --all --force
 | 坑 | 症状 | 结论 |
 |---|---|---|
 | 用了 `allowedClients` | 已授权用户被拒:`Claim 'client_id' value mismatch` | `allowedClients` 校验的是 **access token** 才有的 `client_id`;idToken 带的是 `aud`,所以要用 **`allowedAudience`**。判断依据:未授权用户拿到的是这条消息**再加上** `Authorization denied`,两条对比才能看出组校验本身是通的 |
-| `Authorization` 不在 header 白名单 | 平台放行了,容器却回「X-A2A-Allowed-Skills is missing」 | Runtime edge 会**吃掉** Authorization,不显式加白名单容器根本读不到 token,于是回退到旧的 header 路径 |
+| `Authorization` 不在 header 白名单 | 平台放行了,容器却回「X-A2A-Allowed-Skills is missing」 | Runtime edge 会**吃掉** Authorization,不显式加白名单容器根本读不到 token,于是回退到旧的 header 路径(该路径现已删除) |
 | `CreateGroup` 写在 per-user 循环里 | 保存返回 200,但 39 个用户里 33 个一个组都没进 | 组是共享的,一次建好即可;Cognito 对 ~680 次并发 CreateGroup 直接 `TooManyRequestsException` |
 
-验证结果:已授权用户拿到专家真实回复(带 `⟦A2A:home-security⟧` 标记),未授权用户被**平台层**拒绝(401,容器都没进),旧 m2m token 已彻底失效。`smoke_test.py` 三条负向用例全通过。
+验证结果:已授权用户拿到专家真实回复(带 `⟦A2A:home-security⟧` 标记),未授权用户被**平台层**拒绝(401,容器都没进),旧 m2m token 已彻底失效。`smoke_test.py` 的负向用例全通过。
 
 演示时必须知道的三件事：
 
@@ -711,19 +678,19 @@ ValidationException: Connector integration web-search is not available for this 
 2. **新增的 3 个 skill 需要单独授权。** `usage_audit` / `advisory_review` / `service_forecast`
    是新发布的,重新部署**不会**自动授权。去 Build → SubAgent Policy 勾上(全局或按用户),然后**重新登录**。
 
-### 部署顺序（改了 A2A 鉴权之后不能乱）
+### 部署顺序（A2A 相关改动）
 
-sub-agent 的 authorizer 一旦加上 claim 校验，**旧的 m2m token 立刻不被接受**（client_credentials token 里没有 `cognito:groups`）。两种模型无法在同一个 runtime 上并存，所以这是一次**协调切换**，中间有一段委派不可用的窗口：
+> 历史:2026-08-12 曾做过一次 m2m → claim 的协调切换。旧的 m2m 双 token 模型和 `--legacy-m2m-auth` 开关已从代码中删除,sub-agent 现在只接受终端用户自己的 idToken,不再有并存窗口。
 
 ```bash
-# 1. CDK：admin Lambda 的新 IAM（Cognito 建组/踢下线、Bedrock Mantle、ListInferenceProfiles）
+# 1. CDK：admin Lambda 的 IAM 等基础设施
 cd cdk && npx cdk deploy --require-approval never && cd ..
 
-# 2. 建组并给演示用户授权（没有组的话，切换后所有委派都会被拒）
+# 2. 给演示用户授权(没有授权的话委派会在门口被拒)
 #    控制台 Build → SubAgent Policy 勾选，或直接调 PUT /users/{userId}/permissions?action=a2a
 
-# 3. 八个 sub-agent 换成 claim 校验
-python a2a-agent-registry/deploy.py            # 想回滚旧模型时加 --legacy-m2m-auth
+# 3. 八个 sub-agent
+python a2a-agent-registry/deploy.py
 
 # 4. 主 runtime：先同步代码再部署，否则发的是旧代码
 python scripts/sync-agent-code.py
@@ -731,7 +698,7 @@ agentcore deploy
 python scripts/restore-text-runtime-config.py  # deploy 会清掉 runtime env，这步不是可选的
 
 # 5. 验证
-python a2a-agent-registry/smoke_test.py        # 含三条负向授权用例
+python a2a-agent-registry/smoke_test.py        # 含负向授权用例
 python scripts/measure-baseline.py             # 换模型后的延迟基线
 ```
 
@@ -739,9 +706,7 @@ python scripts/measure-baseline.py             # 换模型后的延迟基线
 > 测不到任何东西(authorizer 本来就该拒),把它算成失败只会得到 6 条红线。要覆盖全部 8 个,先在
 > SubAgent Policy 里全部勾上并重新登录。
 
-顺序反了会怎样：先部署主 runtime 再部署 sub-agent，主 agent 发用户 token 而 sub-agent 还在等 m2m token，**八个专家全部 401**。
-
-`--legacy-m2m-auth` 是 sub-agent 侧的回滚开关，但主 runtime 已经不再签发 m2m token 了，所以真回滚需要连代码一起回退。
+手动跑 `agentcore deploy` 的三条命令为什么缺一不可,见[管理员手册 §2.5](docs/admin_manual_管理员使用手册.md#2-agent-代码快速部署)。
 
 ---
 
@@ -773,7 +738,7 @@ python scripts/measure-baseline.py             # 换模型后的延迟基线
 
 > **Agent Harness management platform**, using a smart home scenario to demonstrate how to build a complete Agent operations and governance system on AWS AgentCore: skill orchestration, model selection, tool access control (per-user Cedar policies), **enterprise knowledge base (on S3 Vectors)**, **Integration Registry (A2A agents)**, session monitoring (with **Remote Shell** debug console), long-term memory viewing, and safety guardrails.
 
-AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console organises 17 pages across four lifecycle stages — **Discover / Build / Deploy / Assess** — including an **agent operations dashboard** on Overview (live health, token cost attribution, evaluation drift, release state) and a **Remote Shell** per-session debug console. The **Skill ERP** site lets end users publish their own skills and A2A agents to **AWS Agent Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
+AI-powered smart home control system built on AWS AgentCore Runtime/Memory/Gateway. Users chat with the assistant via **natural-language text** or **real-time voice conversation** (Amazon Nova Sonic bi-directional streaming) to control simulated IoT devices (LED Matrix, Rice Cooker, Fan, Oven). The admin console organises 18 pages across four lifecycle stages — **Discover / Build / Deploy / Assess** — including an **agent operations dashboard** on Overview (live health, token cost attribution, evaluation drift, release state) and a **Remote Shell** per-session debug console. The **Skill ERP** site lets end users publish their own skills and A2A agents to **AWS Agent Registry**; admins can then one-click import approved records into the skills catalog or browse A2A agents in the Integration Registry. The enterprise knowledge base uses the **S3 Vectors** serverless store (pay-per-vector, no fixed cost).
 
 > **Implementation details, architecture diagrams, protocol specs** live in [`docs/architecture-and-design.md`](docs/architecture-and-design.md). This README focuses on **deployment and usage**.
 
@@ -783,19 +748,20 @@ Nine agents — one orchestrator plus eight A2A specialists — each on its own
 AgentCore Runtime. The topology is the least interesting part. What is worth reading
 is **which decisions were forced by a measurement or a production failure**. The
 full set is in [`docs/agent-design-principles.md`](docs/agent-design-principles.md),
-each entry citing `file:line` and a number; here are the five most
+each entry citing the code (file and symbol) and a number; here are the five most
 counter-intuitive.
 
 **1. A tool that touches user data must be a factory, never a list.** Building the
 tool list once at startup pins whichever user arrived first onto every later
 request — no error, no log line, and the agent keeps answering fluently. It is a
 cross-user data leak that looks exactly like a working system.
-`common/server.py:316` rebuilds per request, and `user_id` comes from a closure so
+`common/server.py` rebuilds per request (`tools_factory(caller)`), and `user_id` comes from a closure so
 it appears in **no** model-facing signature: a parameter the model can fill is a
 parameter a prompt injection can fill.
 
-**2. Half of our "performance work" pointed the wrong way.** Of Spec 5's four
-latency phases, two were overturned by their own measurements:
+**2. Most of our "performance work" pointed the wrong way.** Of Spec 5's four
+latency phases only S2 (naming the devices in the delegation, -10%) held up as
+expected; every expectation below was overturned by its own measurement:
 
 | Expected | Measured |
 |---|---|
@@ -922,7 +888,7 @@ Log in with the admin credentials from deploy output. The login page also offers
 
 > **Registering does not grant admin permission.** This console is open only to members of the `admin` group. A newly registered account can sign in but lands on "Access Denied" until an administrator adds it to the group (`Make Admin` on Build → Identity, or `aws cognito-idp admin-add-user-to-group`). Until then, use the **chatbot** — every end-user capability (smart home conversation, device control, knowledge base) works without admin rights. Both the sign-up form and the Access Denied page link straight to it.
 
-The side navigation groups 17 pages by agent lifecycle stage:
+The side navigation groups 18 pages by agent lifecycle stage:
 
 | Stage | Page | What you can do |
 |-------|------|-----------------|
@@ -933,6 +899,7 @@ The side navigation groups 17 pages by agent lifecycle stage:
 | Build | **Skills** | Edit/delete skills with full [Agent Skills spec](https://agentskills.io/specification) fields; manage skill directory files via S3 presigned URLs; global + per-user overrides. **New skills arrive only by importing an approved record from AWS Agent Registry** — the console no longer creates one locally, so registration and review stay in the Registry |
 | Build | **Prompt** | Edit the text / voice agent system prompts (global default + per-user addendum); runtime concatenates additively |
 | Build | **Tool Policy** | Configure per-user tool permissions (Cedar policies); built-in and gateway tools listed side-by-side with source badges; toggle ENFORCE / LOG_ONLY. Each gateway tool also names **who calls it** — revoking `control_device` stops chat commands, scheduled scenes and two specialists |
+| Build | **SubAgent Policy** | Grant A2A specialist agents per skill (`#/subAgentPolicy`): pick the scope (global default or one user), expand an agent, tick skills, save. Grants become Cognito groups / token claims and take effect after the user **signs in again**; an explicit empty list in a user scope takes a global grant away from that one user |
 | Build | **Memories** | View each user's long-term memory (facts + preferences + episodes, from AgentCore Memory's four built-in strategies) |
 | Build | **Knowledge Base** | Upload documents to the enterprise KB (PDF, TXT, MD, DOCX, CSV, ...); one-click Bedrock KB vectorization sync; per-user isolation |
 | Build | **Identity** | Registered-users table **and all user management**: create, promote/demote admin, delete. (These lived on Overview previously; consolidated here. Self-demotion and self-deletion stay disabled.) |
@@ -992,9 +959,9 @@ Skill ERP is a self-service skills site for **regular end users** (no `admin` gr
 
 **The point is not "more agents" — it is that identity is not lost at the hop:**
 
-- The `Authorization` header carries a shared m2m token. It proves *an authorised service is calling* and nothing else — it has **no `sub`**.
-- The user's idToken travels in its own `X-SuperApp-User-Token` header, and the sub-agent **re-verifies it independently** (JWKS signature, issuer, audience, expiry) before opening the Gateway with it — so **Cedar evaluates the real end user**. The sub-agent runtimes hold no device permissions of their own.
-- `X-A2A-Allowed-Skills` is now **enforced server-side**. It used to be parsed into request state and ignored, which made per-skill authorisation purely client-side: anything holding the shared m2m token could call any skill on any agent.
+- The orchestrator sends the **user's own idToken** in `Authorization` — no service token, no second header. Since 2026-08-15 the AgentCards point at the `smarthome-a2a-gw` gateway.
+- A grant is the signed `cognito:groups` claim in that token (Cognito groups `a2a-<agent>` / `a2a-<agent>.<skill>`): the sub-agent Runtime's authorizer refuses a caller with no group for that agent before the container is entered, and the container derives the skill subset from the same claim (`common/server.py` `skills_from_claims`) and refuses an empty one. The caller cannot widen its own grant — the old client-set `X-A2A-Allowed-Skills` header is gone.
+- The sub-agent **re-verifies the token independently** (JWKS signature, issuer, audience, expiry) before opening the Gateway with it — so **Cedar evaluates the real end user**. The sub-agent runtimes hold no device permissions of their own. The session id is not a credential and travels in the A2A message metadata.
 
 Other notes:
 
@@ -1004,9 +971,9 @@ Other notes:
   cd a2a-agent-registry
   python deploy.py                       # all of them
   python deploy.py --agent light-effect  # one only
-  python smoke_test.py                   # 7 agents + 6 negative authorisation cases
+  python smoke_test.py                   # positive probe per agent (8) + negative authorisation cases
   ```
-- Grant access per user per skill in **Admin Console → Users → Manage Permissions → A2A Agents**; the orchestrator picks it up on the next invocation. **An ungranted skill is never registered**, so the model cannot be talked into calling a tool it cannot see.
+- Grant access per skill (globally or per user) in **Admin Console → Build → SubAgent Policy**; the orchestrator picks it up once the user signs in again and gets a token carrying the new group. **An ungranted skill is never registered**, so the model cannot be talked into calling a tool it cannot see.
 - **Each specialist's prompt is editable** at Admin Console → Agents → detail page; saved, and in effect on the next request, with no container redeploy.
 - A delegated turn takes ~30s against ~15s direct — the A2A hop is non-streaming, so the orchestrator emits nothing until the specialist finishes. That is stated in the dashboard's TTFT hint rather than hidden.
 - Full deploy flow, test prompts, and step-by-step demo walkthrough: [`a2a-agent-registry/README.md`](a2a-agent-registry/README.md).
@@ -1104,7 +1071,7 @@ What has been done:
 |---|---|
 | Name the relevant devices in the delegation (so the specialist skips its opening `discover_devices`) | **-1.64s (-10%)**, winning 4/4 A/B pairs |
 | Parallel delegation (event loop moved to its own thread) | three-domain request **51.1s → 17.2s (-66%)** |
-| Prompt caching on the orchestrator's ~10.5k-token prefix | billed input tokens **29,644 → 9**; latency 2% (noise) |
+| Prompt caching on the orchestrator's ~10.5k-token prefix | billed input tokens **29,644 → 9** (live CloudWatch `InputTokenCount`, window total); latency 2% (noise) |
 | Delegation progress stream | first visible signal **31s → 12s** |
 
 > **Quote numbers that separate what you own from what you rent.** Of a 24.3s mean turn, about **7.1s is spent inside AgentCore before the container is entered** — ~7s for a session id the runtime has never seen, ~0.4s for a reused one. Reporting total wall time alone credits the platform's cold start to the harness.
@@ -1142,31 +1109,9 @@ python3 scripts/simulate-users.py status      # who exists, with what config
 python3 scripts/simulate-users.py teardown --yes
 ```
 
-The nine personas deliberately differ in model, tenant mode and scenario mix, so the dashboard's attribution charts show several real rows instead of collapsing into one bucket:
+The nine personas differ in model, tenant mode and scenario mix (including delegation to all eight specialists). They sign in through Cognito and use the **same** SigV4 `/invocations` path as the chatbot, so their spans, tokens, sessions and evaluation scores are indistinguishable from real usage, and each files **real** votes afterwards (tagged `source="sim"`). Everything is scoped to the `simuser+` email prefix, so `teardown` cannot delete real users. Wait two or three minutes before checking the dashboard (CloudWatch ingestion lag + 5-minute cache).
 
-| persona | model | tenant env | exercises |
-|---|---|---|---|
-| `alice` | Opus 4.6 | default | all four devices, discovery, all-devices-on |
-| `bob` | Sonnet 4.6 | default | knowledge base, weather lookup, refusal |
-| `carol` | Haiku 4.5 | ab-bundles | multi-turn memory recall, user feedback |
-| `dave` | Kimi K2.5 | ab-targets | code-interpreter data analysis (heavy) |
-| `erin` | Sonnet 4.5 | default | browser-use web automation (heavy), refusal, ambiguity |
-| `frank` | Sonnet 4.6 | default | **light-effect + scene-sync specialists** |
-| `grace` | Haiku 4.5 | ab-bundles | **task-management (incl. solar triggers), device orchestration** |
-| `henry` | Opus 4.6 | ab-targets | **energy-optimization + home-security specialists** |
-| `iris` | Sonnet 4.5 | default | **appliance-maintenance, docs Q&A, concurrent delegation** |
-
-The last four close a real gap: before them **not one of the eight specialist agents ever saw traffic**, so the dashboard's per-runtime attribution had nothing to attribute and a demo could not show delegation at all. Their prompts come from the same `shared/prompt-examples.json` the chatbot renders, so "what the demo covers" and "what you can click in the UI" cannot diverge.
-
-Test users sign in through Cognito and use the **same** SigV4 `/invocations` path as the chatbot, so the spans, tokens, sessions and evaluation scores they produce are indistinguishable from real usage. Each persona also files **real** 👍/👎 votes on its own turns afterwards, tagged `source="sim"` with the share disclosed on the card.
-
-> **`--days-back` only moves rows this script writes** (the votes). Span and evaluation-score timestamps are stamped by AgentCore and cannot be faked, so the 90d view stays honestly sparse before today. Filling it in would mean injecting fabricated telemetry.
-
-> **Safety boundary**: everything is scoped to the `simuser+` email prefix, and a guard in the code raises on any other address — `teardown` cannot delete real users.
->
-> Wait two or three minutes after a run before checking the dashboard: CloudWatch ingestion lags and the dashboard caches for 5 minutes (use Refresh to force re-aggregation).
-
-**Full pre-demo runbook** (troubleshooting, what to verify afterwards) is [admin manual §10.3](docs/admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做); implementation detail in [`scripts/sim/README.md`](scripts/sim/README.md) and [architecture §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation).
+**Persona list, flags, what to verify afterwards and troubleshooting**: see [admin manual §10.3](docs/admin_manual_管理员使用手册.md#103-演示前准备生成模拟数据每次演示必做); implementation detail in [`scripts/sim/README.md`](scripts/sim/README.md) and [architecture §9.16](docs/architecture-and-design.md#916-simulated-end-users-test-data-generation).
 
 ---
 
@@ -1243,7 +1188,7 @@ window.__CONFIG__ = {
 ```bash
 source venv/bin/activate
 export AWS_REGION=us-west-2
-export MODEL_ID=moonshotai.kimi-k2.5
+export MODEL_ID=us.anthropic.claude-sonnet-4-6   # the default; optional
 cd agent && python agent.py  # starts on http://localhost:8080
 ```
 
@@ -1259,7 +1204,7 @@ curl -X POST http://localhost:8080/invocations \
 
 ## Configuration & Customization
 
-- **Change the LLM**: use Models tab in the admin console for per-user/global override (no redeploy); or edit `agent/agent.py` / set `MODEL_ID` env var for the default (defaults to `moonshotai.kimi-k2.5`)
+- **Change the LLM**: use Models tab in the admin console for per-user/global override (no redeploy); or edit `agent/agent.py` / set `MODEL_ID` env var for the default (defaults to `us.anthropic.claude-sonnet-4-6`)
 - **Change the voice welcome clip**: edit the Polly text/voice in `scripts/setup-agentcore.py`, re-run step 6
 - **Custom domain**: add `domainNames` + ACM certificate to the CloudFront distributions in `cdk/lib/smarthome-stack.ts`
 
@@ -1325,9 +1270,9 @@ The teardown script only deletes resources tracked in `agentcore-state.json`.
 - **Teardown fails `Gateway has targets associated`** → the teardown script handles order; manually: `aws cloudformation delete-stack --stack-name AgentCore-smarthome-default`
 - **`create_registry failed: ServiceQuotaExceededException ... maximum number of registries (5)`** → the account is at the AWS Agent Registry default quota (5). If a registry named `SmartHomeSkillsRegistry` already exists the deploy script reuses it automatically; otherwise request a quota increase in AWS Service Quotas or delete an unused registry.
 - **`boto3 ... is below the required 1.43.67`** → venv boto3 is too old. 1.43.67 is the first release carrying the `agent-registry` and `agent-registry-control` services that AWS Agent Registry moved to when it went GA on 2026-08-06. Re-run `scripts/01-install-deps.sh` (which upgrades boto3) or `pip install --upgrade boto3`.
-- **No A2A agents to grant in Tool Policy → Manage Permissions (or only 3)** → run `./venv/bin/python scripts/check-registry-wiring.py`. It compares the `REGISTRY_ID` held by the admin Lambda, the Skill ERP Lambda, the orchestrator runtime and `agentcore-state.json`, then confirms that registry is READY and has approved records. The usual cause is an id from the **legacy `bedrock-agentcore` namespace**, which holds a different set of registries than GA `agent-registry` — the same id 404s in the other namespace, so a `GetRegistry` failure alone does not tell you the id is dead. Fix by re-running `scripts/setup-agentcore.py`; `REGISTRY_ID` is read at module import, so force a cold start. The console now names the reason (`catalogError`) instead of showing an empty list.
+- **No A2A agents to grant in Build → SubAgent Policy (or only 3)** → run `./venv/bin/python scripts/check-registry-wiring.py` (compares the four `REGISTRY_ID` consumers and confirms the registry is READY with approved records). The usual cause is an id from the **legacy `bedrock-agentcore` namespace** — the same id 404s in the other namespace, so a `GetRegistry` failure alone does not prove the id is dead. Fix by re-running `scripts/setup-agentcore.py` and forcing a cold start; details in [Admin Manual §11.11](docs/admin_manual_管理员使用手册.md#11-其他重要事项).
 - **Skill ERP records stuck in `DRAFT`** → `SubmitRegistryRecordForApproval` was called while the record was still `CREATING`. The current Lambda polls `GetRegistryRecord` until the record leaves `CREATING` before submitting — just push the latest code (re-run `scripts/04-cdk-deploy.sh` or `aws lambda update-function-code`).
-- **⚠️ After any `cdk deploy`: no gateway tools in Tool Policy / Optimization rejects a sub-agent / `/optimization/*` returns ConfigurationError** → the admin Lambda's env vars were reset. CDK declares 15 of them (8 inline + 7 `addEnvironment`); the other 12 (`GATEWAY_ID`, `MEMORY_ID`, `VOICE_AGENT_RUNTIME_ARN`, `DASHBOARD_EXTRA_RUNTIME_ARNS`, `KB_ID`, `OPTIMIZATION_*`, the eval/AB ARNs) are patched in afterwards by `setup-agentcore.py`, and `environment` in CloudFormation is the whole map — so any `cdk deploy` drops them, **with no error anywhere**. `REGISTRY_ID` and `AGENT_RUNTIME_ARN` are worse than dropped: CDK declares them as `PLACEHOLDER_SET_BY_SETUP_SCRIPT`, so they survive a reset with a placeholder value and the total still looks right. Fix: re-run `python scripts/setup-agentcore.py`, then `cd a2a-agent-registry && python deploy.py --only patch-text-agent`. Verify by NAME, not by count (the total moves whenever a variable is added): `aws lambda get-function-configuration --function-name smarthome-admin-api --query "Environment.Variables.[GATEWAY_ID,REGISTRY_ID,MEMORY_ID,OPTIMIZATION_GATEWAY_ID]"` must have no nulls, and `scripts/check-registry-wiring.py` must exit 0.
+- **⚠️ After a `cdk deploy`: no gateway tools in Tool Policy / Optimization rejects a sub-agent / `/optimization/*` returns ConfigurationError** → the env vars `setup-agentcore.py` patches into the admin Lambda were reset (only a deploy that **changes the CDK-declared environment** triggers it, code-only deploys do not; `REGISTRY_ID` comes back as `PLACEHOLDER`, so verify by name and value, never by count). Fix: re-run `python scripts/setup-agentcore.py`, then `cd a2a-agent-registry && python deploy.py --only patch-text-agent`, and `scripts/check-registry-wiring.py` must exit 0. Prevention, verification commands and the symptom table: [Admin Manual §11.8](docs/admin_manual_管理员使用手册.md#11-其他重要事项).
 
 ### Frontend
 

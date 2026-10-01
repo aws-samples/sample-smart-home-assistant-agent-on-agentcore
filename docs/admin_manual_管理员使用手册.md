@@ -18,7 +18,7 @@
    - [9.6 场景联动与定时自动化](#96-场景联动与定时自动化)（含[场景即代码](#965-场景即代码导出--导入-json)、[JSON 模式](#966-结构化输出json-模式)、[委派进度与追踪](#968-委派时的进度提示)、[共享记忆](#969-跨-agent-共享记忆)、[示例提示词库](#9610-示例提示词库chatbot)）
 10. [Agent 运维统计大屏与演示前数据准备](#10-agent-运维统计大屏与演示前数据准备)
 11. [其他重要事项](#11-其他重要事项)
-    - [11.11 A2A 目录为空:两个 namespace 各有一套 registry](#1111--a2a-目录为空两个-namespace-各有一套-registry)
+    - [11.11 A2A 目录为空:两个 namespace 各有一套 registry](#11-其他重要事项)
 
 ---
 
@@ -53,25 +53,25 @@
 
 ### 2.2 AgentCore CLI (本方案使用的方式)
 
-官方 [AgentCore Starter Toolkit CLI](https://aws.github.io/bedrock-agentcore-starter-toolkit/api-reference/cli.html) 提供两种 `--deployment-type`: **`direct_code_deploy`**(零 Docker,管理员不需要构建镜像,CLI 自动打包 Python 源代码进 CloudFormation 部署;支持 `PYTHON_3_10..3_13`)和 `container`(自行提供 Docker 镜像)。本方案选用 `direct_code_deploy`,Python 3.13。常用命令:
+本方案使用新版 `agentcore` CLI 的项目模式(`agentcore create` + `agentcore add ...` + `agentcore deploy`),构建方式为 **CodeZip**(零 Docker,CLI 自动打包 Python 源代码进 CloudFormation 部署),运行时 `PYTHON_3_14`(见 `.agentcore-project/smarthome/agentcore/agentcore.json` 的 `build` / `runtimeVersion`)。`setup-agentcore.py` 实际执行的命令(在 `.agentcore-project/` 下):
 
 ```bash
-agentcore configure --entrypoint agent.py --name smarthome \
-  --deployment-type direct_code_deploy --runtime PYTHON_3_13 \
-  --non-interactive                                      # 配置
+agentcore create --name smarthome --defaults             # 创建项目(CodeZip 默认 agent)
+# setup-agentcore.py 随后把 agent/ 拷贝进 smarthome/app/smarthome/ 并改写 agentcore.json
 agentcore add memory --name SmartHomeMemory \
   --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE,EPISODIC  # 声明 Memory 资源
-agentcore add gateway                                    # 创建 Gateway
-agentcore add gateway-target SmartHomeDeviceControl ...  # 注册 Lambda 工具
+agentcore add gateway --name SmartHomeGateway --authorizer-type CUSTOM_JWT ...  # 创建 Gateway
+agentcore add gateway-target --name SmartHomeDeviceControl ...  # 注册 Lambda 工具
 agentcore deploy -y --verbose                            # 构建 CFN stack 并发布
-agentcore invoke '{"prompt":"ping"}'                     # 测试
 ```
+
+> 只改了 `agent/` 代码、想单独跑 `agentcore deploy` 时,必须先跑 `./venv/bin/python scripts/sync-agent-code.py`(详见 §2.5)。
 
 `agentcore deploy` 会产出 CloudFormation stack `AgentCore-smarthome-default`,同时自动注入 `MEMORY_<NAME>_ID`、`AGENTCORE_GATEWAY_<NAME>_URL` 等环境变量。调用 Runtime 的公共 API 为 [`InvokeAgentRuntime`](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_InvokeAgentRuntime.html)(HTTP POST /invocations,payload ≤ 100 MB,支持流式)。
 
 ### 2.3 常见部署坑位 (已在 `setup-agentcore.py` 中解决)
 
-- **boto3 版本**: Registry API 要求 `boto3 ≥ 1.42.93`,`01-install-deps.sh` 自动升级 venv。
+- **boto3 版本**: Registry 等新 API 需要较新的 boto3,`01-install-deps.sh` 按其中的 `BOTO3_MIN`(当前 `1.43.67`)自动升级 venv。
 - **环境变量被 deploy 覆盖**: `agentcore deploy` 会丢弃 `agentcore.json` 里自定义 env,必须 deploy 之后用 `update_agent_runtime` 再打补丁。
 - **`requestHeaderAllowlist` 嵌套坑**: `get_agent_runtime` 返回顶层字段,`update_agent_runtime` 需要嵌入 `requestHeaderConfiguration`,round-trip 时若不改写会静默丢失自定义头,导致 Gateway 401。
 - **部署后 Session 仍跑旧代码**: `setup-agentcore.py` 会扫描 DynamoDB 里 `__session_text__` / `__session_voice__` 记录并调用 `StopRuntimeSession`,让新部署立即生效。
@@ -118,10 +118,13 @@ caching 在 AgentCore 上不生效」)。
 diff -rq --exclude=tests --exclude=__pycache__ agent .agentcore-project/smarthome/app/smarthome
 ```
 
-**第 3 步为什么必须:** `agentcore deploy` 会抹掉 12 个环境变量(A2A_* 、REGISTRY_ID、
-各表名、MODEL_ID 等)、`protocolConfiguration`、header allowlist 和 `/mnt/workspace`
-挂载。**没有 A2A 变量时,编排器不会注册任何 `a2a_*` tool,而是自己回答所有专家问题 ——
-静默地。** 本轮每次真实部署都确认恢复了 12 个变量。
+**第 3 步为什么必须:** `agentcore deploy` 会抹掉 CLI 不认识的环境变量、`protocolConfiguration`、
+header allowlist 和 `/mnt/workspace` 挂载。脚本写回的变量是 7 个固定项(`AWS_REGION`、`MODEL_ID`、
+`NOVA_SONIC_MODEL_ID`、`BYPASS_TOOL_CONSENT` 和三张表名)加上按状态文件解析出的
+`REGISTRY_ID`、`WEBSEARCH_GATEWAY_URL`、`MEMORY_STRATEGY_EPISODIC_ID`、`AGENTCORE_GATEWAY_ARN`
+(以 `scripts/restore-text-runtime-config.py` 里的 `env_wanted` 为准;以前的 `A2A_COGNITO_*` / `A2A_M2M_*`
+已随 m2m 模型删除)。**没有 `REGISTRY_ID` 时,编排器不会注册任何 `a2a_*` tool,而是自己回答所有专家
+问题 —— 静默地。** 脚本结束时会打印本次补回了哪些变量,对一下即可。
 
 > ⚠️ **还有一个独立的坑:热容器会继续跑旧代码。** runtime 在 06:36 更新完,06:38 的一轮
 > 请求仍然执行的是上一个版本。所以部署后测试前,先换一个**全新的**
@@ -229,7 +232,7 @@ permit(
 
 > **⚠️ 保存成功不等于授权生效 —— 一定要复核策略状态。**
 >
-> 页面提示保存成功(API 返回 200)、DynamoDB 也写进去了、Cedar 语句里确实能看到该用户的 sub —— 但策略仍可能落到 `UPDATE_FAILED`。一旦如此,**Gateway 会对该用户返回 0 个工具**,Agent 表现为"抱歉,这超出我的知识范围",看起来像模型能力不足,实际是授权链断了。而且全链路没有任何报错:API 200、Cedar 内容正确、连 `DenyDecisions` 都是 0(请求根本没走到授权评估)。
+> **症状**:保存返回 200,但该用户的 Agent 回"抱歉,这超出我的知识范围" —— 策略落在了 `UPDATE_FAILED`,Gateway 对他返回 0 个工具,全链路没有任何报错。机制(为什么 200 不代表 attach 成功、为什么连 `DenyDecisions` 都是 0)见架构文档 [§9.5](architecture-and-design.md#95-per-user-tool-permission-management)。
 >
 > 复核方法(授权后等约 75 秒,`UPDATING` 是正常中间态,`UPDATE_FAILED` 不是):
 >
@@ -256,6 +259,23 @@ permit(
 
 - **组权限 vs 用户权限**: 当前 Cedar 策略只写 `principal.id`。生产环境可引入 Cognito 组 → `principal in Group::"family"`,减少单条策略里的用户数 (单策略上限 153KB / ~3800 用户)。
 - **变更审计**: DynamoDB 更新时应开启 Stream + 写 CloudTrail,避免单点修改无迹可寻。
+
+### 4.5 全局授权与按用户收回(Skill / 工具 / 子 Agent)
+
+权限模型是**全局 ∪ 按用户**。三类对象各有一个"把全局给的东西从某一个用户身上拿走"的入口:
+
+| 对象 | 默认 | 按用户收回 | 入口 |
+|------|------|-----------|------|
+| Skill | 全局 Skill 对所有人生效 | 该用户的 `__skill_policy__` 行列出**不给**他的 Skill,在合并之后扣除(`agent/skill_policy.py`)。携带工具的 Skill(`browser-use` → `browse_web`、`code-interpreter` → `execute_python`,以及声明了 `http_request` / `file_write` 的 Skill)关闭后工具一并收回,下一轮对话生效 | Build → Skills,scope 选该用户 → "该用户继承的全局 Skill" 开关 → 保存 Skill 策略 |
+| Gateway 工具 | **默认拒绝**:策略存在时,没被任何 permit 点名的用户 `tools/list` 为空 | 不勾即可;页面对没有任何授权行的用户会直接告警,而不是预先勾上内置工具 | Build → Tool Policy(§4.2) |
+| A2A 子 Agent | 全局授权对所有人生效 | 每个子 Agent 三种状态:**继承全局**(无条目)/ **替换**(列出 skill)/ **禁用**(空列表 `[]`)。点"为该用户单独配置"并取消勾选全部 skill 才是禁用;保存会把该用户登出 | Build → 子 Agent 策略(`#/subAgentPolicy`) |
+
+**全局 A2A 授权不是 Cognito 组成员关系。** 它由 Cognito 的 pre token generation 触发器
+`smarthome-pre-token`(`cdk/lambda/pre-token/index.py`,CDK 中的 `PreTokenLambda`)在签发
+token 时算出,直接写进 ID token 的 `cognito:groups` claim;按用户授权仍是真实的组成员关系。
+所以 `AdminListGroupsForUser` 不再是"这个用户能访问哪些子 Agent"的完整答案 —— 看 token
+里的 claim,或看子 Agent 策略页的有效权限预览。全局授权变更对已签发的 token 要等用户重新
+登录 / 刷新 token 才生效。应急开关:触发器环境变量 `A2A_CLAIM_INJECTION=off`(不需要部署)。
 
 ---
 
@@ -309,7 +329,7 @@ AgentCore SDK 的数据集是 scenarios 列表,每个 scenario 可单轮或多�
 ```
             Generate                Apply                  Start A/B Test
 agent traces ────────▶ Recommendation ─────▶ Bundle version ─────▶ Live traffic split
-   (aws/spans)          (system prompt /        (DDB __prompt_*__         (Gateway routes
+(runtime log group)     (system prompt /        (DDB __prompt_*__         (Gateway routes
                          tool description)       + AgentCore bundle)       sessions sticky-by-id)
                                                           │                       │
                                                           ▼                       ▼
@@ -317,7 +337,7 @@ agent traces ────────▶ Recommendation ─────▶ Bundl
                                                      invocation              p-value / winner
 ```
 
-- **Recommendations** — Lambda 调用 `start_recommendation`,把 `aws/spans` 中过去 N 天的 trace + 一个 evaluator(默认 `Builtin.GoalSuccessRate`)交给 AgentCore,数分钟后返回优化后的 prompt 或 tool description。
+- **Recommendations** — Lambda 调用 `start_recommendation`,把该 agent 所在 Runtime 自己的 log group(`/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`,`optimization._default_log_group_arn`;2026-08-05 起 span 已不再写入 `aws/spans`,见 §11.9)中过去 N 天的 trace + 一个 evaluator(默认 `Builtin.GoalSuccessRate`)交给 AgentCore,数分钟后返回优化后的 prompt 或 tool description。
 - **Apply** — 一键写回到现有的 `__prompt_text__` / `__prompt_voice__` DynamoDB 行(下次 invocation 就生效),同时创建一个新的 Configuration Bundle 版本作为审计 + 回滚 + A/B 候选。
 - **Configuration Bundles** — AgentCore 端的不可变版本链。每次 Apply 自动产生一个新版本;A/B Test 直接引用版本 ID。
 - **A/B Tests** — `create_ab_test` 在 Gateway 上按 sessionId 粘性分流。在线评估打分;`get_ab_test` 返回 per-variant mean / sample size / p-value / 是否显著。Stop 即调用 `update_ab_test(executionStatus="STOPPED")`。
@@ -386,7 +406,7 @@ SubmitForApproval         │                          │
 |---|------|------|------|
 | 1 | 设备厂商员工 | **Skill ERP** | 登录 → Create Skill → 填 `name=air-purifier-control`,`description=控制空气净化器开关、风速、模式`,`allowed_tools=["control_device"]`,`instructions` 写 SKILL.md 正文 |
 | 2 | Skill ERP 后端 | **AWS Agent Registry** | `CreateRegistryRecord(descriptorType="AGENT_SKILLS")` → 轮询等 `CREATING` → `SubmitRegistryRecordForApproval` ⇒ `PENDING_APPROVAL` |
-| 3 | 审批员 (Admin) | **Admin Console → Skills** | 点 `Add approved skill from AWS Agent Registry` → 顶部**待审批**队列里审阅 → `Approve` 或 `Reject`(驳回必须填原因,见 §8.6)。也可用 CLI: `aws agent-registry-control update-registry-record-status`;可配合 EventBridge 接入工单/审批机器人 |
+| 3 | 审批员 (Admin) | **Admin Console → Skills** | 点 `Add approved skill from AWS Agent Registry` → 顶部**待审批**队列里审阅 → `Approve` 或 `Reject`(驳回必须填原因,见 §8.6)。也可用 CLI: `aws agent-registry-control update-registry-record-status`。新提交会经 EventBridge 规则 `smarthome-registry-record-events` 自动出现在 **Registry 动态**面板(§8.7),无需人工轮询 |
 | 4 | Admin | **同一个弹窗** | 批准后记录出现在下方"可导入"列表 → 勾选 `air-purifier-control` → 选择 scope `__global__` → `Import` |
 | 5 | Agent | Runtime | 下一次 `/invocations` 时 `load_skills_from_dynamodb("__global__")` 自动拉到新 skill,无需重启 |
 
@@ -421,10 +441,7 @@ DynamoDB 存两条记录:`__global__/{skillName}` 和 `{userEmail}/{skillName}`�
 
 ### 8.6 审批 / 驳回 Skill(在 Admin Console 里做)
 
-审批状态机由 Registry 托管,但在此之前**仓库里没有任何调用方** ——
-`agent-registry:UpdateRegistryRecordStatus` 早已授给 admin Lambda 却从未被调用,
-所以用户从 Skill ERP 发布的 skill 会停在 `PENDING_APPROVAL`,只能去 AWS 控制台推进。
-现在这一步在 Admin Console 里完成。
+审批状态机由 Registry 托管,这一步在 Admin Console 里完成(不必去 AWS 控制台)。
 
 **操作路径**: Admin Console → **Skills** → `Add approved skill from AWS Agent Registry`
 → 弹窗顶部的 **待审批** 区块。
@@ -433,29 +450,43 @@ DynamoDB 存两条记录:`__global__/{skillName}` 和 `{userEmail}/{skillName}`�
 |------|------|------|
 | **Approve** | → `APPROVED`,记录随即出现在下方"可导入"列表 | 仍需再点 Import 才会写进 skill 目录 |
 | **Reject** | → `REJECTED` | **必须填原因** |
-| Deprecate(API 支持,UI 暂未暴露) | → `DEPRECATED` | DRAFT 记录唯一的退出路径 |
+| Deprecate(API 支持;审批表格目前没有对应按钮,前端 `handleReview` 已为它预置不可逆确认框) | → `DEPRECATED` | DRAFT 记录唯一的退出路径。**终态**:之后任何状态变更都会失败,恢复只能重建记录(新 recordId) |
 
-**为什么驳回必须填原因**: `statusReason` 是 Registry 里唯一记录"为什么"的字段,
-也是 skill 作者唯一能看到的反馈。不写原因的驳回,对作者来说和"系统把我的东西弄丢了"
-没有区别。审批人的邮箱会自动附加在原因后面,所以记录同时回答了"是谁批的"。
+**驳回必须填原因**: `statusReason` 是 skill 作者唯一能看到的反馈;审批人的邮箱会自动附加在原因后面。
 
-**状态机(在真实记录上实测得出,不是照文档抄的)**:
+**两条操作上要知道的状态规则**(实测的完整转移表见架构文档
+[Skill review](architecture-and-design.md#skill-review-approve--reject--deprecate)):
 
-```
-DRAFT             → PENDING_APPROVAL | DEPRECATED | DRAFT     (不能直接 REJECTED)
-PENDING_APPROVAL  → APPROVED | REJECTED
-REJECTED          → APPROVED                                  (可逆)
-```
-
-所以:
-
-- **DRAFT 记录无法驳回**。API 会报错,但错误信息只是一串枚举值
-  ("PENDING_APPROVAL, DEPRECATED, DRAFT, UPDATING"),看不出"其实是还没提交审批"。
-  界面把它翻译成一句人话,并提示改用 deprecate。
-- **驳回是可逆的**。审批人改主意不必让作者重新发布 —— 待审批队列里同时列出
-  `PENDING_APPROVAL` 和 `REJECTED`,已驳回的行只显示 Approve 按钮。
+- **DRAFT 记录无法驳回** —— 它还没提交审批。界面会给出一句人话的 409 提示,并建议改用 deprecate。
+- **驳回是可逆的** —— 待审批队列里同时列出 `PENDING_APPROVAL` 和 `REJECTED`,已驳回的行只显示
+  Approve 按钮,审批人改主意不必让作者重新发布。
 
 **作者侧**: 驳回原因会显示在 Skill ERP 的 `My Skill Records` 表格里,状态下方一行红字。
+
+### 8.7 Registry 动态面板(不用再手动刷新待审批队列)
+
+AWS Agent Registry 会把记录状态变化发到账号默认 EventBridge 总线(source `aws.agent-registry`)。
+CDK 中的规则 `smarthome-registry-record-events` 把它们送进 admin Lambda,补一次
+`GetRegistryRecord` 后写入 DynamoDB 表 `smarthome-registry-events`(TTL 30 天);
+控制台 **Integration Registry(集成注册中心)→ Overview** 的 **Registry 动态** 表每 30 秒拉取一次。
+
+- 最新一次变化是"待审批"的记录会一直高亮,直到 Registry 报告它的下一次变化("需审批"是推导出来的,不需要手动标记);Overview 子 tab 标签上显示待审批数。
+- 点"审批":SKILL 记录打开 Skills 审批弹窗,AGENT 记录跳到 A2A 子 tab。
+- 面板为空 ≠ 没有动静:读取失败会显示为告警。ERP 发布的记录"发布人"列由 Cognito sub 反查得到。
+- 实现见 `cdk/lambda/admin-api/registry_events.py`。
+
+### 8.8 Skill 风险扫描报告
+
+审批队列(Build → Skills → `Add approved skill from AWS Agent Registry`)每行可以"扫描 / 重新扫描 / 全部扫描"
+(`POST /registry/records?action=skill-scan`,一次一条记录)。扫描器是两层
+(`cdk/lambda/admin-api/skill_scan.py`):
+
+- **静态层**:确定性规则(规则 id `SS..`,各自映射到 OWASP Agentic Skills Top 10)。
+- **语义层**(可选,调用模型):**只能新增发现或提高严重度,不能清除或降低静态层的结论** —— 即使有人对扫描器自己的 LLM 判官做提示注入,最坏结果也只是多报。模型不可用时报告会标明"仅静态层"。
+
+**报告是证据,不是闸门。** 未扫描也可以批准;批准/驳回时,当时最新的扫描结论会被写进记录的
+`statusReason`(例如 `[scan <verdict> <score>]`,未扫描则是 `[scan not run]`),所以审批记录会说明是
+依据什么证据做的决定。没有发现 ≠ 安全。
 
 ---
 
@@ -466,10 +497,15 @@ REJECTED          → APPROVED                                  (可逆)
 > **Token 数现在会标出归属的 agent**(悬停看逐个 agent 的拆分)。之前是一个没有归属的
 > 数字 —— 九个 Runtime 往同一个日志组里写,合成一个数就没法回答"这个 agent 花了多少"。
 >
-> 一个已知口径限制:**子 Agent 会打自己的 session id**(一串裸 UUID,不是主 Agent 的
-> `user-session-*`)。AgentCore 的 `runtimeSessionId` 是按 Runtime 分配的,A2A 这一跳
-> 不传递它,所以一次委派产生的 token 落在本表没有对应行的 session 下。
-> **按 agent 的总量是准的,跨委派的按轮次归因目前拿不到。**
+> **2026-08-15 起 session id 会跨 A2A 这一跳传递**(约定见 `shared/a2a_session.py`,
+> 子 Agent 侧读取见 `a2a-agent-registry/common/server.py` 的 `_orchestrator_session_id`):
+> 主 Agent 发起委派时带上平台的 runtime session header,AgentCore 据此把同一个
+> `user-session-*` 作为子 Agent 的 `runtimeSessionId`,子 Agent 的 span 因而打上同一个
+> `session.id`;同一个 id 还放在 A2A 消息 metadata 里,供子 Agent 自己的代码读取。所以一次
+> 委派的 token 现在落在主 Agent 那一行下,悬停可见主/子 Agent 的拆分(实测一轮:
+> 主 Agent 55,056 + 子 Agent 3,188 token,同一个 `session.id`)。
+> 例外:2026-08-15 之前的数据,以及 warmup 等 id 不足 33 字符、不会被转发的调用,子 Agent
+> 仍是自己的裸 UUID,这部分 token 只出现在按 agent 的总量里。
 
 ### 9.1 Stop Session
 
@@ -510,7 +546,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "$AGENTCORE_GATEWAY_SMARTHOMEDEVICECONT
 ## 9.5 Agents 页 —— 机队总览与逐个 Agent 治理
 
 "Agent" 以前不是管控面里的一等实体:一等实体是 Cognito 用户和 skill,agent 只是
-prompt 和 optimization 两个页面里 `text | voice` 的二选一。现在有 1 主 + 6 子 +
+prompt 和 optimization 两个页面里 `text | voice` 的二选一。现在有 1 主 + 8 子 +
 1 语音 + 1 A/B 变体 + 1 Tool,`#/agents` 回答"有哪些 agent、跑在哪、有没有出问题"。
 
 **列表是推导出来的,不是维护出来的** —— 由 Runtime ARN + Registry 已批准记录 +
@@ -538,12 +574,17 @@ prompt 和 optimization 两个页面里 `text | voice` 的二选一。现在有 
 
 ### 9.5.1 "No runtime" 告警是真信号,不是噪音
 
-一行显示 `No runtime`,意思是 Registry 里有已批准记录但 ARN 白名单里没有对应
-Runtime。两种可能:记录成了孤儿,或者某次部署漏跑了 `patch-text-agent`,
-`DASHBOARD_EXTRA_RUNTIME_ARNS` 没学到这个 ARN。**后者用别的方式看不出来** ——
-这个告警第一次上线就抓到了一例(3 个子 Agent 不在白名单里)。
+一行显示 `No runtime`,意思是 Registry 里有已批准记录,但它的 card `url` 没能解析到
+Runtime 列表里的任何一个 Runtime。Runtime 列表(`dashboard._all_runtime_arns()`)现在
+除了环境变量,还包含**从 APPROVED Registry 记录的 card `url` 推导出的 Runtime**
+(`_registry_runtime_arns`),所以"部署漏跑 `patch-text-agent`"已不再是主要原因
+(这个告警第一次上线时抓到的正是这一类:3 个子 Agent 不在 `DASHBOARD_EXTRA_RUNTIME_ARNS` 里)。
+现在剩下的可能:记录成了孤儿(Runtime 已拆掉);card `url` 指向网关,但网关上找不到同名
+target(`_attach_runtime_arns` 会在日志里打 `fleet: gateway ... has no runtime target named ...`);
+或者是第三方部署在其他账号的 Runtime。
 
-处理: `cd a2a-agent-registry && python deploy.py --only patch-text-agent`。
+处理:先看上面那条日志确认是哪一种;对本账号内确实存在的 Runtime,可以兜底跑
+`cd a2a-agent-registry && python deploy.py --only patch-text-agent` 把 ARN 写进环境变量。
 
 ### 9.5.2 逐个 Agent 改 prompt
 
@@ -590,16 +631,12 @@ Gateway、以用户身份、受同一套策略约束。
 
 ### 9.6.2 定时执行需要一份用户凭证(这是真实的新增攻击面)
 
-以"不在线的用户"的身份执行需要凭证,几个方案都实测过:
+以"不在线的用户"的身份执行需要凭证。系统存的是该用户的 Cognito **refresh token**(执行时用
+`REFRESH_TOKEN_AUTH` 换出 Gateway 接受的 idToken),**这确实是一份 30 天有效的用户凭证落在了系统里**。
+为什么不用 workload token 或直接问 Cedar(都实测过,都不行),见架构文档
+[The credential, and why it is a real tradeoff](architecture-and-design.md#the-credential-and-why-it-is-a-real-tradeoff)。
 
-| 方案 | 结果 |
-|------|------|
-| `GetWorkloadAccessTokenForUserId` | 形态正确(无需用户在线即可为某 userId 换 token),但 **Gateway 返回 401 `Invalid Bearer token`** —— 它是 KMS 加密的不透明 AgentCore token,不是带正确 audience 的 JWT |
-| 直接问 Cedar | 没有公开 API(Verified Permissions 是另一个服务,AgentCore 的 `AuthorizeAction` 是 Gateway 内部动作) |
-| Cognito refresh token → `REFRESH_TOKEN_AUTH` | 能换出 Gateway 接受的真 idToken(实测 200,返回 6 个经 Cedar 过滤的工具) |
-
-所以存的是 refresh token,**这确实是一份 30 天有效的用户凭证落在了系统里**。
-对应的收敛措施:
+对应的收敛措施(运维核对时逐条看):
 
 - 存在 Secrets Manager,专用的客户托管 KMS 密钥(已开启轮换);
 - **一个用户一个 secret**(`smarthome/scenario-tokens/{sub}`),可单独吊销;
@@ -607,8 +644,8 @@ Gateway、以用户身份、受同一套策略约束。
 - **绝不写日志**;
 - 没有存 token 的用户,其定时场景直接不执行(fail closed)。
 
-> 只给 Secrets Manager 权限是不够的:用客户托管密钥时 `GetSecretValue` 会被 **KMS**
-> 拒绝,而表象是"没有可用的调度凭证",看起来像 secret 不存在而不是缺权限。
+> **排障**:场景报"没有可用的调度凭证",但 secret 明明存在 → 多半是执行 role 缺
+> `kms:Decrypt`(客户托管密钥下 `GetSecretValue` 被 **KMS** 拒绝),而不是 secret 丢了。
 
 ### 9.6.3 触发器支持哪五种
 
@@ -737,8 +774,8 @@ Agent 做场景时它就会用暖色调。
 
 ### 9.6.10 示例提示词库(Chatbot)
 
-Chatbot 输入框左侧有一个图标按钮,打开右侧的**示例提示词抽屉**:56 条示例、17 个能力
-分组、可按中英文搜索。点一条示例只会把它**填进输入框**,不会直接发出去 —— 演示时讲解
+Chatbot 输入框左侧有一个图标按钮,打开右侧的**示例提示词抽屉**:67 条示例、19 个能力
+分组(以 `shared/prompt-examples.json` 为准)、可按中英文搜索。点一条示例只会把它**填进输入框**,不会直接发出去 —— 演示时讲解
 者需要先说明这条要演什么。
 
 对运维/演示来说有三点值得知道:
@@ -750,7 +787,7 @@ Chatbot 输入框左侧有一个图标按钮,打开右侧的**示例提示词抽
   它,`scripts/simulate-users.py` 也读它来生成演示流量(§10.3)。所以「演示覆盖了什么」
   和「Chatbot 里能点到什么」不会各说一套。
 - **有覆盖率测试兜底。** `shared/tests/test_prompt_examples.py` 会解析 8 个 AgentCard,
-  断言 18 个已发布 skill 每一个都被某条示例覆盖;反向也断言示例没有指向已不存在的
+  断言 21 个已发布 skill(`test_all_twenty_one_skills_are_accounted_for`)每一个都被某条示例覆盖;反向也断言示例没有指向已不存在的
   skill。新增一个 skill 却忘了写示例 → 测试失败,而不是等到演示当天才发现「这个 Agent
   没人演」。
 
@@ -900,9 +937,9 @@ python3 scripts/simulate-users.py run --days-back 45
 | 大屏还是空的 | ①等 2-3 分钟(CloudWatch 摄取延迟);②大屏有 5 分钟缓存,点右上角"刷新"强制重算;③确认时间范围是 24h 而不是 7d |
 | 汇总表里有 err | 首轮常见(Runtime 冷启动),脚本会自动重试一次。持续失败查对应 JSONL 里的 `error` 字段 |
 | `AGENT_RUNTIME_ARN missing from the admin Lambda env` | 单独跑过 `cdk deploy` 会把这个环境变量重置成占位符。重跑 `bash scripts/06-deploy-agentcore.sh` 修复 |
-| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Tool Policy → Manage Permissions** 里给(Integration Registry 只读)。8 个专家全部有已批准记录、共 21 个 skill 可授权;目录为空时的排查见 [§11.11](#1111--a2a-目录为空两个-namespace-各有一套-registry) |
+| 专家 Agent 相关的请求回「超出我当前的工具、技能与代理能力范围」 | 该用户没有对应的 **A2A 技能授权**。`setup` 只授予 MCP 工具,A2A 授权要在 **Admin Console → Build → 子 Agent 策略**(`#/subAgentPolicy`)里给(Integration Registry 只读)。8 个专家全部有已批准记录、共 21 个 skill 可授权;目录为空时的排查见 [§11.11](#11-其他重要事项) |
 | 满意度卡片显示「尚无反馈」 | 该时间范围内没有投票。跑 `run`(会自动投票)或在 Chatbot 里点几下赞/踩。**空表不会显示成 CSAT 0** —— 那会把「没数据」画成「评分极低」 |
-| 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + `DASHBOARD_EXTRA_RUNTIME_ARNS` 这三个环境变量推导出的 Runtime。修复:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),A2A 则重跑 `python a2a-agent-registry/deploy.py --only patch-text-agent`。**注意**:2026-08-05 之前部署的环境没有 `DASHBOARD_EXTRA_RUNTIME_ARNS`,升级后必须重跑一次才会生效 |
+| 某个 Runtime(voice / A2A / bundles)的 Token 不出现在大屏上 | 该 Runtime 没进白名单。span 与评估指标上的 `service.name` 是**精确匹配**,大屏只聚合 `dashboard._all_runtime_arns()` 给出的 Runtime:`AGENT_RUNTIME_ARN` + `VOICE_AGENT_RUNTIME_ARN` + **Registry 中 APPROVED 的 AGENT 记录**的 card `url` 解析出的 Runtime(`_registry_runtime_arns`,缓存 5 分钟)+ `DASHBOARD_EXTRA_RUNTIME_ARNS`。所以已批准的 A2A 子 Agent 一般会自动出现;仍缺失时看它的记录是否 APPROVED、card `url` 能否解析到 Runtime(admin Lambda 日志里有 `dashboard allowlist: N runtime ARN(s) from the Registry`)。没有 Registry 记录的 Runtime(bundles 等)只能靠环境变量:重跑 `bash scripts/06-deploy-agentcore.sh`(会补上 bundles runtime),或 `python a2a-agent-registry/deploy.py --only patch-text-agent` |
 
 #### 安全边界
 
@@ -969,7 +1006,7 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 3. **看 `chat` span** → token 用量、工具路径、报错 stacktrace。
    **注意 log group 换过位置**:2026-08-05 起 span 写在每个 runtime 自己的
    `/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`(`spans` 流)里,不再是
-   账号级的 `aws/spans` —— 见 [§11.9](#119--span-的-log-group-换过位置查错地方会看到空数据)。
+   账号级的 `aws/spans` —— 见 [§11.9](#11-其他重要事项)。
 4. **Tool Policy 切 LOG_ONLY 重放** → 鉴别是 Cedar 拒绝还是模型没调工具。
 5. **Quality Evaluation 跑一次 offline eval** → 判断回归是提示词还是模型引起。
 
@@ -991,7 +1028,7 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 
 - 改 Prompt / Skill → DynamoDB 即时生效,不需 `agentcore deploy`。
 - 改 Agent Python 代码 → 必须 `bash scripts/06-deploy-agentcore.sh`;若手动跑
-  `agentcore deploy`,**必须**按 [§2.5](#25--手动跑-agentcore-deploy-时三条命令缺一不可) 的三条命令来。
+  `agentcore deploy`,**必须**按 [§2.5](#2-agent-代码快速部署) 的三条命令来。
 - 改 CDK (Lambda / IAM / API GW) → `bash scripts/04-cdk-deploy.sh`,**然后必须再跑
   `python scripts/setup-agentcore.py`** —— 见下条。
 - 改 Cognito 用户组 / 添加 admin → Cognito 控制台直接操作,不走 CDK。
@@ -1002,18 +1039,12 @@ AgentCore Memory 内置 5 种策略(`SEMANTIC` / `SUMMARIZATION` / `USER_PREFERE
 
 ### 11.8 ⚠️ `cdk deploy` 会静默抹掉 admin Lambda 的一半环境变量
 
-admin Lambda 的环境变量来自两处:CDK 声明 **15** 个(内联 8 + `addEnvironment` 7),
-`setup-agentcore.py` 在部署后补 **12** 个(`GATEWAY_ID`、`MEMORY_ID`、
-`VOICE_AGENT_RUNTIME_ARN`、`DASHBOARD_EXTRA_RUNTIME_ARNS`、`KB_ID` / `KB_DATA_SOURCE_ID`、
-`OPTIMIZATION_*` / `*_ONLINE_EVAL_ARN` / `AB_TEST_ROLE_ARN` 等),因为它们指向 synth 时
-还不存在的资源。当前部署共 27 个。
-
-CloudFormation 里 `environment` 是**整张表**,所以任何一次 `cdk deploy` 都会把函数重置回
-CDK 的那 15 个,补写的 12 个全部丢失。**全过程没有任何报错**,而症状离病因很远。
-
-还有一类**数不出来**的丢失:`REGISTRY_ID` 和 `AGENT_RUNTIME_ARN` 由 CDK 声明,但声明的值是
-`PLACEHOLDER_SET_BY_SETUP_SCRIPT`。`cdk deploy` 之后它们**还在**(总数看起来正常),值却是
-占位符 —— 所以**按个数核对是查不出来的**,必须看值。
+**一句话**:`setup-agentcore.py` 部署后补写的那批变量(`GATEWAY_ID`、`MEMORY_ID`、`OPTIMIZATION_*`、
+`DASHBOARD_EXTRA_RUNTIME_ARNS`、`KB_ID` 等),会被任何一次**改动了 CDK 声明环境变量表**的
+`cdk deploy` 静默重置掉(只改代码不会触发,所以看起来像偶发);`REGISTRY_ID` / `AGENT_RUNTIME_ARN`
+则会**留在表里但变回 `PLACEHOLDER_SET_BY_SETUP_SCRIPT`** —— 所以必须按值核对,不能按个数。
+机制见架构文档 [§9.3 Runtime Configuration Injection](architecture-and-design.md#93-runtime-configuration-injection);
+哪一侧拥有哪个变量以 `cdk/lambda/admin-api/tests/test_env_contract.py` 为准。
 
 | 丢失的变量 | 表象 |
 |---|---|
@@ -1022,12 +1053,18 @@ CDK 的那 15 个,补写的 12 个全部丢失。**全过程没有任何报错**
 | `OPTIMIZATION_*` | `/optimization/*` 返回 ConfigurationError |
 | `DASHBOARD_EXTRA_RUNTIME_ARNS` | 大屏漏掉子 Agent 的 token;**Optimization 的 agent 下拉框认不出子 Agent**(报 "agentType must be text&#124;voice&#124;tool_desc") |
 
+**预防**:要改 CDK 声明的 environment 时,部署前先存一份,部署后按名字合并回去:
+
+```bash
+aws lambda get-function-configuration --function-name smarthome-admin-api \
+  --query "Environment.Variables" --output json > /tmp/admin-env-before.json
+```
+
 **修复**: 重跑 `python scripts/setup-agentcore.py`(它是往现有环境变量上合并,不是覆盖),
 然后 `cd a2a-agent-registry && python deploy.py --only patch-text-agent` 补回 A2A 的
 8 条 Runtime ARN。
 
-**核对**:按**名字和值**核对,不要按个数 —— 新增一个变量总数就变了,而占位符根本不改变
-总数。(这份手册此前写「期望 28」,实测是 27:一个会随代码漂移、且查不出占位符的判据。)
+**核对**:按**名字和值**核对,不要按个数(占位符不改变总数)。
 
 ```bash
 # 这四个必须有真实值,不能是 null,也不能是 PLACEHOLDER_*
@@ -1038,32 +1075,24 @@ aws lambda get-function-configuration --function-name smarthome-admin-api \
 ./venv/bin/python scripts/check-registry-wiring.py
 ```
 
-`cdk/lambda/admin-api/tests/test_env_contract.py` 记录了哪一侧拥有哪个变量,
-新增变量时按它选边。
+新增变量时按 `test_env_contract.py` 选边。
 
 ### 11.9 ⚠️ span 的 log group 换过位置,查错地方会看到空数据
 
-AgentCore Runtime 以前把 Strands/ADOT 的 span 写进账号级的 `aws/spans`。**2026-08-05
-起(主 Agent)/ 2026-08-09 起(八个 A2A 子 Agent)** 改成写进每个 runtime 自己的
-`/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`(`spans` 流)。
+**症状**:手工查 span(或自己写 Logs Insights)结果为空,但系统明明在用。
 
-切换非常干净,也因此完全没有人发现:`aws/spans` 停在 02:12,runtime 自己那条流从同一天
-02:28 开始。**没有报错、没有权限拒绝,`StartQuery` 一直成功** —— 它只是匹配到 0 条记录。
-结果是 Overview 的 TTFT / Token 卡片和 Sessions 页的 token 合计**整整六天显示"没有
-数据",和系统闲置时的表现一模一样。**
+**原因**:**2026-08-05 起(主 Agent)/ 2026-08-09 起(八个 A2A 子 Agent)** span 不再写账号级的
+`aws/spans`,而是写每个 runtime 自己的 `/aws/bedrock-agentcore/runtimes/{runtimeId}-DEFAULT`
+(`spans` 流)。查旧位置不报错,只是匹配 0 条。控制台大屏已同时查两处并合并;切换经过、为什么保留旧
+group,见架构文档 [§8.9](architecture-and-design.md#89-per-login-session-id-and-session-tracking)。
 
-代码侧已修:`dashboard._spans_log_groups()` 同时查**两个**来源并合并。为什么不直接换掉
-旧的:30 天的时间范围仍然会跨过这个切换点,丢掉旧 group 等于把趋势线抹掉五周 —— 而趋势
-线正是这个页面存在的意义。
-
-自己排查时要注意两点(都是实测出来的):
+自己排查时要注意两点:
 
 - **`StartQuery` 只要有一个 group 不存在,就整条请求失败**(`ResourceNotFoundException`)。
-  所以一个已经拆掉、但还留在 `DASHBOARD_EXTRA_RUNTIME_ARNS` 里的子 Agent runtime,会把
-  **所有** span 卡片一起弄挂。代码里先用 `DescribeLogGroups` 过滤一遍。
+  已经拆掉、但还留在 `DASHBOARD_EXTRA_RUNTIME_ARNS` 里的子 Agent runtime 会让查询整体失败 ——
+  手工查时只列存在的 group。
 - **`POST /invocations` 这个 span 在 `opentelemetry.instrumentation.starlette` scope 下**,
-  不在 Strands 的 scope 里。只按 Strands scope 过滤会静默丢掉它 —— 而它是唯一能测出
-  "一次请求里有多少时间花在我们容器内"的数据。
+  不在 Strands 的 scope 里;只按 Strands scope 过滤会漏掉它。
 
 手工查最近的 span:
 
@@ -1120,16 +1149,15 @@ A2A Agent 列表是**空的**,或者只有 3 个;给用户授权后,问安全/�
 `agentcore-state.json`),再确认该 registry 存在、`READY`、且有已批准记录。任何一项不符
 就非 0 退出并打印具体差异。
 
-**根因(2026-08-10 实测)**:GA 的 `agent-registry` 与旧的 `bedrock-agentcore` 是**两个
-互不可见的 namespace,各自持有一套 registry**。同一个 id 在另一个 namespace 里查不到:
+**根因**:GA 的 `agent-registry` 与旧的 `bedrock-agentcore` 是**两个互不可见的 namespace,
+各自持有一套 registry**,同一个 id 在另一个 namespace 里查不到 —— 所以 **`GetRegistry` 报 404
+并不能证明 id 失效**,排查时必须说清用的是哪个 namespace(细节见架构文档
+[Cross-service facts](architecture-and-design.md#cross-service-facts-all-measured-on-the-deployment)):
 
 ```bash
 aws agent-registry-control     get-registry --registry-id Zuy3YNKrPQ5uwE9t   # READY,8 条 agent 记录
 aws bedrock-agentcore-control  get-registry --registry-id Zuy3YNKrPQ5uwE9t   # ResourceNotFoundException
 ```
-
-所以 **`GetRegistry` 报 404 并不能证明 id 失效** —— id 正确而 namespace 用错时,报的是
-同一个错。**排查时必须同时说清用的是哪个 namespace**,否则会得出错误结论(见下方复盘)。
 
 列记录时也要认准 namespace:
 
@@ -1144,19 +1172,13 @@ aws agent-registry-control list-registry-records --registry-id "$(
 patch 回去。**注意 `REGISTRY_ID` 是在模块导入时读取的**,改完环境变量后暖容器仍然用旧值
 —— 要强制冷启动(改一次 `--description` 即可)才会生效。
 
-> **复盘:一次被误诊的排查。** 2026-08-10 这个空目录被归因为两个**都不成立**的原因:
-> ①「admin Lambda 内置 botocore 早于 GA 的 `filters` 形状」——实测部署包里是 **1.43.68**
-> 且带 GA service model,`/var/task` 在 `sys.path` 上优先于 `/var/runtime`;若真被旧版覆盖,
-> 导入期的 `boto3.client("agent-registry-control")` 会直接 `UnknownServiceError`,Lambda
-> 根本返回不了 200。②「角色缺 `ListRegistryRecords`」——该权限一直在 CDK 里授着,且以
-> `agent-registry:` 前缀。真实原因只有一个:admin Lambda 的 `REGISTRY_ID` 被手工改成了一个
-> **旧 namespace** 的 id。那个 registry 共 5 条记录,但只有 3 条是 agent 记录
-> (energy-optimization、appliance-maintenance、home-security;另外 2 条是 skill 记录),
-> 而目录只列 agent —— 于是「8 个专家」变成了「3 个」。
+> **别被这两个假原因带偏(2026-08-10 实测排除)**:不是 admin Lambda 的 botocore 太旧(部署包里是
+> 1.43.68,带 GA service model;真太旧会直接 `UnknownServiceError` 而不是返回 200),也不是角色缺
+> `ListRegistryRecords`(一直以 `agent-registry:` 前缀授着)。那次的真实原因是 `REGISTRY_ID` 被手工改成了
+> 旧 namespace 里一个只有 3 条 agent 记录的 registry,于是「8 个专家」变成了「3 个」。
 >
-> 教训是这个仓库反复出现的那一类:**空列表 + 200 + 一条 warning,无法区分「本来就没有」和
-> 「读失败了」**。现在读失败会随响应返回 `catalogError`,控制台渲染成告警而不是中性的
-> 「暂无已审批的 A2A 智能体」,并禁用保存按钮。
+> 读失败和"本来就没有"现在可以区分:读失败时响应带 `catalogError`,控制台显示告警(而不是中性的
+> 「暂无已审批的 A2A 智能体」)并禁用保存按钮。
 
 > **当前状态(2026-08-12)**:8 个专家全部可授权(共 21 个 skill —— 2026-08-12 为能耗/安全/维护
 > 三个专家各新增一个需要完整工具链的 skill:`usage_audit` / `advisory_review` / `service_forecast`,
