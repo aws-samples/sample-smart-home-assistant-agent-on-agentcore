@@ -3341,6 +3341,69 @@ AWS console.
 > returning the unchanged status, so pressing Approve on a rejected skill answered
 > "Record is now REJECTED" as though it had worked.
 
+#### Registry event notifications (EventBridge → Overview panel)
+
+Both approval surfaces above — the Skills review modal and the A2A inventory — only
+revealed a new submission to an admin who happened to open them. AWS Agent Registry
+publishes every approval-workflow transition to the account's **default EventBridge
+bus** (source `aws.agent-registry`, detail-type `Registry Record State changed to
+Draft | Pending Approval | Approved | Rejected | Deprecated`), so the console now
+subscribes instead of polling two list pages.
+
+```
+Registry ──event──▶ default bus ──rule smarthome-registry-record-events──▶ admin Lambda
+                                                                            │ GetRegistryRecord (enrich)
+                                                                            ▼
+                                                     DynamoDB smarthome-registry-events (TTL 30d)
+                                                                            ▲
+Admin Console: Integration Registry tab polls GET /registry/records?action=events every 30s
+```
+
+**Why enrich and store, rather than render the event.** The event carries only
+`registryRecordId` and `registryId`; the name, type and version come from one
+`GetRegistryRecord` at ingest, and the publisher from the Skill ERP's ownership
+row (which stores only a Cognito `sub`, resolved to an email through Cognito;
+built-ins fall back to the definition's `_meta.publishedBy`). That read is allowed to fail — throttling,
+a record deleted in between — and the event is stored anyway with `enrichError`
+set, because a row with only a recordId is still a notification and a dropped row
+is a submission nobody hears about. Only the DynamoDB write may raise, which is
+what the rule's two retries are for. Storing also preserves history the Registry
+does not: it keeps a record's *current* status and one `statusReason`, overwritten
+on the next change.
+
+**"Needs review" is derived, never marked.** `registry_events.fold` treats a
+record's newest event as its state; a row is `actionable` only when it is that
+newest event and it is Pending Approval. "Newest" needs one care: EventBridge
+stamps `time` to the second, and the ERP's create-and-submit emits Draft and
+Pending Approval inside the same second, so a same-second tie is broken by the
+workflow's own order (Draft < Pending < Approved/Rejected < Deprecated) rather
+than by event id, which had left a real submission unhighlighted. An approval, rejection, deprecation or a
+new draft on the same record retires the highlight by itself, and an author who
+resubmits twice produces one highlight, not two. There is deliberately no "mark as
+read": a second source of truth about what is pending is how the panel and the
+queue would start disagreeing. Known limit: deletion emits no event, so a record
+deleted while pending stays flagged until its rows expire (30 days); Review then
+lands on an honest empty queue.
+
+**Console.** The Overview sub-tab of Integration Registry gains a *Registry
+activity* table (badge + bold on actionable rows, an info alert with the count,
+and the count on the Overview sub-tab label so it is visible from A2A and Skills
+too). *Review* on a SKILL row switches to Build → Skills and opens the review
+modal; on an AGENT row it switches to the A2A sub-tab. Either way the target table
+marks the matching row "From notification", so the admin lands on the line rather
+than at the top of a queue. The feed is polled at the tab level, not inside the
+panel, so one fetch serves both the table and the label; a review action refreshes
+it immediately rather than waiting for the next 30 s tick.
+
+**Deploy notes.** The rule's pattern does not name a registryId (at deploy time the
+admin Lambda's `REGISTRY_ID` is still the setup script's placeholder), so the Lambda
+filters; events for any other registry are logged and dropped. The rule target is
+the one grant on the admin Lambda that uses a resource-policy statement rather than
+a scheduler role, costing ~300 bytes of the 20 KB Lambda policy cap. Adding
+`REGISTRY_EVENTS_TABLE_NAME` to the CDK-declared environment is the kind of change
+that resets the setup-script variables (see the runbook's 排错表); the env was
+snapshotted and merged back by name after the deploy that introduced it.
+
 ---
 
 ### 9.9 Integration Registry & A2A Agents

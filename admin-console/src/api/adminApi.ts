@@ -1054,6 +1054,59 @@ export async function stopSession(sessionId: string, kind?: 'text' | 'voice'): P
 }
 
 // ---------------------------------------------------------------------------
+// Registry event notifications (Integration Registry -> Overview)
+// ---------------------------------------------------------------------------
+
+/** One AWS Agent Registry record transition, as stored by the admin API after
+ *  enrichment. `actionable` is computed server-side: true only when this is the
+ *  record's newest event AND it is Pending Approval, so an approval on the same
+ *  record retires the highlight without anyone marking it read. */
+export interface RegistryEvent {
+  eventId: string;
+  eventKey: string;
+  recordId: string;
+  recordArn: string;
+  transition: 'DRAFT' | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'DEPRECATED';
+  /** AGENT / SKILL / … from GetRegistryRecord; "" when the enrichment read failed. */
+  recordType: string;
+  name: string;
+  recordVersion: string;
+  description: string;
+  statusReason: string;
+  publishedBy: string;
+  occurredAt: string;
+  receivedAt: string;
+  /** Set when the admin API could not read the record at ingest time. The row is
+   *  still a notification; only its display fields are missing. */
+  enrichError?: string;
+  actionable: boolean;
+}
+
+export interface RegistryEventsResult {
+  events: RegistryEvent[];
+  pendingCount: number;
+  generatedAt: string;
+}
+
+/** Recent Registry record transitions, newest first. Polled while the Integration
+ *  Registry tab is open; a failure throws so the panel can say "could not read"
+ *  rather than "nothing happened". */
+export async function listRegistryEvents(): Promise<RegistryEventsResult> {
+  const headers = await authHeaders();
+  const res = await fetch(`${getBaseUrl()}/registry/records?action=events`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error(body.error || `Failed to list registry events (${res.status})`);
+  }
+  const data = await res.json();
+  return {
+    events: data.events || [],
+    pendingCount: data.pendingCount || 0,
+    generatedAt: data.generatedAt || '',
+  };
+}
+
+// ---------------------------------------------------------------------------
 // A2A Agents (Integration Registry)
 // ---------------------------------------------------------------------------
 

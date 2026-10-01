@@ -429,8 +429,14 @@ python publish_skill.py --record-version 0.1.0
 
 ### B3. 审批 (1 分钟)
 
-AWS Console → Bedrock AgentCore → Registry → `indoor-air-report` → **Approve**,
-或演示图快 `--approve`(绕过闸门, 生产禁用)。
+发布后 30 秒内, **Admin Console → 探索 → 集成注册中心 → 概览** 顶部的「Registry 动态」
+面板出现一行高亮的 `indoor-air-report · 待审批`, 概览页签带角标; 点 **审批** 直接落到
+构建 → 技能的审批弹窗, 该行标着「来自通知」。这是 Registry 发到 EventBridge 的事件
+(2026-09-19 接入), 不是页面轮询 Registry。
+
+也可以走 AWS Console → Bedrock AgentCore → Registry → `indoor-air-report` → **Approve**,
+或演示图快 `--approve`(绕过闸门, 生产禁用)。无论在哪里批, 面板里那一行会在下一次
+刷新后变成「已批准」, 高亮自动消失 —— 不需要任何人点「已读」。
 
 拒绝时**必须**填理由: `statusReason` 是提交者唯一能看到的反馈, 空理由的拒绝和
 "系统把我的 skill 弄丢了"无法区分。
@@ -509,6 +515,31 @@ DRAFT ──submit──> PENDING_APPROVAL ──update status──> APPROVED
 
 ---
 
+## Registry 事件通知的部署验证 (2026-09-19 新增, 1 分钟)
+
+`cdk deploy` 之后, 三条命令确认事件链路是通的:
+
+```bash
+# 1) 规则存在且 ENABLED, 目标是 admin Lambda
+aws events list-rules --region us-west-2 --name-prefix smarthome-registry-record-events \
+  --query 'Rules[].{name:Name,state:State}'
+aws events list-targets-by-rule --region us-west-2 --rule smarthome-registry-record-events \
+  --query 'Targets[].Arn'
+
+# 2) admin Lambda 的 resource policy 含 events.amazonaws.com, 且总长度 < 20480
+aws lambda get-policy --region us-west-2 --function-name smarthome-admin-api \
+  --query 'Policy' --output text | python3 -c "import sys,json;p=sys.stdin.read();print(len(p), 'events.amazonaws.com' in p)"
+
+# 3) 发一条真实事件 (Skill ERP 提交一个 skill), 然后看 Lambda 日志有 stored 行
+aws logs tail /aws/lambda/smarthome-admin-api --region us-west-2 --since 5m \
+  --filter-pattern '"registry event"'
+```
+
+这次部署给 admin Lambda 的 CDK 声明环境加了 `REGISTRY_EVENTS_TABLE_NAME`, 属于会触发
+setup 脚本变量被重置的那类变更(见下表最后一行)。部署前先
+`aws lambda get-function-configuration --function-name smarthome-admin-api --query Environment.Variables > /tmp/admin-env-before.json`,
+部署后按名字合并回去, 再跑 `scripts/check-registry-wiring.py`。
+
 ## 排错表
 
 | 症状 | 原因 | 处理 |
@@ -531,6 +562,7 @@ DRAFT ──submit──> PENDING_APPROVAL ──update status──> APPROVED
 | 注册好了, 但**没授权的人也能调** | authorizer 没配 `customClaims`, 授权层等于不存在 | 同上, `Authorizer` 列会显示 `Too permissive`(红) |
 | 全局授权在 `admin-list-groups-for-user` 里看不到 | 2026-08-15 起全局授权由 token trigger 注入 claim, 不落 membership | 正常状态; 解 idToken 看 `cognito:groups`, 或看控制台 reconcile 页的 claim-injected 一行 |
 | `deprecate` 之后想恢复, 一切操作都被拒 | `DEPRECATED` 是终态且记录会从 API 消失 | 只能重建记录 → 新 recordId → 把授权逐条迁过去。临时停用请用 `reject` |
+| Skill ERP 提交了, 「Registry 动态」面板 30 秒后还是空的 | 规则没匹配(看 `list-rules`), 或 admin Lambda 的 `REGISTRY_ID` 是 PLACEHOLDER 导致事件被当作"别的 registry"丢弃(日志 `ignored registry`), 或面板显示的是黄色"读取失败"而不是空 | 按上一节三步查; 面板把"读不到"和"没有事件"分开显示, 先看是哪一种 |
 | 一次 `cdk deploy` 之后 sweep 报 `registryId failed to satisfy constraint` | admin Lambda 的 `REGISTRY_ID` 被重置成 PLACEHOLDER(**改了 CDK 声明的 environment 才会触发**, 只改代码不会) | 按名字合并恢复环境变量, 再跑 `scripts/check-registry-wiring.py` 确认 exit 0 |
 
 ---

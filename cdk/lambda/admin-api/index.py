@@ -25,6 +25,7 @@ import agent_registry as registry_ns
 import model_catalog  # live Bedrock model catalog; see model_catalog.py
 import chat_history  # Memory events -> a renderable transcript; see chat_history.py
 import gateway_catalog  # which gateway exposes which tool; see gateway_catalog.py
+import registry_events  # Registry EventBridge events -> console activity; see registry_events.py
 # Copied from shared/ by scripts/01-install-deps.sh. The actor id is a Memory
 # namespace component, so reading a transcript back requires naming the actor
 # exactly as the agent named it when writing — a second sanitizer that differs by
@@ -3507,6 +3508,161 @@ def _caller_identity(event) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Registry event notifications (EventBridge -> here -> DynamoDB -> console)
+#
+# AWS Agent Registry emits a record's state transitions to the account's default
+# bus. Before this, the two approval surfaces in the console (the Skills review
+# modal, the A2A inventory) only revealed a new submission to whoever happened to
+# open them. The rule in the CDK stack points those events at this Lambda; the
+# handler enriches each with one GetRegistryRecord and stores it, and the console's
+# Integration Registry tab polls the stored rows. The which-rows-need-a-decision
+# logic is in registry_events.fold, shared with its tests.
+# ---------------------------------------------------------------------------
+
+REGISTRY_EVENTS_TABLE_NAME = os.environ.get("REGISTRY_EVENTS_TABLE_NAME",
+                                            "smarthome-registry-events")
+# Long enough that "who approved what last month" is still answerable, short enough
+# that the table never needs housekeeping.
+REGISTRY_EVENT_TTL_SECONDS = 30 * 24 * 3600
+# One registry, 30 days: a hundred rows is more history than the panel can show.
+REGISTRY_EVENTS_PAGE = 100
+
+
+def _registry_events_table():
+    return dynamodb.Table(REGISTRY_EVENTS_TABLE_NAME)
+
+
+def _record_publisher(record_id: str, record_type: str, detail: dict | None) -> str:
+    """Who published this record, as an email where one can be had.
+
+    The Skill ERP writes one ownership row per record into the skills table —
+    `__erp_owner__` / `<recordId>` for skills, `__erp_owner__` / `a2a:<recordId>`
+    for agents — and that row carries only the Cognito `sub` (measured against every
+    row in the deployment: no email, no recordType, which is also why the
+    `_scan_*_ownership_map` helpers match nothing). So: read the row directly, use
+    an email if one is ever stored, otherwise resolve the sub through Cognito the
+    way `_resolve_ddb_user_key` does, and show the bare sub if that fails. Built-in
+    skills have no ownership row at all; they say who published them in the
+    definition's `_meta`, the same field `skill-list` falls back to.
+
+    Best-effort throughout: a failure here costs one column, never the row.
+    """
+    if not record_id:
+        return ""
+    if record_type == registry_ns.RECORD_TYPE_AGENT:
+        sort_key = f"a2a:{record_id}"
+    else:
+        sort_key = record_id
+    try:
+        row = table.get_item(
+            Key={"userId": "__erp_owner__", "skillName": sort_key}).get("Item") or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("registry event: owner row lookup failed for %s: %s",
+                       record_id, exc)
+        row = {}
+    email = row.get("ownerEmail") or ""
+    if email:
+        return email
+    sub = row.get("ownerSub") or ""
+    if sub:
+        return _resolve_ddb_user_key(sub)
+    if record_type == registry_ns.RECORD_TYPE_SKILL and detail:
+        try:
+            definition_raw, _ = registry_ns.read_skill_definition(detail)
+            meta = (json.loads(definition_raw) or {}).get("_meta") or {} if definition_raw else {}
+            return meta.get("publishedBy", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("registry event: could not read _meta for %s: %s",
+                           record_id, exc)
+    return ""
+
+
+def ingest_registry_event(event):
+    """Store one Registry record transition from EventBridge.
+
+    Invoked by the `smarthome-registry-record-events` rule, so there is no HTTP
+    envelope and the return value is only read by the Lambda console. Two rules:
+
+      - Not ours (another source, a registry lifecycle event, another registry)
+        is dropped with a log line and WITHOUT raising, because raising makes
+        EventBridge retry something that will never be accepted.
+      - The enrichment read may fail — throttling, a record deleted between the
+        event and now — and the event is stored anyway with `enrichError` set. A
+        row with only a recordId is still a notification; a dropped row is a
+        submission the admin never hears about.
+
+    Only `put_item` is allowed to raise: a storage failure is exactly what the
+    rule's retries are for.
+    """
+    parsed = registry_events.parse_event(event)
+    if not parsed:
+        logger.info("registry event: ignored %s / %s",
+                    event.get("source"), event.get("detail-type"))
+        return {"skipped": "not a registry record event"}
+    if parsed["registryId"] != REGISTRY_ID:
+        logger.info("registry event: ignored registry %s (ours is %s)",
+                    parsed["registryId"], REGISTRY_ID)
+        return {"skipped": "other registry"}
+
+    summary = registry_events.summarize_record({})
+    detail = None
+    enrich_error = ""
+    try:
+        detail = registry_control.get_registry_record(
+            registryId=REGISTRY_ID, recordId=parsed["recordId"])
+        summary = registry_events.summarize_record(detail)
+    except Exception as exc:  # noqa: BLE001
+        enrich_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("registry event: GetRegistryRecord failed for %s: %s",
+                       parsed["recordId"], exc)
+
+    now = int(time.time())
+    item = {
+        **parsed,
+        **summary,
+        "eventKey": registry_events.event_key(parsed["occurredAt"], parsed["eventId"]),
+        "receivedAt": datetime.now(timezone.utc).isoformat(),
+        "publishedBy": _record_publisher(parsed["recordId"], summary["recordType"], detail),
+        "enrichError": enrich_error,
+        "ttl": now + REGISTRY_EVENT_TTL_SECONDS,
+    }
+    _registry_events_table().put_item(Item=item)
+    logger.info("registry event: stored %s %s %s", item["transition"],
+                item["recordType"] or "?", item["recordId"])
+    return {"stored": item["eventKey"]}
+
+
+def list_registry_events(event):
+    """GET /registry/records?action=events — recent transitions, newest first,
+    with `actionable` on the rows an admin still has to decide.
+
+    Reads only the stored rows, never the Registry: this is polled every 30s
+    while the Integration Registry tab is open. A read failure is a 502 rather
+    than an empty list, for the reason every other registry route gives — the
+    console must not render "nothing happened" for "could not find out".
+    """
+    if not REGISTRY_ID or REGISTRY_ID == "PLACEHOLDER_SET_BY_SETUP_SCRIPT":
+        return response(500, {"error": "REGISTRY_ID not configured"})
+    from boto3.dynamodb.conditions import Key
+    try:
+        resp = _registry_events_table().query(
+            KeyConditionExpression=Key("registryId").eq(REGISTRY_ID),
+            ScanIndexForward=False,
+            Limit=REGISTRY_EVENTS_PAGE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("registry events: query failed: %s", exc)
+        return response(502, {"error": f"cannot read registry events: {exc}"})
+    rows = []
+    for item in resp.get("Items", []):
+        row = {k: v for k, v in item.items() if k not in ("ttl", "registryId")}
+        rows.append(row)
+    folded = registry_events.fold(rows)
+    folded["generatedAt"] = datetime.now(timezone.utc).isoformat()
+    return response(200, folded)
+
+
+# ---------------------------------------------------------------------------
 # Skill risk scanning (GET / POST /registry/records?action=skill-scan)
 #
 # What a reviewer had before this: a name, a description, and a wall of SKILL.md. That
@@ -4822,6 +4978,10 @@ def _dispatch(event, context):
     # event by hand.
     if event.get("task") == "a2a-sweep":
         return sweep_a2a_revocations(event)
+    # A Registry record transition from the EventBridge rule. Same idea: keyed on
+    # the event's own `source`, so the trigger is greppable and a test can build it.
+    if event.get("source") == registry_events.SOURCE and "detail-type" in event:
+        return ingest_registry_event(event)
 
     method = event.get("httpMethod", "")
     resource = event.get("resource", "")
@@ -5008,6 +5168,8 @@ def _dispatch(event, context):
             return list_registry_skills(event)
         if action == "skill-scan":
             return list_skill_scans(event)
+        if action == "events":
+            return list_registry_events(event)
         if action == "fleet":
             return list_agent_fleet(event)
         if action == "scenarios":

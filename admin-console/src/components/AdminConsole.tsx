@@ -39,6 +39,9 @@ import {
   RegistrySkill,
   reviewRegistryRecord,
   importRegistryRecords,
+  listRegistryEvents,
+  RegistryEvent,
+  RegistryEventsResult,
   scanSkillRecord,
   listSkillScans,
   SkillScanReport,
@@ -123,6 +126,7 @@ import { sanitizeActorId } from '../api/sanitizeActor';
 import ShellModal, { ShellTarget } from './ShellModal';
 import { EntryEnvironmentTable } from './Optimization/EntryEnvironmentTable';
 import { DashboardSection } from './Dashboard/DashboardSection';
+import { RegistryActivityPanel } from './RegistryActivity/RegistryActivityPanel';
 import { AgentsPage } from './AgentsPage';
 import architectureDiagram from '../assets/architecture.drawio.png';
 import {
@@ -2722,6 +2726,28 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
   // Integration Registry
   const [integrationsSubTab, setIntegrationsSubTab] =
     useState<'overview' | 'a2a' | 'skills'>('overview');
+  // Registry record transitions from EventBridge, via the admin API. Held at the tab
+  // level rather than inside the Overview panel because the pending count is also
+  // the Overview sub-tab's badge, which has to show while the admin is on A2A.
+  const [registryEvents, setRegistryEvents] = useState<RegistryEventsResult | null>(null);
+  const [registryEventsLoading, setRegistryEventsLoading] = useState(false);
+  const [registryEventsError, setRegistryEventsError] = useState('');
+  // The record a "Review" click came from. The target table marks that row so the
+  // admin lands on the right line of a queue rather than at the top of a page.
+  const [highlightRecordId, setHighlightRecordId] = useState('');
+
+  const loadRegistryEvents = useCallback(async () => {
+    setRegistryEventsLoading(true);
+    try {
+      setRegistryEvents(await listRegistryEvents());
+      setRegistryEventsError('');
+    } catch (err: any) {
+      // Keep the last good data on screen; the alert says the refresh failed.
+      setRegistryEventsError(err.message);
+    } finally {
+      setRegistryEventsLoading(false);
+    }
+  }, []);
   // Approved SKILL records. Separate from the Build -> Skills page, which shows what
   // is running; this shows what the registry has approved and who imported it.
   const [registrySkills, setRegistrySkills] = useState<RegistrySkill[]>([]);
@@ -3210,6 +3236,36 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
     }
   }, [activeTab, integrationsSubTab, loadA2aInventory]);
 
+  // Poll the Registry event feed while the Integration Registry tab is open. 30s
+  // matches how quickly an admin would notice anyway; the rule → Lambda → table hop
+  // is sub-second, so a submission shows within one poll. Leaving the tab stops it.
+  useEffect(() => {
+    if (activeTab !== 'integrations') return;
+    void loadRegistryEvents();
+    const id = window.setInterval(() => void loadRegistryEvents(), 30_000);
+    return () => window.clearInterval(id);
+  }, [activeTab, loadRegistryEvents]);
+
+  // The review modal closing is the end of a SKILL notification's journey; the
+  // highlight has no meaning after that. (Runs on mount too — clearing "" is free.)
+  useEffect(() => {
+    if (!showRegistryModal) setHighlightRecordId('');
+  }, [showRegistryModal]);
+
+  /** From a Registry activity row to the place its decision is made. SKILLs are
+   *  reviewed in the Build → Skills modal, AGENTs on the A2A sub-tab; both tables
+   *  mark the row whose recordId matches. */
+  const reviewFromRegistryEvent = (evt: RegistryEvent) => {
+    setHighlightRecordId(evt.recordId);
+    if (evt.recordType === 'SKILL') {
+      setActiveTab('skills');
+      void handleOpenRegistryModal();
+    } else if (evt.recordType === 'AGENT') {
+      setActiveTab('integrations');
+      setIntegrationsSubTab('a2a');
+    }
+  };
+
   const clearMessages = () => {
     setError('');
     setSuccess('');
@@ -3241,7 +3297,9 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       setSuccess(t('integrations.a2a.review.done')
         .replace('{name}', record.name)
         .replace('{status}', out.status));
+      setHighlightRecordId('');
       await loadA2aInventory();
+      void loadRegistryEvents();
     } catch (err: any) {
       if (err instanceof A2AConformanceBlocked) {
         // Not an error message — a decision to put in front of the admin.
@@ -3481,6 +3539,7 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
       ]);
       setRegistryRecords(approved);
       setPendingRecords([...pending, ...rejected]);
+      void loadRegistryEvents();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -4008,7 +4067,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                   items={pendingRecords}
                   trackBy="recordId"
                   {...resizable<RegistryRecord>('registry-review-queue', [
-                    { id: 'name', width: W_NAME, header: t('registry.colName'), cell: (r) => r.name },
+                    {
+                      id: 'name', width: W_NAME, header: t('registry.colName'),
+                      cell: (r) => (r.recordId === highlightRecordId
+                        ? <SpaceBetween direction="horizontal" size="xs">
+                            <b>{r.name}</b>
+                            <Badge color="blue">{t('registryEvents.fromNotification')}</Badge>
+                          </SpaceBetween>
+                        : r.name),
+                    },
                     {
                       id: 'status', width: W_STATUS,
                       header: t('registry.colStatus'),
@@ -4890,10 +4957,19 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
         <SpaceBetween size="l">
           <SegmentedControl
             selectedId={integrationsSubTab}
-            onChange={({ detail }) =>
-              setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a' | 'skills')}
+            onChange={({ detail }) => {
+              setHighlightRecordId('');
+              setIntegrationsSubTab(detail.selectedId as 'overview' | 'a2a' | 'skills');
+            }}
             options={[
-              { id: 'overview', text: t('integrations.sub.overview') },
+              {
+                id: 'overview',
+                // The pending count rides the label so a submission is visible from
+                // the A2A and Skills sub-tabs too, not only once Overview is open.
+                text: registryEvents && registryEvents.pendingCount > 0
+                  ? `${t('integrations.sub.overview')} · ${registryEvents.pendingCount}`
+                  : t('integrations.sub.overview'),
+              },
               { id: 'a2a', text: t('integrations.sub.a2a') },
               { id: 'skills', text: t('integrations.sub.skills') },
               { id: 'mcp', text: `${t('integrations.sub.mcp')} · ${t('integrations.comingSoon')}`, disabled: true },
@@ -4903,6 +4979,13 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
 
           {integrationsSubTab === 'overview' && (
             <SpaceBetween size="l">
+              <RegistryActivityPanel
+                data={registryEvents}
+                loading={registryEventsLoading}
+                error={registryEventsError}
+                onRefresh={() => void loadRegistryEvents()}
+                onReview={reviewFromRegistryEvent}
+              />
               <Table
                 header={
                   <CloudscapeHeader variant="h2" description={t('integrations.desc')}>
@@ -5152,7 +5235,15 @@ const AdminConsole: React.FC<AdminConsoleProps> = ({ activeTab, setActiveTab, th
                 items={a2aAgents}
                 trackBy="recordId"
                 {...resizable<A2AAgentRecord>('integrations-a2a', [
-                  { id: 'name', width: W_NAME, header: t('integrations.a2a.col.name'), cell: (r) => r.name },
+                  {
+                    id: 'name', width: W_NAME, header: t('integrations.a2a.col.name'),
+                    cell: (r) => (r.recordId === highlightRecordId
+                      ? <SpaceBetween direction="horizontal" size="xs">
+                          <b>{r.name}</b>
+                          <Badge color="blue">{t('registryEvents.fromNotification')}</Badge>
+                        </SpaceBetween>
+                      : r.name),
+                  },
                   { id: 'description', header: t('integrations.a2a.col.description'),
                     width: TEXT_COL_MAX,
                     cell: (r) => <WrapCell>{r.description}</WrapCell> },
