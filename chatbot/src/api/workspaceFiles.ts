@@ -7,6 +7,7 @@
  */
 import { getAwsCredentials } from '../auth/CognitoAuth';
 import { getConfig } from '../config';
+import { retryOnSessionConflict } from './sessionConflict';
 
 export interface WorkspaceEntry {
   name: string;
@@ -59,7 +60,9 @@ async function runOne(
     runtimeSessionId: sessionId,
     body: { command, timeout: timeoutSeconds },
   });
-  const resp = await client.send(cmd);
+  // Opened right after login on the same fresh session as the warmup, so it
+  // can lose the race to create that session (see sessionConflict.ts).
+  const resp = await retryOnSessionConflict(() => client.send(cmd));
   if (!resp.stream) throw new Error('no response stream');
 
   let stdout = '';

@@ -13,6 +13,7 @@ import { SignatureV4 } from '@aws-sdk/signature-v4';
 import { HttpRequest } from '@aws-sdk/protocol-http';
 import { Sha256 } from '@aws-crypto/sha256-browser';
 import type { AwsCredentialIdentity } from '@aws-sdk/types';
+import { isSessionConflictResponse, retryOnSessionConflict } from '../api/sessionConflict';
 
 const SERVICE = 'bedrock-agentcore';
 
@@ -115,12 +116,15 @@ async function doSignedPost(p: {
     body: bodyStr,
   });
   const signer = makeSigner(p.credentials, p.region);
-  const signed = await signer.sign(req);
-  return fetch(`https://${p.host}${p.path}`, {
-    method: 'POST',
-    headers: signed.headers as Record<string, string>,
-    body: bodyStr,
-  });
+  // Signed per attempt so a retry carries a fresh x-amz-date.
+  return retryOnSessionConflict(async () => {
+    const signed = await signer.sign(req);
+    return fetch(`https://${p.host}${p.path}`, {
+      method: 'POST',
+      headers: signed.headers as Record<string, string>,
+      body: bodyStr,
+    });
+  }, isSessionConflictResponse);
 }
 
 /**
