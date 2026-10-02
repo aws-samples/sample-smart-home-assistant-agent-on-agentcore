@@ -1435,7 +1435,13 @@ def _ensure_bundles_runtime(primary_runtime_id: str, primary_runtime_arn: str,
         base_kwargs["filesystemConfigurations"] = fs_cfg
 
     if found_id is None:
-        resp = ac.create_agent_runtime(agentRuntimeName=bundles_name, **base_kwargs)
+        # Created on the primary's platform so the two arms differ only in the
+        # env var. An update that omits platformVersion keeps it, so the update
+        # branch below needs nothing.
+        resp = ac.create_agent_runtime(
+            agentRuntimeName=bundles_name,
+            platformVersion=primary.get("platformVersion") or "V1",
+            **base_kwargs)
         rt_id = resp["agentRuntimeId"]
         rt_arn = resp["agentRuntimeArn"]
         print(f"  [bundles-runtime] Created {bundles_name} runtimeId={rt_id}")

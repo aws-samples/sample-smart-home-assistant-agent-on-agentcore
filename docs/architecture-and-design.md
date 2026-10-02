@@ -1973,11 +1973,47 @@ deploy.sh (one-click wrapper)
     |           |     (admin config.js also injects chatbotUrl + deviceSimulatorUrl
     |           |      so the Tool Access tab can deep-link per-user demo flows)
     |           +---> Invalidate CloudFront cache
+    |     then scripts/set-platform-version.py --apply
+    |           -> text, voice and bundles runtimes V1 -> platform V2 (§9.2.1)
     |
     +---> [7/7] scripts/07-seed-skills.sh -> scripts/seed-skills.py
                 +---> Read SKILL.md files from agent/skills/
                 +---> Write to DynamoDB as __global__ skills (idempotent)
 ```
+
+### 9.2.1 Runtime Platform V2 (Snapshot Start)
+
+All 11 runtimes (text, voice, bundles and the eight A2A specialists) run on AgentCore Runtime `platformVersion: V2`, moved from V1 on 2026-10-01. V2 starts the container once per runtime version, takes a snapshot on the first healthy `/ping`, and restores every new session's microVM from that snapshot instead of re-running the import.
+
+**What it bought, measured.** Both runs used `scripts/measure-baseline.py --repeats 2`: the same 10 prompts, a fresh session each, and the rows whose span join failed excluded. The `platform` column is the time spent before our container is entered.
+
+| | V1 | V2 |
+|---|---|---|
+| `platform`, fresh session | 7.3-10.8s (fast group mean 8.3s) | 2.4-3.7s (fast group mean 2.8s) |
+| fast-group wall, first turn | 18.7s | 15.6s |
+
+Cold start is shorter, not gone: a first turn still waits about 3s for the session and then for the LLM. The first session after a new version goes READY ran about 11s longer inside the container (`harness` 15.8s against the usual 4-5s), and later sessions did not.
+
+**Setting it.** `scripts/set-platform-version.py` (`--apply`, `--only <runtime>`, `--to V1` to roll back). Neither CloudFormation, CDK nor the agentcore CLI can set the field, so a runtime the CLI creates is always V1. Three facts follow from that:
+
+- An `UpdateAgentRuntime` that omits `platformVersion` keeps the current one. So `agentcore deploy`, `restore-text-runtime-config.py` and the setup script's env patches all leave V2 alone.
+- A fresh provision does not, so `06-deploy-agentcore.sh` runs the script after `setup-agentcore.py` (text, voice, bundles). `a2a-agent-registry/deploy.py` declares `PLATFORM_VERSION` in its post-deploy patch for the specialists. The bundles runtime is created on the primary's platform so the two A/B arms differ only in `ENABLE_BUNDLE_HOOK`.
+- `platformVersion` is recorded per runtime **version**. The `control` (v212) and `treatment` (v217) endpoints of the text runtime are pinned to versions that predate V2 and still run V1. A V2 copy of old code cannot be made without moving `DEFAULT`, because every update becomes the new `DEFAULT`. Both arms are V1, so an experiment across them is still like for like.
+
+**Limits that now bite.** A V2 update takes 4-5 minutes to go READY (measured 244-274s, against seconds on V1), and a second update on the same runtime before then fails with `ConflictException`. The env cap is 1.5 KB for CodeZip (V1: 4 KB). The largest runtime here is bundles at about 1.0 KB of JSON, so this is the cap a new env var will hit first. The container must report healthy within 120s of start; the import takes 2-4s.
+
+**What import-time state now means.** Anything computed before `app.run()` is shared by every session for the life of the version. The code was audited against this on the move, and nothing an admin can change without redeploying is read at import:
+
+- Skills, prompts, grants and settings are read from DynamoDB per request.
+- Gateway `list_tools` runs per request.
+- AgentCard and JWKS caches use wall-clock buckets and first fill on a request.
+- `__warmup__` arrives on `/invocations`, so it runs after restore.
+
+Keep it that way. A value that must differ per session (ids, timestamps, credentials) or that an admin can change belongs in the handler. A Gateway tool catalog fetched at import would freeze until the next deploy.
+
+**One platform-level effect, measured and harmless here.** ADOT's X-Ray id generator draws from Python's `random`, and every restored VM replays the same sequence. In the first 20 V2 sessions the same span id appeared in 18 different traces. Trace ids are unaffected: the platform passes trace context in (every root `POST /invocations` span has a `parentSpanId`), so no trace id and no `(traceId, spanId)` pair was shared between sessions, and nothing in this repo joins telemetry on the span id alone. A trace started locally, without the incoming context (for example, on a thread that does not inherit it), would get colliding trace ids.
+
+**A race V2 made visible.** The chatbot's login `__warmup__` and the side panel's Files listing (`InvokeAgentRuntimeCommand`) hit the same brand-new session id at the same moment. On V2 the loser gets `409 RetryableConflictException: Session operation in progress, please retry` immediately. On V1 the same race returned 424 after about 5.5s, 4 times out of 4, so the warmup was already being lost. `doSignedPost` does not retry yet.
 
 ### 9.3 Runtime Configuration Injection
 

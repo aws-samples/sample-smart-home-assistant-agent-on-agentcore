@@ -170,7 +170,10 @@ def main() -> int:
     print(f"runtime {runtime_id}")
     print(f"  env: {len(env)} vars ({len(restored)} restored: {restored})")
     print("  protocol=HTTP, header allowlist, /mnt/workspace: applied")
-    print("  NOTE: the runtime goes UPDATING for ~1 minute before it is READY.")
+    # platformVersion is not passed, so the runtime keeps whichever it is on.
+    print(f"  platform {rt.get('platformVersion') or 'V1'} kept")
+    print("  NOTE: the runtime goes UPDATING before it is READY: ~1 minute on V1, "
+          "several on V2 while the snapshot is prepared.")
     return 0
 
 

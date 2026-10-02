@@ -74,6 +74,11 @@ SKILLS_TABLE = "smarthome-skills"
 # write, which is why scenes did not go into the skills table: writing there would
 # let it edit the permission and prompt rows that govern it.
 SCENARIOS_TABLE = "smarthome-scenarios"
+# AgentCore Runtime platform. V2 restores each session from a snapshot taken once
+# per runtime version, so a cold start no longer re-runs the import; it also means
+# import-time state is shared by every session (docs/architecture-and-design.md,
+# "Platform V2"). A V2 update takes minutes to go READY, not seconds.
+PLATFORM_VERSION = "V2"
 
 
 # ------------------------------------------------------------------
@@ -617,9 +622,15 @@ def agentcore_deploy(agent: str, project_dir: Path, state: dict[str, Any]) -> di
             # like a container bug.
             "requestHeaderAllowlist": ["Authorization"],
         },
+        # The CLI creates every runtime on V1 (CloudFormation cannot set the
+        # field), so the platform is declared here with the rest of the runtime's
+        # config. To roll one agent back, set this to V1 and redeploy it, or run
+        # scripts/set-platform-version.py --to V1 and leave this run out.
+        platformVersion=PLATFORM_VERSION,
     )
     ac.update_agent_runtime(**update_kwargs)
-    log(f"  [{agent}] patched env + CUSTOM_JWT auth (discovery={discovery_url})")
+    log(f"  [{agent}] patched env + CUSTOM_JWT auth (discovery={discovery_url}), "
+        f"platform {PLATFORM_VERSION}")
     log(f"  [{agent}] header allowlist: Authorization")
 
     _grant_prompt_table_read(agent, rt_info["roleArn"], state)

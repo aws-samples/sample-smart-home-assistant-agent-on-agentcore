@@ -42,4 +42,10 @@ echo "==> Deploying AgentCore (Gateway, Targets, Runtime, Memory, KB init)..."
 cd "$SCRIPT_DIR"
 python3 "$SCRIPT_DIR/scripts/setup-agentcore.py"
 
+# The CLI creates runtimes on platform V1 (CloudFormation cannot set the field),
+# so they are moved to V2 last, after every V1-speed config update above has
+# landed. Each V2 update takes several minutes while the snapshot is prepared.
+echo "==> Moving runtimes to AgentCore Runtime platform V2..."
+python3 "$SCRIPT_DIR/scripts/set-platform-version.py" --apply
+
 echo "==> Step 6 complete."
